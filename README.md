@@ -25,7 +25,7 @@ Stuff that annoys us, like:
 - Memorizing maps and then camping in all the cheap spots.
   We all do it,
   but only because devs are too lazy to supply an infinite flow of new maps.
-  That's why our maps our all procedurally generated. 👍🏼
+  That's why our maps our all procedurally generated. 👍
 - Getting penalized for just plain bad luck.
   That's why we have invented a system called Karma,
   where all the bad things that happen to you are eventually balanced out by the good! 😇
