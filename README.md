@@ -27,7 +27,7 @@ Stuff that annoys us, like:
   but only because devs are too lazy to supply an infinite flow of new maps.
   That's why our maps our all procedurally generated. 👍
 - Getting penalized for just plain bad luck.
-  That's why we have invented a system called Karma,
+  That's why we have invented a system called Karma™,
   where all the bad things that happen to you are eventually balanced out by the good! 😇
 
 ...you get the idea.
@@ -43,7 +43,7 @@ scheming to acquire more material wealth.
 This is ultimately accomplished by packing as many potential survivors onto spaceships as possible,
 in hopes of someday farming their labor for your guacamole fund.
 
-We're not allowed to talk about the poeple higher up...
+We're not allowed to talk about the people higher up...
 
 # How do I escape?
 
