@@ -52,4 +52,4 @@ We're not allowed to talk about the poeple higher up...
 Let's just assume you're the bottom of the totem-pole.
 If your lucky, life for you will turn out something like this:
 
-![Map](diagrams/lemmings.drawio.svg)
+![Map](diagrams/lemming.drawio.svg)
