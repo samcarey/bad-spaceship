@@ -1,8 +1,11 @@
 # Bad Spaceship
 
 You planet is doomed!
+
 Nothing can save you now except your feeble witts,
 so you'd better do something!
+
+Quick! You must escape to the moonbase where it is surely safe.
 
 # Philosophy
 
