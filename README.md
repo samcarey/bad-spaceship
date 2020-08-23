@@ -29,8 +29,12 @@ Stuff that annoys us, like:
 - Getting penalized for just plain bad luck.
   That's why we have invented a system called Karma™,
   where all the bad things that happen to you are eventually balanced out by the good! 😇
+- The CANCER that is battle royale. Obviously, this game is nothing like battle royale. 
+  Any comparisons of this game to battle royale shall result in an immediate shadow-ban-hammering. 
+  Any apparent signs that shadow-ban-hammering is not actually happening is simply part 
+  of the intended illusion of shadow-ban-hammering.
 
-...you get the idea.
+...anyway, you get the idea.
 
 # How does it work?
 
