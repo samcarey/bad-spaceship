@@ -32,7 +32,7 @@ Stuff that annoys us, like:
 - The CANCER that is battle royale. Obviously, this game is nothing like battle royale. 
   Any comparisons of this game to battle royale shall result in an immediate shadow-ban-hammering. 
   Any apparent signs that shadow-ban-hammering is not actually happening is simply part 
-  of the intended illusion of shadow-ban-hammering.
+  of the intended illusion of shadow-ban-hammering. 🔨
 
 ...anyway, you get the idea.
 
