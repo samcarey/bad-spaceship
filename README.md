@@ -20,7 +20,7 @@ Stuff that annoys us, like:
 - Sniping while strafing.
   It's just not a thing.
   Keeping your upper body perfectly stable while your feet wildly move you back and forth in random directions?
-  Moves like that would make Micahel Jackson jealous.
+  Moves like that would make Michael Jackson jealous.
   Instead, player movement is goverened by the laws of physics! 🤯
 - Memorizing maps and then camping in all the cheap spots.
   We all do it,
@@ -50,6 +50,6 @@ We're not allowed to talk about the people higher up...
 ## Escape as a Lemming
 
 Let's just assume you're the bottom of the totem-pole.
-If your lucky, life for you will turn out something like this:
+If you're lucky, life for you will turn out something like this:
 
 ![Map](diagrams/lemming.drawio.svg)
