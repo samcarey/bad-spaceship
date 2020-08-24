@@ -20,7 +20,7 @@ Stuff that annoys us, like:
 - Sniping while strafing.
   It's just not a thing.
   Keeping your upper body perfectly stable while your feet wildly move you back and forth in random directions?
-  Moves like that would make Micahel Jackson jealous.
+  Moves like that would make Michael Jackson jealous.
   Instead, player movement is goverened by the laws of physics! 🤯
 - Memorizing maps and then camping in all the cheap spots.
   We all do it,
@@ -29,8 +29,12 @@ Stuff that annoys us, like:
 - Getting penalized for just plain bad luck.
   That's why we have invented a system called Karma™,
   where all the bad things that happen to you are eventually balanced out by the good! 😇
+- The CANCER that is battle royale. Obviously, this game is nothing like battle royale. 
+  Any comparisons of this game to battle royale shall result in an immediate shadow-ban-hammering. 
+  Any apparent signs that shadow-ban-hammering is not actually happening is simply part 
+  of the intended illusion of shadow-ban-hammering. 🔨
 
-...you get the idea.
+...anyway, you get the idea.
 
 # How does it work?
 
@@ -50,6 +54,6 @@ We're not allowed to talk about the people higher up...
 ## Escape as a Lemming
 
 Let's just assume you're the bottom of the totem-pole.
-If your lucky, life for you will turn out something like this:
+If you're lucky, life for you will turn out something like this:
 
 ![Map](diagrams/lemming.drawio.svg)
