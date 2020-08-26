@@ -9,10 +9,23 @@ impl Plugin for CharacterPlugin {
     }
 }
 
+const RADIANS_IN_CIRCLE: f32 = 2.0 * std::f32::consts::PI;
+
 const SIZE: f32 = 1.5;
-const HOVER_SIZE_RATIO: f32 = 0.1;
+const HOVER_SIZE_RATIO: f32 = 0.2;
+
+const BOB_RATIO: f32 = 0.15;
+const BOB_RATE: f32 = 1.7;
 
 struct Name(String);
+
+struct Bob {
+    amplitude: f32,
+    phase: f32,
+    radians_per_second: f32,
+}
+
+struct BasePosition(Vec3);
 
 fn add_character(
     mut commands: Commands,
@@ -20,25 +33,43 @@ fn add_character(
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     let hover = SIZE * HOVER_SIZE_RATIO;
+    let bob_amplitude = hover * BOB_RATIO;
+    let base_position = BasePosition(Vec3::new(0.0, SIZE * 1.5 + hover, 0.0));
     commands
         .spawn(PbrComponents {
             mesh: meshes.add(Mesh::from(shape::Cube { size: SIZE })),
             material: materials.add(Color::rgb(0.5, 0.4, 0.3).into()),
-            translation: Translation::new(0.0, SIZE * 1.5 + hover, 0.0),
+            translation: Translation(base_position.0),
             ..Default::default()
         })
-        .with(Name("Name".to_string()));
+        .with(base_position)
+        .with(Name("Name".to_string()))
+        .with(Bob {
+            amplitude: bob_amplitude,
+            phase: 0.0,
+            radians_per_second: BOB_RATE * RADIANS_IN_CIRCLE,
+        });
 }
 
 fn move_character(
     time: Res<Time>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    mut query: Query<(&Name, &mut Translation, &Handle<StandardMaterial>)>,
+    mut query: Query<(
+        &Name,
+        &mut Translation,
+        &Handle<StandardMaterial>,
+        &mut Bob,
+        &mut BasePosition,
+    )>,
 ) {
-    for (_name, mut translation, material_handle) in &mut query.iter() {
+    for (_name, mut translation, material_handle, mut bob, mut base_position) in &mut query.iter() {
         let material = materials.get_mut(&material_handle).unwrap();
-        translation.0 += Vec3::new(1.0, 0.0, 0.0) * time.delta_seconds;
         material.albedo =
             Color::BLUE * Vec3::splat((3.0 * time.seconds_since_startup as f32).sin());
+
+        base_position.0 += Vec3::new(1.0, 0.0, 0.0) * time.delta_seconds;
+        bob.phase = (bob.phase + time.delta_seconds * bob.radians_per_second) % RADIANS_IN_CIRCLE;
+        let bob_offset = Vec3::new(0.0, bob.amplitude * bob.phase.cos(), 0.0);
+        translation.0 = base_position.0 + bob_offset;
     }
 }
