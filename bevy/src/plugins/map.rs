@@ -10,6 +10,8 @@ impl Plugin for MapPlugin {
     }
 }
 
+const PLATFORM_SIZE: f32 = 15.0;
+
 fn add_camera(mut commands: Commands) {
     commands.spawn(Camera3dComponents {
         transform: Transform::new_sync_disabled(Mat4::face_toward(
@@ -36,7 +38,9 @@ fn add_platform(
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     commands.spawn(PbrComponents {
-        mesh: meshes.add(Mesh::from(shape::Plane { size: 10.0 })),
+        mesh: meshes.add(Mesh::from(shape::Plane {
+            size: PLATFORM_SIZE,
+        })),
         material: materials.add(Color::rgb(0.1, 0.2, 0.1).into()),
         ..Default::default()
     });
