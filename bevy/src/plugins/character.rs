@@ -10,6 +10,7 @@ impl Plugin for CharacterPlugin {
 }
 
 const SIZE: f32 = 1.5;
+const HOVER_SIZE_RATIO: f32 = 0.1;
 
 struct Name(String);
 
@@ -18,11 +19,12 @@ fn add_character(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
+    let hover = SIZE * HOVER_SIZE_RATIO;
     commands
         .spawn(PbrComponents {
             mesh: meshes.add(Mesh::from(shape::Cube { size: SIZE })),
             material: materials.add(Color::rgb(0.5, 0.4, 0.3).into()),
-            translation: Translation::new(0.0, 1.0, 0.0),
+            translation: Translation::new(0.0, SIZE * 1.5 + hover, 0.0),
             ..Default::default()
         })
         .with(Name("Name".to_string()));
