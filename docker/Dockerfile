@@ -8,7 +8,12 @@ RUN apt-get update && \
     vim \
     build-essential \
     lld \
-    clang
+    clang \
+    pkg-config \
+    libasound2-dev \
+    xorg \
+    openbox \
+    libx11-dev
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 
 ENV PATH="/root/.cargo/bin:${PATH}"
