@@ -1,3 +1,21 @@
 FROM ubuntu:20.04
 
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+RUN apt-get update && \
+    apt-get install -y \
+    curl \
+    git \
+    htop \
+    vim \
+    build-essential \
+    lld \
+    clang
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+RUN rustup toolchain install nightly && \
+    rustup default nightly
+
+RUN mkdir -p projects && \
+    cd projects && \
+    git clone https://github.com/bevyengine/bevy.git
