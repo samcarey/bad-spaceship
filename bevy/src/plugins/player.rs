@@ -12,8 +12,8 @@ const LOOK_SENSITIVITY: f32 = 1.0;
 
 const MIN_CAMERA_DISTANCE: f32 = 5.;
 const MAX_CAMERA_DISTANCE: f32 = 30.;
-const MIN_CAMERA_PITCH_DEGREES: f32 = 179.;
-const MAX_CAMERA_PITCH_DEGREES: f32 = 1.;
+const MIN_CAMERA_PITCH_DEGREES: f32 = 1.;
+const MAX_CAMERA_PITCH_DEGREES: f32 = 179.;
 
 const MIN_CAMERA_PITCH: f32 = MIN_CAMERA_PITCH_DEGREES * DEG_TO_RADIANS;
 const MAX_CAMERA_PITCH: f32 = MAX_CAMERA_PITCH_DEGREES * DEG_TO_RADIANS;
@@ -112,12 +112,12 @@ fn process_mouse_events(
         player.yaw += look.x() * time.delta_seconds;
         player.camera_pitch = (player.camera_pitch
             - look.y() * time.delta_seconds * LOOK_SENSITIVITY)
-            .min(MIN_CAMERA_PITCH)
-            .max(MAX_CAMERA_PITCH);
+            .max(MIN_CAMERA_PITCH)
+            .min(MAX_CAMERA_PITCH);
         player.camera_distance = (player.camera_distance
             - zoom_delta * time.delta_seconds * ZOOM_SENSITIVITY)
-            .min(MIN_CAMERA_DISTANCE)
-            .max(MAX_CAMERA_DISTANCE);
+            .max(MIN_CAMERA_DISTANCE)
+            .min(MAX_CAMERA_DISTANCE);
         rotation.0 = Quat::from_rotation_y(-player.yaw);
     }
 }
