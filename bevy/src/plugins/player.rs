@@ -125,7 +125,7 @@ fn process_mouse_events(
 fn process_keyboard_events(
     time: Res<Time>,
     keyboard_input: Res<Input<KeyCode>>,
-    mut player_query: Query<(&mut Translation, &Transform)>,
+    mut player_query: Query<(&mut Player, &mut Translation, &Transform)>,
 ) {
     let mut movement = Vec2::zero();
     if keyboard_input.pressed(KeyCode::W) {
@@ -147,7 +147,7 @@ fn process_keyboard_events(
 
     movement *= time.delta_seconds * MOVE_SPEED;
 
-    for (mut translation, transform) in &mut player_query.iter() {
+    for (_player, mut translation, transform) in &mut player_query.iter() {
         let fwd = transform.value.z_axis().truncate() * movement.y();
         let right = -transform.value.x_axis().truncate() * movement.x();
         translation.0 += Vec3::from(fwd + right);
