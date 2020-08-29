@@ -78,6 +78,7 @@ fn setup(
         // Append camera to player as child.
         .push_children(player_entity.unwrap(), &[camera_entity.unwrap()]);
 }
+
 fn process_mouse_events(
     time: Res<Time>,
     mut state: ResMut<State>,
@@ -99,6 +100,12 @@ fn process_mouse_events(
         player.yaw += look.x() * time.delta_seconds;
         player.camera_pitch -= look.y() * time.delta_seconds * LOOK_SENSITIVITY;
         player.camera_distance -= zoom_delta * time.delta_seconds * ZOOM_SENSITIVITY;
+
+        player.camera_pitch = player
+            .camera_pitch
+            .max(1f32.to_radians())
+            .min(179f32.to_radians());
+        player.camera_distance = player.camera_distance.max(5.).min(30.);
     }
 }
 
@@ -129,12 +136,6 @@ fn update_player(
     movement *= time.delta_seconds * MOVE_SPEED;
 
     for (mut player, mut translation, transform, mut rotation) in &mut player_query.iter() {
-        player.camera_pitch = player
-            .camera_pitch
-            .max(1f32.to_radians())
-            .min(179f32.to_radians());
-        player.camera_distance = player.camera_distance.max(5.).min(30.);
-
         let fwd = transform.value.z_axis().truncate() * movement.y();
         let right = -transform.value.x_axis().truncate() * movement.x();
 
