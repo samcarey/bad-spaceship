@@ -3,6 +3,10 @@ use bevy::{
     prelude::*,
 };
 
+const MOVE_SPEED: f32 = 10.0;
+const ZOOM_SENSITIVITY: f32 = 10.0;
+const LOOK_SENSITIVITY: f32 = 1.0;
+
 pub struct MMOPlayerPlugin;
 
 impl Plugin for MMOPlayerPlugin {
@@ -101,13 +105,10 @@ fn process_mouse_events(
         zoom_delta = event.y;
     }
 
-    let zoom_sense = 10.0;
-    let look_sense = 1.0;
-
     for mut player in &mut query.iter() {
         player.yaw += look.x() * time.delta_seconds;
-        player.camera_pitch -= look.y() * time.delta_seconds * look_sense;
-        player.camera_distance -= zoom_delta * time.delta_seconds * zoom_sense;
+        player.camera_pitch -= look.y() * time.delta_seconds * LOOK_SENSITIVITY;
+        player.camera_distance -= zoom_delta * time.delta_seconds * ZOOM_SENSITIVITY;
     }
 }
 
@@ -135,8 +136,7 @@ fn update_player(
         movement.normalize();
     }
 
-    let move_speed = 10.0;
-    movement *= time.delta_seconds * move_speed;
+    movement *= time.delta_seconds * MOVE_SPEED;
 
     for (mut player, mut translation, transform, mut rotation) in &mut player_query.iter() {
         player.camera_pitch = player
