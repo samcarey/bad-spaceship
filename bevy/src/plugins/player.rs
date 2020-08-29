@@ -25,6 +25,7 @@ impl Plugin for PlayerPlugin {
         app.init_resource::<State>()
             .add_startup_system(setup.system())
             .add_system(process_mouse_events.system())
+            .add_system(process_keyboard_events.system())
             .add_system(update_player.system());
     }
 }
@@ -121,11 +122,10 @@ fn process_mouse_events(
     }
 }
 
-fn update_player(
+fn process_keyboard_events(
     time: Res<Time>,
     keyboard_input: Res<Input<KeyCode>>,
-    mut player_query: Query<(&mut Player, &mut Translation, &Transform)>,
-    camera_query: Query<(&mut Translation, &mut Rotation)>,
+    mut player_query: Query<(&mut Translation, &Transform)>,
 ) {
     let mut movement = Vec2::zero();
     if keyboard_input.pressed(KeyCode::W) {
@@ -147,12 +147,18 @@ fn update_player(
 
     movement *= time.delta_seconds * MOVE_SPEED;
 
-    for (player, mut translation, transform) in &mut player_query.iter() {
+    for (mut translation, transform) in &mut player_query.iter() {
         let fwd = transform.value.z_axis().truncate() * movement.y();
         let right = -transform.value.x_axis().truncate() * movement.x();
-
         translation.0 += Vec3::from(fwd + right);
+    }
+}
 
+fn update_player(
+    mut player_query: Query<&mut Player>,
+    camera_query: Query<(&mut Translation, &mut Rotation)>,
+) {
+    for player in &mut player_query.iter() {
         if let Some(camera_entity) = player.camera_entity {
             let cam_pos = Vec3::new(0., player.camera_pitch.cos(), -player.camera_pitch.sin())
                 .normalize()
