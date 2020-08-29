@@ -20,8 +20,6 @@ fn add_lighting(mut commands: Commands) {
     });
 }
 
-struct Platform(PbrComponents);
-
 fn add_platform(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
