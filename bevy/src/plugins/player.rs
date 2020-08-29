@@ -98,14 +98,14 @@ fn process_mouse_events(
 
     for mut player in &mut query.iter() {
         player.yaw += look.x() * time.delta_seconds;
-        player.camera_pitch -= look.y() * time.delta_seconds * LOOK_SENSITIVITY;
-        player.camera_distance -= zoom_delta * time.delta_seconds * ZOOM_SENSITIVITY;
-
-        player.camera_pitch = player
-            .camera_pitch
+        player.camera_pitch = (player.camera_pitch
+            - look.y() * time.delta_seconds * LOOK_SENSITIVITY)
             .max(1f32.to_radians())
             .min(179f32.to_radians());
-        player.camera_distance = player.camera_distance.max(5.).min(30.);
+        player.camera_distance = (player.camera_distance
+            - zoom_delta * time.delta_seconds * ZOOM_SENSITIVITY)
+            .max(5.)
+            .min(30.);
     }
 }
 
