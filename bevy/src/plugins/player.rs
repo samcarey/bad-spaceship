@@ -6,9 +6,9 @@ use std::f32::consts::PI;
 
 const DEG_TO_RADIANS: f32 = PI / 180.;
 
-const MOVE_SPEED: f32 = 10.0;
-const ZOOM_SENSITIVITY: f32 = 10.0;
-const LOOK_SENSITIVITY: f32 = 1.0;
+const MOVE_SPEED: f32 = 10.;
+const ZOOM_SENSITIVITY: f32 = 10.;
+const LOOK_SENSITIVITY: f32 = 1.;
 
 const MIN_CAMERA_DISTANCE: f32 = 5.;
 const MAX_CAMERA_DISTANCE: f32 = 30.;
