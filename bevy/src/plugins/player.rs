@@ -46,6 +46,15 @@ impl Default for Camera {
     }
 }
 
+impl Camera {
+    fn new(camera_entity: Option<Entity>) -> Self {
+        Camera {
+            entity: camera_entity,
+            ..Default::default()
+        }
+    }
+}
+
 struct Player {
     yaw: f32,
     camera: Camera,
@@ -56,6 +65,15 @@ impl Default for Player {
         Player {
             yaw: 0.,
             camera: Camera::default(),
+        }
+    }
+}
+
+impl Player {
+    fn new(camera_entity: Option<Entity>) -> Self {
+        Player {
+            camera: Camera::new(camera_entity),
+            ..Default::default()
         }
     }
 }
@@ -89,13 +107,7 @@ fn setup(
             translation: Translation::new(0.0, 1.0, 0.0),
             ..Default::default()
         })
-        .with(Player {
-            camera: Camera {
-                entity: camera_entity,
-                ..Default::default()
-            },
-            ..Default::default()
-        })
+        .with(Player::new(camera_entity))
         .current_entity();
 
     commands
