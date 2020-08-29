@@ -147,7 +147,7 @@ fn update_player(
 
     movement *= time.delta_seconds * MOVE_SPEED;
 
-    for (mut player, mut translation, transform) in &mut player_query.iter() {
+    for (player, mut translation, transform) in &mut player_query.iter() {
         let fwd = transform.value.z_axis().truncate() * movement.y();
         let right = -transform.value.x_axis().truncate() * movement.x();
 
