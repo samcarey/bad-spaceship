@@ -30,22 +30,32 @@ impl Plugin for PlayerPlugin {
     }
 }
 
+struct Camera {
+    distance: f32,
+    pitch: f32,
+    entity: Option<Entity>,
+}
+
+impl Default for Camera {
+    fn default() -> Self {
+        Camera {
+            distance: 20.,
+            pitch: 30.0f32.to_radians(),
+            entity: None,
+        }
+    }
+}
+
 struct Player {
     yaw: f32,
-
-    camera_distance: f32,
-    camera_pitch: f32,
-    camera_entity: Option<Entity>,
+    camera: Camera,
 }
 
 impl Default for Player {
     fn default() -> Self {
         Player {
             yaw: 0.,
-
-            camera_distance: 20.,
-            camera_pitch: 30.0f32.to_radians(),
-            camera_entity: None,
+            camera: Camera::default(),
         }
     }
 }
@@ -80,8 +90,10 @@ fn setup(
             ..Default::default()
         })
         .with(Player {
-            camera_entity,
-            camera_distance: 20.,
+            camera: Camera {
+                entity: camera_entity,
+                ..Default::default()
+            },
             ..Default::default()
         })
         .current_entity();
@@ -110,11 +122,11 @@ fn process_mouse_events(
 
     for (mut player, mut rotation) in &mut query.iter() {
         player.yaw += look.x() * time.delta_seconds;
-        player.camera_pitch = (player.camera_pitch
+        player.camera.pitch = (player.camera.pitch
             - look.y() * time.delta_seconds * LOOK_SENSITIVITY)
             .max(MIN_CAMERA_PITCH)
             .min(MAX_CAMERA_PITCH);
-        player.camera_distance = (player.camera_distance
+        player.camera.distance = (player.camera.distance
             - zoom_delta * time.delta_seconds * ZOOM_SENSITIVITY)
             .max(MIN_CAMERA_DISTANCE)
             .min(MAX_CAMERA_DISTANCE);
@@ -159,10 +171,10 @@ fn update_player(
     camera_query: Query<(&mut Translation, &mut Rotation)>,
 ) {
     for player in &mut player_query.iter() {
-        if let Some(camera_entity) = player.camera_entity {
-            let cam_pos = Vec3::new(0., player.camera_pitch.cos(), -player.camera_pitch.sin())
+        if let Some(camera_entity) = player.camera.entity {
+            let cam_pos = Vec3::new(0., player.camera.pitch.cos(), -player.camera.pitch.sin())
                 .normalize()
-                * player.camera_distance;
+                * player.camera.distance;
             if let Ok(mut cam_trans) = camera_query.get_mut::<Translation>(camera_entity) {
                 cam_trans.0 = cam_pos;
             }
