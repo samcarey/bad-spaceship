@@ -95,7 +95,7 @@ fn process_mouse_events(
     mut state: ResMut<State>,
     mouse_motion_events: Res<Events<MouseMotion>>,
     mouse_wheel_events: Res<Events<MouseWheel>>,
-    mut query: Query<&mut Player>,
+    mut query: Query<(&mut Player, &mut Rotation)>,
 ) {
     let mut look = Vec2::zero();
     for event in state.mouse_motion_event_reader.iter(&mouse_motion_events) {
@@ -107,7 +107,7 @@ fn process_mouse_events(
         zoom_delta = event.y;
     }
 
-    for mut player in &mut query.iter() {
+    for (mut player, mut rotation) in &mut query.iter() {
         player.yaw += look.x() * time.delta_seconds;
         player.camera_pitch = (player.camera_pitch
             - look.y() * time.delta_seconds * LOOK_SENSITIVITY)
@@ -117,13 +117,14 @@ fn process_mouse_events(
             - zoom_delta * time.delta_seconds * ZOOM_SENSITIVITY)
             .min(MIN_CAMERA_DISTANCE)
             .max(MAX_CAMERA_DISTANCE);
+        rotation.0 = Quat::from_rotation_y(-player.yaw);
     }
 }
 
 fn update_player(
     time: Res<Time>,
     keyboard_input: Res<Input<KeyCode>>,
-    mut player_query: Query<(&mut Player, &mut Translation, &Transform, &mut Rotation)>,
+    mut player_query: Query<(&mut Player, &mut Translation, &Transform)>,
     camera_query: Query<(&mut Translation, &mut Rotation)>,
 ) {
     let mut movement = Vec2::zero();
@@ -146,12 +147,11 @@ fn update_player(
 
     movement *= time.delta_seconds * MOVE_SPEED;
 
-    for (mut player, mut translation, transform, mut rotation) in &mut player_query.iter() {
+    for (mut player, mut translation, transform) in &mut player_query.iter() {
         let fwd = transform.value.z_axis().truncate() * movement.y();
         let right = -transform.value.x_axis().truncate() * movement.x();
 
         translation.0 += Vec3::from(fwd + right);
-        rotation.0 = Quat::from_rotation_y(-player.yaw);
 
         if let Some(camera_entity) = player.camera_entity {
             let cam_pos = Vec3::new(0., player.camera_pitch.cos(), -player.camera_pitch.sin())
