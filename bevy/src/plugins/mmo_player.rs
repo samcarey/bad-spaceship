@@ -8,7 +8,6 @@ pub struct MMOPlayerPlugin;
 impl Plugin for MMOPlayerPlugin {
     fn build(&self, app: &mut AppBuilder) {
         app.init_resource::<State>()
-            .add_default_plugins()
             .add_startup_system(setup.system())
             .add_system(process_mouse_events.system())
             .add_system(update_player.system());
