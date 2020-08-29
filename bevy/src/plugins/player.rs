@@ -7,9 +7,9 @@ const MOVE_SPEED: f32 = 10.0;
 const ZOOM_SENSITIVITY: f32 = 10.0;
 const LOOK_SENSITIVITY: f32 = 1.0;
 
-pub struct MMOPlayerPlugin;
+pub struct PlayerPlugin;
 
-impl Plugin for MMOPlayerPlugin {
+impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut AppBuilder) {
         app.init_resource::<State>()
             .add_startup_system(setup.system())
@@ -18,7 +18,7 @@ impl Plugin for MMOPlayerPlugin {
     }
 }
 
-struct MMOPlayer {
+struct Player {
     yaw: f32,
 
     camera_distance: f32,
@@ -26,9 +26,9 @@ struct MMOPlayer {
     camera_entity: Option<Entity>,
 }
 
-impl Default for MMOPlayer {
+impl Default for Player {
     fn default() -> Self {
-        MMOPlayer {
+        Player {
             yaw: 0.,
 
             camera_distance: 20.,
@@ -67,7 +67,7 @@ fn setup(
             translation: Translation::new(0.0, 1.0, 0.0),
             ..Default::default()
         })
-        .with(MMOPlayer {
+        .with(Player {
             camera_entity,
             camera_distance: 20.,
             ..Default::default()
@@ -76,24 +76,14 @@ fn setup(
 
     commands
         // Append camera to player as child.
-        .push_children(player_entity.unwrap(), &[camera_entity.unwrap()])
-        // Create the environment.
-        .spawn(PbrComponents {
-            mesh: meshes.add(Mesh::from(shape::Plane { size: 5.0 })),
-            material: materials.add(Color::rgb(0.7, 0.3, 0.0).into()),
-            ..Default::default()
-        })
-        .spawn(LightComponents {
-            translation: Translation::new(4.0, 5.0, 4.0),
-            ..Default::default()
-        });
+        .push_children(player_entity.unwrap(), &[camera_entity.unwrap()]);
 }
 fn process_mouse_events(
     time: Res<Time>,
     mut state: ResMut<State>,
     mouse_motion_events: Res<Events<MouseMotion>>,
     mouse_wheel_events: Res<Events<MouseWheel>>,
-    mut query: Query<&mut MMOPlayer>,
+    mut query: Query<&mut Player>,
 ) {
     let mut look = Vec2::zero();
     for event in state.mouse_motion_event_reader.iter(&mouse_motion_events) {
@@ -115,7 +105,7 @@ fn process_mouse_events(
 fn update_player(
     time: Res<Time>,
     keyboard_input: Res<Input<KeyCode>>,
-    mut player_query: Query<(&mut MMOPlayer, &mut Translation, &Transform, &mut Rotation)>,
+    mut player_query: Query<(&mut Player, &mut Translation, &Transform, &mut Rotation)>,
     camera_query: Query<(&mut Translation, &mut Rotation)>,
 ) {
     let mut movement = Vec2::zero();

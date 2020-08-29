@@ -6,8 +6,8 @@ fn main() {
     App::build()
         .add_default_plugins()
         // .add_plugin(plugins::HelloPlugin)
-        // .add_plugin(plugins::MapPlugin)
+        .add_plugin(plugins::MapPlugin)
         // .add_plugin(plugins::CharacterPlugin)
-        .add_plugin(plugins::MMOPlayerPlugin)
+        .add_plugin(plugins::PlayerPlugin)
         .run();
 }

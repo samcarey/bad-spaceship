@@ -4,24 +4,14 @@ pub struct MapPlugin;
 
 impl Plugin for MapPlugin {
     fn build(&self, app: &mut AppBuilder) {
-        app.add_startup_system(add_camera.system())
+        app
+            // .add_startup_system(add_camera.system())
             .add_startup_system(add_lighting.system())
             .add_startup_system(add_platform.system());
     }
 }
 
 const PLATFORM_SIZE: f32 = 15.0;
-
-fn add_camera(mut commands: Commands) {
-    commands.spawn(Camera3dComponents {
-        transform: Transform::new_sync_disabled(Mat4::face_toward(
-            Vec3::new(-3.0, 5.0, 8.0),
-            Vec3::new(0.0, 0.0, 0.0),
-            Vec3::new(0.0, 1.0, 0.0),
-        )),
-        ..Default::default()
-    });
-}
 
 fn add_lighting(mut commands: Commands) {
     commands.spawn(LightComponents {
