@@ -60,18 +60,10 @@ impl Camera {
     }
 }
 
+#[derive(Default)]
 struct Player {
     yaw: f32,
     camera: Camera,
-}
-
-impl Default for Player {
-    fn default() -> Self {
-        Player {
-            yaw: 0.,
-            camera: Camera::default(),
-        }
-    }
 }
 
 impl Player {
