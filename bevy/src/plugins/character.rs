@@ -27,6 +27,46 @@ struct Bob {
 
 struct BasePosition(Vec3);
 
+pub fn get_model(
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) -> PbrComponents {
+    let cube_mat_handle = materials.add({
+        let mut cube_material: StandardMaterial = Color::rgb(1.0, 1.0, 1.0).into();
+        cube_material.shaded = true;
+        cube_material
+    });
+    PbrComponents {
+        mesh: meshes.add(Mesh::from(shape::Cube { size: SIZE })),
+        material: cube_mat_handle,
+        translation: Translation::new(0.0, 1.0, 0.0),
+        ..Default::default()
+    }
+}
+
+// impl Character {
+//     pub fn new(
+//         mut meshes: ResMut<Assets<Mesh>>,
+//         mut materials: ResMut<Assets<StandardMaterial>>,
+//     ) -> Self {
+//         let cube_mat_handle = materials.add({
+//             let mut cube_material: StandardMaterial = Color::rgb(1.0, 1.0, 1.0).into();
+//             cube_material.shaded = true;
+//             cube_material
+//         });
+//         let model = PbrComponents {
+//             mesh: meshes.add(Mesh::from(shape::Cube { size: 1.0 })),
+//             material: cube_mat_handle.clone(),
+//             translation: Translation::new(0.0, 1.0, 0.0),
+//             ..Default::default()
+//         };
+//         Character {
+//             model: Some(model),
+//             ..Default::default()
+//         }
+//     }
+// }
+
 fn add_character(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,

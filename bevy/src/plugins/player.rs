@@ -2,6 +2,9 @@ use bevy::{
     input::mouse::{MouseMotion, MouseWheel},
     prelude::*,
 };
+
+use crate::plugins::character;
+
 use std::f32::consts::PI;
 
 const DEG_TO_RADIANS: f32 = PI / 180.;
@@ -86,27 +89,15 @@ struct State {
 
 fn setup(
     mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    meshes: ResMut<Assets<Mesh>>,
+    materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    let cube_mat_handle = materials.add({
-        let mut cube_material: StandardMaterial = Color::rgb(1.0, 1.0, 1.0).into();
-        cube_material.shaded = true;
-        cube_material
-    });
-
-    // Spawn camera and player, set entity for camera on player.
     let camera_entity = commands
         .spawn(Camera3dComponents::default())
         .current_entity();
 
     let player_entity = commands
-        .spawn(PbrComponents {
-            mesh: meshes.add(Mesh::from(shape::Cube { size: 1.0 })),
-            material: cube_mat_handle.clone(),
-            translation: Translation::new(0.0, 1.0, 0.0),
-            ..Default::default()
-        })
+        .spawn(character::get_model(meshes, materials))
         .with(Player::new(camera_entity))
         .current_entity();
 
