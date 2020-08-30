@@ -4,7 +4,7 @@ pub struct CharacterPlugin;
 
 impl Plugin for CharacterPlugin {
     fn build(&self, app: &mut AppBuilder) {
-        app.add_system(bob.system());
+        app.add_system_to_stage("animate_characters", bob.system());
     }
 }
 
@@ -30,7 +30,7 @@ pub fn spawn(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-) {
+) -> Option<Entity> {
     let hover = SIZE * HOVER_SIZE_RATIO;
     let bob_amplitude = hover * BOB_RATIO;
     let base_position = BasePosition(Vec3::new(0.0, SIZE * 1.5 + hover, 0.0));
@@ -52,7 +52,8 @@ pub fn spawn(
             amplitude: bob_amplitude,
             phase: 0.0,
             radians_per_second: BOB_RATE * RADIANS_IN_CIRCLE,
-        });
+        })
+        .current_entity()
 }
 
 // impl Character {

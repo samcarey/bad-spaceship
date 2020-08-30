@@ -4,6 +4,7 @@ mod plugins;
 
 fn main() {
     App::build()
+        .add_stage_after("update", "animate_characters")
         .add_default_plugins()
         // .add_plugin(plugins::HelloPlugin)
         .add_plugin(plugins::MapPlugin)
