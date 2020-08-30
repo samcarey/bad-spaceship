@@ -30,8 +30,8 @@ impl Plugin for PlayerPlugin {
             .add_startup_system(setup.system())
             .add_system(process_mouse_events.system())
             .add_system(process_keyboard_events.system())
-            .add_system(update_player.system())
-            .add_plugin(CharacterPlugin);
+            .add_system(update_player.system());
+        // .add_plugin(CharacterPlugin);
     }
 }
 
@@ -133,7 +133,7 @@ fn process_mouse_events(
 fn process_keyboard_events(
     time: Res<Time>,
     keyboard_input: Res<Input<KeyCode>>,
-    mut player_query: Query<(&mut Player, &mut character::BasePosition, &Transform)>,
+    mut player_query: Query<(&mut Player, &mut Translation, &Transform)>,
 ) {
     let mut movement = Vec2::zero();
     if keyboard_input.pressed(KeyCode::W) {
@@ -155,10 +155,10 @@ fn process_keyboard_events(
 
     movement *= time.delta_seconds * MOVE_SPEED;
 
-    for (_player, mut base_position, transform) in &mut player_query.iter() {
+    for (_player, mut translation, transform) in &mut player_query.iter() {
         let fwd = transform.value.z_axis().truncate() * movement.y();
         let right = -transform.value.x_axis().truncate() * movement.x();
-        base_position.0 += Vec3::from(fwd + right);
+        translation.0 += Vec3::from(fwd + right);
     }
 }
 
