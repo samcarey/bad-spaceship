@@ -27,9 +27,9 @@ struct Bob {
 pub struct BasePosition(pub Vec3);
 
 pub fn spawn(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    commands: &mut Commands,
+    meshes: &mut ResMut<Assets<Mesh>>,
+    materials: &mut ResMut<Assets<StandardMaterial>>,
 ) -> Option<Entity> {
     let hover = SIZE * HOVER_SIZE_RATIO;
     let bob_amplitude = hover * BOB_RATIO;

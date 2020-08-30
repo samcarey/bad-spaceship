@@ -94,11 +94,8 @@ fn setup(
         .spawn(Camera3dComponents::default())
         .current_entity();
 
-    // Spawn a character entity and add a player component
-    // character::spawn(commands.clone(), meshes, materials);
-    // let player_entity = commands.with(Player::new(camera_entity)).current_entity();
+    let character_entity = character::spawn(&mut commands, &mut meshes, &mut materials).unwrap();
 
-    // let character_entity = ;
     let player_entity = commands
         .spawn(PbrComponents {
             mesh: meshes.add(Mesh::from(shape::Cube { size: 0.0 })),
@@ -108,15 +105,10 @@ fn setup(
         .with(Player::new(camera_entity))
         .current_entity();
 
-    commands
-        // Append camera to player as child.
-        .push_children(
-            player_entity.unwrap(),
-            &[
-                camera_entity.unwrap(),
-                character::spawn(commands.clone(), meshes, materials).unwrap(),
-            ],
-        );
+    commands.push_children(
+        player_entity.unwrap(),
+        &[camera_entity.unwrap(), character_entity],
+    );
 }
 
 fn process_mouse_events(
