@@ -13,7 +13,7 @@ const MOVE_SPEED: f32 = 10.;
 const ZOOM_SENSITIVITY: f32 = 10.;
 const LOOK_SENSITIVITY: f32 = 1.;
 
-const MIN_CAMERA_DISTANCE: f32 = 5.;
+const MIN_CAMERA_DISTANCE: f32 = 0.01; // Not Zero to avoid singularity of normalize()
 const MAX_CAMERA_DISTANCE: f32 = 30.;
 const MIN_CAMERA_PITCH_DEGREES: f32 = 1.;
 const MAX_CAMERA_PITCH_DEGREES: f32 = 179.;
@@ -94,12 +94,14 @@ fn setup(
         .spawn(Camera3dComponents::default())
         .current_entity();
 
-    let character_entity = character::spawn(&mut commands, &mut meshes, &mut materials).unwrap();
+    let (character_entity, max_height) =
+        character::spawn(&mut commands, &mut meshes, &mut materials);
 
     let player_entity = commands
         .spawn(PbrComponents {
             mesh: meshes.add(Mesh::from(shape::Cube { size: 0.0 })),
             material: materials.add(Color::default().into()),
+            translation: Translation::new(0.0, max_height, 0.0),
             ..Default::default()
         })
         .with(Player::new(camera_entity))
@@ -107,7 +109,7 @@ fn setup(
 
     commands.push_children(
         player_entity.unwrap(),
-        &[camera_entity.unwrap(), character_entity],
+        &[camera_entity.unwrap(), character_entity.unwrap()],
     );
 }
 
