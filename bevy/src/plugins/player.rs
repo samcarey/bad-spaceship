@@ -22,6 +22,7 @@ const MIN_CAMERA_PITCH: f32 = MIN_CAMERA_PITCH_DEGREES * DEG_TO_RADIANS;
 const MAX_CAMERA_PITCH: f32 = MAX_CAMERA_PITCH_DEGREES * DEG_TO_RADIANS;
 
 pub struct PlayerPlugin;
+use character::CharacterPlugin;
 
 impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut AppBuilder) {
@@ -29,7 +30,8 @@ impl Plugin for PlayerPlugin {
             .add_startup_system(setup.system())
             .add_system(process_mouse_events.system())
             .add_system(process_keyboard_events.system())
-            .add_system(update_player.system());
+            .add_system(update_player.system())
+            .add_plugin(CharacterPlugin);
     }
 }
 
@@ -96,10 +98,9 @@ fn setup(
         .spawn(Camera3dComponents::default())
         .current_entity();
 
-    let player_entity = commands
-        .spawn(character::get_model(meshes, materials))
-        .with(Player::new(camera_entity))
-        .current_entity();
+    // Spawn a character entity and add a player component
+    character::spawn(commands.clone(), meshes, materials);
+    let player_entity = commands.with(Player::new(camera_entity)).current_entity();
 
     commands
         // Append camera to player as child.
@@ -140,7 +141,7 @@ fn process_mouse_events(
 fn process_keyboard_events(
     time: Res<Time>,
     keyboard_input: Res<Input<KeyCode>>,
-    mut player_query: Query<(&mut Player, &mut Translation, &Transform)>,
+    mut player_query: Query<(&mut Player, &mut character::BasePosition, &Transform)>,
 ) {
     let mut movement = Vec2::zero();
     if keyboard_input.pressed(KeyCode::W) {
@@ -162,10 +163,10 @@ fn process_keyboard_events(
 
     movement *= time.delta_seconds * MOVE_SPEED;
 
-    for (_player, mut translation, transform) in &mut player_query.iter() {
+    for (_player, mut base_position, transform) in &mut player_query.iter() {
         let fwd = transform.value.z_axis().truncate() * movement.y();
         let right = -transform.value.x_axis().truncate() * movement.x();
-        translation.0 += Vec3::from(fwd + right);
+        base_position.0 += Vec3::from(fwd + right);
     }
 }
 
