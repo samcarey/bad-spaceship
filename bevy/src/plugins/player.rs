@@ -30,8 +30,8 @@ impl Plugin for PlayerPlugin {
             .add_startup_system(setup.system())
             .add_system(process_mouse_events.system())
             .add_system(process_keyboard_events.system())
-            .add_system(update_player.system());
-        // .add_plugin(CharacterPlugin);
+            .add_system(update_player.system())
+            .add_plugin(CharacterPlugin);
     }
 }
 
@@ -60,10 +60,14 @@ impl Camera {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Bundle)]
 struct Player {
     yaw: f32,
     camera: Camera,
+
+    pub transform: Transform,
+    pub translation: Translation,
+    pub rotation: Rotation,
 }
 
 impl Player {
@@ -83,20 +87,36 @@ struct State {
 
 fn setup(
     mut commands: Commands,
-    meshes: ResMut<Assets<Mesh>>,
-    materials: ResMut<Assets<StandardMaterial>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     let camera_entity = commands
         .spawn(Camera3dComponents::default())
         .current_entity();
 
     // Spawn a character entity and add a player component
-    character::spawn(commands.clone(), meshes, materials);
-    let player_entity = commands.with(Player::new(camera_entity)).current_entity();
+    // character::spawn(commands.clone(), meshes, materials);
+    // let player_entity = commands.with(Player::new(camera_entity)).current_entity();
+
+    // let character_entity = ;
+    let player_entity = commands
+        .spawn(PbrComponents {
+            mesh: meshes.add(Mesh::from(shape::Cube { size: 0.0 })),
+            material: materials.add(Color::default().into()),
+            ..Default::default()
+        })
+        .with(Player::new(camera_entity))
+        .current_entity();
 
     commands
         // Append camera to player as child.
-        .push_children(player_entity.unwrap(), &[camera_entity.unwrap()]);
+        .push_children(
+            player_entity.unwrap(),
+            &[
+                camera_entity.unwrap(),
+                character::spawn(commands.clone(), meshes, materials).unwrap(),
+            ],
+        );
 }
 
 fn process_mouse_events(
