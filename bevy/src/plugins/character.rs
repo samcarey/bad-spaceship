@@ -4,7 +4,7 @@ pub struct CharacterPlugin;
 
 impl Plugin for CharacterPlugin {
     fn build(&self, app: &mut AppBuilder) {
-        app.add_system_to_stage("animate_characters", bob.system());
+        app.add_system(bob.system());
     }
 }
 
@@ -70,7 +70,7 @@ pub fn spawn(
 }
 
 fn bob(time: Res<Time>, mut query: Query<(&mut Translation, &mut Bob, &mut BasePosition)>) {
-    for (mut translation, mut bob, mut base_position) in &mut query.iter() {
+    for (mut translation, mut bob, base_position) in &mut query.iter() {
         bob.phase = (bob.phase + time.delta_seconds * bob.radians_per_second) % RADIANS_IN_CIRCLE;
         let bob_offset = Vec3::new(0.0, bob.amplitude * bob.phase.cos(), 0.0);
         translation.0 = base_position.0 + bob_offset;

@@ -13,7 +13,7 @@ const MOVE_SPEED: f32 = 10.;
 const ZOOM_SENSITIVITY: f32 = 10.;
 const LOOK_SENSITIVITY: f32 = 1.;
 
-const MIN_CAMERA_DISTANCE: f32 = 0.01; // Not Zero to avoid singularity of normalize()
+const MIN_CAMERA_DISTANCE: f32 = 0.01; // Not zero to avoid singularity of normalize()
 const MAX_CAMERA_DISTANCE: f32 = 30.;
 const MIN_CAMERA_PITCH_DEGREES: f32 = 1.;
 const MAX_CAMERA_PITCH_DEGREES: f32 = 179.;
