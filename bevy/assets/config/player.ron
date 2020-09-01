@@ -1,0 +1,8 @@
+(
+    move_speed: 10,
+    zoom_sensitivity: 10,
+    look_sensitivity: 1,
+    
+    min_camera_distance: 0.01, // Not zero to avoid singularity on normalize()
+    max_camera_distance: 30,
+)
