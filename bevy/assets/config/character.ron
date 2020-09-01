@@ -1,0 +1,8 @@
+(
+    size: 1.5,
+    hover_size_ratio: 0.2,
+    bob_ratio: 0.15,
+    bob_rate: 1.7,
+    extra_first_person_height_size_ratio: 0.5,
+    name: "Name"
+)

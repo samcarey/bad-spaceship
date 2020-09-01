@@ -94,6 +94,8 @@ name = "bad-spaceship-bevy"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "ron",
+ "serde",
 ]
 
 [[package]]
@@ -2153,6 +2155,17 @@ dependencies = [
  "cpal",
  "lazy_static",
  "minimp3",
+]
+
+[[package]]
+name = "ron"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2a9d94cee22c8a4b5e2a1c7f9a20fdc315668ee8a75835949bb40d7456934634"
+dependencies = [
+ "base64",
+ "bitflags",
+ "serde",
 ]
 
 [[package]]
