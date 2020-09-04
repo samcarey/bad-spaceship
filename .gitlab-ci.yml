@@ -1,0 +1,12 @@
+image: python:3.8-buster
+
+pages:
+  stage: deploy
+  script:
+    - pip install mkdocs==1.1.2
+    - mkdocs build --strict --verbose --site-dir public --config-file mkdocs.yml
+  artifacts:
+    paths:
+      - public
+  only:
+    - master
