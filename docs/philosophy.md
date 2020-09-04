@@ -1,37 +1,3 @@
-# **_You planet is doomed!_**
-
-Nothing can save you now except your feeble witts,
-so you'd better do something!
-
-Quick! You must escape to the moonbase where it is surely safe.
-
-# Introduction
-
-Bad Spaceship is a game in development by [nobo.games](http://www.nobo.games).
-
-At this point, it's essentially a mashup of our favorite games,
-except with all the problems gone (ideally).
-
-# How does it work?
-
-You must survive a sequence of catastrophic scenarios,
-stretching across your solar system.
-Each scenario presents as a minigame of a different genre.
-You may need to race on foot or in a vehicle,
-you may need to build or destroy things,
-you may need to solve a puzzle...
-
-As a lemming you must complete various tasks that need doing "for the greater good",
-well, specifically your own good.
-You're basically a red-shirt in a mosh pit, climbing over your comrades to survive at _all_ costs.
-
-Eventually you gain enough experience and reputation to take a more important role in your society:
-scheming to acquire more material wealth.
-This is ultimately accomplished by packing as many potential survivors onto spaceships as possible,
-in hopes of someday farming their labor for your guacamole fund.
-
-We're not allowed to talk about the people higher up...
-
 # Philosophy
 
 Bad Spaceship is fundamentally a game about chasing that unatainable "something" missing from all the other video games.

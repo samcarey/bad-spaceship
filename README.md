@@ -1,59 +1,71 @@
 # Bad Spaceship
 
-You planet is doomed!
+[Read about this new game here](docs/README.md)
 
-Nothing can save you now except your feeble witts,
-so you'd better do something!
+# Installation
 
-Quick! You must escape to the moonbase where it is surely safe.
+To play Bad Spaceship,
+you'll need to clone this repo and choose an implementation below
+(the only one so far is Bevy).
 
-# Philosophy
+## Bevy
 
-Bad Spaceship is fundamentally a game about chasing that unatainable "something" missing from all the other video games.
-Our rather, running from all the problems that modern gaming has produced.
-Stuff that annoys us, like:
+[Bevy Engine](https://bevyengine.org/) is a brand-new,
+in-development game engine written in the Rust programming language.
+Why am I using tools that are so new and unstable?
+Because I want to be on the _cutting edge_.
 
-- Competitive advantages as reward for competitive success.
-  It's like a runaway chain reaction of oppression for anyone just trying to enjoy a game.
-  There's basically two schools of thought: Call of Duty and Mariokart.
-  We prefer Mariokart. ⭐
-- Sniping while strafing.
-  It's just not a thing.
-  Keeping your upper body perfectly stable while your feet wildly move you back and forth in random directions?
-  Moves like that would make Michael Jackson jealous.
-  Instead, player movement is goverened by the laws of physics! 🤯
-- Memorizing maps and then camping in all the cheap spots.
-  We all do it,
-  but only because devs are too lazy to supply an infinite flow of new maps.
-  That's why our maps our all procedurally generated. 👍
-- Getting penalized for just plain bad luck.
-  That's why we have invented a system called Karma™,
-  where all the bad things that happen to you are eventually balanced out by the good! 😇
-- The CANCER that is battle royale. Obviously, this game is nothing like battle royale. 
-  Any comparisons of this game to battle royale shall result in an immediate shadow-ban-hammering. 
-  Any apparent signs that shadow-ban-hammering is not actually happening is simply part 
-  of the intended illusion of shadow-ban-hammering. 🔨
+To run this thang:
 
-...anyway, you get the idea.
+1. Make sure you have Curl installed.
+1. Install [Rust](https://www.rust-lang.org/learn/get-started).
+1. Clone this repo.
+1. (Optional): Enable Fast Compiles for Bevy.
+   See the instructions per OS [here](https://bevyengine.org/learn/book/getting-started/setup/).
+   This doesn't seem to help much on Mac.
+   You can always add this later.
+1. Navigate in your terminal to the "bevy" subdirectory.
+1. Run `cargo run`.
 
-# How does it work?
+The first time you run this it'll take quite a while to:
 
-You begine life as a lemming, completing various tasks that need doing "for the greater good",
-well, specifically your own good.
-You're basically a red-shirt in a mosh pit, climbing over your comrades to survive at _all_ costs.
+1. Download all the dependencies.
+1. Compile all the dependencies.
+1. Compile the game itself.
 
-Eventually you gain enough experience and reputation to take a more important role in your society:
-scheming to acquire more material wealth.
-This is ultimately accomplished by packing as many potential survivors onto spaceships as possible,
-in hopes of someday farming their labor for your guacamole fund.
+But the next time you change something and run `cargo run` again,
+it'll finish much faster.
 
-We're not allowed to talk about the people higher up...
+# Building the Website
 
-# How do I escape?
+The [website](https://badspaceship.com) is automatically built
+using [MkDocs](https://www.mkdocs.org/).
+It is based on the [mkdocs.yml](mkdocs.yml) and the markdown (.md) files in the [docs](docs/README.md) subdirectory.
 
-## Escape as a Lemming
+To make changes:
 
-Let's just assume you're the bottom of the totem-pole.
-If you're lucky, life for you will turn out something like this:
-
-![Map](diagrams/lemming.drawio.svg)
+1. Install Python on your OS.
+1. (Recommended): Create a virtual environment.
+   From the root of this project, run `python -m venv venv`,
+   which will create a virtual environment
+   called "venv" in the root of the project.
+   The `.gitignore` file is set to ignore this directory,
+   as it is specific to you, your machine, and this project.
+   Lastly, activate it by running the activation script inside.
+1. Install mkdocs (listed in the python dependencies file):
+   `pip install -r requirements.txt`
+1. Run `mkdocs serve` to build a temporary version of the site,
+   then follow the outputted link to preview the site in you browser.
+   This site will automatically detect changes to source files
+   and reload as long as `mkdocs serve` is running.
+1. (Optional): You can also build a more permenant version
+   of the site with `mkdocs build`,
+   which will put all the generated files in directory called `site`.
+   I'm not sure why you'd want to do that though...
+1. When you are ready to push changes to the actual,
+   public website, commit your changes to the "master" (default) branch and push to the repo.
+   Gitlab continuous integration will automatically detect the changes,
+   spawn a [Docker](https://hub.docker.com/) container on a Gitlab server,
+   install all the prerequisites,
+   and rebuild and publish the new version of the site.
+   This process is configured in [.gitlab-ci.yml](.gitlab-ci.yml).

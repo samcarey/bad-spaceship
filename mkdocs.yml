@@ -1,1 +1,6 @@
 site_name: Bad Spaceship
+nav:
+  - Home: "README.md"
+  - Stages:
+      - Home Planet: "mechanics/stages/home_planet.md"
+  - News: "news.md"
