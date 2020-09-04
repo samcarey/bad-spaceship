@@ -1,6 +1,8 @@
-# Game Mechanics
+# Introduction
 
-Bad Spaceship is a game.
+Bad Spaceship is a game in development by [nobo.games](http://www.nobo.games).
+
+# Game Mechanics
 
 ## Stages
 
