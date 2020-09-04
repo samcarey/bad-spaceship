@@ -1,3 +1,4 @@
 {
-    "debug.allowBreakpointsEverywhere": true
+    "debug.allowBreakpointsEverywhere": true,
+    "python.pythonPath": "venv/"
 }
