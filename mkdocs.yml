@@ -1,4 +1,6 @@
 site_name: Bad Spaceship
+theme:
+  name: darkly
 nav:
   - Home: "README.md"
   - Stages:
