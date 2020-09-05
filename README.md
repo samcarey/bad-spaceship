@@ -23,7 +23,7 @@ To run this thang:
 1. Clone this repo.
 1. (Optional): Enable Fast Compiles for Bevy.
    See the instructions per OS [here](https://bevyengine.org/learn/book/getting-started/setup/).
-   This doesn't seem to help much on Mac.
+   This increases recompile time by ~40% but removes some debugging. 
    You can always add this later.
 1. Navigate in your terminal to the "bevy" subdirectory.
 1. Run `cargo run`.
