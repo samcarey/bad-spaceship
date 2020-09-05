@@ -60,3 +60,5 @@ Stuff that annoys us, like:
   of the intended illusion of shadow-ban-hammering. 🔨
 
 ...anyway, you get the idea.
+
+### Be sure to check out more content from the navigation bar above!

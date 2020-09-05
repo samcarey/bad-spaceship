@@ -16,13 +16,11 @@ As it takes off, meteors, tornadoes, and evasive manuevers of the ship's pilot w
 The difficulty involved in overcoming these threats will be related to the ships construction.
 For example:
 
-- Not enough thrusters/fuel:
-  - The escape sequence will last longer, and evasive manuevers will be less graceful.
-- Not enough floor paneling:
-  - The ship will be overcrowded, making it easier to get bumped off.
-- Not enough walls and structural components:
-  - There will be less keeping you inside and the meteors tornadoes out.
-    ...and so on.
+- Not enough thrusters/fuel: The escape sequence will last longer, and evasive manuevers will be less graceful.
+- Not enough floor paneling: The ship will be overcrowded, making it easier to get bumped off.
+- Not enough walls and structural components: There will be less keeping you inside and the meteors tornadoes out.
+
+...and so on.
 
 Eventually, you'll escape the planets gravity, and everyone breathes a sigh of relief.
 
