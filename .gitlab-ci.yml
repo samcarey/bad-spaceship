@@ -10,3 +10,8 @@ pages:
       - public
   only:
     - master
+  - rules:
+    - changes:
+      - mkdocs.yml
+      - docs/*
+
