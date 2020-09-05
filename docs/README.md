@@ -9,7 +9,7 @@ Quick! You must escape to the moonbase where it is surely safe.
 
 Bad Spaceship is a game in development by [nobo.games](http://www.nobo.games).
 
-At this point, it's essentially a mashup of our favorite games,
+At this point, it's planned to be a mashup of our favorite games,
 except with all the problems gone (ideally).
 
 # How does it work?
