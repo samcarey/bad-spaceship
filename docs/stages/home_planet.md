@@ -7,6 +7,12 @@ so players will need to build a new one to escape.
 
 The level is a big obstacle course that leads down to a spaceship build site.
 Along the way, the player will be prompted to scavenge for parts needed in the spaceship construction.
+
+Items may include everyday household items:
+
+- Lawnchairs
+- Generators
+
 Maybe this could be a bit like the game Overcooked.
 The parts will immediately be added to the spaceship as they are reached by players.
 If the players gather too many or not enough of certain parts, the construction of the spaceship will suffer.
