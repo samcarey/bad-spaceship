@@ -21,10 +21,13 @@ To run this thang:
 1. Install [Rust](https://www.rust-lang.org/learn/get-started).
 1. If you are on Linux, install the additional Bevy [dependencies](https://github.com/bevyengine/bevy/blob/master/docs/linux_dependencies.md).
 1. Clone this repo.
-1. (Optional): Enable Fast Compiles for Bevy.
-   See the instructions per OS [here](https://bevyengine.org/learn/book/getting-started/setup/).
-   This increases recompile time by ~40% but removes some debugging. 
-   You can always add this later.
+1. (Optional): Enable Fast Compiles for Bevy (you can always skip this and add it later).
+   See the instructions per OS [here](https://bevyengine.org/learn/book/getting-started/setup/),
+   in the section "Enable Fast Compiles (Optional)".
+   As part of this process,
+   you'll need to copy [bevy/.cargo/config_fast_builds](bevy/.cargo/config_fast_builds) to bevy/.cargo/config.
+   If you're on Mac, see the bottom of that file for more lines to uncomment.
+   This increases recompile time by ~40% but removes some debugging features.
 1. Navigate in your terminal to the "bevy" subdirectory.
 1. Run `cargo run`.
 
