@@ -19,6 +19,7 @@ To run this thang:
 
 1. Make sure you have Curl installed.
 1. Install [Rust](https://www.rust-lang.org/learn/get-started).
+1. If you are on Linux, install the additional Bevy [dependencies](https://github.com/bevyengine/bevy/blob/master/docs/linux_dependencies.md).
 1. Clone this repo.
 1. (Optional): Enable Fast Compiles for Bevy.
    See the instructions per OS [here](https://bevyengine.org/learn/book/getting-started/setup/).
@@ -57,7 +58,7 @@ To make changes:
 1. Run `mkdocs serve` to build a temporary version of the site,
    then follow the link printed in the terminal to preview the site in you browser.
 1. Switch to a new git branch.
-1. Make your changes and save them. 
+1. Make your changes and save them.
    This site will automatically detect changes to source files
    and reload as long as `mkdocs serve` is running.
 1. (Optional): You can also build a more permenant version
@@ -65,11 +66,11 @@ To make changes:
    which will put all the generated files a in directory called `site`.
    I'm not sure why you'd want to do that though...
 1. When you are ready to push changes to the actual,
-   public website, 
-   commit your changes to your branch, 
-   switch to the master branch, 
-   pull any changes to the master branch from the remote repo, 
-   merge your branch to the master branch, 
+   public website,
+   commit your changes to your branch,
+   switch to the master branch,
+   pull any changes to the master branch from the remote repo,
+   merge your branch to the master branch,
    and push to the repo.
    Gitlab continuous integration will automatically detect the changes,
    spawn a [Docker](https://hub.docker.com/) container on a Gitlab server,
