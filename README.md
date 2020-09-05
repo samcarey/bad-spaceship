@@ -1,6 +1,6 @@
 # Bad Spaceship
 
-[Read about this new game here](docs/README.md).
+[Read about this new game here](https://badspaceship.com).
 
 # Installation
 
