@@ -2,8 +2,9 @@ use bevy::{
     input::mouse::{MouseMotion, MouseWheel},
     prelude::*,
 };
+use config_from_file_macro::ConfigFromFileMacro;
+use config_from_file_macro_derive::ConfigFromFileMacro;
 use serde::Deserialize;
-use std::fs;
 
 use crate::plugins::character;
 
@@ -31,7 +32,7 @@ impl Plugin for PlayerPlugin {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(ConfigFromFileMacro, Deserialize)]
 struct Config {
     move_speed: f32,
     zoom_sensitivity: f32,
@@ -39,13 +40,6 @@ struct Config {
 
     min_camera_distance: f32,
     max_camera_distance: f32,
-}
-
-impl Config {
-    fn new() -> Self {
-        let config_string = fs::read_to_string(CONFIG_FILE).unwrap();
-        ron::from_str(&config_string[..]).unwrap()
-    }
 }
 
 struct Camera {
@@ -103,7 +97,7 @@ fn setup(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    let config = Config::new();
+    let config = Config::new(CONFIG_FILE);
 
     let camera_entity = commands
         .spawn(Camera3dComponents::default())

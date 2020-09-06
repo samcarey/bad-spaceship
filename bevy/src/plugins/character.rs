@@ -1,6 +1,7 @@
 use bevy::prelude::*;
+use config_from_file_macro::ConfigFromFileMacro;
+use config_from_file_macro_derive::ConfigFromFileMacro;
 use serde::Deserialize;
-use std::fs;
 
 pub struct CharacterPlugin;
 
@@ -24,7 +25,7 @@ struct Bob {
 
 pub struct BasePosition(pub Vec3);
 
-#[derive(Deserialize)]
+#[derive(ConfigFromFileMacro, Deserialize)]
 struct Config {
     size: f32,
     hover_size_ratio: f32,
@@ -34,19 +35,19 @@ struct Config {
     name: String,
 }
 
-impl Config {
-    fn new() -> Self {
-        let config_string = fs::read_to_string(CONFIG_FILE).unwrap();
-        ron::from_str(&config_string[..]).unwrap()
-    }
-}
+// impl Config {
+//     fn new() -> Self {
+//         let config_string = fs::read_to_string(CONFIG_FILE).unwrap();
+//         ron::from_str(&config_string[..]).unwrap()
+//     }
+// }
 
 pub fn spawn(
     commands: &mut Commands,
     meshes: &mut ResMut<Assets<Mesh>>,
     materials: &mut ResMut<Assets<StandardMaterial>>,
 ) -> (Option<Entity>, f32) {
-    let config = Config::new();
+    let config = Config::new(CONFIG_FILE);
 
     let hover = config.size * config.hover_size_ratio;
     let base_height = config.size / 2.0 + hover;
