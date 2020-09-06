@@ -94,6 +94,8 @@ name = "bad-spaceship-bevy"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "config_from_file_macro",
+ "config_from_file_macro_derive",
  "ron",
  "serde",
 ]
@@ -713,6 +715,21 @@ dependencies = [
  "foreign-types",
  "libc",
  "objc",
+]
+
+[[package]]
+name = "config_from_file_macro"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "config_from_file_macro_derive"
+version = "0.1.0"
+dependencies = [
+ "quote",
+ "syn",
 ]
 
 [[package]]
