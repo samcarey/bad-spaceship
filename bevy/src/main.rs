@@ -9,6 +9,3 @@ fn main() {
         .add_plugin(plugins::PlayerPlugin)
         .run();
 }
-
-const TEST: i32 = 60;
-const TEST2: i32 = 0;
