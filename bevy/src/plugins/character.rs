@@ -35,13 +35,6 @@ struct Config {
     name: String,
 }
 
-// impl Config {
-//     fn new() -> Self {
-//         let config_string = fs::read_to_string(CONFIG_FILE).unwrap();
-//         ron::from_str(&config_string[..]).unwrap()
-//     }
-// }
-
 pub fn spawn(
     commands: &mut Commands,
     meshes: &mut ResMut<Assets<Mesh>>,
