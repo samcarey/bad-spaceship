@@ -11,3 +11,4 @@ fn main() {
 }
 
 const TEST: i32 = 0;
+const TEST2: i32 = 0;
