@@ -48,6 +48,8 @@ It is based on [mkdocs.yml](mkdocs.yml) and the markdown (.md) files in the [doc
 
 To make changes:
 
+### 1. Setup Python
+
 1. Install Python on your OS.
 1. (Recommended): Create a virtual environment.
    From the root of this project, run `python -m venv venv`,
@@ -56,6 +58,9 @@ To make changes:
    The [.gitignore](.gitignore) file is set to ignore this directory,
    as it is specific to you, your machine, and this project.
    Lastly, activate it by running the activation script inside.
+
+### 2. Use MkDocs
+
 1. Install mkdocs and themes (listed in the [python dependencies file](requirements.txt)):
    `pip install -r requirements.txt`
 1. Run `mkdocs serve` to build a temporary version of the site,
@@ -68,6 +73,8 @@ To make changes:
    of the site with `mkdocs build`,
    which will put all the generated files a in directory called `site`.
    I'm not sure why you'd want to do that though...
+1. You can commit and push your commits to your branch.
+   This won't change the website unless the commits are pushed to the master branch.
 1. When you are ready to push changes to the actual,
    public website,
    commit your changes to your branch,

@@ -41,7 +41,13 @@ Stuff that annoys us, like:
 - Competitive advantages as reward for competitive success.
   It's like a runaway chain reaction of oppression for anyone just trying to enjoy a game.
   There's basically two schools of thought: Call of Duty and Mariokart.
-  We prefer Mariokart. ⭐
+  In Call of Duty, the longer you play, the more advantageous guns you unlock,
+  and when you get enough kills in a row, you unlock "kill streaks" that seal your victory with air support, etc.
+  In Mariokart,
+  everyone starts every game with very similar circumstances,
+  and the further from the lead you get,
+  the better items you get to help you catch up.
+  We might prefer Mariokart? Something to think about...
 - Sniping while strafing.
   It's just not a thing.
   Keeping your upper body perfectly stable while your feet wildly move you back and forth in random directions?
