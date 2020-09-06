@@ -1,5 +1,9 @@
 image: python:3.8-buster
 
+workflow:
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "master"'
+
 pages:
   stage: deploy
   script:
@@ -9,7 +13,6 @@ pages:
     paths:
       - public
   rules:
-    - if: '$CI_COMMIT_BRANCH == "master"'
     - changes:
       - mkdocs.yml
       - docs/*
