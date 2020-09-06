@@ -11,11 +11,11 @@ impl Plugin for MapPlugin {
     }
 }
 
-const PLATFORM_SIZE: f32 = 15.0;
+const PLATFORM_SIZE_M: f32 = 15.0;  // meters
 
 fn add_lighting(mut commands: Commands) {
     commands.spawn(LightComponents {
-        translation: Translation::new(4.0, 8.0, 4.0),
+        translation: Translation::new(4.0, 8.0, 4.0),   // meters
         ..Default::default()
     });
 }
@@ -27,7 +27,7 @@ fn add_platform(
 ) {
     commands.spawn(PbrComponents {
         mesh: meshes.add(Mesh::from(shape::Plane {
-            size: PLATFORM_SIZE,
+            size: PLATFORM_SIZE_M,
         })),
         material: materials.add(Color::rgb(0.1, 0.2, 0.1).into()),
         ..Default::default()
