@@ -2,3 +2,4 @@
 venv
 site
 bevy/.cargo/config
+.ipynb_checkpoints
