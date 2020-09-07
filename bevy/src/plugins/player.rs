@@ -27,6 +27,7 @@ impl Plugin for PlayerPlugin {
             .add_startup_system(setup.system())
             .add_system(process_mouse_events.system())
             .add_system(process_keyboard_events.system())
+            .add_system(update_player_position.system())
             .add_system(update_player.system())
             .add_plugin(CharacterPlugin);
     }
@@ -41,6 +42,9 @@ struct Config {
     min_camera_distance: f32,
     max_camera_distance: f32,
 }
+
+#[derive(Default)]
+struct KeyboardDirectionalInput(Vec2);
 
 struct Camera {
     distance: f32,
@@ -115,6 +119,7 @@ fn setup(
         })
         .with(Player::new(camera_entity))
         .with(config)
+        .with(KeyboardDirectionalInput::default())
         .current_entity();
 
     commands.push_children(
@@ -155,34 +160,41 @@ fn process_mouse_events(
 }
 
 fn process_keyboard_events(
-    time: Res<Time>,
     keyboard_input: Res<Input<KeyCode>>,
-    mut player_query: Query<(&mut Player, &mut Translation, &Transform, &Config)>,
+    _player: &Player,
+    mut keyboard_directional_input: Mut<KeyboardDirectionalInput>,
 ) {
-    let mut movement = Vec2::zero();
+    keyboard_directional_input.0 = Vec2::zero();
+
     if keyboard_input.pressed(KeyCode::W) {
-        *movement.y_mut() += 1.;
+        *keyboard_directional_input.0.y_mut() += 1.;
     }
     if keyboard_input.pressed(KeyCode::S) {
-        *movement.y_mut() -= 1.;
+        *keyboard_directional_input.0.y_mut() -= 1.;
     }
     if keyboard_input.pressed(KeyCode::D) {
-        *movement.x_mut() += 1.;
+        *keyboard_directional_input.0.x_mut() += 1.;
     }
     if keyboard_input.pressed(KeyCode::A) {
-        *movement.x_mut() -= 1.;
+        *keyboard_directional_input.0.x_mut() -= 1.;
     }
 
-    if movement != Vec2::zero() {
-        movement.normalize();
+    if keyboard_directional_input.0 != Vec2::zero() {
+        keyboard_directional_input.0.normalize();
     }
+}
 
-    for (_player, mut translation, transform, config) in &mut player_query.iter() {
-        movement *= time.delta_seconds * config.move_speed;
-        let fwd = transform.value.z_axis().truncate() * movement.y();
-        let right = -transform.value.x_axis().truncate() * movement.x();
-        translation.0 += Vec3::from(fwd + right);
-    }
+fn update_player_position(
+    time: Res<Time>,
+    keyboard_directional_input: &KeyboardDirectionalInput,
+    transform: &Transform,
+    config: &Config,
+    mut translation: Mut<Translation>,
+) {
+    let movement = keyboard_directional_input.0 * time.delta_seconds * config.move_speed;
+    let fwd = transform.value.z_axis().truncate() * movement.y();
+    let right = -transform.value.x_axis().truncate() * movement.x();
+    translation.0 += Vec3::from(fwd + right);
 }
 
 fn update_player(
