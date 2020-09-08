@@ -27,15 +27,14 @@ impl Plugin for PlayerPlugin {
             .add_startup_system(setup.system())
             .add_system(process_mouse_events.system())
             .add_system(process_keyboard_events.system())
-            .add_system(update_player_position.system())
             .add_system(update_player.system())
             .add_plugin(CharacterPlugin);
     }
 }
 
 #[derive(ConfigFromFileMacro, Deserialize)]
-struct Config {
-    move_speed: f32,
+pub struct Config {
+    pub move_speed: f32,
     zoom_sensitivity: f32,
     look_sensitivity: f32,
 
@@ -44,7 +43,7 @@ struct Config {
 }
 
 #[derive(Default)]
-struct KeyboardDirectionalInput(Vec2);
+pub struct KeyboardDirectionalInput(pub Vec2);
 
 struct Camera {
     distance: f32,
@@ -182,19 +181,6 @@ fn process_keyboard_events(
     if keyboard_directional_input.0 != Vec2::zero() {
         keyboard_directional_input.0.normalize();
     }
-}
-
-fn update_player_position(
-    time: Res<Time>,
-    keyboard_directional_input: &KeyboardDirectionalInput,
-    transform: &Transform,
-    config: &Config,
-    mut translation: Mut<Translation>,
-) {
-    let movement = keyboard_directional_input.0 * time.delta_seconds * config.move_speed;
-    let fwd = transform.value.z_axis().truncate() * movement.y();
-    let right = -transform.value.x_axis().truncate() * movement.x();
-    translation.0 += Vec3::from(fwd + right);
 }
 
 fn update_player(

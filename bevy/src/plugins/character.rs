@@ -3,11 +3,13 @@ use config_from_file_macro::ConfigFromFileMacro;
 use config_from_file_macro_derive::ConfigFromFileMacro;
 use serde::Deserialize;
 
+use crate::plugins::player;
 pub struct CharacterPlugin;
 
 impl Plugin for CharacterPlugin {
     fn build(&self, app: &mut AppBuilder) {
-        app.add_system(bob.system());
+        app.add_system(bob.system())
+            .add_system(update_player_position.system());
     }
 }
 
@@ -78,6 +80,19 @@ pub fn spawn(
         })
         .current_entity();
     (character_entity, first_person_camera_height)
+}
+
+fn update_player_position(
+    time: Res<Time>,
+    keyboard_directional_input: &player::KeyboardDirectionalInput,
+    transform: &Transform,
+    config: &player::Config,
+    mut translation: Mut<Translation>,
+) {
+    let movement = keyboard_directional_input.0 * time.delta_seconds * config.move_speed;
+    let fwd = transform.value.z_axis().truncate() * movement.y();
+    let right = -transform.value.x_axis().truncate() * movement.x();
+    translation.0 += Vec3::from(fwd + right);
 }
 
 fn bob(time: Res<Time>, mut query: Query<(&mut Translation, &mut Bob, &mut BasePosition)>) {
