@@ -85,7 +85,7 @@ pub fn spawn(
 }
 
 pub fn add_player_components(commands: &mut Commands, player: Entity) {
-    /// This is called from player::setup, after the player has been created based on the character.
+    // This is called from player::setup, after the player has been created based on the character.
     let config = Config::new(CONFIG_FILE);
     commands.insert_one(player, MoveSpeed(config.move_speed));
 }
