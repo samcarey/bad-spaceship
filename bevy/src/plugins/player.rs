@@ -33,8 +33,7 @@ impl Plugin for PlayerPlugin {
 }
 
 #[derive(ConfigFromFileMacro, Deserialize)]
-pub struct Config {
-    pub move_speed: f32,
+struct Config {
     zoom_sensitivity: f32,
     look_sensitivity: f32,
 
@@ -120,6 +119,8 @@ fn setup(
         .with(config)
         .with(KeyboardDirectionalInput::default())
         .current_entity();
+
+    character::add_player_components(&mut commands, player_entity.unwrap());
 
     commands.push_children(
         player_entity.unwrap(),

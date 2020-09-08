@@ -25,7 +25,8 @@ struct Bob {
     radians_per_second: f32,
 }
 
-pub struct BasePosition(pub Vec3);
+struct BasePosition(pub Vec3);
+pub struct MoveSpeed(f32);
 
 #[derive(ConfigFromFileMacro, Deserialize)]
 struct Config {
@@ -35,6 +36,7 @@ struct Config {
     bob_rate: f32,
     extra_first_person_height_size_ratio: f32,
     name: String,
+    move_speed: f32,
 }
 
 pub fn spawn(
@@ -72,6 +74,7 @@ pub fn spawn(
             ..Default::default()
         })
         .with(base_position)
+        .with(MoveSpeed(config.move_speed))
         .with(Name(config.name))
         .with(Bob {
             amplitude: bob_amplitude,
@@ -82,14 +85,19 @@ pub fn spawn(
     (character_entity, first_person_camera_height)
 }
 
+pub fn add_player_components(commands: &mut Commands, player: Entity) {
+    let config = Config::new(CONFIG_FILE);
+    commands.insert_one(player, MoveSpeed(config.move_speed));
+}
+
 fn update_position(
     time: Res<Time>,
     keyboard_directional_input: &player::KeyboardDirectionalInput,
     transform: &Transform,
-    config: &player::Config,
+    move_speed: &MoveSpeed,
     mut translation: Mut<Translation>,
 ) {
-    let movement = keyboard_directional_input.0 * time.delta_seconds * config.move_speed;
+    let movement = keyboard_directional_input.0 * time.delta_seconds * move_speed.0;
     let fwd = transform.value.z_axis().truncate() * movement.y();
     let right = -transform.value.x_axis().truncate() * movement.x();
     translation.0 += Vec3::from(fwd + right);
