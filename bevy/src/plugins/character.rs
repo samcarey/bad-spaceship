@@ -9,7 +9,7 @@ pub struct CharacterPlugin;
 impl Plugin for CharacterPlugin {
     fn build(&self, app: &mut AppBuilder) {
         app.add_system(bob.system())
-            .add_system(update_player_position.system());
+            .add_system(update_position.system());
     }
 }
 
@@ -82,7 +82,7 @@ pub fn spawn(
     (character_entity, first_person_camera_height)
 }
 
-fn update_player_position(
+fn update_position(
     time: Res<Time>,
     keyboard_directional_input: &player::KeyboardDirectionalInput,
     transform: &Transform,
