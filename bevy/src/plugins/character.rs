@@ -18,15 +18,14 @@ const CONFIG_FILE: &str = "assets/config/character.ron";
 const RADIANS_IN_CIRCLE: f32 = 2.0 * std::f32::consts::PI;
 
 struct Name(String);
+struct BasePosition(pub Vec3);
+pub struct MoveSpeed(f32);
 
 struct Bob {
     amplitude: f32,
     phase: f32,
     radians_per_second: f32,
 }
-
-struct BasePosition(pub Vec3);
-pub struct MoveSpeed(f32);
 
 #[derive(ConfigFromFileMacro, Deserialize)]
 struct Config {
