@@ -27,7 +27,7 @@ impl Plugin for PlayerPlugin {
             .add_startup_system(setup.system())
             .add_system(process_mouse_events.system())
             .add_system(process_keyboard_events.system())
-            .add_system(update_player.system())
+            .add_system(update_camera.system())
             .add_plugin(CharacterPlugin);
     }
 }
@@ -184,7 +184,7 @@ fn process_keyboard_events(
     }
 }
 
-fn update_player(
+fn update_camera(
     mut player_query: Query<&mut Player>,
     camera_query: Query<(&mut Translation, &mut Rotation)>,
 ) {
