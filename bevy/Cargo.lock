@@ -106,6 +106,7 @@ dependencies = [
  "bevy_rapier3d",
  "config_from_file_macro",
  "config_from_file_macro_derive",
+ "nalgebra",
  "ron",
  "serde",
 ]
