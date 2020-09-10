@@ -4,7 +4,7 @@
 
 # Development Updates
 
-### [Meeting Notes](https://gitlab.com/sccarey/bad-spaceship/-/issues?label_name%5B%5D=Meeting+Notes&scope=all&sort=created_date&state=closed&utf8=%E2%9C%93)
+- [Meeting Notes](https://gitlab.com/sccarey/bad-spaceship/-/issues?label_name%5B%5D=Meeting+Notes&scope=all&sort=created_date&state=closed&utf8=%E2%9C%93)
 
 # Installation
 
