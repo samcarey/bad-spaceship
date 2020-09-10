@@ -1,5 +1,6 @@
 {
   "debug.allowBreakpointsEverywhere": true,
   "python.pythonPath": "venv/",
-  "editor.formatOnSave": true
+  "editor.formatOnSave": true,
+  "rust-analyzer.diagnostics.enableExperimental": false
 }
