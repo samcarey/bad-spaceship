@@ -107,6 +107,7 @@ dependencies = [
  "config_from_file_macro",
  "config_from_file_macro_derive",
  "nalgebra",
+ "rapier3d",
  "ron",
  "serde",
 ]
@@ -2328,6 +2329,7 @@ dependencies = [
  "nalgebra",
  "ncollide3d",
  "num-traits",
+ "rayon",
  "rustc-hash",
  "simba",
  "vec_map",
@@ -2511,6 +2513,7 @@ dependencies = [
  "num-complex",
  "num-traits",
  "paste",
+ "wide",
 ]
 
 [[package]]
@@ -2903,6 +2906,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e3529528e608b54838ee618c3923b0f46e6db0334cfc6c42a16cf4ceb3bdb57"
 dependencies = [
  "bitflags",
+]
+
+[[package]]
+name = "wide"
+version = "0.4.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5825a3b8b18b67af1c24165f8ae1feb8f691222736d14099c3483effed2ea729"
+dependencies = [
+ "bytemuck",
 ]
 
 [[package]]
