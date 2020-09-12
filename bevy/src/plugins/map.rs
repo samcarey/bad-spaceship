@@ -1,5 +1,6 @@
 use bevy::prelude::*;
-
+use bevy_rapier3d::rapier::dynamics::RigidBodyBuilder;
+use bevy_rapier3d::rapier::geometry::ColliderBuilder;
 pub struct MapPlugin;
 
 impl Plugin for MapPlugin {
@@ -11,25 +12,18 @@ impl Plugin for MapPlugin {
     }
 }
 
-const PLATFORM_SIZE_M: f32 = 15.0;  // meters
+const PLATFORM_SIZE_M: f32 = 15.0; // meters
+const PLATFORM_HEIGHT_M: f32 = 0.1; // meters
 
 fn add_lighting(mut commands: Commands) {
     commands.spawn(LightComponents {
-        translation: Translation::new(4.0, 8.0, 4.0),   // meters
+        translation: Translation::new(4.0, 8.0, 4.0), // meters
         ..Default::default()
     });
 }
 
-fn add_platform(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-) {
-    commands.spawn(PbrComponents {
-        mesh: meshes.add(Mesh::from(shape::Plane {
-            size: PLATFORM_SIZE_M,
-        })),
-        material: materials.add(Color::rgb(0.1, 0.2, 0.1).into()),
-        ..Default::default()
-    });
+fn add_platform(mut commands: Commands) {
+    let rigid_body = RigidBodyBuilder::new_static().translation(0.0, -PLATFORM_HEIGHT_M, 0.0);
+    let collider = ColliderBuilder::cuboid(PLATFORM_SIZE_M, PLATFORM_HEIGHT_M, PLATFORM_SIZE_M);
+    commands.spawn((rigid_body, collider));
 }
