@@ -110,7 +110,6 @@ fn update_position(
     rigid_body: &RigidBodyHandleComponent,
     transform: &Transform,
     move_speed: &MoveSpeed,
-    mut translation: Mut<Translation>,
 ) {
     if let Some(mut rb) = bodies.get_mut(rigid_body.handle()) {
         let movement = keyboard_directional_input.0 * time.delta_seconds * move_speed.0;
