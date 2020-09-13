@@ -115,7 +115,7 @@ fn update_position(
     let movement = keyboard_directional_input.0 * time.delta_seconds * move_speed.0;
     let fwd = transform.value.z_axis().truncate() * movement.y();
     let right = -transform.value.x_axis().truncate() * movement.x();
-    let total = Vec3::from(fwd + right);
+    let total = Vec3::from(fwd + right) * 1000.0;
     // println!("{}", total);
     // translation.0 += Vec3::from(fwd + right);
     if let Some(mut rb) = bodies.get_mut(rigid_body.handle()) {
