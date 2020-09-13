@@ -98,12 +98,6 @@ pub fn spawn(
     // (character_entity, first_person_camera_height)
 }
 
-pub fn add_player_components(commands: &mut Commands, player: Entity) {
-    // This is called from player::setup, after the player has been created based on the character.
-    let config = Config::new(CONFIG_FILE);
-    commands.insert_one(player, MoveSpeed(config.max_speed));
-}
-
 fn propel(
     mut bodies: ResMut<RigidBodySet>,
     keyboard_directional_input: &player::KeyboardDirectionalInput,
