@@ -25,7 +25,10 @@ const RADIANS_IN_CIRCLE: f32 = 2.0 * std::f32::consts::PI;
 
 struct Name(String);
 struct BasePosition(pub Vec3);
-pub struct Propulsion(f32);
+pub struct Propulsion {
+    max_force: f32,
+    max_speed: f32,
+}
 
 struct Bob {
     amplitude: f32,
@@ -87,7 +90,10 @@ pub fn spawn(
         // })
         .spawn((rigid_body, collider))
         .with(base_position)
-        .with(Propulsion(config.max_speed))
+        .with(Propulsion {
+            max_speed: config.max_speed,
+            max_force: config.max_propulsion,
+        })
         .with(Name(config.name))
         .with(Bob {
             amplitude: bob_amplitude,
@@ -96,6 +102,10 @@ pub fn spawn(
         });
     // .current_entity();
     // (character_entity, first_person_camera_height)
+}
+
+fn convert_vector_type(v: Vec3) -> Vector<f32> {
+    Vector::new(v.x(), v.y(), v.z())
 }
 
 fn propel(
@@ -108,9 +118,19 @@ fn propel(
     if let Some(mut rb) = bodies.get_mut(rigid_body.handle()) {
         let forward = transform.value.z_axis().truncate() * keyboard_directional_input.0.y();
         let right = -transform.value.x_axis().truncate() * keyboard_directional_input.0.x();
-        let total = Vec3::from(forward + right) * propulsion.0;
-        let force = Vector::new(total.x(), total.y(), total.z());
-        rb.apply_force(force);
+        let propulsion_unit_vector = convert_vector_type(Vec3::from(forward + right));
+
+        let mut propulsive_force = propulsion_unit_vector * propulsion.max_force;
+        let current_speed_along_propulsion_direction = rb.linvel.dot(&propulsion_unit_vector);
+        let relative_remaining_propulsion = (propulsion.max_speed
+            - current_speed_along_propulsion_direction)
+            / propulsion.max_speed;
+
+        if relative_remaining_propulsion < 1.0 {
+            propulsive_force *= relative_remaining_propulsion;
+            println!("{}", relative_remaining_propulsion);
+        }
+        rb.apply_force(propulsive_force);
     }
 }
 
