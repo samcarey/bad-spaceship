@@ -5,7 +5,7 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "(Windows) Debug Bevy",
+      "name": "debug (windows)",
       "type": "cppvsdbg",
       "request": "launch",
       "program": "${workspaceFolder}/bevy/target/debug/bad-spaceship-bevy",
@@ -13,15 +13,17 @@
       "stopAtEntry": false,
       "cwd": "${workspaceRoot}/bevy",
       "environment": [],
-      "externalConsole": true
+      "externalConsole": true,
+      "preLaunchTask": "build (windows)",
     },
     {
-      "name": "(OSX) Debug Bevy",
+      "name": "debug (unix)",
       "type": "lldb",
       "request": "launch",
       "program": "${workspaceFolder}/bevy/target/debug/bad-spaceship-bevy",
       "args": [],
-      "cwd": "${workspaceFolder}/bevy"
+      "cwd": "${workspaceFolder}/bevy",
+      "preLaunchTask": "build (unix)"
     }
   ]
 }
