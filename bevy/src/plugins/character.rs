@@ -120,17 +120,21 @@ fn propel(
         let right = -transform.value.x_axis().truncate() * keyboard_directional_input.0.x();
         let propulsion_unit_vector = convert_vector_type(Vec3::from(forward + right));
 
-        let mut propulsive_force = propulsion_unit_vector * propulsion.max_force;
-        let current_speed_along_propulsion_direction = rb.linvel.dot(&propulsion_unit_vector);
-        let relative_remaining_propulsion = (propulsion.max_speed
-            - current_speed_along_propulsion_direction)
-            / propulsion.max_speed;
+        if propulsion_unit_vector.amax() > 0.0 {
+            rb.wake_up();
 
-        if relative_remaining_propulsion < 1.0 {
-            propulsive_force *= relative_remaining_propulsion;
-            println!("{}", relative_remaining_propulsion);
+            let mut propulsive_force = propulsion_unit_vector * propulsion.max_force;
+            let current_speed_along_propulsion_direction = rb.linvel.dot(&propulsion_unit_vector);
+            let relative_remaining_propulsion = (propulsion.max_speed
+                - current_speed_along_propulsion_direction)
+                / propulsion.max_speed;
+
+            if relative_remaining_propulsion < 1.0 {
+                propulsive_force *= relative_remaining_propulsion;
+                println!("{}", relative_remaining_propulsion);
+            }
+            rb.apply_force(propulsive_force);
         }
-        rb.apply_force(propulsive_force);
     }
 }
 
