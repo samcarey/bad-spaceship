@@ -21,3 +21,4 @@ config_from_file_macro_derive = { path = "crates/config_from_file_macro/config_f
 
 [profile.dev]
 opt-level = 0
+debug = 2
