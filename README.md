@@ -2,6 +2,10 @@
 
 [Read about this new game here](https://badspaceship.com).
 
+# Development Updates
+
+- [Meeting Notes](https://gitlab.com/sccarey/bad-spaceship/-/issues?label_name%5B%5D=Meeting+Notes&scope=all&sort=created_date&state=closed&utf8=%E2%9C%93)
+
 # Installation
 
 To play Bad Spaceship,
