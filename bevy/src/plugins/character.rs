@@ -42,6 +42,7 @@ struct Config {
     extra_first_person_height_size_ratio: f32,
     name: String,
     max_speed: f32,
+    max_move_force: f32,
 }
 
 pub fn spawn(
