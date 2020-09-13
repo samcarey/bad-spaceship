@@ -25,7 +25,7 @@ const RADIANS_IN_CIRCLE: f32 = 2.0 * std::f32::consts::PI;
 
 struct Name(String);
 struct BasePosition(pub Vec3);
-pub struct MoveSpeed(f32);
+pub struct Propulsion(f32);
 
 struct Bob {
     amplitude: f32,
@@ -42,7 +42,7 @@ struct Config {
     extra_first_person_height_size_ratio: f32,
     name: String,
     max_speed: f32,
-    max_move_force: f32,
+    max_propulsion: f32,
 }
 
 pub fn spawn(
@@ -87,7 +87,7 @@ pub fn spawn(
         // })
         .spawn((rigid_body, collider))
         .with(base_position)
-        .with(MoveSpeed(config.max_speed))
+        .with(Propulsion(config.max_speed))
         .with(Name(config.name))
         .with(Bob {
             amplitude: bob_amplitude,
@@ -103,12 +103,12 @@ fn propel(
     keyboard_directional_input: &player::KeyboardDirectionalInput,
     rigid_body: &RigidBodyHandleComponent,
     transform: &Transform,
-    move_speed: &MoveSpeed,
+    propulsion: &Propulsion,
 ) {
     if let Some(mut rb) = bodies.get_mut(rigid_body.handle()) {
         let forward = transform.value.z_axis().truncate() * keyboard_directional_input.0.y();
         let right = -transform.value.x_axis().truncate() * keyboard_directional_input.0.x();
-        let total = Vec3::from(forward + right) * move_speed.0;
+        let total = Vec3::from(forward + right) * propulsion.0;
         let force = Vector::new(total.x(), total.y(), total.z());
         rb.apply_force(force);
     }
