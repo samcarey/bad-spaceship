@@ -104,7 +104,6 @@ pub fn add_player_components(commands: &mut Commands, player: Entity) {
 }
 
 fn update_position(
-    time: Res<Time>,
     mut bodies: ResMut<RigidBodySet>,
     keyboard_directional_input: &player::KeyboardDirectionalInput,
     rigid_body: &RigidBodyHandleComponent,
@@ -112,10 +111,10 @@ fn update_position(
     move_speed: &MoveSpeed,
 ) {
     if let Some(mut rb) = bodies.get_mut(rigid_body.handle()) {
-        let movement = keyboard_directional_input.0 * time.delta_seconds * move_speed.0;
+        let movement = keyboard_directional_input.0 * move_speed.0;
         let fwd = transform.value.z_axis().truncate() * movement.y();
         let right = -transform.value.x_axis().truncate() * movement.x();
-        let total = Vec3::from(fwd + right) * 1000.0;
+        let total = Vec3::from(fwd + right);
         let force = Vector::new(total.x(), total.y(), total.z());
         rb.apply_force(force);
     }
