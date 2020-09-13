@@ -10,7 +10,7 @@
       "name": "Debug",
       "program": "${workspaceFolder}/bevy/target/debug/bad-spaceship-bevy",
       "args": [],
-      "cwd": "${workspaceFolder}"
+      "cwd": "${workspaceFolder}/bevy"
     }
   ]
 }
