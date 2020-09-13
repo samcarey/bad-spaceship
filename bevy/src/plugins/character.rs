@@ -111,10 +111,9 @@ fn update_position(
     move_speed: &MoveSpeed,
 ) {
     if let Some(mut rb) = bodies.get_mut(rigid_body.handle()) {
-        let movement = keyboard_directional_input.0 * move_speed.0;
-        let fwd = transform.value.z_axis().truncate() * movement.y();
-        let right = -transform.value.x_axis().truncate() * movement.x();
-        let total = Vec3::from(fwd + right);
+        let fwd = transform.value.z_axis().truncate() * keyboard_directional_input.0.y();
+        let right = -transform.value.x_axis().truncate() * keyboard_directional_input.0.x();
+        let total = Vec3::from(fwd + right) * move_speed.0;
         let force = Vector::new(total.x(), total.y(), total.z());
         rb.apply_force(force);
     }
