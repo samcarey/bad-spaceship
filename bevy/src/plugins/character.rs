@@ -15,7 +15,7 @@ impl Plugin for CharacterPlugin {
     fn build(&self, app: &mut AppBuilder) {
         app
             // .add_system(bob.system())
-            .add_system_to_stage(stage::LAST, update_position.system());
+            .add_system_to_stage(stage::LAST, propel.system());
     }
 }
 
@@ -41,7 +41,7 @@ struct Config {
     bob_rate: f32,
     extra_first_person_height_size_ratio: f32,
     name: String,
-    move_speed: f32,
+    max_speed: f32,
 }
 
 pub fn spawn(
@@ -86,7 +86,7 @@ pub fn spawn(
         // })
         .spawn((rigid_body, collider))
         .with(base_position)
-        .with(MoveSpeed(config.move_speed))
+        .with(MoveSpeed(config.max_speed))
         .with(Name(config.name))
         .with(Bob {
             amplitude: bob_amplitude,
@@ -100,10 +100,10 @@ pub fn spawn(
 pub fn add_player_components(commands: &mut Commands, player: Entity) {
     // This is called from player::setup, after the player has been created based on the character.
     let config = Config::new(CONFIG_FILE);
-    commands.insert_one(player, MoveSpeed(config.move_speed));
+    commands.insert_one(player, MoveSpeed(config.max_speed));
 }
 
-fn update_position(
+fn propel(
     mut bodies: ResMut<RigidBodySet>,
     keyboard_directional_input: &player::KeyboardDirectionalInput,
     rigid_body: &RigidBodyHandleComponent,
@@ -111,9 +111,9 @@ fn update_position(
     move_speed: &MoveSpeed,
 ) {
     if let Some(mut rb) = bodies.get_mut(rigid_body.handle()) {
-        let fwd = transform.value.z_axis().truncate() * keyboard_directional_input.0.y();
+        let forward = transform.value.z_axis().truncate() * keyboard_directional_input.0.y();
         let right = -transform.value.x_axis().truncate() * keyboard_directional_input.0.x();
-        let total = Vec3::from(fwd + right) * move_speed.0;
+        let total = Vec3::from(forward + right) * move_speed.0;
         let force = Vector::new(total.x(), total.y(), total.z());
         rb.apply_force(force);
     }
