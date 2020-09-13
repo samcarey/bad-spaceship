@@ -73,10 +73,9 @@ impl Camera {
 struct Player {
     yaw: f32,
     camera: Camera,
-
-    pub transform: Transform,
-    pub translation: Translation,
-    pub rotation: Rotation,
+    // pub transform: Transform,
+    // pub translation: Translation,
+    // pub rotation: Rotation,
 }
 
 impl Player {
@@ -105,27 +104,35 @@ fn setup(
         .spawn(Camera3dComponents::default())
         .current_entity();
 
-    let (character_entity, max_height) =
-        character::spawn(&mut commands, &mut meshes, &mut materials);
+    // let (character_entity, max_height) =
+    character::spawn(&mut commands, &mut meshes, &mut materials);
 
     let player_entity = commands
-        .spawn(PbrComponents {
-            mesh: meshes.add(Mesh::from(shape::Cube { size: 0.0 })),
-            material: materials.add(Color::default().into()),
-            translation: Translation::new(0.0, max_height, 0.0),
-            ..Default::default()
-        })
+        // .spawn(PbrComponents {
+        //     mesh: meshes.add(Mesh::from(shape::Cube { size: 0.0 })),
+        //     material: materials.add(Color::default().into()),
+        //     translation: Translation::new(0.0, max_height, 0.0),
+        //     ..Default::default()
+        // })
+        // .with()
         .with(Player::new(camera_entity))
         .with(config)
         .with(KeyboardDirectionalInput::default())
         .current_entity();
 
-    character::add_player_components(&mut commands, player_entity.unwrap());
+    // character::add_player_components(&mut commands, player_entity.unwrap());
 
     commands.push_children(
         player_entity.unwrap(),
-        &[camera_entity.unwrap(), character_entity.unwrap()],
+        &[
+            camera_entity.unwrap(),
+            // character_entity.unwrap()
+        ],
     );
+    // commands.push_children(
+    //     player_entity.unwrap(),
+    //     &[camera_entity.unwrap(), character_entity.unwrap()],
+    // );
 }
 
 fn process_mouse_events(
