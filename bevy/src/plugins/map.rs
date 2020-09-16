@@ -24,7 +24,6 @@ fn add_lighting(mut commands: Commands) {
 
 fn add_platform(mut commands: Commands) {
     let rigid_body = RigidBodyBuilder::new_static().translation(0.0, -PLATFORM_HEIGHT_M, 0.0);
-    let collider =
-        ColliderBuilder::cuboid(PLATFORM_SIZE_M, PLATFORM_HEIGHT_M, PLATFORM_SIZE_M).friction(1.0);
+    let collider = ColliderBuilder::cuboid(PLATFORM_SIZE_M, PLATFORM_HEIGHT_M, PLATFORM_SIZE_M);
     commands.spawn((rigid_body, collider));
 }

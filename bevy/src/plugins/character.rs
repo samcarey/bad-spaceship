@@ -27,7 +27,6 @@ const RADIANS_IN_CIRCLE: f32 = 2.0 * std::f32::consts::PI;
 struct Name(String);
 struct BasePosition(pub Vec3);
 pub struct Propulsion {
-    max_force: f32,
     max_speed: f32,
 }
 
@@ -46,7 +45,6 @@ struct Config {
     extra_first_person_height_size_ratio: f32,
     name: String,
     max_speed: f32,
-    max_propulsion: f32,
 }
 
 pub fn spawn(
@@ -78,8 +76,7 @@ pub fn spawn(
 
     let rigid_body = RigidBodyBuilder::new_dynamic().translation(0.0, 50.0, 0.0);
     let collider = ColliderBuilder::cuboid(config.size / 2.0, config.size / 2.0, config.size / 2.0)
-        .density(1.0)
-        .friction(1.0);
+        .density(1.0);
 
     let character_entity = commands
         // .spawn(PbrComponents {
@@ -94,7 +91,6 @@ pub fn spawn(
         .with(base_position)
         .with(Propulsion {
             max_speed: config.max_speed,
-            max_force: config.max_propulsion,
         })
         .with(Name(config.name))
         .with(Bob {
@@ -124,38 +120,23 @@ fn propel(
     if let Some(mut rb) = bodies.get_mut(rigid_body.handle()) {
         let forward = transform.value.z_axis().truncate() * keyboard_directional_input.0.y();
         let right = -transform.value.x_axis().truncate() * keyboard_directional_input.0.x();
-        let propulsion_unit_vector = vec3_to_vector(Vec3::from(forward + right));
+        let target_velocity = vec3_to_vector(Vec3::from(forward + right)) * propulsion.max_speed;
 
-        if propulsion_unit_vector.amax() > 0.0 {
-            rb.wake_up();
+        rb.wake_up();
 
-            // let new_translation_vector = Vector::new(
+        let current_speed_along_propulsion_direction = rb.linvel.dot(&target_velocity.normalize());
 
-            // );
+        let velocity_change =
+            target_velocity - current_speed_along_propulsion_direction * rb.linvel.normalize();
+        let impulse = rb.mass() * velocity_change;
 
-            // let new_translation = math::Translation::new(
-            //     rb.position.translation.vector.x + 3.0,
-            //     rb.position.translation.vector.y,
-            //     rb.position.translation.vector.z,
-            // );
+        // let mut propulsive_force = propulsion_unit_vector * propulsion.max_force;
+        // let current_speed_along_propulsion_direction = rb.linvel.dot(&propulsion_unit_vector);
+        // let relative_remaining_propulsion = (propulsion.max_speed
+        //     - current_speed_along_propulsion_direction)
+        //     / propulsion.max_speed;
 
-            let new_translation = rb.position.translation.vector + propulsion_unit_vector;
-
-            let position = Isometry::new(new_translation, rb.position.rotation.as_vector());
-
-            rb.set_position(position);
-            // let mut propulsive_force = propulsion_unit_vector * propulsion.max_force;
-            // let current_speed_along_propulsion_direction = rb.linvel.dot(&propulsion_unit_vector);
-            // let relative_remaining_propulsion = (propulsion.max_speed
-            //     - current_speed_along_propulsion_direction)
-            //     / propulsion.max_speed;
-
-            // if relative_remaining_propulsion < 1.0 {
-            //     propulsive_force *= relative_remaining_propulsion;
-            //     println!("{}", relative_remaining_propulsion);
-            // }
-            // rb.apply_force(propulsive_force);
-        }
+        rb.apply_impulse(impulse);
     }
 }
 
