@@ -1,5 +1,5 @@
 .DS_STORE
 venv
 site
-bevy/.cargo/config
+bevy/.cargo/config.toml
 .ipynb_checkpoints
