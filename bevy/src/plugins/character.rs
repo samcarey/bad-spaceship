@@ -75,8 +75,7 @@ pub fn spawn(
     // });
 
     let rigid_body = RigidBodyBuilder::new_dynamic().translation(0.0, 50.0, 0.0);
-    let collider = ColliderBuilder::cuboid(config.size / 2.0, config.size / 2.0, config.size / 2.0)
-        .density(1.0);
+    let collider = ColliderBuilder::cuboid(config.size / 2.0, config.size / 2.0, config.size / 2.0);
 
     let character_entity = commands
         // .spawn(PbrComponents {
@@ -106,10 +105,6 @@ fn vec3_to_vector(v: Vec3) -> Vector<f32> {
     Vector::new(v.x(), v.y(), v.z())
 }
 
-fn vector_to_vec3(v: Vector<f32>) -> Vec3 {
-    Vec3::new(v[(0, 0)], v[(1, 1)], v[(0, 2)])
-}
-
 fn propel(
     mut bodies: ResMut<RigidBodySet>,
     keyboard_directional_input: &player::KeyboardDirectionalInput,
@@ -118,26 +113,36 @@ fn propel(
     propulsion: &Propulsion,
 ) {
     if let Some(mut rb) = bodies.get_mut(rigid_body.handle()) {
-        let forward = transform.value.z_axis().truncate() * keyboard_directional_input.0.y();
-        let right = -transform.value.x_axis().truncate() * keyboard_directional_input.0.x();
-        let target_velocity = vec3_to_vector(Vec3::from(forward + right)) * propulsion.max_speed;
-        let current_velocity = rb.linvel.clone_owned();
-        let horizontal_velocity = vec3_to_vector(Vec3::new(
-            current_velocity[(0, 0)],
-            current_velocity[(2, 0)],
-            0.0,
-        ));
         rb.wake_up();
 
-        let velocity_change = match target_velocity.amax() > 0.0 {
+        // Need to map the y-coordinate (used for forward in 2D vector that takes keyboard directional input)
+        // to the z-coordinate (used by the 3D game engine for horizontal forward).
+        // Note: Z is vertical in Bevy/Rapier, X/Y is horizontal
+        let forward = transform.value.z_axis().truncate() * keyboard_directional_input.0.y();
+        let right = -transform.value.x_axis().truncate() * keyboard_directional_input.0.x();
+        let desired_velocity = vec3_to_vector(Vec3::from(forward + right)) * propulsion.max_speed;
+
+        // Get the current velocity from the physics engine but ignore the vertical component
+        let current_velocity = rb.linvel.clone_owned();
+        let current_horizontal_velocity = vec3_to_vector(Vec3::new(
+            current_velocity[(0, 0)],
+            0.0,
+            current_velocity[(2, 0)],
+        ));
+
+        // Either increase the speed to match the maximum speed,
+        // or cancel out any velocity to come to a halt.
+        let velocity_change = match desired_velocity.amax() > 0.0 {
             true => {
                 let current_speed_along_propulsion_direction =
-                    horizontal_velocity.dot(&target_velocity.normalize());
-                target_velocity
-                    - current_speed_along_propulsion_direction * horizontal_velocity.normalize()
+                    current_horizontal_velocity.dot(&desired_velocity.normalize());
+                desired_velocity
+                    - current_speed_along_propulsion_direction
+                        * current_horizontal_velocity.normalize()
             }
-            false => -horizontal_velocity,
+            false => -current_horizontal_velocity,
         };
+
         let impulse = rb.mass() * velocity_change;
         rb.apply_impulse(impulse);
     }
