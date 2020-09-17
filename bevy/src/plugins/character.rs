@@ -5,8 +5,7 @@ use bevy_rapier3d::rapier::geometry::ColliderBuilder;
 use config_from_file_macro::ConfigFromFileMacro;
 use config_from_file_macro_derive::ConfigFromFileMacro;
 use rapier3d::dynamics::RigidBodySet;
-use rapier3d::math;
-use rapier3d::math::{Isometry, Matrix, Vector};
+use rapier3d::math::Vector;
 use serde::Deserialize;
 
 use crate::plugins::player;
