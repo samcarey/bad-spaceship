@@ -121,21 +121,24 @@ fn propel(
         let forward = transform.value.z_axis().truncate() * keyboard_directional_input.0.y();
         let right = -transform.value.x_axis().truncate() * keyboard_directional_input.0.x();
         let target_velocity = vec3_to_vector(Vec3::from(forward + right)) * propulsion.max_speed;
-
+        let current_velocity = rb.linvel.clone_owned();
+        let horizontal_velocity = vec3_to_vector(Vec3::new(
+            current_velocity[(0, 0)],
+            current_velocity[(2, 0)],
+            0.0,
+        ));
         rb.wake_up();
 
-        let current_speed_along_propulsion_direction = rb.linvel.dot(&target_velocity.normalize());
-
-        let velocity_change =
-            target_velocity - current_speed_along_propulsion_direction * rb.linvel.normalize();
+        let velocity_change = match target_velocity.amax() > 0.0 {
+            true => {
+                let current_speed_along_propulsion_direction =
+                    horizontal_velocity.dot(&target_velocity.normalize());
+                target_velocity
+                    - current_speed_along_propulsion_direction * horizontal_velocity.normalize()
+            }
+            false => -horizontal_velocity,
+        };
         let impulse = rb.mass() * velocity_change;
-
-        // let mut propulsive_force = propulsion_unit_vector * propulsion.max_force;
-        // let current_speed_along_propulsion_direction = rb.linvel.dot(&propulsion_unit_vector);
-        // let relative_remaining_propulsion = (propulsion.max_speed
-        //     - current_speed_along_propulsion_direction)
-        //     / propulsion.max_speed;
-
         rb.apply_impulse(impulse);
     }
 }
