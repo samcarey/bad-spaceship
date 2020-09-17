@@ -5,7 +5,8 @@ use bevy_rapier3d::rapier::geometry::ColliderBuilder;
 use config_from_file_macro::ConfigFromFileMacro;
 use config_from_file_macro_derive::ConfigFromFileMacro;
 use rapier3d::dynamics::RigidBodySet;
-use rapier3d::math::Vector;
+use rapier3d::math;
+use rapier3d::math::{Isometry, Matrix, Vector};
 use serde::Deserialize;
 
 use crate::plugins::player;
@@ -74,7 +75,8 @@ pub fn spawn(
     // });
 
     let rigid_body = RigidBodyBuilder::new_dynamic().translation(0.0, 50.0, 0.0);
-    let collider = ColliderBuilder::cuboid(config.size / 2.0, config.size / 2.0, config.size / 2.0);
+    let collider = ColliderBuilder::cuboid(config.size / 2.0, config.size / 2.0, config.size / 2.0)
+        .density(1.0);
 
     let character_entity = commands
         // .spawn(PbrComponents {
@@ -135,9 +137,15 @@ fn propel(
             true => {
                 let current_speed_along_propulsion_direction =
                     current_horizontal_velocity.dot(&desired_velocity.normalize());
-                desired_velocity
-                    - current_speed_along_propulsion_direction
-                        * current_horizontal_velocity.normalize()
+                let current_velocity_along_propulsion_direction =
+                    match current_horizontal_velocity.amax() > 0.0 {
+                        true => {
+                            current_speed_along_propulsion_direction
+                                * current_horizontal_velocity.normalize()
+                        }
+                        false => vec3_to_vector(Vec3::new(0.0, 0.0, 0.0)),
+                    };
+                desired_velocity - current_velocity_along_propulsion_direction
             }
             false => -current_horizontal_velocity,
         };
