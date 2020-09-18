@@ -137,7 +137,7 @@ fn propel(
                             current_speed_along_propulsion_direction
                                 * current_horizontal_velocity.normalize()
                         }
-                        false => vec3_to_vector(Vec3::new(0.0, 0.0, 0.0)),
+                        false => Vector::zeros(),
                     };
                 desired_velocity - current_velocity_along_propulsion_direction
             }
