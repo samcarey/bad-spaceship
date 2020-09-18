@@ -5,8 +5,7 @@ use bevy_rapier3d::rapier::geometry::ColliderBuilder;
 use config_from_file_macro::ConfigFromFileMacro;
 use config_from_file_macro_derive::ConfigFromFileMacro;
 use rapier3d::dynamics::RigidBodySet;
-use rapier3d::math;
-use rapier3d::math::{Isometry, Matrix, Vector};
+use rapier3d::math::Vector;
 use serde::Deserialize;
 
 use crate::plugins::player;
@@ -20,78 +19,26 @@ impl Plugin for CharacterPlugin {
 
 const CONFIG_FILE: &str = "assets/config/character.ron";
 
-const RADIANS_IN_CIRCLE: f32 = 2.0 * std::f32::consts::PI;
-
 struct Name(String);
-struct BasePosition(pub Vec3);
+
 pub struct MoveSpeed(f32);
-struct Bob {
-    amplitude: f32,
-    phase: f32,
-    radians_per_second: f32,
-}
 
 #[derive(ConfigFromFileMacro, Deserialize)]
 struct Config {
     size: f32,
-    hover_size_ratio: f32,
-    bob_ratio: f32,
-    bob_rate: f32,
-    extra_first_person_height_size_ratio: f32,
     name: String,
     max_speed: f32,
 }
 
-pub fn spawn(
-    commands: &mut Commands,
-    meshes: &mut ResMut<Assets<Mesh>>,
-    materials: &mut ResMut<Assets<StandardMaterial>>,
-) {
+pub fn spawn(commands: &mut Commands) {
     let config = Config::new(CONFIG_FILE);
-
-    let hover = config.size * config.hover_size_ratio;
-    let base_height = config.size / 2.0 + hover;
-    let static_height_of_top = config.size + hover;
-    let bob_amplitude = hover * config.bob_ratio;
-    let dynamic_height_of_top = static_height_of_top + bob_amplitude;
-    let extra_first_person_height = config.extra_first_person_height_size_ratio * config.size;
-    let first_person_camera_height = dynamic_height_of_top * extra_first_person_height;
-
-    let base_position = BasePosition(Vec3::new(
-        0.0,
-        base_height * 55. - first_person_camera_height,
-        0.0,
-    ));
-
-    // let cube_mat_handle = materials.add({
-    //     let mut cube_material: StandardMaterial = Color::rgb(1.0, 1.0, 1.0).into();
-    //     cube_material.shaded = true;
-    //     cube_material
-    // });
-
     let rigid_body = RigidBodyBuilder::new_dynamic().translation(0.0, 50.0, 0.0);
     let collider = ColliderBuilder::cuboid(config.size / 2.0, config.size / 2.0, config.size / 2.0);
 
-    let character_entity = commands
-        // .spawn(PbrComponents {
-        //     mesh: meshes.add(Mesh::from(shape::Cube {
-        //         size: config.size / 2.0,
-        //     })),
-        //     material: cube_mat_handle,
-        //     translation: Translation(base_position.0),
-        //     ..Default::default()
-        // })
+    commands
         .spawn((rigid_body, collider))
-        .with(base_position)
         .with(MoveSpeed(config.max_speed))
-        .with(Name(config.name))
-        .with(Bob {
-            amplitude: bob_amplitude,
-            phase: 0.0,
-            radians_per_second: config.bob_rate * RADIANS_IN_CIRCLE,
-        });
-    // .current_entity();
-    // (character_entity, first_person_camera_height)
+        .with(Name(config.name));
 }
 
 fn vec3_to_vector(v: Vec3) -> Vector<f32> {

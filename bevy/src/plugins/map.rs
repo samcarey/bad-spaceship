@@ -5,9 +5,7 @@ pub struct MapPlugin;
 
 impl Plugin for MapPlugin {
     fn build(&self, app: &mut AppBuilder) {
-        app
-            // .add_startup_system(add_camera.system())
-            .add_startup_system(add_lighting.system())
+        app.add_startup_system(add_lighting.system())
             .add_startup_system(add_platform.system());
     }
 }
