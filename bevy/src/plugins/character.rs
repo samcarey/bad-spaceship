@@ -14,9 +14,7 @@ pub struct CharacterPlugin;
 
 impl Plugin for CharacterPlugin {
     fn build(&self, app: &mut AppBuilder) {
-        app
-            // .add_system(bob.system())
-            .add_system_to_stage(stage::LAST, propel.system());
+        app.add_system(move_character_based_on_keyboard_input.system());
     }
 }
 
@@ -100,7 +98,7 @@ fn vec3_to_vector(v: Vec3) -> Vector<f32> {
     Vector::new(v.x(), v.y(), v.z())
 }
 
-fn propel(
+fn move_character_based_on_keyboard_input(
     mut bodies: ResMut<RigidBodySet>,
     keyboard_directional_input: &player::KeyboardDirectionalInput,
     rigid_body: &RigidBodyHandleComponent,
@@ -146,13 +144,5 @@ fn propel(
 
         let impulse = rb.mass() * velocity_change;
         rb.apply_impulse(impulse);
-    }
-}
-
-fn bob(time: Res<Time>, mut query: Query<(&mut Translation, &mut Bob, &mut BasePosition)>) {
-    for (mut translation, mut bob, base_position) in &mut query.iter() {
-        bob.phase = (bob.phase + time.delta_seconds * bob.radians_per_second) % RADIANS_IN_CIRCLE;
-        let bob_offset = Vec3::new(0.0, bob.amplitude * bob.phase.cos(), 0.0);
-        translation.0 = base_position.0 + bob_offset;
     }
 }
