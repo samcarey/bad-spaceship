@@ -115,7 +115,7 @@ fn move_character_based_on_keyboard_input(
         let right = -transform.value.x_axis().truncate() * keyboard_directional_input.0.x();
         let desired_velocity = vec3_to_vector(Vec3::from(forward + right)) * move_speed.0;
 
-        // Get the current velocity from the physics engine but ignore the vertical component
+        // Get the current velocity from the physics engine but ignore the vertical component (Y)
         let current_velocity = rb.linvel.clone_owned();
         let current_horizontal_velocity = vec3_to_vector(Vec3::new(
             current_velocity[(0, 0)],
