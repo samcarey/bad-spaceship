@@ -26,10 +26,7 @@ const RADIANS_IN_CIRCLE: f32 = 2.0 * std::f32::consts::PI;
 
 struct Name(String);
 struct BasePosition(pub Vec3);
-pub struct Propulsion {
-    max_speed: f32,
-}
-
+pub struct MoveSpeed(f32);
 struct Bob {
     amplitude: f32,
     phase: f32,
@@ -75,8 +72,7 @@ pub fn spawn(
     // });
 
     let rigid_body = RigidBodyBuilder::new_dynamic().translation(0.0, 50.0, 0.0);
-    let collider = ColliderBuilder::cuboid(config.size / 2.0, config.size / 2.0, config.size / 2.0)
-        .density(1.0);
+    let collider = ColliderBuilder::cuboid(config.size / 2.0, config.size / 2.0, config.size / 2.0);
 
     let character_entity = commands
         // .spawn(PbrComponents {
@@ -89,9 +85,7 @@ pub fn spawn(
         // })
         .spawn((rigid_body, collider))
         .with(base_position)
-        .with(Propulsion {
-            max_speed: config.max_speed,
-        })
+        .with(MoveSpeed(config.max_speed))
         .with(Name(config.name))
         .with(Bob {
             amplitude: bob_amplitude,
@@ -111,7 +105,7 @@ fn propel(
     keyboard_directional_input: &player::KeyboardDirectionalInput,
     rigid_body: &RigidBodyHandleComponent,
     transform: &Transform,
-    propulsion: &Propulsion,
+    move_speed: &MoveSpeed,
 ) {
     if let Some(mut rb) = bodies.get_mut(rigid_body.handle()) {
         rb.wake_up();
@@ -121,7 +115,7 @@ fn propel(
         // Note: Z is vertical in Bevy/Rapier, X/Y is horizontal
         let forward = transform.value.z_axis().truncate() * keyboard_directional_input.0.y();
         let right = -transform.value.x_axis().truncate() * keyboard_directional_input.0.x();
-        let desired_velocity = vec3_to_vector(Vec3::from(forward + right)) * propulsion.max_speed;
+        let desired_velocity = vec3_to_vector(Vec3::from(forward + right)) * move_speed.0;
 
         // Get the current velocity from the physics engine but ignore the vertical component
         let current_velocity = rb.linvel.clone_owned();
