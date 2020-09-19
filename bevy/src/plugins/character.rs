@@ -32,7 +32,7 @@ struct Config {
 
 pub fn spawn(commands: &mut Commands) {
     let config = Config::new(CONFIG_FILE);
-    let rigid_body = RigidBodyBuilder::new_dynamic().translation(0.0, 50.0, 0.0);
+    let rigid_body = RigidBodyBuilder::new_dynamic().translation(0.0, 10.0, 0.0);
     let collider = ColliderBuilder::cuboid(config.size / 2.0, config.size / 2.0, config.size / 2.0);
 
     commands
@@ -55,41 +55,39 @@ fn move_character_based_on_keyboard_input(
     if let Some(mut rb) = bodies.get_mut(rigid_body.handle()) {
         rb.wake_up();
 
-        // Need to map the y-coordinate (used for forward in 2D vector that takes keyboard directional input)
-        // to the z-coordinate (used by the 3D game engine for horizontal forward).
-        // Note: Z is vertical in Bevy/Rapier, X/Y is horizontal
-        let forward = transform.value.z_axis().truncate() * keyboard_directional_input.0.y();
-        let right = -transform.value.x_axis().truncate() * keyboard_directional_input.0.x();
-        let desired_velocity = vec3_to_vector(Vec3::from(forward + right)) * move_speed.0;
-
-        // Get the current velocity from the physics engine but ignore the vertical component (Y)
+        // Get the current velocity from the physics engine
         let current_velocity = rb.linvel.clone_owned();
-        let current_horizontal_velocity = vec3_to_vector(Vec3::new(
-            current_velocity[(0, 0)],
-            0.0,
-            current_velocity[(2, 0)],
-        ));
 
-        // Either increase the speed to match the maximum speed,
+        // Compute our desired velocity vector
+        // Desired velocity vector should incorporate gravity into vertical component
+        // Note: Y is vertical in Bevy/Rapier, (X,Z) is horizontal
+        let forward = transform.value.z_axis().truncate() * keyboard_directional_input.0.z();
+        let right = -transform.value.x_axis().truncate() * keyboard_directional_input.0.x();
+        let up = transform.value.y_axis().truncate() * keyboard_directional_input.0.y();
+        let desired_velocity = vec3_to_vector(Vec3::from(forward + right + up)) * move_speed.0;
+
+        // To move the character, we increase the speed to match the maximum speed,
         // or cancel out any velocity to come to a halt.
         let velocity_change = match desired_velocity.amax() > 0.0 {
             true => {
                 let current_speed_along_propulsion_direction =
-                    current_horizontal_velocity.dot(&desired_velocity.normalize());
-                let current_velocity_along_propulsion_direction =
-                    match current_horizontal_velocity.amax() > 0.0 {
-                        true => {
-                            current_speed_along_propulsion_direction
-                                * current_horizontal_velocity.normalize()
-                        }
-                        false => Vector::zeros(),
-                    };
+                    current_velocity.dot(&desired_velocity.normalize());
+                let current_velocity_along_propulsion_direction = match current_velocity.amax()
+                    > 0.0
+                {
+                    true => current_speed_along_propulsion_direction * current_velocity.normalize(),
+                    false => Vector::zeros(),
+                };
                 desired_velocity - current_velocity_along_propulsion_direction
             }
-            false => -current_horizontal_velocity,
+            false => -current_velocity,
         };
 
         let impulse = rb.mass() * velocity_change;
-        rb.apply_impulse(impulse);
+
+        // if we use "force" instead of "impulse" then we don't permanently defy gravity - though it does
+        // make it more difficult to precisely stop in horizontal plane.
+        // rb.apply_impulse(impulse);
+        rb.apply_force(impulse);
     }
 }
