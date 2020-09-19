@@ -57,7 +57,7 @@ fn move_character_based_on_keyboard_input(
 
         // Need to map the y-coordinate (used for forward in 2D vector that takes keyboard directional input)
         // to the z-coordinate (used by the 3D game engine for horizontal forward).
-        // Note: Z is vertical in Bevy/Rapier, X/Y is horizontal
+        // Note: Y is vertical in Bevy/Rapier, X/Z is horizontal
         let forward = transform.value.z_axis().truncate() * keyboard_directional_input.0.y();
         let right = -transform.value.x_axis().truncate() * keyboard_directional_input.0.x();
         let desired_velocity = vec3_to_vector(Vec3::from(forward + right)) * move_speed.0;
