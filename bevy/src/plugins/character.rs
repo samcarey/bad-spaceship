@@ -22,12 +22,14 @@ const CONFIG_FILE: &str = "assets/config/character.ron";
 struct Name(String);
 
 pub struct MoveSpeed(f32);
+pub struct JumpForce(f32);
 
 #[derive(ConfigFromFileMacro, Deserialize)]
 struct Config {
     size: f32,
     name: String,
     max_speed: f32,
+    jump_force: f32,
 }
 
 pub fn spawn(commands: &mut Commands) {
@@ -38,6 +40,7 @@ pub fn spawn(commands: &mut Commands) {
     commands
         .spawn((rigid_body, collider))
         .with(MoveSpeed(config.max_speed))
+        .with(JumpForce(config.jump_force))
         .with(Name(config.name));
 }
 
@@ -51,6 +54,7 @@ fn move_character_based_on_keyboard_input(
     rigid_body: &RigidBodyHandleComponent,
     transform: &Transform,
     move_speed: &MoveSpeed,
+    jump_force: &JumpForce,
 ) {
     if let Some(mut rb) = bodies.get_mut(rigid_body.handle()) {
         rb.wake_up();
@@ -141,7 +145,7 @@ fn move_character_based_on_keyboard_input(
             //          jump event.
             //
             let up = transform.value.y_axis().truncate() * keyboard_directional_input.0.y();
-            let desired_vertical_velocity = vec3_to_vector(Vec3::from(up)) * move_speed.0;
+            let desired_vertical_velocity = vec3_to_vector(Vec3::from(up)) * jump_force.0;
 
             //
             // get a copy of the current velocity from rapier, isolated to vertical component only

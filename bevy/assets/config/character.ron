@@ -6,4 +6,5 @@
     extra_first_person_height_size_ratio: 0.5,
     name: "Name",
     max_speed: 20,
+    jump_force: 60,
 )
