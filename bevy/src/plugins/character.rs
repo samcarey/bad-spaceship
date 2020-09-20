@@ -109,8 +109,9 @@ fn move_character_based_on_keyboard_input(
             //
             let horizontal_velocity_change = match desired_horizontal_velocity.amax() > 0.0 {
                 true => {
-                    let current_speed_along_propulsion_direction =
-                        current_velocity.dot(&desired_horizontal_velocity.normalize());
+                    let current_speed_along_propulsion_direction = current_velocity
+                        .dot(&desired_horizontal_velocity.normalize())
+                        .abs();
                     let current_velocity_along_propulsion_direction =
                         match current_horizontal_velocity.amax() > 0.0 {
                             true => {
@@ -159,8 +160,9 @@ fn move_character_based_on_keyboard_input(
             //
             let vertical_velocity = match desired_vertical_velocity.amax() > 0.0 {
                 true => {
-                    let current_speed_along_propulsion_direction =
-                        current_velocity.dot(&desired_vertical_velocity.normalize());
+                    let current_speed_along_propulsion_direction = current_velocity
+                        .dot(&desired_vertical_velocity.normalize())
+                        .abs();
                     let current_velocity_along_propulsion_direction =
                         match current_vertical_velocity.amax() > 0.0 {
                             true => {
