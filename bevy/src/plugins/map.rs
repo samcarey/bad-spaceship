@@ -10,18 +10,23 @@ impl Plugin for MapPlugin {
     }
 }
 
-const PLATFORM_SIZE_M: f32 = 15.0; // meters
-const PLATFORM_HEIGHT_M: f32 = 0.1; // meters
+const PLATFORM_WIDTH_M: f32 = 50.0; // meters
+const PLATFORM_THICKNESS_M: f32 = 0.1; // meters
 
 fn add_lighting(mut commands: Commands) {
     commands.spawn(LightComponents {
-        translation: Translation::new(4.0, 8.0, 4.0), // meters
+        translation: Translation::new(0.0, 8.0, 0.0), // meters
         ..Default::default()
     });
 }
 
 fn add_platform(mut commands: Commands) {
-    let rigid_body = RigidBodyBuilder::new_static().translation(0.0, -PLATFORM_HEIGHT_M, 0.0);
-    let collider = ColliderBuilder::cuboid(PLATFORM_SIZE_M, PLATFORM_HEIGHT_M, PLATFORM_SIZE_M);
-    commands.spawn((rigid_body, collider));
+    let platform_rigid_body = RigidBodyBuilder::new_static().translation(0.0, 0.0, 0.0);
+    let platform_collider = ColliderBuilder::cuboid(
+        PLATFORM_WIDTH_M / 2.0,
+        PLATFORM_THICKNESS_M / 2.0,
+        PLATFORM_WIDTH_M / 2.0,
+    );
+
+    commands.spawn((platform_rigid_body, platform_collider));
 }

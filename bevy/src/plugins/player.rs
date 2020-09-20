@@ -42,7 +42,7 @@ struct Config {
 }
 
 #[derive(Default)]
-pub struct KeyboardDirectionalInput(pub Vec2);
+pub struct KeyboardDirectionalInput(pub Vec3);
 
 struct Camera {
     distance: f32,
@@ -144,22 +144,48 @@ fn process_keyboard_events(
     _player: &Player,
     mut keyboard_directional_input: Mut<KeyboardDirectionalInput>,
 ) {
-    keyboard_directional_input.0 = Vec2::zero();
+    //
+    // Note: keyboard_directional_input vector components match Bevy/Rapier vector definitions:
+    //  Horizontal = (X,Z)
+    //  Vertical = Y
+    //
 
+    // Initialize to zero every time - if a key is pressed then it will overwrite in the section below.
+    keyboard_directional_input.0 = Vec3::zero();
+
+    // "W" keypress indicates forward movement
     if keyboard_input.pressed(KeyCode::W) {
-        *keyboard_directional_input.0.y_mut() += 1.;
+        *keyboard_directional_input.0.z_mut() += 1.;
     }
+
+    // "S" keypress indicates forward movement
     if keyboard_input.pressed(KeyCode::S) {
-        *keyboard_directional_input.0.y_mut() -= 1.;
+        *keyboard_directional_input.0.z_mut() -= 1.;
     }
+
+    // "D" keypress indicates forward movement
     if keyboard_input.pressed(KeyCode::D) {
         *keyboard_directional_input.0.x_mut() += 1.;
     }
+
+    // "A" keypress indicates forward movement
     if keyboard_input.pressed(KeyCode::A) {
         *keyboard_directional_input.0.x_mut() -= 1.;
     }
 
-    if keyboard_directional_input.0 != Vec2::zero() {
+    //
+    // "Spacebar" keypress indicates vertical jump / thrust.
+    //
+    //  TODO:   We need to control directional input here to isolate jump event vs. continuous
+    //          upward thrust.
+    //
+    if keyboard_input.pressed(KeyCode::Space) {
+        *keyboard_directional_input.0.y_mut() += 1.;
+    }
+
+    // Check here to see if any keypresses were registered.
+    // If so, then normalize the vector components.
+    if keyboard_directional_input.0 != Vec3::zero() {
         keyboard_directional_input.0.normalize();
     }
 }
