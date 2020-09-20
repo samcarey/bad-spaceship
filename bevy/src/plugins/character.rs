@@ -55,39 +55,126 @@ fn move_character_based_on_keyboard_input(
     if let Some(mut rb) = bodies.get_mut(rigid_body.handle()) {
         rb.wake_up();
 
+        //
         // Get the current velocity from the physics engine
+        //
         let current_velocity = rb.linvel.clone_owned();
 
-        // Compute our desired velocity vector
-        // Desired velocity vector should incorporate gravity into vertical component
-        // Note: Y is vertical in Bevy/Rapier, (X,Z) is horizontal
-        let forward = transform.value.z_axis().truncate() * keyboard_directional_input.0.z();
-        let right = -transform.value.x_axis().truncate() * keyboard_directional_input.0.x();
-        let up = transform.value.y_axis().truncate() * keyboard_directional_input.0.y();
-        let desired_velocity = vec3_to_vector(Vec3::from(forward + right + up)) * move_speed.0;
+        //
+        // In moving the character we want to use two different physics principles: impulse and force.
+        //
+        // Since we want the character's movement in the horizontal plane (x,z) to be precisely controlled
+        // WRT movement and stop via keypresses, we use rapier to apply an impulse for movement,
+        // and then negate that impulse to stop instantaneously.  We need a different approach for
+        // the vertical plane; if the same is applied to the vertical plane (y), the character will hover
+        // instead of responding to gravity. In the vertical direction we want to apply "force" which then
+        // releases and allows the rapier gravity to re-engage.
+        //
+        // To accomplish this, we compute separate vectors for horizontal/vertical contributions
+        // and then use them to apply separate impulse/force actions (respectively) to our rigid body.
+        //
 
-        // To move the character, we increase the speed to match the maximum speed,
-        // or cancel out any velocity to come to a halt.
-        let velocity_change = match desired_velocity.amax() > 0.0 {
-            true => {
-                let current_speed_along_propulsion_direction =
-                    current_velocity.dot(&desired_velocity.normalize());
-                let current_velocity_along_propulsion_direction = match current_velocity.amax()
-                    > 0.0
-                {
-                    true => current_speed_along_propulsion_direction * current_velocity.normalize(),
-                    false => Vector::zeros(),
-                };
-                desired_velocity - current_velocity_along_propulsion_direction
-            }
-            false => -current_velocity,
-        };
+        //
+        // Start with the horizontal plane (x,z)
+        // Compute our desired horizontal velocity vector and apply an impulse to the rigid body.
+        //
+        {
+            //
+            // Compute our desired horizontal velocity vector based on keyboard inputs and move speed
+            //  Note: Horizontal plane = (x,z), Vertical plane = (y)
+            //
+            let forward = transform.value.z_axis().truncate() * keyboard_directional_input.0.z();
+            let right = -transform.value.x_axis().truncate() * keyboard_directional_input.0.x();
+            let desired_horizontal_velocity =
+                vec3_to_vector(Vec3::from(forward + right)) * move_speed.0;
 
-        let impulse = rb.mass() * velocity_change;
+            //
+            // get a copy of the current velocity from rapier, isolated to horizontal components only
+            // (ie, zero out current vertical [y] component)
+            //
+            let current_horizontal_velocity = vec3_to_vector(Vec3::new(
+                current_velocity[(0, 0)],
+                0.0,
+                current_velocity[(2, 0)],
+            ));
 
-        // if we use "force" instead of "impulse" then we don't permanently defy gravity - though it does
-        // make it more difficult to precisely stop in horizontal plane.
-        // rb.apply_impulse(impulse);
-        rb.apply_force(impulse);
+            //
+            // To move the character, we increase the speed to match the maximum speed in whatever
+            // direction is indicated by user keypress; or, if no keys pressed then we cancel out
+            // any velocity to stop horizontally.
+            //
+            let horizontal_velocity_change = match desired_horizontal_velocity.amax() > 0.0 {
+                true => {
+                    let current_speed_along_propulsion_direction =
+                        current_velocity.dot(&desired_horizontal_velocity.normalize());
+                    let current_velocity_along_propulsion_direction =
+                        match current_horizontal_velocity.amax() > 0.0 {
+                            true => {
+                                current_speed_along_propulsion_direction
+                                    * current_horizontal_velocity.normalize()
+                            }
+                            false => Vector::zeros(),
+                        };
+                    desired_horizontal_velocity - current_velocity_along_propulsion_direction
+                }
+                false => -current_horizontal_velocity,
+            };
+
+            //
+            // Apply the computed impulse to the character's rigid body
+            //
+            let horizontal_impulse = rb.mass() * horizontal_velocity_change;
+            rb.apply_impulse(horizontal_impulse);
+        }
+
+        //
+        // Now consider the vertical plane (y)
+        // Compute our desired vertical velocity vector and apply a force to the rigid body.
+        //
+        {
+            //
+            // Compute our desired vertical velocity vector based on keyboard inputs and move speed
+            //  Note: Horizontal plane = (x,z), Vertical plane = (y)
+            //
+            //  Note: We presume that keyboard directional input is limited externally.  If not,
+            //          then a long keypress will act more like "thrust" upwards than singular
+            //          jump event.
+            //
+            let up = transform.value.y_axis().truncate() * keyboard_directional_input.0.y();
+            let desired_vertical_velocity = vec3_to_vector(Vec3::from(up)) * move_speed.0;
+
+            //
+            // get a copy of the current velocity from rapier, isolated to vertical component only
+            // (ie, zero out current horizontal [x,z] components)
+            //
+            let current_vertical_velocity =
+                vec3_to_vector(Vec3::new(0.0, current_velocity[(1, 0)], 0.0));
+
+            //
+            // To "jump" we allow apply force in the vertical direction
+            //
+            let vertical_velocity = match desired_vertical_velocity.amax() > 0.0 {
+                true => {
+                    let current_speed_along_propulsion_direction =
+                        current_velocity.dot(&desired_vertical_velocity.normalize());
+                    let current_velocity_along_propulsion_direction =
+                        match current_vertical_velocity.amax() > 0.0 {
+                            true => {
+                                current_speed_along_propulsion_direction
+                                    * current_vertical_velocity.normalize()
+                            }
+                            false => Vector::zeros(),
+                        };
+                    desired_vertical_velocity - current_velocity_along_propulsion_direction
+                }
+                false => Vector::zeros(),
+            };
+
+            //
+            // Apply the computed force to the character's rigid body
+            //
+            let vertical_force = rb.mass() * vertical_velocity;
+            rb.apply_force(vertical_force);
+        }
     }
 }

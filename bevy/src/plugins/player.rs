@@ -173,7 +173,12 @@ fn process_keyboard_events(
         *keyboard_directional_input.0.x_mut() -= 1.;
     }
 
-    // "Spacebar" keypress indicates vertical thrust
+    //
+    // "Spacebar" keypress indicates vertical jump / thrust.
+    //
+    //  TODO:   We need to control directional input here to isolate jump event vs. continuous
+    //          upward thrust.
+    //
     if keyboard_input.pressed(KeyCode::Space) {
         *keyboard_directional_input.0.y_mut() += 1.;
     }
