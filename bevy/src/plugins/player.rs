@@ -141,7 +141,6 @@ fn process_mouse_events(
 
 fn process_keyboard_events(
     keyboard_input: Res<Input<KeyCode>>,
-    _player: &Player,
     mut keyboard_directional_input: Mut<KeyboardDirectionalInput>,
 ) {
     //
