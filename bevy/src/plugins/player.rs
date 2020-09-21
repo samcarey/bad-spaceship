@@ -32,13 +32,14 @@ impl Plugin for PlayerPlugin {
     }
 }
 
-#[derive(ConfigFromFileMacro, Deserialize)]
+#[derive(ConfigFromFileMacro, Deserialize, Copy, Clone)]
 struct Config {
     zoom_sensitivity: f32,
     look_sensitivity: f32,
 
     min_camera_distance: f32,
     max_camera_distance: f32,
+    camera_offset_character_size_ratio: (f32, f32, f32),
 }
 
 #[derive(Default)]
@@ -90,6 +91,11 @@ struct State {
     mouse_wheel_event_reader: EventReader<MouseWheel>,
 }
 
+fn tuple_to_vec3(tuple: (f32, f32, f32)) -> Vec3 {
+    let (x, y, z) = tuple;
+    Vec3::new(x, y, z)
+}
+
 fn setup(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -117,7 +123,9 @@ fn setup(
         .spawn(PbrComponents {
             mesh: meshes.add(Mesh::from(shape::Cube { size: 0.0 })),
             material: materials.add(StandardMaterial::default()),
-            translation: Translation::new(0.0, character_size * 1.5, character_size / 2.0),
+            translation: Translation(
+                tuple_to_vec3(config.camera_offset_character_size_ratio) * character_size,
+            ),
             ..Default::default()
         })
         .current_entity();
