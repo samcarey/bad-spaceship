@@ -90,14 +90,18 @@ struct State {
     mouse_wheel_event_reader: EventReader<MouseWheel>,
 }
 
-fn setup(mut commands: Commands) {
+fn setup(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
     let config = Config::new(CONFIG_FILE);
 
     let camera_entity = commands
         .spawn(Camera3dComponents::default())
         .current_entity();
 
-    character::spawn(&mut commands);
+    let character_size = character::spawn(&mut commands);
 
     let player_entity = commands
         .with(Player::new(camera_entity))
@@ -105,7 +109,24 @@ fn setup(mut commands: Commands) {
         .with(KeyboardDirectionalInput::default())
         .current_entity();
 
-    commands.push_children(player_entity.unwrap(), &[camera_entity.unwrap()]);
+    // This is simply a point that hovers above the character that the camera orbits around.
+    // This is for the purpose of making it easier to see over obstructions.
+    // For now we generate this as a PbrComponent, which is overkill for an invisible point,
+    // so we'll want to simplify this later to something with only the necessary components.
+    let camera_center = commands
+        .spawn(PbrComponents {
+            mesh: meshes.add(Mesh::from(shape::Cube { size: 0.0 })),
+            material: materials.add(StandardMaterial::default()),
+            translation: Translation::new(0.0, character_size * 1.5, character_size / 2.0),
+            ..Default::default()
+        })
+        .current_entity();
+
+    // Mount the camera center to the player
+    commands.push_children(player_entity.unwrap(), &[camera_center.unwrap()]);
+
+    // Mount the camera to the camera center
+    commands.push_children(camera_center.unwrap(), &[camera_entity.unwrap()]);
 }
 
 fn process_mouse_events(

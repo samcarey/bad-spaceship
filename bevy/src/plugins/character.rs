@@ -31,7 +31,7 @@ struct Config {
     jump_force: f32,
 }
 
-pub fn spawn(commands: &mut Commands) {
+pub fn spawn(commands: &mut Commands) -> f32 {
     let config = Config::new(CONFIG_FILE);
     let rigid_body = RigidBodyBuilder::new_dynamic().translation(0.0, 10.0, 0.0);
     let collider = ColliderBuilder::cuboid(config.size / 2.0, config.size / 2.0, config.size / 2.0);
@@ -41,6 +41,7 @@ pub fn spawn(commands: &mut Commands) {
         .with(MoveSpeed(config.max_speed))
         .with(JumpForce(config.jump_force))
         .with(Name(config.name));
+    return config.size;
 }
 
 fn vec3_to_vector(v: Vec3) -> Vector<f32> {
