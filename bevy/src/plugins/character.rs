@@ -20,9 +20,8 @@ impl Plugin for CharacterPlugin {
 const CONFIG_FILE: &str = "assets/config/character.ron";
 
 struct Name(String);
-
-pub struct MoveSpeed(f32);
-pub struct JumpForce(f32);
+struct MoveSpeed(f32);
+struct JumpForce(f32);
 
 #[derive(ConfigFromFileMacro, Deserialize)]
 struct Config {
