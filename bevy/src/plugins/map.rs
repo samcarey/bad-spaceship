@@ -15,7 +15,7 @@ const PLATFORM_THICKNESS_M: f32 = 0.1; // meters
 
 fn add_lighting(mut commands: Commands) {
     commands.spawn(LightComponents {
-        translation: Translation::new(0.0, 8.0, 0.0), // meters
+        transform: Transform::from_translation(Vec3::new(0.0, 8.0, 0.0)), // meters
         ..Default::default()
     });
 }

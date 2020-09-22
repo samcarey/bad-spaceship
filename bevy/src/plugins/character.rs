@@ -87,8 +87,8 @@ fn move_character_based_on_keyboard_input(
             // Compute our desired horizontal velocity vector based on keyboard inputs and move speed
             //  Note: Horizontal plane = (x,z), Vertical plane = (y)
             //
-            let forward = transform.value.z_axis().truncate() * keyboard_directional_input.0.z();
-            let right = -transform.value.x_axis().truncate() * keyboard_directional_input.0.x();
+            let forward = transform.value().z_axis().truncate() * keyboard_directional_input.0.z();
+            let right = -transform.value().x_axis().truncate() * keyboard_directional_input.0.x();
             let desired_horizontal_velocity =
                 vec3_to_vector(Vec3::from(forward + right)) * move_speed.0;
 
@@ -145,7 +145,7 @@ fn move_character_based_on_keyboard_input(
             //          then a long keypress will act more like "thrust" upwards than singular
             //          jump event.
             //
-            let up = transform.value.y_axis().truncate() * keyboard_directional_input.0.y();
+            let up = transform.value().y_axis().truncate() * keyboard_directional_input.0.y();
             let desired_vertical_velocity = vec3_to_vector(Vec3::from(up)) * jump_force.0;
 
             //
