@@ -4,8 +4,9 @@ use bevy_rapier3d::rapier::dynamics::RigidBodyBuilder;
 use bevy_rapier3d::rapier::geometry::ColliderBuilder;
 use config_from_file_macro::ConfigFromFileMacro;
 use config_from_file_macro_derive::ConfigFromFileMacro;
+use nalgebra::{Quaternion, UnitQuaternion};
 use rapier3d::dynamics::RigidBodySet;
-use rapier3d::math::Vector;
+use rapier3d::math::{Isometry, Translation, Vector};
 use serde::Deserialize;
 
 use crate::plugins::player;
@@ -13,7 +14,11 @@ pub struct CharacterPlugin;
 
 impl Plugin for CharacterPlugin {
     fn build(&self, app: &mut AppBuilder) {
-        app.add_system(move_character_based_on_keyboard_input.system());
+        app.add_system(move_character_based_on_keyboard_input.system())
+            .add_system_to_stage(
+                stage::POST_UPDATE,
+                rotate_character_based_on_mouse_input.system(),
+            );
     }
 }
 
@@ -44,8 +49,35 @@ pub fn spawn(commands: &mut Commands) -> f32 {
     return config.size;
 }
 
-fn vec3_to_vector(v: Vec3) -> Vector<f32> {
-    Vector::new(v.x(), v.y(), v.z())
+trait Vec3Ext {
+    fn to_vector(&self) -> Vector<f32>;
+    fn to_translation3(&self) -> Translation<f32>;
+}
+
+impl Vec3Ext for Vec3 {
+    fn to_vector(&self) -> Vector<f32> {
+        Vector::new(self.x(), self.y(), self.z())
+    }
+
+    fn to_translation3(&self) -> Translation<f32> {
+        Translation::new(self.x(), self.y(), self.z())
+    }
+}
+
+// TODO: submit this to bevy project
+trait TransformExt {
+    fn right(&self) -> Vec3;
+    fn up(&self) -> Vec3;
+}
+
+impl TransformExt for Transform {
+    fn right(&self) -> Vec3 {
+        self.rotation * Vec3::unit_x()
+    }
+
+    fn up(&self) -> Vec3 {
+        self.rotation * Vec3::unit_y()
+    }
 }
 
 fn move_character_based_on_keyboard_input(
@@ -56,13 +88,11 @@ fn move_character_based_on_keyboard_input(
     move_speed: &MoveSpeed,
     jump_force: &JumpForce,
 ) {
-    if let Some(mut rb) = bodies.get_mut(rigid_body.handle()) {
-        rb.wake_up();
-
+    if let Some(rb) = bodies.get_mut(rigid_body.handle()) {
         //
         // Get the current velocity from the physics engine
         //
-        let current_velocity = rb.linvel.clone_owned();
+        let current_velocity = rb.linvel().clone_owned();
 
         //
         // In moving the character we want to use two different physics principles: impulse and force.
@@ -87,20 +117,17 @@ fn move_character_based_on_keyboard_input(
             // Compute our desired horizontal velocity vector based on keyboard inputs and move speed
             //  Note: Horizontal plane = (x,z), Vertical plane = (y)
             //
-            let forward = transform.value().z_axis().truncate() * keyboard_directional_input.0.z();
-            let right = -transform.value().x_axis().truncate() * keyboard_directional_input.0.x();
+            let forward = transform.forward() * keyboard_directional_input.0.z();
+            let right = -transform.right() * keyboard_directional_input.0.x();
             let desired_horizontal_velocity =
-                vec3_to_vector(Vec3::from(forward + right)) * move_speed.0;
+                Vec3::from(forward + right).to_vector() * move_speed.0;
 
             //
             // get a copy of the current velocity from rapier, isolated to horizontal components only
             // (ie, zero out current vertical [y] component)
             //
-            let current_horizontal_velocity = vec3_to_vector(Vec3::new(
-                current_velocity[(0, 0)],
-                0.0,
-                current_velocity[(2, 0)],
-            ));
+            let current_horizontal_velocity =
+                Vec3::new(current_velocity[(0, 0)], 0.0, current_velocity[(2, 0)]).to_vector();
 
             //
             // To move the character, we increase the speed to match the maximum speed in whatever
@@ -129,7 +156,7 @@ fn move_character_based_on_keyboard_input(
             // Apply the computed impulse to the character's rigid body
             //
             let horizontal_impulse = rb.mass() * horizontal_velocity_change;
-            rb.apply_impulse(horizontal_impulse);
+            rb.apply_impulse(horizontal_impulse, true);
         }
 
         //
@@ -145,15 +172,15 @@ fn move_character_based_on_keyboard_input(
             //          then a long keypress will act more like "thrust" upwards than singular
             //          jump event.
             //
-            let up = transform.value().y_axis().truncate() * keyboard_directional_input.0.y();
-            let desired_vertical_velocity = vec3_to_vector(Vec3::from(up)) * jump_force.0;
+            let up = transform.up() * keyboard_directional_input.0.y();
+            let desired_vertical_velocity = Vec3::from(up).to_vector() * jump_force.0;
 
             //
             // get a copy of the current velocity from rapier, isolated to vertical component only
             // (ie, zero out current horizontal [x,z] components)
             //
             let current_vertical_velocity =
-                vec3_to_vector(Vec3::new(0.0, current_velocity[(1, 0)], 0.0));
+                Vec3::new(0.0, current_velocity[(1, 0)], 0.0).to_vector();
 
             //
             // To "jump" we allow apply force in the vertical direction
@@ -180,7 +207,42 @@ fn move_character_based_on_keyboard_input(
             // Apply the computed force to the character's rigid body
             //
             let vertical_force = rb.mass() * vertical_velocity;
-            rb.apply_force(vertical_force);
+            rb.apply_force(vertical_force, true);
         }
+    }
+}
+
+trait QuatExt {
+    fn to(&self, other: Quat) -> Quat;
+    fn to_rotation_vector(&self) -> Vector<f32>;
+    fn to_quaternion(&self) -> Quaternion<f32>;
+}
+
+impl QuatExt for Quat {
+    fn to(&self, other: Quat) -> Quat {
+        (self.conjugate() * other).normalize()
+    }
+
+    fn to_rotation_vector(&self) -> Vector<f32> {
+        let (axis, angle) = self.to_axis_angle();
+        axis.to_vector() * angle
+    }
+
+    fn to_quaternion(&self) -> Quaternion<f32> {
+        Quaternion::new(self.w(), self.x(), self.y(), self.z())
+    }
+}
+
+fn rotate_character_based_on_mouse_input(
+    mut bodies: ResMut<RigidBodySet>,
+    player: &player::Player,
+    rigid_body: &RigidBodyHandleComponent,
+    transform: &Transform,
+) {
+    if let Some(rb) = bodies.get_mut(rigid_body.handle()) {
+        let rotation =
+            UnitQuaternion::from_quaternion(Quat::from_rotation_y(-player.yaw).to_quaternion());
+        let position = Isometry::from_parts(transform.translation.to_translation3(), rotation);
+        rb.set_position(position, true);
     }
 }

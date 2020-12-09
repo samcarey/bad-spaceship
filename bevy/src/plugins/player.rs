@@ -71,8 +71,8 @@ impl Camera {
 }
 
 #[derive(Default, Bundle)]
-struct Player {
-    yaw: f32,
+pub struct Player {
+    pub yaw: f32,
     camera: Camera,
 }
 
@@ -142,7 +142,7 @@ fn process_mouse_events(
     mut state: ResMut<State>,
     mouse_motion_events: Res<Events<MouseMotion>>,
     mouse_wheel_events: Res<Events<MouseWheel>>,
-    mut query: Query<(&mut Player, &mut Transform, &Config)>,
+    mut query: Query<(&mut Player, &Config)>,
 ) {
     let mut look = Vec2::zero();
     for event in state.mouse_motion_event_reader.iter(&mouse_motion_events) {
@@ -154,7 +154,7 @@ fn process_mouse_events(
         zoom_delta = event.y;
     }
 
-    for (mut player, mut transform, config) in &mut query.iter() {
+    for (mut player, config) in query.iter_mut() {
         player.yaw += look.x() * time.delta_seconds;
         player.camera.pitch = (player.camera.pitch
             - look.y() * time.delta_seconds * config.look_sensitivity)
@@ -164,7 +164,6 @@ fn process_mouse_events(
             - zoom_delta * time.delta_seconds * config.zoom_sensitivity)
             .max(config.min_camera_distance)
             .min(config.max_camera_distance);
-        transform.set_rotation(Quat::from_rotation_y(-player.yaw));
     }
 }
 
@@ -218,17 +217,17 @@ fn process_keyboard_events(
     }
 }
 
-fn update_camera(mut player_query: Query<&mut Player>, camera_query: Query<&mut Transform>) {
-    for player in &mut player_query.iter() {
+fn update_camera(mut player_query: Query<&mut Player>, mut camera_query: Query<&mut Transform>) {
+    for player in player_query.iter_mut() {
         if let Some(camera_entity) = player.camera.entity {
             let cam_pos = Vec3::new(0., player.camera.pitch.cos(), -player.camera.pitch.sin())
                 .normalize()
                 * player.camera.distance;
-            if let Ok(mut transform) = camera_query.get_mut::<Transform>(camera_entity) {
-                transform.set_translation(cam_pos);
+            if let Ok(mut transform) = camera_query.get_mut(camera_entity) {
+                transform.translation = cam_pos;
 
                 let look = Mat4::face_toward(cam_pos, Vec3::zero(), Vec3::new(0.0, 1.0, 0.0));
-                transform.set_rotation(look.to_scale_rotation_translation().1);
+                transform.rotation = look.to_scale_rotation_translation().1;
             }
         }
     }
