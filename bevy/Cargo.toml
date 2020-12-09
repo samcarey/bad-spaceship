@@ -8,12 +8,12 @@ edition = "2018"
 
 [dependencies]
 # External
-bevy = "0.2.1"
-serde = { version = "1.0", features = ["derive"] }
-ron = "0.6.1"
-nalgebra = "0.22.0"
-bevy_rapier3d = { version = "0.2.0", features = ["simd-stable", "parallel"] }
-rapier3d = "0.1.4"
+bevy = "0.3.0"
+serde = { version = "1.0.118", features = ["derive"] }
+ron = "0.6.2"
+nalgebra = "0.23.1"
+bevy_rapier3d = { version = "0.6.2", features = ["simd-stable", "parallel"] }
+rapier3d = "0.4.2"
 
 # Internal
 config_from_file_macro = { path = "crates/config_from_file_macro" }
