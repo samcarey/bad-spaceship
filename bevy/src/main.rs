@@ -15,5 +15,6 @@ fn main() {
         .add_plugin(RapierRenderPlugin)
         .add_plugin(plugins::MapPlugin)
         .add_plugin(plugins::PlayerPlugin)
+        .add_plugin(plugins::UiPlugin)
         .run();
 }
