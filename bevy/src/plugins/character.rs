@@ -10,6 +10,8 @@ use rapier3d::math::{Isometry, Translation, Vector};
 use serde::Deserialize;
 
 use crate::plugins::player;
+use crate::plugins::ui;
+
 pub struct CharacterPlugin;
 
 impl Plugin for CharacterPlugin {
@@ -82,12 +84,17 @@ impl TransformExt for Transform {
 
 fn move_character_based_on_keyboard_input(
     mut bodies: ResMut<RigidBodySet>,
+    menu_state: Res<ui::MenuState>,
     keyboard_directional_input: &player::KeyboardDirectionalInput,
     rigid_body: &RigidBodyHandleComponent,
     transform: &Transform,
     move_speed: &MoveSpeed,
     jump_force: &JumpForce,
 ) {
+    if *menu_state == ui::MenuState::Open {
+        return;
+    }
+
     if let Some(rb) = bodies.get_mut(rigid_body.handle()) {
         //
         // Get the current velocity from the physics engine

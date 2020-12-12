@@ -14,7 +14,8 @@ impl Plugin for UiPlugin {
     }
 }
 
-enum MenuState {
+#[derive(PartialEq)]
+pub enum MenuState {
     Open,
     Closed,
 }

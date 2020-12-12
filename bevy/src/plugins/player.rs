@@ -7,6 +7,7 @@ use config_from_file_macro_derive::ConfigFromFileMacro;
 use serde::Deserialize;
 
 use crate::plugins::character;
+use crate::plugins::ui;
 
 use std::f32::consts::PI;
 
@@ -140,10 +141,15 @@ fn setup(
 fn process_mouse_events(
     time: Res<Time>,
     mut state: ResMut<State>,
+    menu_state: Res<ui::MenuState>,
     mouse_motion_events: Res<Events<MouseMotion>>,
     mouse_wheel_events: Res<Events<MouseWheel>>,
     mut query: Query<(&mut Player, &Config)>,
 ) {
+    if *menu_state == ui::MenuState::Open {
+        return;
+    }
+
     let mut look = Vec2::zero();
     for event in state.mouse_motion_event_reader.iter(&mouse_motion_events) {
         look = event.delta;
@@ -169,8 +175,13 @@ fn process_mouse_events(
 
 fn process_keyboard_events(
     keyboard_input: Res<Input<KeyCode>>,
+    menu_state: Res<ui::MenuState>,
     mut keyboard_directional_input: Mut<KeyboardDirectionalInput>,
 ) {
+    if *menu_state == ui::MenuState::Open {
+        return;
+    }
+
     //
     // Note: keyboard_directional_input vector components match Bevy/Rapier vector definitions:
     //  Horizontal = (X,Z)
