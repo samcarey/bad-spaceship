@@ -1,5 +1,5 @@
 (
-    menu_button_height: 65.0,
+    menu_button_height: 60.0,
     menu_button_width: 200.0,
-    menu_button_spacing: 20.0,
+    menu_button_spacing: 10.0,
 )
