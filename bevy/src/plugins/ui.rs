@@ -69,15 +69,12 @@ fn button_system(
         let mut text = text_query.get_mut(children[0]).unwrap();
         match *interaction {
             Interaction::Clicked => {
-                text.value = "Press".to_string();
                 *material = button_materials.pressed.clone();
             }
             Interaction::Hovered => {
-                text.value = "Hover".to_string();
                 *material = button_materials.hovered.clone();
             }
             Interaction::None => {
-                text.value = "Button".to_string();
                 *material = button_materials.normal.clone();
             }
         }
