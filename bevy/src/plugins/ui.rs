@@ -57,16 +57,9 @@ impl FromResources for ButtonMaterials {
 
 fn button_highlight(
     button_materials: Res<ButtonMaterials>,
-    mut interaction_query: Query<(
-        &Button,
-        Mutated<Interaction>,
-        &mut Handle<ColorMaterial>,
-        &Children,
-    )>,
-    mut text_query: Query<&mut Text>,
+    mut interaction_query: Query<(&Button, Mutated<Interaction>, &mut Handle<ColorMaterial>)>,
 ) {
-    for (_button, interaction, mut material, children) in interaction_query.iter_mut() {
-        let mut text = text_query.get_mut(children[0]).unwrap();
+    for (_button, interaction, mut material) in interaction_query.iter_mut() {
         match *interaction {
             Interaction::Clicked => {
                 *material = button_materials.pressed.clone();
