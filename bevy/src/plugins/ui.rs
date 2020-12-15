@@ -22,7 +22,7 @@ impl Plugin for UiPlugin {
             .add_startup_system(setup.system())
             .add_system(toggle_menu_state.system())
             .add_system(hide_cursor.system())
-            .add_system(button_system.system());
+            .add_system(button_highlight.system());
     }
 }
 
@@ -55,7 +55,7 @@ impl FromResources for ButtonMaterials {
     }
 }
 
-fn button_system(
+fn button_highlight(
     button_materials: Res<ButtonMaterials>,
     mut interaction_query: Query<(
         &Button,
