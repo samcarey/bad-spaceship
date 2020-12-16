@@ -19,12 +19,15 @@ impl Plugin for UiPlugin {
     fn build(&self, app: &mut AppBuilder) {
         app.init_resource::<ButtonMaterials>()
             .init_resource::<MenuState>()
-            .add_startup_system(setup.system())
+            .add_startup_system(spawn_camera.system())
             .add_system(toggle_menu_state.system())
+            .add_system(toggle_menu.system())
             .add_system(hide_cursor.system())
             .add_system(button_highlight.system());
     }
 }
+
+struct Menu;
 
 #[derive(PartialEq)]
 pub enum MenuState {
@@ -74,8 +77,12 @@ fn button_highlight(
     }
 }
 
-fn setup(
-    mut commands: Commands,
+fn spawn_camera(mut commands: Commands) {
+    commands.spawn(UiCameraComponents::default());
+}
+
+fn spawn_menu(
+    commands: &mut Commands,
     asset_server: Res<AssetServer>,
     mut materials: ResMut<Assets<ColorMaterial>>,
     button_materials: Res<ButtonMaterials>,
@@ -87,9 +94,7 @@ fn setup(
         + config.menu_button_spacing * (names.len() - 1) as f32;
 
     commands
-        // ui camera
-        .spawn(UiCameraComponents::default())
-        // root node
+        // root menu node
         .spawn(NodeComponents {
             style: Style {
                 size: Size::new(Val::Percent(100.0), Val::Percent(100.0)),
@@ -100,9 +105,10 @@ fn setup(
             material: materials.add(Color::NONE.into()),
             ..Default::default()
         })
+        .with(Menu)
         .with_children(|parent| {
             parent
-                // menu node
+                // button portion of menu
                 .spawn(NodeComponents {
                     style: Style {
                         size: Size::new(
@@ -155,6 +161,26 @@ fn setup(
                     }
                 });
         });
+}
+
+fn toggle_menu(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    materials: ResMut<Assets<ColorMaterial>>,
+    button_materials: Res<ButtonMaterials>,
+    menu_state: ChangedRes<MenuState>,
+    menu_query: Query<(Entity, &Menu)>,
+) {
+    match *menu_state {
+        MenuState::Open => {
+            spawn_menu(&mut commands, asset_server, materials, button_materials);
+        }
+        MenuState::Closed => {
+            for (menu_entity, _menu_component) in menu_query.iter() {
+                commands.despawn_recursive(menu_entity);
+            }
+        }
+    }
 }
 
 fn toggle_menu_state(input: ChangedRes<Input<KeyCode>>, mut menu_state: ResMut<MenuState>) {
