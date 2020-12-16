@@ -77,6 +77,15 @@ fn button_highlight(
     }
 }
 
+#[derive(Copy, Clone)]
+enum Selection {
+    Resume,
+    Options,
+    Multiplayer,
+}
+
+struct MenuSelection(Selection, String);
+
 fn spawn_camera(mut commands: Commands) {
     commands.spawn(UiCameraComponents::default());
 }
@@ -89,6 +98,11 @@ fn spawn_menu(
 ) {
     let config: Config = Config::new(CONFIG_FILE);
     let names = ["Options", "Multiplayer", "Resume"];
+    let menu_options = [
+        MenuSelection(Selection::Multiplayer, "Multiplayer".to_owned()),
+        MenuSelection(Selection::Options, "Options".to_owned()),
+        MenuSelection(Selection::Resume, "Resume".to_owned()),
+    ];
     let offset_increment = config.menu_button_height + config.menu_button_spacing;
     let menu_items_height = config.menu_button_height * names.len() as f32
         + config.menu_button_spacing * (names.len() - 1) as f32;
@@ -122,9 +136,9 @@ fn spawn_menu(
                     material: materials.add(Color::NONE.into()),
                     ..Default::default()
                 })
-                .with_children(|parent| {
+                .with_children(move |parent| {
                     // buttons
-                    for (i, name) in names.iter().enumerate() {
+                    for (i, MenuSelection(selection, label)) in menu_options.iter().enumerate() {
                         parent
                             .spawn(ButtonComponents {
                                 style: Style {
@@ -145,10 +159,11 @@ fn spawn_menu(
                                 material: button_materials.normal.clone(),
                                 ..Default::default()
                             })
+                            .with(selection.clone())
                             .with_children(|parent| {
                                 parent.spawn(TextComponents {
                                     text: Text {
-                                        value: name.to_string(),
+                                        value: label.to_owned(),
                                         font: asset_server.load("fonts/FiraSans-Bold.ttf"),
                                         style: TextStyle {
                                             font_size: 40.0,
