@@ -157,7 +157,7 @@ fn setup(
         });
 }
 
-fn toggle_menu_state(input: Res<Input<KeyCode>>, mut menu_state: ResMut<MenuState>) {
+fn toggle_menu_state(input: ChangedRes<Input<KeyCode>>, mut menu_state: ResMut<MenuState>) {
     if input.just_pressed(KeyCode::Escape) {
         *menu_state = match *menu_state {
             MenuState::Closed => MenuState::Open,
@@ -166,7 +166,7 @@ fn toggle_menu_state(input: Res<Input<KeyCode>>, mut menu_state: ResMut<MenuStat
     }
 }
 
-fn hide_cursor(menu_state: ResMut<MenuState>, mut windows: ResMut<Windows>) {
+fn hide_cursor(menu_state: ChangedRes<MenuState>, mut windows: ResMut<Windows>) {
     let window = windows.get_primary_mut().unwrap();
     match *menu_state {
         MenuState::Closed => {
