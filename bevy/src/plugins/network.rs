@@ -1,4 +1,5 @@
 use bevy::prelude::*;
+use bevy_networking_turbulence;
 use config_from_file_macro::ConfigFromFileMacro;
 use config_from_file_macro_derive::ConfigFromFileMacro;
 use serde::Deserialize;
