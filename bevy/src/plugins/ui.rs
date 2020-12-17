@@ -26,7 +26,9 @@ impl Plugin for UiPlugin {
             .add_system(hide_cursor.system())
             .add_system(button_interaction.system())
             .add_system(selection_event_listener.system())
-            .add_system_to_stage(stage::PRE_EVENT, resume.system());
+            .add_system_to_stage(stage::PRE_EVENT, resume.system())
+            .add_system_to_stage(stage::PRE_EVENT, options.system())
+            .add_system_to_stage(stage::PRE_EVENT, multiplayer.system());
     }
 }
 
@@ -92,6 +94,24 @@ fn resume(
         if *selection == Selection::Resume {
             *menu_state = MenuState::Closed;
         }
+    }
+}
+
+fn options(
+    mut selection_event_reader: Local<EventReader<Selection>>,
+    selection_events: Res<Events<Selection>>,
+) {
+    for selection in selection_event_reader.iter(&selection_events) {
+        if *selection == Selection::Options {}
+    }
+}
+
+fn multiplayer(
+    mut selection_event_reader: Local<EventReader<Selection>>,
+    selection_events: Res<Events<Selection>>,
+) {
+    for selection in selection_event_reader.iter(&selection_events) {
+        if *selection == Selection::Multiplayer {}
     }
 }
 
