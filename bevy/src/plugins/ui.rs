@@ -100,7 +100,7 @@ fn selection_event_listener(
     my_events: Res<Events<Selection>>,
 ) {
     for my_event in my_event_reader.iter(&my_events) {
-        println!("{:?}", my_event);
+        println!("Selected menu option: {:?}", my_event);
     }
 }
 
