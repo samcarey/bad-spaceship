@@ -19,11 +19,14 @@ impl Plugin for UiPlugin {
     fn build(&self, app: &mut AppBuilder) {
         app.init_resource::<ButtonMaterials>()
             .init_resource::<MenuState>()
+            .add_event::<Selection>()
             .add_startup_system(spawn_camera.system())
             .add_system(toggle_menu_state.system())
             .add_system(toggle_menu.system())
             .add_system(hide_cursor.system())
-            .add_system(button_highlight.system());
+            .add_system(button_interaction.system())
+            .add_system(selection_event_listener.system())
+            .add_system(resume.system());
     }
 }
 
@@ -58,15 +61,18 @@ impl FromResources for ButtonMaterials {
     }
 }
 
-fn button_highlight(
+fn button_interaction(
     button_materials: Res<ButtonMaterials>,
+    mut selection_events: ResMut<Events<Selection>>,
     _button: &Button,
+    selection: &Selection,
     interaction: Mutated<Interaction>,
     mut material: Mut<Handle<ColorMaterial>>,
 ) {
     match *interaction {
         Interaction::Clicked => {
             *material = button_materials.pressed.clone();
+            selection_events.send(*selection);
         }
         Interaction::Hovered => {
             *material = button_materials.hovered.clone();
@@ -77,14 +83,33 @@ fn button_highlight(
     }
 }
 
-#[derive(Copy, Clone)]
+fn resume(
+    mut menu_state: ResMut<MenuState>,
+    mut selection_event_reader: Local<EventReader<Selection>>,
+    selection_events: Res<Events<Selection>>,
+) {
+    for selection in selection_event_reader.iter(&selection_events) {
+        if *selection == Selection::Resume {
+            *menu_state = MenuState::Closed;
+        }
+    }
+}
+
+fn selection_event_listener(
+    mut my_event_reader: Local<EventReader<Selection>>,
+    my_events: Res<Events<Selection>>,
+) {
+    for my_event in my_event_reader.iter(&my_events) {
+        println!("{:?}", my_event);
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq)]
 enum Selection {
     Resume,
     Options,
     Multiplayer,
 }
-
-struct MenuSelection(Selection, String);
 
 fn spawn_camera(mut commands: Commands) {
     commands.spawn(UiCameraComponents::default());
@@ -99,9 +124,9 @@ fn spawn_menu(
     let config: Config = Config::new(CONFIG_FILE);
     let names = ["Options", "Multiplayer", "Resume"];
     let menu_options = [
-        MenuSelection(Selection::Multiplayer, "Multiplayer".to_owned()),
-        MenuSelection(Selection::Options, "Options".to_owned()),
-        MenuSelection(Selection::Resume, "Resume".to_owned()),
+        Selection::Multiplayer,
+        Selection::Options,
+        Selection::Resume,
     ];
     let offset_increment = config.menu_button_height + config.menu_button_spacing;
     let menu_items_height = config.menu_button_height * names.len() as f32
@@ -138,7 +163,7 @@ fn spawn_menu(
                 })
                 .with_children(move |parent| {
                     // buttons
-                    for (i, MenuSelection(selection, label)) in menu_options.iter().enumerate() {
+                    for (i, selection) in menu_options.iter().enumerate() {
                         parent
                             .spawn(ButtonComponents {
                                 style: Style {
@@ -163,7 +188,7 @@ fn spawn_menu(
                             .with_children(|parent| {
                                 parent.spawn(TextComponents {
                                     text: Text {
-                                        value: label.to_owned(),
+                                        value: format!("{:?}", selection),
                                         font: asset_server.load("fonts/FiraSans-Bold.ttf"),
                                         style: TextStyle {
                                             font_size: 40.0,
