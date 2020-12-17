@@ -26,7 +26,7 @@ impl Plugin for UiPlugin {
             .add_system(hide_cursor.system())
             .add_system(button_interaction.system())
             .add_system(selection_event_listener.system())
-            .add_system(resume.system());
+            .add_system_to_stage(stage::PRE_EVENT, resume.system());
     }
 }
 
