@@ -12,15 +12,15 @@ impl Plugin for ClientPlugin {
             height: BOARD_HEIGHT,
             ..Default::default()
         })
-        .add_startup_system(client_setup.system())
-        .add_system_to_stage(stage::PRE_UPDATE, handle_messages_client.system())
+        .add_startup_system(setup.system())
+        .add_system_to_stage(stage::PRE_UPDATE, handle_messages.system())
         .add_resource(ServerIds::default())
         .add_system(ball_control_system.system());
         // app.init_resource::<Online>();
     }
 }
 
-pub fn client_setup(mut commands: Commands, mut net: ResMut<NetworkResource>) {
+pub fn setup(mut commands: Commands, mut net: ResMut<NetworkResource>) {
     let mut camera = Camera2dComponents::default();
     camera.orthographic_projection.window_origin = WindowOrigin::BottomLeft;
     commands.spawn(camera);
@@ -32,7 +32,7 @@ pub fn client_setup(mut commands: Commands, mut net: ResMut<NetworkResource>) {
     net.connect(socket_address);
 }
 
-pub fn handle_messages_client(
+pub fn handle_messages(
     mut commands: Commands,
     mut net: ResMut<NetworkResource>,
     mut server_ids: ResMut<ServerIds>,

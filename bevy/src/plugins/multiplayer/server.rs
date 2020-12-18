@@ -11,15 +11,15 @@ impl Plugin for ServerPlugin {
         app.add_resource(ScheduleRunnerSettings::run_loop(Duration::from_secs_f64(
             1.0 / 60.0,
         )))
-        .add_startup_system(server_setup.system())
+        .add_startup_system(setup.system())
         .add_system(ball_movement_system.system())
         .add_resource(NetworkBroadcast { frame: 0 })
-        .add_system_to_stage(stage::PRE_UPDATE, handle_messages_server.system())
+        .add_system_to_stage(stage::PRE_UPDATE, handle_messages.system())
         .add_system_to_stage(stage::POST_UPDATE, network_broadcast_system.system());
     }
 }
 
-pub fn server_setup(mut net: ResMut<NetworkResource>) {
+pub fn setup(mut net: ResMut<NetworkResource>) {
     let ip_address =
         bevy_networking_turbulence::find_my_ip_address().expect("can't find ip address");
     let socket_address = SocketAddr::new(ip_address, SERVER_PORT);
@@ -27,10 +27,7 @@ pub fn server_setup(mut net: ResMut<NetworkResource>) {
     net.listen(socket_address);
 }
 
-pub fn handle_messages_server(
-    mut net: ResMut<NetworkResource>,
-    mut balls: Query<(&mut Ball, &Pawn)>,
-) {
+pub fn handle_messages(mut net: ResMut<NetworkResource>, mut balls: Query<(&mut Ball, &Pawn)>) {
     for (handle, connection) in net.connections.iter_mut() {
         let channels = connection.channels().unwrap();
         while let Some(client_message) = channels.recv::<ClientMessage>() {
