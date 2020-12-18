@@ -1,8 +1,9 @@
-use bevy::prelude::*;
 use bevy::render::pass::ClearColor;
+use bevy::{app::ScheduleRunnerSettings, prelude::*};
 use bevy_rapier3d::{physics::RapierPhysicsPlugin, render::RapierRenderPlugin};
 mod plugins;
 mod utils;
+use std::time::Duration;
 
 fn main() {
     simple_logger::SimpleLogger::from_env()
@@ -13,7 +14,10 @@ fn main() {
     let mut app = App::build();
 
     if args.is_server {
-        app.add_plugins(MinimalPlugins);
+        app.add_resource(ScheduleRunnerSettings::run_loop(Duration::from_secs_f64(
+            1.0 / 60.0,
+        )))
+        .add_plugins(MinimalPlugins);
     } else {
         app.add_plugins(DefaultPlugins)
             .add_plugin(plugins::UiPlugin)
@@ -39,9 +43,3 @@ fn main() {
 
     app.run();
 }
-
-// let args = utils::parse_args();
-
-// let mut app = App::build();
-
-// app.run();
