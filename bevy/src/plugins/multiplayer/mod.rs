@@ -70,8 +70,8 @@ fn handle_packets(
     network_events: Res<Events<NetworkEvent>>,
 ) {
     for event in state.network_events.iter(&network_events) {
-        match event {
-            NetworkEvent::Connected(handle) => match net.connections.get_mut(handle) {
+        if let NetworkEvent::Connected(handle) = event {
+            match net.connections.get_mut(handle) {
                 Some(connection) => {
                     match connection.remote_address() {
                         Some(remote_address) => {
@@ -119,8 +119,7 @@ fn handle_packets(
                     }
                 }
                 None => panic!("Got packet for non-existing connection [{}]", handle),
-            },
-            _ => {}
+            }
         }
     }
 }
