@@ -8,23 +8,7 @@ pub fn parse_args() -> Args {
         if #[cfg(target_arch = "wasm32")] {
             let is_server = false;
         } else {
-            let args: Vec<String> = std::env::args().collect();
-            let is_server = match args.len() {
-                1 => {
-                    false
-                }
-                2 => {
-                    let connection_type = &args[1];
-                    match connection_type.as_str() {
-                        "--server" | "-s" => {true},
-                        "--client" | "-c" => {false},
-                        _ => {
-                            panic!("Need to select to run as either a server (--server) or a client (--client).")
-                        },
-                    }
-                }
-                _ => panic!("Need to select to run as either a server (--server) or a client (--client).")
-            };
+            let is_server = std::env::args().any(|arg| ["--server", "-s"].contains(&&*arg));
         }
     }
 
