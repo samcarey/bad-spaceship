@@ -15,6 +15,10 @@ nalgebra = "0.23.1"
 bevy_rapier3d = { version = "0.6.2", features = ["simd-stable", "parallel"] }
 rapier3d = "0.4.2"
 bevy_networking_turbulence = {git = "https://github.com/smokku/bevy_networking_turbulence", rev="ef0dd468c4cbacd2511f4855c7887391b045b4d2"}
+simple_logger = "1"
+rand = "0.7"
+log = "0.4"
+cfg-if = "1.0.0"
 
 # Internal
 config_from_file_macro = { path = "crates/config_from_file_macro" }
