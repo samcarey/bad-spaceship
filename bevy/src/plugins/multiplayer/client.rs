@@ -3,6 +3,23 @@ use bevy::{prelude::*, render::camera::WindowOrigin};
 use bevy_networking_turbulence::NetworkResource;
 use std::{collections::HashMap, net::SocketAddr};
 
+pub struct ClientPlugin;
+
+impl Plugin for ClientPlugin {
+    fn build(&self, app: &mut AppBuilder) {
+        app.add_resource(WindowDescriptor {
+            width: BOARD_WIDTH,
+            height: BOARD_HEIGHT,
+            ..Default::default()
+        })
+        .add_startup_system(client_setup.system())
+        .add_system_to_stage(stage::PRE_UPDATE, handle_messages_client.system())
+        .add_resource(ServerIds::default())
+        .add_system(ball_control_system.system());
+        // app.init_resource::<Online>();
+    }
+}
+
 pub fn client_setup(mut commands: Commands, mut net: ResMut<NetworkResource>) {
     let mut camera = Camera2dComponents::default();
     camera.orthographic_projection.window_origin = WindowOrigin::BottomLeft;

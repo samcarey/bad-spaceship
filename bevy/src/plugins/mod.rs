@@ -1,6 +1,6 @@
 pub use self::character::CharacterPlugin;
 pub use self::map::MapPlugin;
-pub use self::multiplayer::{ClientPlugin, MultiplayerPlugins, ServerPlugin};
+pub use self::multiplayer::{client::ClientPlugin, server::ServerPlugin, MultiplayerPlugins};
 pub use self::player::PlayerPlugin;
 pub use self::ui::UiPlugin;
 

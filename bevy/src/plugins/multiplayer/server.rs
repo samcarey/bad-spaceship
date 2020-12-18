@@ -1,7 +1,23 @@
 use super::types::{self, *};
-use bevy::prelude::*;
+use bevy::{app::ScheduleRunnerSettings, prelude::*};
 use bevy_networking_turbulence::NetworkResource;
 use std::net::SocketAddr;
+use std::time::Duration;
+
+pub struct ServerPlugin;
+
+impl Plugin for ServerPlugin {
+    fn build(&self, app: &mut AppBuilder) {
+        app.add_resource(ScheduleRunnerSettings::run_loop(Duration::from_secs_f64(
+            1.0 / 60.0,
+        )))
+        .add_startup_system(server_setup.system())
+        .add_system(ball_movement_system.system())
+        .add_resource(NetworkBroadcast { frame: 0 })
+        .add_system_to_stage(stage::PRE_UPDATE, handle_messages_server.system())
+        .add_system_to_stage(stage::POST_UPDATE, network_broadcast_system.system());
+    }
+}
 
 pub fn server_setup(mut net: ResMut<NetworkResource>) {
     let ip_address =

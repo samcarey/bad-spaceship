@@ -1,7 +1,4 @@
-use bevy::{
-    app::{PluginGroupBuilder, ScheduleRunnerSettings},
-    prelude::*,
-};
+use bevy::{app::PluginGroupBuilder, prelude::*};
 use bevy_networking_turbulence::{
     ConnectionChannelsBuilder, MessageChannelMode, MessageChannelSettings, NetworkEvent,
     NetworkResource, NetworkingPlugin, ReliableChannelSettings,
@@ -10,8 +7,8 @@ use rand::Rng;
 // use serde::Deserialize;
 use std::time::Duration;
 
-mod client;
-mod server;
+pub mod client;
+pub mod server;
 mod types;
 use super::super::utils::Args;
 
@@ -31,42 +28,10 @@ pub struct MultiplayerPlugins;
 
 impl PluginGroup for MultiplayerPlugins {
     fn build(&mut self, group: &mut PluginGroupBuilder) {
-        group.add(ServerPlugin).add(ClientPlugin).add(CommonPlugin);
-    }
-}
-
-pub struct ServerPlugin;
-
-impl Plugin for ServerPlugin {
-    fn build(&self, app: &mut AppBuilder) {
-        app.add_resource(ScheduleRunnerSettings::run_loop(Duration::from_secs_f64(
-            1.0 / 60.0,
-        )))
-        .add_startup_system(server::server_setup.system())
-        .add_system(server::ball_movement_system.system())
-        .add_resource(types::NetworkBroadcast { frame: 0 })
-        .add_system_to_stage(stage::PRE_UPDATE, server::handle_messages_server.system())
-        .add_system_to_stage(
-            stage::POST_UPDATE,
-            server::network_broadcast_system.system(),
-        );
-    }
-}
-
-pub struct ClientPlugin;
-
-impl Plugin for ClientPlugin {
-    fn build(&self, app: &mut AppBuilder) {
-        app.add_resource(WindowDescriptor {
-            width: BOARD_WIDTH,
-            height: BOARD_HEIGHT,
-            ..Default::default()
-        })
-        .add_startup_system(client::client_setup.system())
-        .add_system_to_stage(stage::PRE_UPDATE, client::handle_messages_client.system())
-        .add_resource(client::ServerIds::default())
-        .add_system(client::ball_control_system.system());
-        // app.init_resource::<Online>();
+        group
+            .add(server::ServerPlugin)
+            .add(client::ClientPlugin)
+            .add(CommonPlugin);
     }
 }
 
