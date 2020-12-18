@@ -71,54 +71,53 @@ fn handle_packets(
 ) {
     for event in state.network_events.iter(&network_events) {
         if let NetworkEvent::Connected(handle) = event {
-            match net.connections.get_mut(handle) {
-                Some(connection) => {
-                    match connection.remote_address() {
-                        Some(remote_address) => {
-                            log::debug!(
-                                "Incoming connection on [{}] from [{}]",
-                                handle,
-                                remote_address
-                            );
+            let connection = net.connections.get_mut(handle).expect(&format!(
+                "Got packet for non-existing connection [{}]",
+                handle
+            ));
 
-                            // New client connected - spawn a ball
-                            let mut rng = rand::thread_rng();
-                            let vel_x = rng.gen_range(-0.5, 0.5);
-                            let vel_y = rng.gen_range(-0.5, 0.5);
-                            let pos_x = rng.gen_range(0.0, BOARD_WIDTH as f32);
-                            let pos_y = rng.gen_range(0.0, BOARD_HEIGHT as f32);
-                            log::info!("Spawning {}x{} {}/{}", pos_x, pos_y, vel_x, vel_y);
-                            commands.spawn((
-                                Ball {
-                                    velocity: 400.0 * Vec3::new(vel_x, vel_y, 0.0).normalize(),
-                                },
-                                Pawn {
-                                    controller: *handle,
-                                },
-                                Transform::from_translation(Vec3::new(pos_x, pos_y, 1.0)),
-                            ));
-                        }
-                        None => {
-                            log::debug!("Connected on [{}]", handle);
-                        }
-                    }
+            match connection.remote_address() {
+                Some(remote_address) => {
+                    log::debug!(
+                        "Incoming connection on [{}] from [{}]",
+                        handle,
+                        remote_address
+                    );
 
-                    if !args.is_server {
-                        log::debug!("Sending Hello on [{}]", handle);
-                        match net.send_message(*handle, ClientMessage::Hello("test".to_string())) {
-                            Ok(msg) => match msg {
-                                Some(msg) => {
-                                    log::error!("Unable to send Hello: {:?}", msg);
-                                }
-                                None => {}
-                            },
-                            Err(err) => {
-                                log::error!("Unable to send Hello: {:?}", err);
-                            }
-                        };
-                    }
+                    // New client connected - spawn a ball
+                    let mut rng = rand::thread_rng();
+                    let vel_x = rng.gen_range(-0.5, 0.5);
+                    let vel_y = rng.gen_range(-0.5, 0.5);
+                    let pos_x = rng.gen_range(0.0, BOARD_WIDTH as f32);
+                    let pos_y = rng.gen_range(0.0, BOARD_HEIGHT as f32);
+                    log::info!("Spawning {}x{} {}/{}", pos_x, pos_y, vel_x, vel_y);
+                    commands.spawn((
+                        Ball {
+                            velocity: 400.0 * Vec3::new(vel_x, vel_y, 0.0).normalize(),
+                        },
+                        Pawn {
+                            controller: *handle,
+                        },
+                        Transform::from_translation(Vec3::new(pos_x, pos_y, 1.0)),
+                    ));
                 }
-                None => panic!("Got packet for non-existing connection [{}]", handle),
+                None => {
+                    log::debug!("Connected on [{}]", handle);
+                }
+            }
+
+            if !args.is_server {
+                log::debug!("Sending Hello on [{}]", handle);
+                match net.send_message(*handle, ClientMessage::Hello("test".to_string())) {
+                    Ok(msg) => {
+                        if let Some(msg) = msg {
+                            log::error!("Unable to send Hello: {:?}", msg);
+                        }
+                    }
+                    Err(err) => {
+                        log::error!("Unable to send Hello: {:?}", err);
+                    }
+                };
             }
         }
     }
