@@ -17,6 +17,20 @@
       "preLaunchTask": "build (windows)",
     },
     {
+      "name": "debug (windows, server)",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/bevy/target/debug/bad-spaceship-bevy",
+      "args": [
+        "--server"
+      ],
+      "stopAtEntry": false,
+      "cwd": "${workspaceRoot}/bevy",
+      "environment": [],
+      "externalConsole": true,
+      "preLaunchTask": "build (windows)",
+    },
+    {
       "name": "debug (unix)",
       "type": "lldb",
       "request": "launch",
