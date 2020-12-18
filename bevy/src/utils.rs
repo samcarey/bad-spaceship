@@ -9,17 +9,21 @@ pub fn parse_args() -> Args {
             let is_server = false;
         } else {
             let args: Vec<String> = std::env::args().collect();
-
-            if args.len() < 2 {
-                panic!("Need to select to run as either a server (--server) or a client (--client).");
-            }
-
-            let connection_type = &args[1];
-
-            let is_server = match connection_type.as_str() {
-                "--server" | "-s" => true,
-                "--client" | "-c" => false,
-                _ => panic!("Need to select to run as either a server (--server) or a client (--client)."),
+            let is_server = match args.len() {
+                1 => {
+                    false
+                }
+                2 => {
+                    let connection_type = &args[1];
+                    match connection_type.as_str() {
+                        "--server" | "-s" => {true},
+                        "--client" | "-c" => {false},
+                        _ => {
+                            panic!("Need to select to run as either a server (--server) or a client (--client).")
+                        },
+                    }
+                }
+                _ => panic!("Need to select to run as either a server (--server) or a client (--client).")
             };
         }
     }
