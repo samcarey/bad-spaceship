@@ -15,7 +15,7 @@ fn main() {
 
     if args.is_server {
         app.add_resource(ScheduleRunnerSettings::run_loop(Duration::from_secs_f64(
-            1.0,
+            1.0 / 60.,
         )))
         .add_plugins(MinimalPlugins);
     } else {

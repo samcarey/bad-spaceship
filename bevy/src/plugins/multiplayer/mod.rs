@@ -1,28 +1,13 @@
 use bevy::{app::PluginGroupBuilder, prelude::*};
 use bevy_networking_turbulence::{
     ConnectionChannelsBuilder, MessageChannelMode, MessageChannelSettings, NetworkEvent,
-    NetworkResource, NetworkingPlugin, ReliableChannelSettings,
+    NetworkResource, NetworkingPlugin,
 };
-use rand::Rng;
-// use serde::Deserialize;
-use std::time::Duration;
+use types::*;
 
 pub mod client;
 pub mod server;
 mod types;
-use super::super::utils::Args;
-
-// use config_from_file_macro::ConfigFromFileMacro;
-// use config_from_file_macro_derive::ConfigFromFileMacro;
-use types::*;
-
-// const CONFIG_FILE: &str = "assets/config/network.ron";
-
-// #[derive(ConfigFromFileMacro, Deserialize)]
-// struct Config {
-//     server_ip_address: String,
-//     server_port: u16,
-// }
 
 pub struct MultiplayerPlugins;
 
@@ -63,10 +48,8 @@ fn network_setup(mut net: ResMut<NetworkResource>) {
 }
 
 fn handle_packets(
-    mut commands: Commands,
     mut net: ResMut<NetworkResource>,
     mut state: ResMut<NetworkReader>,
-    args: Res<Args>,
     network_events: Res<Events<NetworkEvent>>,
 ) {
     for event in state.network_events.iter(&network_events) {
@@ -83,41 +66,10 @@ fn handle_packets(
                         handle,
                         remote_address
                     );
-
-                    // New client connected - spawn a ball
-                    let mut rng = rand::thread_rng();
-                    let vel_x = rng.gen_range(-0.5, 0.5);
-                    let vel_y = rng.gen_range(-0.5, 0.5);
-                    let pos_x = rng.gen_range(0.0, BOARD_WIDTH as f32);
-                    let pos_y = rng.gen_range(0.0, BOARD_HEIGHT as f32);
-                    log::info!("Spawning {}x{} {}/{}", pos_x, pos_y, vel_x, vel_y);
-                    commands.spawn((
-                        Ball {
-                            velocity: 400.0 * Vec3::new(vel_x, vel_y, 0.0).normalize(),
-                        },
-                        Pawn {
-                            controller: *handle,
-                        },
-                        Transform::from_translation(Vec3::new(pos_x, pos_y, 1.0)),
-                    ));
                 }
                 None => {
                     log::debug!("Connected on [{}]", handle);
                 }
-            }
-
-            if !args.is_server {
-                log::debug!("Sending Hello on [{}]", handle);
-                match net.send_message(*handle, ClientMessage::Hello("test".to_string())) {
-                    Ok(msg) => {
-                        if let Some(msg) = msg {
-                            log::error!("Unable to send Hello: {:?}", msg);
-                        }
-                    }
-                    Err(err) => {
-                        log::error!("Unable to send Hello: {:?}", err);
-                    }
-                };
             }
         }
     }
@@ -125,36 +77,14 @@ fn handle_packets(
 
 const CLIENT_STATE_MESSAGE_SETTINGS: MessageChannelSettings = MessageChannelSettings {
     channel: 0,
-    channel_mode: MessageChannelMode::Reliable {
-        reliability_settings: ReliableChannelSettings {
-            bandwidth: 4096,
-            recv_window_size: 1024,
-            send_window_size: 1024,
-            burst_bandwidth: 1024,
-            init_send: 512,
-            wakeup_time: Duration::from_millis(100),
-            initial_rtt: Duration::from_millis(200),
-            max_rtt: Duration::from_secs(2),
-            rtt_update_factor: 0.1,
-            rtt_resend_factor: 1.5,
-        },
-        max_message_len: 1024,
-    },
-    message_buffer_size: 8,
-    packet_buffer_size: 8,
+    channel_mode: MessageChannelMode::Unreliable,
+    message_buffer_size: 60,
+    packet_buffer_size: 60,
 };
 
 const GAME_STATE_MESSAGE_SETTINGS: MessageChannelSettings = MessageChannelSettings {
     channel: 1,
     channel_mode: MessageChannelMode::Unreliable,
-    message_buffer_size: 8,
-    packet_buffer_size: 8,
+    message_buffer_size: 60,
+    packet_buffer_size: 60,
 };
-
-// #[derive(Default)]
-// struct Online(bool);
-
-// struct GameState {
-//     frame: u32,
-//     player_transforms: Vec<Transform>,
-// }
