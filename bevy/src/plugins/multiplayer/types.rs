@@ -30,6 +30,23 @@ pub struct GameStateMessage {
     pub balls: Vec<(u32, Vec3, Vec3)>,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, Bundle)]
+pub struct Player {
+    id: u32,
+    transform: Mat4,
+}
+
+// #[derive(Serialize, Deserialize, Debug, Clone)]
+// pub struct ClientMessage {
+//     pub player: Player,
+// }
+
+// #[derive(Serialize, Deserialize, Debug, Clone)]
+// pub struct GameStateMessage {
+//     pub frame: u32,
+//     pub players: Vec<Player>,
+// }
+
 #[derive(Default)]
 pub struct NetworkBroadcast {
     pub frame: u32,
