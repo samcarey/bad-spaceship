@@ -33,13 +33,14 @@ fn main() {
     }
 
     app.add_resource(args)
-        .add_plugins_with(plugins::MultiplayerPlugins, |group| {
-            if args.is_server {
-                group.disable::<plugins::ClientPlugin>()
-            } else {
-                group.disable::<plugins::ServerPlugin>()
-            }
-        });
+        // .add_plugins_with(plugins::MultiplayerPlugins, |group| {
+        //     if args.is_server {
+        //         group.disable::<plugins::ClientPlugin>()
+        //     } else {
+        //         group.disable::<plugins::ServerPlugin>()
+        //     }
+        // })
+        ;
 
     app.run();
 }
