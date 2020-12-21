@@ -98,17 +98,15 @@ fn tuple_to_vec3(tuple: (f32, f32, f32)) -> Vec3 {
 }
 
 fn setup(
-    mut commands: Commands,
+    commands: &mut Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     let config = Config::new(CONFIG_FILE);
 
-    let camera_entity = commands
-        .spawn(Camera3dComponents::default())
-        .current_entity();
+    let camera_entity = commands.spawn(Camera3dBundle::default()).current_entity();
 
-    let character_size = character::spawn(&mut commands);
+    let character_size = character::spawn(commands);
 
     let player_entity = commands
         .with(Player::new(camera_entity))
@@ -121,7 +119,7 @@ fn setup(
     // For now we generate this as a PbrComponent, which is overkill for an invisible point,
     // so we'll want to simplify this later to something with only the necessary components.
     let camera_center = commands
-        .spawn(PbrComponents {
+        .spawn(PbrBundle {
             mesh: meshes.add(Mesh::from(shape::Cube { size: 0.0 })),
             material: materials.add(StandardMaterial::default()),
             transform: Transform::from_translation(
@@ -161,13 +159,13 @@ fn process_mouse_events(
     }
 
     for (mut player, config) in query.iter_mut() {
-        player.yaw += look.x() * time.delta_seconds;
+        player.yaw += look.x * time.delta_seconds();
         player.camera.pitch = (player.camera.pitch
-            - look.y() * time.delta_seconds * config.look_sensitivity)
+            - look.y * time.delta_seconds() * config.look_sensitivity)
             .max(MIN_CAMERA_PITCH)
             .min(MAX_CAMERA_PITCH);
         player.camera.distance = (player.camera.distance
-            - zoom_delta * time.delta_seconds * config.zoom_sensitivity)
+            - zoom_delta * time.delta_seconds() * config.zoom_sensitivity)
             .max(config.min_camera_distance)
             .min(config.max_camera_distance);
     }
@@ -176,55 +174,57 @@ fn process_mouse_events(
 fn process_keyboard_events(
     keyboard_input: Res<Input<KeyCode>>,
     menu_state: Res<ui::MenuState>,
-    mut keyboard_directional_input: Mut<KeyboardDirectionalInput>,
+    mut query: Query<Mut<KeyboardDirectionalInput>>,
 ) {
     if *menu_state == ui::MenuState::Open {
         return;
     }
 
-    //
-    // Note: keyboard_directional_input vector components match Bevy/Rapier vector definitions:
-    //  Horizontal = (X,Z)
-    //  Vertical = Y
-    //
+    for mut keyboard_directional_input in query.iter_mut() {
+        //
+        // Note: keyboard_directional_input vector components match Bevy/Rapier vector definitions:
+        //  Horizontal = (X,Z)
+        //  Vertical = Y
+        //
 
-    // Initialize to zero every time - if a key is pressed then it will overwrite in the section below.
-    keyboard_directional_input.0 = Vec3::zero();
+        // Initialize to zero every time - if a key is pressed then it will overwrite in the section below.
+        keyboard_directional_input.0 = Vec3::zero();
 
-    // "W" keypress indicates forward movement
-    if keyboard_input.pressed(KeyCode::W) {
-        *keyboard_directional_input.0.z_mut() += 1.;
-    }
+        // "W" keypress indicates forward movement
+        if keyboard_input.pressed(KeyCode::W) {
+            keyboard_directional_input.0.z += 1.;
+        }
 
-    // "S" keypress indicates forward movement
-    if keyboard_input.pressed(KeyCode::S) {
-        *keyboard_directional_input.0.z_mut() -= 1.;
-    }
+        // "S" keypress indicates forward movement
+        if keyboard_input.pressed(KeyCode::S) {
+            keyboard_directional_input.0.z -= 1.;
+        }
 
-    // "D" keypress indicates forward movement
-    if keyboard_input.pressed(KeyCode::D) {
-        *keyboard_directional_input.0.x_mut() += 1.;
-    }
+        // "D" keypress indicates forward movement
+        if keyboard_input.pressed(KeyCode::D) {
+            keyboard_directional_input.0.x += 1.;
+        }
 
-    // "A" keypress indicates forward movement
-    if keyboard_input.pressed(KeyCode::A) {
-        *keyboard_directional_input.0.x_mut() -= 1.;
-    }
+        // "A" keypress indicates forward movement
+        if keyboard_input.pressed(KeyCode::A) {
+            keyboard_directional_input.0.x -= 1.;
+        }
 
-    //
-    // "Spacebar" keypress indicates vertical jump / thrust.
-    //
-    //  TODO:   We need to control directional input here to isolate jump event vs. continuous
-    //          upward thrust.
-    //
-    if keyboard_input.pressed(KeyCode::Space) {
-        *keyboard_directional_input.0.y_mut() += 1.;
-    }
+        //
+        // "Spacebar" keypress indicates vertical jump / thrust.
+        //
+        //  TODO:   We need to control directional input here to isolate jump event vs. continuous
+        //          upward thrust.
+        //
+        if keyboard_input.pressed(KeyCode::Space) {
+            keyboard_directional_input.0.y += 1.;
+        }
 
-    // Check here to see if any keypresses were registered.
-    // If so, then normalize the vector components.
-    if keyboard_directional_input.0 != Vec3::zero() {
-        keyboard_directional_input.0.normalize();
+        // Check here to see if any keypresses were registered.
+        // If so, then normalize the vector components.
+        if keyboard_directional_input.0 != Vec3::zero() {
+            keyboard_directional_input.0.normalize();
+        }
     }
 }
 

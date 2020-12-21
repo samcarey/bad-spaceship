@@ -24,7 +24,7 @@ pub fn setup(mut net: ResMut<NetworkResource>) {
     net.listen(socket_address);
 }
 
-pub fn spawn(mut commands: Commands) {
+pub fn spawn(commands: &mut Commands) {
     commands.spawn(SerializablePlayer {
         id: 0,
         transform: Transform::default().compute_matrix(),
