@@ -67,16 +67,11 @@ fn button_interaction(
     button_materials: Res<ButtonMaterials>,
     mut selection_events: ResMut<Events<Selection>>,
     mut query: Query<
-        (
-            &Button,
-            &Selection,
-            &Interaction,
-            Mut<Handle<ColorMaterial>>,
-        ),
-        (Mutated<Interaction>,),
+        (&Selection, &Interaction, Mut<Handle<ColorMaterial>>),
+        (With<Button>, Mutated<Interaction>),
     >,
 ) {
-    for (_button, selection, interaction, mut material) in query.iter_mut() {
+    for (selection, interaction, mut material) in query.iter_mut() {
         match *interaction {
             Interaction::Clicked => {
                 *material = button_materials.pressed.clone();
@@ -237,14 +232,14 @@ fn toggle_menu(
     materials: ResMut<Assets<ColorMaterial>>,
     button_materials: Res<ButtonMaterials>,
     menu_state: ChangedRes<MenuState>,
-    menu_query: Query<(Entity, &Menu)>,
+    menu_query: Query<Entity, With<Menu>>,
 ) {
     match *menu_state {
         MenuState::Open => {
             spawn_menu(commands, asset_server, materials, button_materials);
         }
         MenuState::Closed => {
-            for (menu_entity, _menu_component) in menu_query.iter() {
+            for menu_entity in menu_query.iter() {
                 commands.despawn_recursive(menu_entity);
             }
         }

@@ -35,8 +35,11 @@ pub fn handle_messages(mut net: ResMut<NetworkResource>) {
     }
 }
 
-pub fn ball_control_system(mut net: ResMut<NetworkResource>, query: Query<(&Player, &Transform)>) {
-    for (_player, transform) in query.iter() {
+pub fn ball_control_system(
+    mut net: ResMut<NetworkResource>,
+    query: Query<&Transform, With<Player>>,
+) {
+    for transform in query.iter() {
         net.broadcast_message(ClientMessage {
             player: SerializablePlayer {
                 id: 0,
