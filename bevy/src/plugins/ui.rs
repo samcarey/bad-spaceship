@@ -132,6 +132,11 @@ enum Selection {
     Options,
     Multiplayer,
 }
+const MENU_OPTIONS: [Selection; 3] = [
+    Selection::Multiplayer,
+    Selection::Options,
+    Selection::Resume,
+];
 
 fn spawn_camera(commands: &mut Commands) {
     commands.spawn(CameraUiBundle::default());
@@ -144,15 +149,9 @@ fn spawn_menu(
     button_materials: Res<ButtonMaterials>,
 ) {
     let config: Config = Config::new(CONFIG_FILE);
-    let names = ["Options", "Multiplayer", "Resume"];
-    let menu_options = [
-        Selection::Multiplayer,
-        Selection::Options,
-        Selection::Resume,
-    ];
     let offset_increment = config.menu_button_height + config.menu_button_spacing;
-    let menu_items_height = config.menu_button_height * names.len() as f32
-        + config.menu_button_spacing * (names.len() - 1) as f32;
+    let menu_items_height = config.menu_button_height * MENU_OPTIONS.len() as f32
+        + config.menu_button_spacing * (MENU_OPTIONS.len() - 1) as f32;
 
     commands
         // root menu node
@@ -185,7 +184,7 @@ fn spawn_menu(
                 })
                 .with_children(move |parent| {
                     // buttons
-                    for (i, selection) in menu_options.iter().enumerate() {
+                    for (i, selection) in MENU_OPTIONS.iter().enumerate() {
                         parent
                             .spawn(ButtonBundle {
                                 style: Style {
