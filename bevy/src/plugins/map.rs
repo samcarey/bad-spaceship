@@ -13,14 +13,14 @@ impl Plugin for MapPlugin {
 const PLATFORM_WIDTH_M: f32 = 50.0; // meters
 const PLATFORM_THICKNESS_M: f32 = 0.1; // meters
 
-fn add_lighting(mut commands: Commands) {
-    commands.spawn(LightComponents {
+fn add_lighting(commands: &mut Commands) {
+    commands.spawn(LightBundle {
         transform: Transform::from_translation(Vec3::new(0.0, 8.0, 0.0)), // meters
         ..Default::default()
     });
 }
 
-fn add_platform(mut commands: Commands) {
+fn add_platform(commands: &mut Commands) {
     let platform_rigid_body = RigidBodyBuilder::new_static().translation(0.0, 0.0, 0.0);
     let platform_collider = ColliderBuilder::cuboid(
         PLATFORM_WIDTH_M / 2.0,

@@ -1,5 +1,5 @@
 use bevy::prelude::*;
-use bevy::ui::prelude::ButtonComponents;
+use bevy::ui::prelude::ButtonBundle;
 use config_from_file_macro::ConfigFromFileMacro;
 use config_from_file_macro_derive::ConfigFromFileMacro;
 use serde::Deserialize;
@@ -66,21 +66,28 @@ impl FromResources for ButtonMaterials {
 fn button_interaction(
     button_materials: Res<ButtonMaterials>,
     mut selection_events: ResMut<Events<Selection>>,
-    _button: &Button,
-    selection: &Selection,
-    interaction: Mutated<Interaction>,
-    mut material: Mut<Handle<ColorMaterial>>,
+    mut query: Query<
+        (
+            &Button,
+            &Selection,
+            &Interaction,
+            Mut<Handle<ColorMaterial>>,
+        ),
+        (Mutated<Interaction>,),
+    >,
 ) {
-    match *interaction {
-        Interaction::Clicked => {
-            *material = button_materials.pressed.clone();
-            selection_events.send(*selection);
-        }
-        Interaction::Hovered => {
-            *material = button_materials.hovered.clone();
-        }
-        Interaction::None => {
-            *material = button_materials.normal.clone();
+    for (_button, selection, interaction, mut material) in query.iter_mut() {
+        match *interaction {
+            Interaction::Clicked => {
+                *material = button_materials.pressed.clone();
+                selection_events.send(*selection);
+            }
+            Interaction::Hovered => {
+                *material = button_materials.hovered.clone();
+            }
+            Interaction::None => {
+                *material = button_materials.normal.clone();
+            }
         }
     }
 }
@@ -131,8 +138,8 @@ enum Selection {
     Multiplayer,
 }
 
-fn spawn_camera(mut commands: Commands) {
-    commands.spawn(UiCameraComponents::default());
+fn spawn_camera(commands: &mut Commands) {
+    commands.spawn(CameraUiBundle::default());
 }
 
 fn spawn_menu(
@@ -154,7 +161,7 @@ fn spawn_menu(
 
     commands
         // root menu node
-        .spawn(NodeComponents {
+        .spawn(NodeBundle {
             style: Style {
                 size: Size::new(Val::Percent(100.0), Val::Percent(100.0)),
                 justify_content: JustifyContent::Center,
@@ -168,7 +175,7 @@ fn spawn_menu(
         .with_children(|parent| {
             parent
                 // button portion of menu
-                .spawn(NodeComponents {
+                .spawn(NodeBundle {
                     style: Style {
                         size: Size::new(
                             Val::Px(config.menu_button_width),
@@ -185,7 +192,7 @@ fn spawn_menu(
                     // buttons
                     for (i, selection) in menu_options.iter().enumerate() {
                         parent
-                            .spawn(ButtonComponents {
+                            .spawn(ButtonBundle {
                                 style: Style {
                                     size: Size::new(Val::Percent(100.0), Val::Px(65.0)),
                                     // center button
@@ -206,13 +213,14 @@ fn spawn_menu(
                             })
                             .with(selection.clone())
                             .with_children(|parent| {
-                                parent.spawn(TextComponents {
+                                parent.spawn(TextBundle {
                                     text: Text {
                                         value: format!("{:?}", selection),
                                         font: asset_server.load("fonts/FiraSans-Bold.ttf"),
                                         style: TextStyle {
                                             font_size: 40.0,
                                             color: Color::rgb(0.9, 0.9, 0.9),
+                                            alignment: TextAlignment::default(),
                                         },
                                     },
                                     ..Default::default()
@@ -224,7 +232,7 @@ fn spawn_menu(
 }
 
 fn toggle_menu(
-    mut commands: Commands,
+    commands: &mut Commands,
     asset_server: Res<AssetServer>,
     materials: ResMut<Assets<ColorMaterial>>,
     button_materials: Res<ButtonMaterials>,
@@ -233,7 +241,7 @@ fn toggle_menu(
 ) {
     match *menu_state {
         MenuState::Open => {
-            spawn_menu(&mut commands, asset_server, materials, button_materials);
+            spawn_menu(commands, asset_server, materials, button_materials);
         }
         MenuState::Closed => {
             for (menu_entity, _menu_component) in menu_query.iter() {
