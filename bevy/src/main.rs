@@ -5,6 +5,7 @@ mod plugins;
 mod utils;
 use std::time::Duration;
 
+#[bevy_main]
 fn main() {
     simple_logger::SimpleLogger::from_env()
         .init()
