@@ -246,12 +246,12 @@ impl QuatExt for Quat {
 
 fn rotate_character_based_on_mouse_input(
     mut bodies: ResMut<RigidBodySet>,
-    query: Query<(&player::Player, &RigidBodyHandleComponent, &Transform)>,
+    query: Query<(&RigidBodyHandleComponent, &Transform, &player::Yaw), With<player::Player>>,
 ) {
-    for (player, rigid_body, transform) in query.iter() {
+    for (rigid_body, transform, yaw) in query.iter() {
         if let Some(rb) = bodies.get_mut(rigid_body.handle()) {
             let rotation =
-                UnitQuaternion::from_quaternion(Quat::from_rotation_y(-player.yaw).to_quaternion());
+                UnitQuaternion::from_quaternion(Quat::from_rotation_y(-yaw.0).to_quaternion());
             let position = Isometry::from_parts(transform.translation.to_translation3(), rotation);
             rb.set_position(position, true);
         }

@@ -77,9 +77,10 @@ impl Camera {
 
 #[derive(Default, Bundle)]
 pub struct Player {
-    pub yaw: f32,
     camera: Camera,
 }
+
+pub struct Yaw(pub f32);
 
 impl Player {
     fn new(camera_entity: Option<Entity>) -> Self {
@@ -114,6 +115,7 @@ fn setup(
 
     let player_entity = commands
         .with(Player::new(camera_entity))
+        .with(Yaw(0.))
         .with(config)
         .with(KeyboardDirectionalInput::default())
         .current_entity();
@@ -145,7 +147,7 @@ fn process_mouse_events(
     mut state: ResMut<State>,
     mouse_motion_events: Res<Events<MouseMotion>>,
     mouse_wheel_events: Res<Events<MouseWheel>>,
-    mut query: Query<(&mut Player, &Config)>,
+    mut query: Query<(&mut Player, &Config, &mut Yaw)>,
 ) {
     let mut look = Vec2::zero();
     for event in state.mouse_motion_event_reader.iter(&mouse_motion_events) {
@@ -157,8 +159,8 @@ fn process_mouse_events(
         zoom_delta = event.y;
     }
 
-    for (mut player, config) in query.iter_mut() {
-        player.yaw += look.x * time.delta_seconds();
+    for (mut player, config, mut yaw) in query.iter_mut() {
+        yaw.0 += look.x * time.delta_seconds();
         player.camera.pitch = (player.camera.pitch
             - look.y * time.delta_seconds() * config.look_sensitivity)
             .max(MIN_CAMERA_PITCH)
