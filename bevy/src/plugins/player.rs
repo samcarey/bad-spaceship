@@ -86,7 +86,6 @@ impl Player {
     fn new(camera_entity: Option<Entity>) -> Self {
         Player {
             camera: Camera::new(camera_entity),
-            ..Default::default()
         }
     }
 }
