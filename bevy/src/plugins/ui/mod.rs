@@ -1,13 +1,9 @@
 use super::super::{AppState, APP_STATE};
 use bevy::prelude::*;
 use bevy::ui::prelude::ButtonBundle;
-use config_from_file_macro::ConfigFromFileMacro;
-use config_from_file_macro_derive::ConfigFromFileMacro;
 use serde::Deserialize;
 
-const CONFIG_FILE: &str = "assets/config/ui.ron";
-
-#[derive(ConfigFromFileMacro, Deserialize)]
+#[derive(Deserialize)]
 struct Config {
     menu_button_height: f32,
     menu_button_width: f32,
@@ -139,7 +135,7 @@ fn spawn_menu(
     mut materials: ResMut<Assets<ColorMaterial>>,
     button_materials: Res<ButtonMaterials>,
 ) {
-    let config: Config = Config::new(CONFIG_FILE);
+    let config: Config = config_from_file!("ui.ron");
     let offset_increment = config.menu_button_height + config.menu_button_spacing;
     let menu_items_height = config.menu_button_height * MENU_OPTIONS.len() as f32
         + config.menu_button_spacing * (MENU_OPTIONS.len() - 1) as f32;

@@ -3,15 +3,11 @@ use bevy::{
     input::mouse::{MouseMotion, MouseWheel},
     prelude::*,
 };
-use config_from_file_macro::ConfigFromFileMacro;
-use config_from_file_macro_derive::ConfigFromFileMacro;
 use serde::Deserialize;
 
 use crate::plugins::character;
 
 use std::f32::consts::PI;
-
-const CONFIG_FILE: &str = "assets/config/player.ron";
 
 const DEG_TO_RADIANS: f32 = PI / 180.;
 const MIN_CAMERA_PITCH_DEGREES: f32 = 1.;
@@ -37,7 +33,7 @@ impl Plugin for PlayerPlugin {
     }
 }
 
-#[derive(ConfigFromFileMacro, Deserialize, Copy, Clone)]
+#[derive(Deserialize, Copy, Clone)]
 struct Config {
     zoom_sensitivity: f32,
     look_sensitivity: f32,
@@ -106,7 +102,7 @@ fn setup(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    let config = Config::new(CONFIG_FILE);
+    let config: Config = config_from_file!("player.ron");
 
     let camera_entity = commands.spawn(Camera3dBundle::default()).current_entity();
 

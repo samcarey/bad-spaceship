@@ -3,8 +3,6 @@ use bevy::prelude::*;
 use bevy_rapier3d::physics::RigidBodyHandleComponent;
 use bevy_rapier3d::rapier::dynamics::RigidBodyBuilder;
 use bevy_rapier3d::rapier::geometry::ColliderBuilder;
-use config_from_file_macro::ConfigFromFileMacro;
-use config_from_file_macro_derive::ConfigFromFileMacro;
 use nalgebra::{Quaternion, UnitQuaternion};
 use rapier3d::dynamics::RigidBodySet;
 use rapier3d::math::{Isometry, Translation, Vector};
@@ -28,13 +26,11 @@ impl Plugin for CharacterPlugin {
     }
 }
 
-const CONFIG_FILE: &str = "assets/config/character.ron";
-
 struct Name(String);
 struct MoveSpeed(f32);
 struct JumpForce(f32);
 
-#[derive(ConfigFromFileMacro, Deserialize)]
+#[derive(Deserialize)]
 struct Config {
     size: f32,
     name: String,
@@ -43,7 +39,7 @@ struct Config {
 }
 
 pub fn spawn(commands: &mut Commands) -> f32 {
-    let config = Config::new(CONFIG_FILE);
+    let config: Config = config_from_file!("character.ron");
     let rigid_body = RigidBodyBuilder::new_dynamic().translation(0.0, 10.0, 0.0);
     let collider = ColliderBuilder::cuboid(config.size / 2.0, config.size / 2.0, config.size / 2.0);
 
