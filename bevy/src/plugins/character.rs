@@ -1,3 +1,4 @@
+use super::super::{AppState, APP_STATE};
 use bevy::prelude::*;
 use bevy_rapier3d::physics::RigidBodyHandleComponent;
 use bevy_rapier3d::rapier::dynamics::RigidBodyBuilder;
@@ -10,17 +11,20 @@ use rapier3d::math::{Isometry, Translation, Vector};
 use serde::Deserialize;
 
 use crate::plugins::player;
-use crate::plugins::ui;
 
 pub struct CharacterPlugin;
 
 impl Plugin for CharacterPlugin {
     fn build(&self, app: &mut AppBuilder) {
-        app.add_system(move_character_based_on_keyboard_input.system())
-            .add_system_to_stage(
-                stage::POST_UPDATE,
-                rotate_character_based_on_mouse_input.system(),
-            );
+        app.on_state_update(
+            APP_STATE,
+            AppState::InGame,
+            move_character_based_on_keyboard_input.system(),
+        )
+        .add_system_to_stage(
+            stage::POST_UPDATE,
+            rotate_character_based_on_mouse_input.system(),
+        );
     }
 }
 
@@ -84,7 +88,6 @@ impl TransformExt for Transform {
 
 fn move_character_based_on_keyboard_input(
     mut bodies: ResMut<RigidBodySet>,
-    menu_state: Res<ui::MenuState>,
     query: Query<(
         &player::KeyboardDirectionalInput,
         &RigidBodyHandleComponent,
@@ -93,9 +96,6 @@ fn move_character_based_on_keyboard_input(
         &JumpForce,
     )>,
 ) {
-    if *menu_state == ui::MenuState::Open {
-        return;
-    }
     for (keyboard_directional_input, rigid_body, transform, move_speed, jump_force) in query.iter()
     {
         if let Some(rb) = bodies.get_mut(rigid_body.handle()) {

@@ -1,3 +1,4 @@
+use super::super::{AppState, APP_STATE};
 use bevy::prelude::*;
 use bevy::ui::prelude::ButtonBundle;
 use config_from_file_macro::ConfigFromFileMacro;
@@ -18,33 +19,23 @@ pub struct UiPlugin;
 impl Plugin for UiPlugin {
     fn build(&self, app: &mut AppBuilder) {
         app.init_resource::<ButtonMaterials>()
-            .init_resource::<MenuState>()
             .add_event::<Selection>()
             .add_startup_system(spawn_camera.system())
-            .add_system(toggle_menu_state.system())
-            .add_system(toggle_menu.system())
-            .add_system(hide_cursor.system())
-            .add_system(button_interaction.system())
-            .add_system(selection_event_listener.system())
-            .add_system_to_stage(stage::PRE_EVENT, resume.system())
-            .add_system_to_stage(stage::PRE_EVENT, options.system())
-            .add_system_to_stage(stage::PRE_EVENT, multiplayer.system());
+            .on_state_enter(APP_STATE, AppState::InGameMenu, show_cursor.system())
+            .on_state_enter(APP_STATE, AppState::InGameMenu, spawn_menu.system())
+            .on_state_update(APP_STATE, AppState::InGameMenu, close_menu_on_key.system())
+            .on_state_exit(APP_STATE, AppState::InGameMenu, despawn_menu.system())
+            .on_state_exit(APP_STATE, AppState::InGameMenu, hide_cursor.system())
+            .on_state_update(APP_STATE, AppState::InGameMenu, button_interaction.system())
+            .on_state_update(APP_STATE, AppState::InGameMenu, selection_listener.system())
+            .on_state_update(APP_STATE, AppState::InGameMenu, resume.system())
+            .on_state_update(APP_STATE, AppState::InGameMenu, options.system())
+            .on_state_update(APP_STATE, AppState::InGameMenu, multiplayer.system())
+            .on_state_update(APP_STATE, AppState::InGame, open_menu_on_key.system());
     }
 }
 
 struct Menu;
-
-#[derive(PartialEq)]
-pub enum MenuState {
-    Open,
-    Closed,
-}
-
-impl Default for MenuState {
-    fn default() -> Self {
-        MenuState::Closed
-    }
-}
 
 struct ButtonMaterials {
     normal: Handle<ColorMaterial>,
@@ -88,13 +79,13 @@ fn button_interaction(
 }
 
 fn resume(
-    mut menu_state: ResMut<MenuState>,
+    mut state: ResMut<State<AppState>>,
     mut selection_event_reader: Local<EventReader<Selection>>,
     selection_events: Res<Events<Selection>>,
 ) {
     for selection in selection_event_reader.iter(&selection_events) {
         if *selection == Selection::Resume {
-            *menu_state = MenuState::Closed;
+            state.set_next(AppState::InGame).unwrap();
         }
     }
 }
@@ -117,7 +108,7 @@ fn multiplayer(
     }
 }
 
-fn selection_event_listener(
+fn selection_listener(
     mut my_event_reader: Local<EventReader<Selection>>,
     my_events: Res<Events<Selection>>,
 ) {
@@ -225,45 +216,32 @@ fn spawn_menu(
         });
 }
 
-fn toggle_menu(
-    commands: &mut Commands,
-    asset_server: Res<AssetServer>,
-    materials: ResMut<Assets<ColorMaterial>>,
-    button_materials: Res<ButtonMaterials>,
-    menu_state: ChangedRes<MenuState>,
-    menu_query: Query<Entity, With<Menu>>,
-) {
-    match *menu_state {
-        MenuState::Open => {
-            spawn_menu(commands, asset_server, materials, button_materials);
-        }
-        MenuState::Closed => {
-            for menu_entity in menu_query.iter() {
-                commands.despawn_recursive(menu_entity);
-            }
-        }
+fn despawn_menu(commands: &mut Commands, menu_query: Query<Entity, With<Menu>>) {
+    for menu_entity in menu_query.iter() {
+        commands.despawn_recursive(menu_entity);
     }
 }
 
-fn toggle_menu_state(input: ChangedRes<Input<KeyCode>>, mut menu_state: ResMut<MenuState>) {
+fn close_menu_on_key(input: ChangedRes<Input<KeyCode>>, mut state: ResMut<State<AppState>>) {
     if input.just_pressed(KeyCode::Escape) {
-        *menu_state = match *menu_state {
-            MenuState::Closed => MenuState::Open,
-            MenuState::Open => MenuState::Closed,
-        }
+        state.set_next(AppState::InGame).unwrap();
     }
 }
 
-fn hide_cursor(menu_state: ChangedRes<MenuState>, mut windows: ResMut<Windows>) {
-    let window = windows.get_primary_mut().unwrap();
-    match *menu_state {
-        MenuState::Closed => {
-            window.set_cursor_lock_mode(true);
-            window.set_cursor_visibility(false);
-        }
-        MenuState::Open => {
-            window.set_cursor_lock_mode(false);
-            window.set_cursor_visibility(true);
-        }
+fn open_menu_on_key(input: ChangedRes<Input<KeyCode>>, mut state: ResMut<State<AppState>>) {
+    if input.just_pressed(KeyCode::Escape) {
+        state.set_next(AppState::InGameMenu).unwrap();
     }
+}
+
+fn show_cursor(mut windows: ResMut<Windows>) {
+    let window = windows.get_primary_mut().unwrap();
+    window.set_cursor_lock_mode(false);
+    window.set_cursor_visibility(true);
+}
+
+fn hide_cursor(mut windows: ResMut<Windows>) {
+    let window = windows.get_primary_mut().unwrap();
+    window.set_cursor_lock_mode(true);
+    window.set_cursor_visibility(false);
 }

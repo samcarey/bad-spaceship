@@ -21,6 +21,8 @@ fn main() {
         .add_plugins(MinimalPlugins);
     } else {
         app.add_plugins(DefaultPlugins)
+            .add_resource(State::new(AppState::InGame))
+            .add_stage_after(stage::UPDATE, APP_STATE, StateStage::<AppState>::default())
             .add_plugin(plugins::UiPlugin)
             .add_plugin(RapierRenderPlugin)
             .add_resource(ClearColor(Color::rgb(
@@ -45,3 +47,11 @@ fn main() {
 
     app.run();
 }
+
+#[derive(Clone)]
+pub enum AppState {
+    InGame,
+    InGameMenu,
+}
+
+pub const APP_STATE: &str = "app_state";

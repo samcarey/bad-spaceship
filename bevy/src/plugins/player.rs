@@ -1,3 +1,4 @@
+use super::super::{AppState, APP_STATE};
 use bevy::{
     input::mouse::{MouseMotion, MouseWheel},
     prelude::*,
@@ -7,7 +8,6 @@ use config_from_file_macro_derive::ConfigFromFileMacro;
 use serde::Deserialize;
 
 use crate::plugins::character;
-use crate::plugins::ui;
 
 use std::f32::consts::PI;
 
@@ -26,8 +26,12 @@ impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut AppBuilder) {
         app.init_resource::<State>()
             .add_startup_system(setup.system())
-            .add_system(process_mouse_events.system())
-            .add_system(process_keyboard_events.system())
+            .on_state_update(APP_STATE, AppState::InGame, process_mouse_events.system())
+            .on_state_update(
+                APP_STATE,
+                AppState::InGame,
+                process_keyboard_events.system(),
+            )
             .add_system(update_camera.system())
             .add_plugin(CharacterPlugin);
     }
@@ -139,15 +143,10 @@ fn setup(
 fn process_mouse_events(
     time: Res<Time>,
     mut state: ResMut<State>,
-    menu_state: Res<ui::MenuState>,
     mouse_motion_events: Res<Events<MouseMotion>>,
     mouse_wheel_events: Res<Events<MouseWheel>>,
     mut query: Query<(&mut Player, &Config)>,
 ) {
-    if *menu_state == ui::MenuState::Open {
-        return;
-    }
-
     let mut look = Vec2::zero();
     for event in state.mouse_motion_event_reader.iter(&mouse_motion_events) {
         look = event.delta;
@@ -173,13 +172,8 @@ fn process_mouse_events(
 
 fn process_keyboard_events(
     keyboard_input: Res<Input<KeyCode>>,
-    menu_state: Res<ui::MenuState>,
     mut query: Query<Mut<KeyboardDirectionalInput>>,
 ) {
-    if *menu_state == ui::MenuState::Open {
-        return;
-    }
-
     for mut keyboard_directional_input in query.iter_mut() {
         //
         // Note: keyboard_directional_input vector components match Bevy/Rapier vector definitions:
