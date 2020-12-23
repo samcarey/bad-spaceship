@@ -22,19 +22,23 @@ fn main() {
         )))
         .add_plugins(MinimalPlugins);
     } else {
-        app.add_plugins(DefaultPlugins);
-        #[cfg(target_arch = "wasm32")]
-        app.add_plugin(bevy_webgl2::WebGL2Plugin);
+        cfg_if::cfg_if! {
+            if #[cfg(target_arch = "wasm32")] {
+                app.add_plugins(bevy_webgl2::DefaultPlugins);
+            } else {
+                app.add_plugins(DefaultPlugins);
+            }
+        }
         app.add_resource(State::new(AppState::InGame))
             .add_stage_after(stage::UPDATE, APP_STATE, StateStage::<AppState>::default())
             .add_plugin(plugins::UiPlugin)
+            .add_plugin(RapierPhysicsPlugin)
             .add_plugin(RapierRenderPlugin)
             .add_resource(ClearColor(Color::rgb(
                 0xF9 as f32 / 255.0,
                 0xF9 as f32 / 255.0,
                 0xFF as f32 / 255.0,
             )))
-            .add_plugin(RapierPhysicsPlugin)
             .add_plugin(plugins::MapPlugin)
             .add_plugin(plugins::PlayerPlugin);
     }

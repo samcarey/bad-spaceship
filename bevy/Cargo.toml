@@ -8,11 +8,11 @@ edition = "2018"
 
 [dependencies]
 # External
-# bevy = "0.4.0"
 serde = { version = "1.0.118", features = ["derive"] }
 ron = "0.6.2"
 nalgebra = "0.23.1"
-bevy_rapier3d = { version = "0.7.0", features = ["simd-stable", "parallel"] }
+bevy_rapier3d = { version = "0.7.0", features = ["simd-stable", "wasm-bindgen"] }
+# bevy_rapier3d = { version = "0.7.0", features = ["simd-stable", "wasm-bindgen", "parallel"] } # TODO: Figure out how to enable "parallel" feature when not for WASM
 rapier3d = "0.4.2"
 bevy_networking_turbulence = {git = "https://github.com/smokku/bevy_networking_turbulence", rev="1bfe6f44397e510009a8a80abad1e105d875bf94"}
 simple_logger = "1"
