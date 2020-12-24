@@ -155,7 +155,7 @@ fn process_mouse_events(
     }
 
     for (mut player, config, mut yaw) in query.iter_mut() {
-        yaw.0 += look.x * time.delta_seconds();
+        yaw.0 = (yaw.0 + look.x * time.delta_seconds() * config.look_sensitivity) % TWO_PI;
         player.camera.pitch = (player.camera.pitch
             - look.y * time.delta_seconds() * config.look_sensitivity)
             .max(MIN_CAMERA_PITCH)
