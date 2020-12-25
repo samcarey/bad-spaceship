@@ -1,8 +1,19 @@
+cfg_if::cfg_if! {
+    if #[cfg(target_arch = "wasm32")] {
+        use bevy_webgl2::renderer::JsCast;
+        use gloo::events::EventListener;
+        use web_sys::MouseEvent;
+        use std::sync::{
+            atomic::{AtomicI32, Ordering::SeqCst},
+            Arc,
+        };
+    } else {
+        use bevy::input::mouse::MouseMotion;
+    }
+}
+
 use super::super::{AppState, APP_STATE};
-use bevy::{
-    input::mouse::{MouseMotion, MouseWheel},
-    prelude::*,
-};
+use bevy::{input::mouse::MouseWheel, prelude::*};
 use serde::Deserialize;
 
 use crate::plugins::character;
@@ -14,14 +25,17 @@ const MIN_CAMERA_PITCH_DEGREES: f32 = 1.;
 const MAX_CAMERA_PITCH_DEGREES: f32 = 179.;
 const MIN_CAMERA_PITCH: f32 = MIN_CAMERA_PITCH_DEGREES * DEG_TO_RADIANS;
 const MAX_CAMERA_PITCH: f32 = MAX_CAMERA_PITCH_DEGREES * DEG_TO_RADIANS;
+const TWO_PI: f32 = std::f32::consts::PI * 2.0;
 
 pub struct PlayerPlugin;
 use character::CharacterPlugin;
 
 impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut AppBuilder) {
-        app.init_resource::<State>()
-            .add_startup_system(setup.system())
+        app.init_resource::<State>();
+        #[cfg(target_arch = "wasm32")]
+        app.add_resource(WasmMouseTracker::new());
+        app.add_startup_system(setup.system())
             .on_state_update(APP_STATE, AppState::InGame, process_mouse_events.system())
             .on_state_update(
                 APP_STATE,
@@ -88,6 +102,7 @@ impl Player {
 
 #[derive(Default)]
 struct State {
+    #[cfg(not(target_arch = "wasm32"))]
     mouse_motion_event_reader: EventReader<MouseMotion>,
     mouse_wheel_event_reader: EventReader<MouseWheel>,
 }
@@ -95,6 +110,48 @@ struct State {
 fn tuple_to_vec3(tuple: (f32, f32, f32)) -> Vec3 {
     let (x, y, z) = tuple;
     Vec3::new(x, y, z)
+}
+
+cfg_if::cfg_if! {
+    if #[cfg(target_arch = "wasm32")] {
+        struct WasmMouseTracker {
+            delta_x: Arc<AtomicI32>,
+            delta_y: Arc<AtomicI32>,
+        }
+
+        impl WasmMouseTracker {
+            pub fn new() -> Self {
+                let window = web_sys::window().expect("global window does not exists");
+                let document = window.document().expect("expecting a document on window");
+                let body = document
+                    .body()
+                    .expect("document expect to have have a body");
+
+                let delta_x = Arc::new(AtomicI32::new(0));
+                let delta_y = Arc::new(AtomicI32::new(0));
+
+                let dx = Arc::clone(&delta_x);
+                let dy = Arc::clone(&delta_y);
+                let on_move = EventListener::new(&body, "mousemove", move |_event| {
+                    let me = _event.clone().dyn_into::<MouseEvent>().unwrap();
+                    dx.fetch_add(me.movement_x(), SeqCst);
+                    dy.fetch_add(me.movement_y(), SeqCst);
+                });
+                on_move.forget();
+                Self { delta_x, delta_y }
+            }
+
+            pub fn get_delta_and_reset(&self) -> Vec2 {
+                let delta = Vec2::new(
+                    self.delta_x.load(SeqCst) as f32,
+                    self.delta_y.load(SeqCst) as f32,
+                );
+                self.delta_x.store(0, SeqCst);
+                self.delta_y.store(0, SeqCst);
+                delta
+            }
+        }
+    }
 }
 
 fn setup(
@@ -140,13 +197,20 @@ fn setup(
 fn process_mouse_events(
     time: Res<Time>,
     mut state: ResMut<State>,
-    mouse_motion_events: Res<Events<MouseMotion>>,
+    #[cfg(not(target_arch = "wasm32"))] mouse_motion_events: Res<Events<MouseMotion>>,
+    #[cfg(target_arch = "wasm32")] wasm_mouse_tracker: Res<WasmMouseTracker>,
     mouse_wheel_events: Res<Events<MouseWheel>>,
     mut query: Query<(&mut Player, &Config, &mut Yaw)>,
 ) {
-    let mut look = Vec2::zero();
-    for event in state.mouse_motion_event_reader.iter(&mouse_motion_events) {
-        look = event.delta;
+    cfg_if::cfg_if! {
+        if #[cfg(not(target_arch = "wasm32"))] {
+            let mut look = Vec2::zero();
+            for event in state.mouse_motion_event_reader.iter(&mouse_motion_events) {
+                look = event.delta;
+            }
+        } else {
+            let look = wasm_mouse_tracker.get_delta_and_reset();
+        }
     }
 
     let mut zoom_delta = 0.;

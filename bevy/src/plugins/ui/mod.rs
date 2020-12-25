@@ -238,6 +238,7 @@ fn show_cursor(mut windows: ResMut<Windows>) {
 
 fn hide_cursor(mut windows: ResMut<Windows>) {
     let window = windows.get_primary_mut().unwrap();
+    info!("Window: {:?}", window);
     window.set_cursor_lock_mode(true);
     window.set_cursor_visibility(false);
 }
