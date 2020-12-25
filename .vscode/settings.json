@@ -8,6 +8,6 @@
   "rust-analyzer.checkOnSave.target": "wasm32-unknown-unknown",
   "rust-analyzer.cargo.features": [
     "web"
-    // END Web/WASM settings
   ]
+  // END Web/WASM settings
 }
