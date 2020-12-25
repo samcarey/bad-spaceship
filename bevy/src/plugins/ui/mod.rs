@@ -230,15 +230,26 @@ fn open_menu_on_key(input: ChangedRes<Input<KeyCode>>, mut state: ResMut<State<A
     }
 }
 
-fn show_cursor(mut windows: ResMut<Windows>) {
-    let window = windows.get_primary_mut().unwrap();
-    window.set_cursor_lock_mode(false);
-    window.set_cursor_visibility(true);
+fn show_cursor(#[cfg(not(target_arch = "wasm32"))] mut windows: ResMut<Windows>) {
+    cfg_if::cfg_if! {
+        if #[cfg(target_arch = "wasm32")] {
+
+        } else {
+            let window = windows.get_primary_mut().unwrap();
+            window.set_cursor_lock_mode(false);
+            window.set_cursor_visibility(true);
+        }
+    }
 }
 
-fn hide_cursor(mut windows: ResMut<Windows>) {
-    let window = windows.get_primary_mut().unwrap();
-    info!("Window: {:?}", window);
-    window.set_cursor_lock_mode(true);
-    window.set_cursor_visibility(false);
+fn hide_cursor(#[cfg(not(target_arch = "wasm32"))] mut windows: ResMut<Windows>) {
+    cfg_if::cfg_if! {
+        if #[cfg(target_arch = "wasm32")] {
+
+        } else {
+            let window = windows.get_primary_mut().unwrap();
+            window.set_cursor_lock_mode(true);
+            window.set_cursor_visibility(false);
+        }
+    }
 }
