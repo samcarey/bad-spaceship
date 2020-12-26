@@ -1,6 +1,6 @@
 use super::super::{AppState, APP_STATE};
-use bevy::prelude::*;
 use bevy::ui::prelude::ButtonBundle;
+use bevy::{input::mouse::MouseButtonInput, prelude::*};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -16,6 +16,7 @@ impl Plugin for UiPlugin {
     fn build(&self, app: &mut AppBuilder) {
         app.init_resource::<ButtonMaterials>()
             .add_event::<Selection>()
+            .init_resource::<TrackInputState>()
             .add_startup_system(spawn_camera.system())
             .on_state_enter(APP_STATE, AppState::InGameMenu, show_cursor.system())
             .on_state_enter(APP_STATE, AppState::InGameMenu, spawn_menu.system())
@@ -27,7 +28,8 @@ impl Plugin for UiPlugin {
             .on_state_update(APP_STATE, AppState::InGameMenu, resume.system())
             .on_state_update(APP_STATE, AppState::InGameMenu, options.system())
             .on_state_update(APP_STATE, AppState::InGameMenu, multiplayer.system())
-            .on_state_update(APP_STATE, AppState::InGame, open_menu_on_key.system());
+            .on_state_update(APP_STATE, AppState::InGame, open_menu_on_key.system())
+            .on_state_update(APP_STATE, AppState::InGame, capture_mouse_on_click.system());
     }
 }
 
@@ -230,6 +232,11 @@ fn open_menu_on_key(input: ChangedRes<Input<KeyCode>>, mut state: ResMut<State<A
     }
 }
 
+#[derive(Default)]
+struct TrackInputState {
+    mousebtn: EventReader<MouseButtonInput>,
+}
+
 fn show_cursor(#[cfg(not(target_arch = "wasm32"))] mut windows: ResMut<Windows>) {
     cfg_if::cfg_if! {
         if #[cfg(target_arch = "wasm32")] {
@@ -245,11 +252,26 @@ fn show_cursor(#[cfg(not(target_arch = "wasm32"))] mut windows: ResMut<Windows>)
 fn hide_cursor(#[cfg(not(target_arch = "wasm32"))] mut windows: ResMut<Windows>) {
     cfg_if::cfg_if! {
         if #[cfg(target_arch = "wasm32")] {
-
+            let window = web_sys::window().expect("no global `window` exists");
+            let document = window.document().expect("should have a document on window");
+            let body = document.body().expect("document should have a body");
+            body.request_pointer_lock();
         } else {
             let window = windows.get_primary_mut().unwrap();
             window.set_cursor_lock_mode(true);
             window.set_cursor_visibility(false);
         }
+    }
+}
+
+fn capture_mouse_on_click(
+    mut state: ResMut<TrackInputState>,
+    ev_mousebtn: Res<Events<MouseButtonInput>>,
+) {
+    for _ev in state.mousebtn.iter(&ev_mousebtn) {
+        let window = web_sys::window().expect("no global `window` exists");
+        let document = window.document().expect("should have a document on window");
+        let body = document.body().expect("document should have a body");
+        body.request_pointer_lock();
     }
 }
