@@ -1,11 +1,16 @@
 use crate::{AppState, APP_STATE};
-use bevy::ui::prelude::ButtonBundle;
-
-#[cfg(target_arch = "wasm32")]
-use bevy::input::mouse::MouseButtonInput;
-
 use bevy::prelude::*;
+use bevy::ui::prelude::ButtonBundle;
 use serde::Deserialize;
+
+#[cfg(not(target_arch = "wasm32"))]
+mod native;
+#[cfg(not(target_arch = "wasm32"))]
+use native::PlatformPlugin;
+#[cfg(target_arch = "wasm32")]
+mod web;
+#[cfg(target_arch = "wasm32")]
+use web::PlatformPlugin;
 
 #[derive(Deserialize)]
 struct Config {
@@ -19,24 +24,18 @@ pub struct UiPlugin;
 impl Plugin for UiPlugin {
     fn build(&self, app: &mut AppBuilder) {
         app.init_resource::<ButtonMaterials>()
-            .add_event::<Selection>();
-        #[cfg(target_arch = "wasm32")]
-        app.init_resource::<TrackInputState>();
-        app.add_startup_system(spawn_camera.system());
-        #[cfg(not(target_arch = "wasm32"))]
-        app.on_state_enter(APP_STATE, AppState::InGameMenu, show_cursor.system());
-        app.on_state_enter(APP_STATE, AppState::InGameMenu, spawn_menu.system())
+            .add_event::<Selection>()
+            .add_startup_system(spawn_camera.system())
+            .on_state_enter(APP_STATE, AppState::InGameMenu, spawn_menu.system())
             .on_state_update(APP_STATE, AppState::InGameMenu, close_menu_on_key.system())
             .on_state_exit(APP_STATE, AppState::InGameMenu, despawn_menu.system())
-            .on_state_exit(APP_STATE, AppState::InGameMenu, hide_cursor.system())
             .on_state_update(APP_STATE, AppState::InGameMenu, button_interaction.system())
             .on_state_update(APP_STATE, AppState::InGameMenu, selection_listener.system())
             .on_state_update(APP_STATE, AppState::InGameMenu, resume.system())
             .on_state_update(APP_STATE, AppState::InGameMenu, options.system())
             .on_state_update(APP_STATE, AppState::InGameMenu, multiplayer.system())
-            .on_state_update(APP_STATE, AppState::InGame, open_menu_on_key.system());
-        #[cfg(target_arch = "wasm32")]
-        app.on_state_update(APP_STATE, AppState::InGame, capture_mouse_on_click.system());
+            .on_state_update(APP_STATE, AppState::InGame, open_menu_on_key.system())
+            .add_plugin(PlatformPlugin);
     }
 }
 
@@ -236,47 +235,5 @@ fn close_menu_on_key(input: ChangedRes<Input<KeyCode>>, mut state: ResMut<State<
 fn open_menu_on_key(input: ChangedRes<Input<KeyCode>>, mut state: ResMut<State<AppState>>) {
     if input.just_pressed(KeyCode::Escape) {
         state.set_next(AppState::InGameMenu).unwrap();
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-#[derive(Default)]
-struct TrackInputState {
-    mousebtn: EventReader<MouseButtonInput>,
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn show_cursor(mut windows: ResMut<Windows>) {
-    let window = windows.get_primary_mut().unwrap();
-    window.set_cursor_lock_mode(false);
-    window.set_cursor_visibility(true);
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn hide_cursor(mut windows: ResMut<Windows>) {
-    let window = windows.get_primary_mut().unwrap();
-    window.set_cursor_lock_mode(true);
-    window.set_cursor_visibility(false);
-}
-
-#[cfg(target_arch = "wasm32")]
-use crate::utils::html_body;
-
-#[cfg(target_arch = "wasm32")]
-fn hide_cursor() {
-    let body = html_body::get();
-    body.request_pointer_lock();
-}
-
-#[cfg(target_arch = "wasm32")]
-fn capture_mouse_on_click(
-    mut state: ResMut<TrackInputState>,
-    ev_mousebtn: Res<Events<MouseButtonInput>>,
-) {
-    for _ev in state.mousebtn.iter(&ev_mousebtn) {
-        let window = web_sys::window().expect("no global `window` exists");
-        let document = window.document().expect("should have a document on window");
-        let body = document.body().expect("document should have a body");
-        body.request_pointer_lock();
     }
 }
