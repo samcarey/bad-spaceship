@@ -1,5 +1,5 @@
+use super::super::player::Player;
 use super::types::*;
-use super::Player;
 use bevy::prelude::*;
 use bevy_networking_turbulence::NetworkResource;
 use std::net::SocketAddr;
