@@ -219,7 +219,6 @@ dependencies = [
  "bevy_networking_turbulence",
  "bevy_rapier3d",
  "bevy_webgl2",
- "cfg-if 1.0.0",
  "gloo",
  "include_dir",
  "log",

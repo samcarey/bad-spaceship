@@ -1,4 +1,4 @@
-use super::super::{AppState, APP_STATE};
+use crate::{AppState, APP_STATE};
 use bevy::ui::prelude::ButtonBundle;
 use bevy::{input::mouse::MouseButtonInput, prelude::*};
 use serde::Deserialize;
@@ -237,33 +237,33 @@ struct TrackInputState {
     mousebtn: EventReader<MouseButtonInput>,
 }
 
-fn show_cursor(#[cfg(not(target_arch = "wasm32"))] mut windows: ResMut<Windows>) {
-    cfg_if::cfg_if! {
-        if #[cfg(target_arch = "wasm32")] {
-
-        } else {
-            let window = windows.get_primary_mut().unwrap();
-            window.set_cursor_lock_mode(false);
-            window.set_cursor_visibility(true);
-        }
-    }
+#[cfg(not(target_arch = "wasm32"))]
+fn show_cursor(mut windows: ResMut<Windows>) {
+    let window = windows.get_primary_mut().unwrap();
+    window.set_cursor_lock_mode(false);
+    window.set_cursor_visibility(true);
 }
 
-fn hide_cursor(#[cfg(not(target_arch = "wasm32"))] mut windows: ResMut<Windows>) {
-    cfg_if::cfg_if! {
-        if #[cfg(target_arch = "wasm32")] {
-            let window = web_sys::window().expect("no global `window` exists");
-            let document = window.document().expect("should have a document on window");
-            let body = document.body().expect("document should have a body");
-            body.request_pointer_lock();
-        } else {
-            let window = windows.get_primary_mut().unwrap();
-            window.set_cursor_lock_mode(true);
-            window.set_cursor_visibility(false);
-        }
-    }
+#[cfg(target_arch = "wasm32")]
+fn show_cursor() {}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn hide_cursor(mut windows: ResMut<Windows>) {
+    let window = windows.get_primary_mut().unwrap();
+    window.set_cursor_lock_mode(true);
+    window.set_cursor_visibility(false);
 }
 
+#[cfg(target_arch = "wasm32")]
+use crate::utils::html_body;
+
+#[cfg(target_arch = "wasm32")]
+fn hide_cursor() {
+    let body = html_body::get();
+    body.request_pointer_lock();
+}
+
+#[cfg(target_arch = "wasm32")]
 fn capture_mouse_on_click(
     mut state: ResMut<TrackInputState>,
     ev_mousebtn: Res<Events<MouseButtonInput>>,

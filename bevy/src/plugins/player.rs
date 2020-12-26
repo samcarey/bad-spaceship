@@ -1,22 +1,13 @@
-cfg_if::cfg_if! {
-    if #[cfg(target_arch = "wasm32")] {
-        use bevy_webgl2::renderer::JsCast;
-        use gloo::events::EventListener;
-        use web_sys::MouseEvent;
-        use std::sync::{
-            atomic::{AtomicI32, Ordering::SeqCst},
-            Arc,
-        };
-    } else {
-        use bevy::input::mouse::MouseMotion;
-    }
-}
+#[cfg(not(target_arch = "wasm32"))]
+use bevy::input::mouse::MouseMotion;
+#[cfg(target_arch = "wasm32")]
+use wasm_mouse_tracker::WasmMouseTracker;
 
-use super::super::{AppState, APP_STATE};
+use crate::{AppState, APP_STATE};
 use bevy::{input::mouse::MouseWheel, prelude::*};
 use serde::Deserialize;
 
-use crate::plugins::character;
+use super::character;
 
 use std::f32::consts::PI;
 
@@ -34,9 +25,13 @@ impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut AppBuilder) {
         app.init_resource::<State>();
         #[cfg(target_arch = "wasm32")]
-        app.add_resource(WasmMouseTracker::new());
+        app.add_resource(wasm_mouse_tracker::WasmMouseTracker::new());
         app.add_startup_system(setup.system())
-            .on_state_update(APP_STATE, AppState::InGame, process_mouse_events.system())
+            .on_state_update(
+                APP_STATE,
+                AppState::InGame,
+                get_look.system().chain(process_mouse_events.system()),
+            )
             .on_state_update(
                 APP_STATE,
                 AppState::InGame,
@@ -112,44 +107,46 @@ fn tuple_to_vec3(tuple: (f32, f32, f32)) -> Vec3 {
     Vec3::new(x, y, z)
 }
 
-cfg_if::cfg_if! {
-    if #[cfg(target_arch = "wasm32")] {
-        struct WasmMouseTracker {
-            delta_x: Arc<AtomicI32>,
-            delta_y: Arc<AtomicI32>,
+#[cfg(target_arch = "wasm32")]
+mod wasm_mouse_tracker {
+    use crate::utils::html_body;
+    use bevy_webgl2::renderer::JsCast;
+    use gloo::events::EventListener;
+    use std::sync::{
+        atomic::{AtomicI32, Ordering::SeqCst},
+        Arc,
+    };
+    use web_sys::MouseEvent;
+
+    pub struct WasmMouseTracker {
+        delta_x: Arc<AtomicI32>,
+        delta_y: Arc<AtomicI32>,
+    }
+
+    impl WasmMouseTracker {
+        pub fn new() -> Self {
+            let delta_x = Arc::new(AtomicI32::new(0));
+            let delta_y = Arc::new(AtomicI32::new(0));
+
+            let dx = Arc::clone(&delta_x);
+            let dy = Arc::clone(&delta_y);
+            let on_move = EventListener::new(&html_body::get(), "mousemove", move |_event| {
+                let me = _event.clone().dyn_into::<MouseEvent>().unwrap();
+                dx.fetch_add(me.movement_x(), SeqCst);
+                dy.fetch_add(me.movement_y(), SeqCst);
+            });
+            on_move.forget();
+            Self { delta_x, delta_y }
         }
 
-        impl WasmMouseTracker {
-            pub fn new() -> Self {
-                let window = web_sys::window().expect("global window does not exists");
-                let document = window.document().expect("expecting a document on window");
-                let body = document
-                    .body()
-                    .expect("document expect to have have a body");
-
-                let delta_x = Arc::new(AtomicI32::new(0));
-                let delta_y = Arc::new(AtomicI32::new(0));
-
-                let dx = Arc::clone(&delta_x);
-                let dy = Arc::clone(&delta_y);
-                let on_move = EventListener::new(&body, "mousemove", move |_event| {
-                    let me = _event.clone().dyn_into::<MouseEvent>().unwrap();
-                    dx.fetch_add(me.movement_x(), SeqCst);
-                    dy.fetch_add(me.movement_y(), SeqCst);
-                });
-                on_move.forget();
-                Self { delta_x, delta_y }
-            }
-
-            pub fn get_delta_and_reset(&self) -> Vec2 {
-                let delta = Vec2::new(
-                    self.delta_x.load(SeqCst) as f32,
-                    self.delta_y.load(SeqCst) as f32,
-                );
-                self.delta_x.store(0, SeqCst);
-                self.delta_y.store(0, SeqCst);
-                delta
-            }
+        pub fn get_delta_and_reset(&self) -> super::Vec2 {
+            let delta = super::Vec2::new(
+                self.delta_x.load(SeqCst) as f32,
+                self.delta_y.load(SeqCst) as f32,
+            );
+            self.delta_x.store(0, SeqCst);
+            self.delta_y.store(0, SeqCst);
+            delta
         }
     }
 }
@@ -194,25 +191,27 @@ fn setup(
     commands.push_children(camera_center.unwrap(), &[camera_entity.unwrap()]);
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+fn get_look(mut state: ResMut<State>, mouse_motion_events: Res<Events<MouseMotion>>) -> Vec2 {
+    let mut look = Vec2::zero();
+    for event in state.mouse_motion_event_reader.iter(&mouse_motion_events) {
+        look = event.delta;
+    }
+    look
+}
+
+#[cfg(target_arch = "wasm32")]
+fn get_look(wasm_mouse_tracker: Res<WasmMouseTracker>) -> Vec2 {
+    wasm_mouse_tracker.get_delta_and_reset()
+}
+
 fn process_mouse_events(
+    In(look): In<Vec2>,
     time: Res<Time>,
     mut state: ResMut<State>,
-    #[cfg(not(target_arch = "wasm32"))] mouse_motion_events: Res<Events<MouseMotion>>,
-    #[cfg(target_arch = "wasm32")] wasm_mouse_tracker: Res<WasmMouseTracker>,
     mouse_wheel_events: Res<Events<MouseWheel>>,
     mut query: Query<(&mut Player, &Config, &mut Yaw)>,
 ) {
-    cfg_if::cfg_if! {
-        if #[cfg(not(target_arch = "wasm32"))] {
-            let mut look = Vec2::zero();
-            for event in state.mouse_motion_event_reader.iter(&mouse_motion_events) {
-                look = event.delta;
-            }
-        } else {
-            let look = wasm_mouse_tracker.get_delta_and_reset();
-        }
-    }
-
     let mut zoom_delta = 0.;
     for event in state.mouse_wheel_event_reader.iter(&mouse_wheel_events) {
         zoom_delta = event.y;

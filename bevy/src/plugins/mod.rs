@@ -8,9 +8,7 @@ mod map;
 mod player;
 mod ui;
 
-cfg_if::cfg_if! {
-    if #[cfg(not(target_arch = "wasm32"))] {
-        mod multiplayer;
-        pub use self::multiplayer::{client::ClientPlugin, server::ServerPlugin, MultiplayerPlugins};
-    }
-}
+#[cfg(not(target_arch = "wasm32"))]
+mod multiplayer;
+#[cfg(not(target_arch = "wasm32"))]
+pub use self::multiplayer::{client::ClientPlugin, server::ServerPlugin, MultiplayerPlugins};

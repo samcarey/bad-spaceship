@@ -16,19 +16,21 @@ fn main() {
 
     let mut app = App::build();
 
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let a = 5;
+    }
+
     if args.is_server {
         app.add_resource(ScheduleRunnerSettings::run_loop(Duration::from_secs_f64(
             1.0 / 60.,
         )))
         .add_plugins(MinimalPlugins);
     } else {
-        cfg_if::cfg_if! {
-            if #[cfg(target_arch = "wasm32")] {
-                app.add_plugins(bevy_webgl2::DefaultPlugins);
-            } else {
-                app.add_plugins(DefaultPlugins);
-            }
-        }
+        #[cfg(target_arch = "wasm32")]
+        app.add_plugins(bevy_webgl2::DefaultPlugins);
+        #[cfg(not(target_arch = "wasm32"))]
+        app.add_plugins(DefaultPlugins);
         app.add_resource(State::new(AppState::InGame))
             .add_stage_after(stage::UPDATE, APP_STATE, StateStage::<AppState>::default())
             .add_plugin(plugins::UiPlugin)
@@ -56,21 +58,6 @@ fn main() {
     }
 
     app.add_resource(args);
-    // app.add_system(pointer_lock.system());
-
-    cfg_if::cfg_if! {
-        if #[cfg(not(target_arch = "wasm32"))] {
-            // app.add_plugins_with(plugins::MultiplayerPlugins, |group| {
-            //     if args.is_server {
-            //         group.disable::<plugins::ClientPlugin>()
-            //     } else {
-            //         group.disable::<plugins::ServerPlugin>()
-            //     }
-            // })
-        }
-    }
-    //
-;
 
     app.run();
 }

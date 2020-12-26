@@ -1,4 +1,4 @@
-use super::super::{AppState, APP_STATE};
+use crate::{AppState, APP_STATE};
 use bevy::prelude::*;
 use bevy_rapier3d::physics::RigidBodyHandleComponent;
 use bevy_rapier3d::rapier::dynamics::RigidBodyBuilder;
