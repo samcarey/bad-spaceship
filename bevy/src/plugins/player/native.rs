@@ -1,0 +1,23 @@
+use bevy::input::mouse::MouseMotion;
+use bevy::prelude::*;
+
+pub struct PlatformPlugin;
+
+impl Plugin for PlatformPlugin {
+    fn build(&self, app: &mut AppBuilder) {
+        app.init_resource::<State>();
+    }
+}
+
+#[derive(Default)]
+pub struct State {
+    mouse_motion_event_reader: EventReader<MouseMotion>,
+}
+
+pub fn get_look(mut state: ResMut<State>, mouse_motion_events: Res<Events<MouseMotion>>) -> Vec2 {
+    let mut look = Vec2::zero();
+    for event in state.mouse_motion_event_reader.iter(&mouse_motion_events) {
+        look = event.delta;
+    }
+    look
+}
