@@ -46,6 +46,19 @@ The first time you run this it'll take quite a while to:
 But the next time you change something and build again,
 it'll finish much faster.
 
+When developing for your native OS in VS Code with the rust-analyzer extension,
+ensure the lines beginning with "rust-analyzer" are commented in `.vscode/settings.json`.
+If developing for web, ensure they are uncommented.
+After commenting or uncommenting, you'll need to reload your window,
+and then when you build again you can expect that all the dependencies will need to be recompiled.
+So, switching between platform targets takes a bit of time.
+You can build for the opposite platform that rust-analyzer is configured for
+(e.g. run `cargo make run` when the lines in `settings.json` are uncommented),
+but this will confuse rust-analyzer, 
+causing it to need to rebuild all the dependencies for *both* platforms.
+Therefore it is recommended to infrequently switch platform targets, 
+adjusting `settings.json` and reloading VS Code when you do.
+
 # Building the Website
 
 The [website](https://badspaceship.com) is automatically built
