@@ -16,11 +16,6 @@ fn main() {
 
     let mut app = App::build();
 
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let a = 5;
-    }
-
     if args.is_server {
         app.add_resource(ScheduleRunnerSettings::run_loop(Duration::from_secs_f64(
             1.0 / 60.,
