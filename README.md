@@ -33,7 +33,9 @@ To run this thang:
    If you're on Mac, see the bottom of that file for more lines to uncomment.
    This increases recompile time by ~40% but removes some debugging features.
 1. Navigate in your terminal to the "bevy" subdirectory.
-1. Run `cargo run`.
+1. To build and run for your:
+    1. Native OS: `cargo make run`
+    2. Web Browser: `cargo make serve` (and then open the URL that is printed)
 
 The first time you run this it'll take quite a while to:
 
@@ -41,7 +43,7 @@ The first time you run this it'll take quite a while to:
 1. Compile all the dependencies.
 1. Compile the game itself.
 
-But the next time you change something and run `cargo run` again,
+But the next time you change something and build again,
 it'll finish much faster.
 
 # Building the Website
