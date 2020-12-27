@@ -9,9 +9,6 @@ mod plugins;
 
 #[bevy_main]
 fn main() {
-    // simple_logger::SimpleLogger::from_env()
-    //     .init()
-    //     .expect("A logger was already initialized");
     let args = utils::parse_args();
 
     let mut app = App::build();
@@ -38,42 +35,12 @@ fn main() {
             )))
             .add_plugin(plugins::MapPlugin)
             .add_plugin(plugins::PlayerPlugin);
-
-        // #[cfg(target_arch = "wasm32")]
-        // {
-        //     let window = web_sys::window().expect("no global `window` exists");
-        //     let document = window.document().expect("should have a document on window");
-        //     let body = document.body().expect("document should have a body");
-        //     info!("{:?}", window);
-        //     info!("{:?}", document);
-        //     info!("{:?}", body);
-        //     body.focus();
-        //     body.request_pointer_lock();
-        // }
     }
 
     app.add_resource(args);
 
     app.run();
 }
-
-// #[cfg(target_arch = "wasm32")]
-// fn pointer_lock() {
-//     let window = web_sys::window().expect("no global `window` exists");
-//     let document = window.document().expect("should have a document on window");
-//     let body = document.body().expect("document should have a body");
-//     // info!("{:?}", window);
-//     // info!("{:?}", document);
-//     // info!("{:?}", body);
-//     // request_pointer_lock(this)
-//     // has_pointer_capture(this, pointer_id)
-//     // pointer_lock_element()
-//     // body.focus();
-//     // body.request_fullscreen();
-//     info!("{:?}", body.request_pointer_lock());
-//     // body.request_pointer_lock();
-// }
-
 #[derive(Clone)]
 pub enum AppState {
     InGame,
