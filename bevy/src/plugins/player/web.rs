@@ -30,8 +30,9 @@ impl WasmMouseTracker {
         let dy = Arc::clone(&delta_y);
         let on_move = EventListener::new(&html_body::get(), "mousemove", move |_event| {
             let me = _event.clone().dyn_into::<MouseEvent>().unwrap();
-            dx.fetch_add(me.movement_x(), SeqCst);
-            dy.fetch_add(me.movement_y(), SeqCst);
+            info!("Moved! {:?}, {:?}", me.movement_x(), me.movement_y());
+            dx.store(me.movement_x(), SeqCst);
+            dy.store(me.movement_y(), SeqCst);
         });
         on_move.forget();
         Self { delta_x, delta_y }

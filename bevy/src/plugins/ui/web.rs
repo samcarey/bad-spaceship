@@ -19,8 +19,7 @@ struct TrackInputState {
 }
 
 fn hide_cursor() {
-    let body = html_body::get();
-    body.request_pointer_lock();
+    html_body::get().request_pointer_lock();
 }
 
 fn capture_mouse_on_click(
@@ -28,9 +27,7 @@ fn capture_mouse_on_click(
     ev_mousebtn: Res<Events<MouseButtonInput>>,
 ) {
     for _ev in state.mousebtn.iter(&ev_mousebtn) {
-        let window = web_sys::window().expect("no global `window` exists");
-        let document = window.document().expect("should have a document on window");
-        let body = document.body().expect("document should have a body");
-        body.request_pointer_lock();
+        html_body::get().request_pointer_lock();
+        break;
     }
 }
