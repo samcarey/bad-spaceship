@@ -247,7 +247,6 @@ fn open_menu_on_key(input: ChangedRes<Input<KeyCode>>, mut state: ResMut<State<A
 struct DiagnosticsText;
 
 fn spawn_diagnostics_text(commands: &mut Commands, asset_server: Res<AssetServer>) {
-    let font = asset_server.load("fonts/FiraMono-Medium.ttf");
     commands
         .spawn(TextBundle {
             style: Style {
@@ -262,7 +261,7 @@ fn spawn_diagnostics_text(commands: &mut Commands, asset_server: Res<AssetServer
             },
             text: Text {
                 value: "This text changes in the bottom right".to_string(),
-                font: font.clone(),
+                font: asset_server.load("fonts/FiraMono-Medium.ttf"),
                 style: TextStyle {
                     font_size: 30.0,
                     color: Color::WHITE,
