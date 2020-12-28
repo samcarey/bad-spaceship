@@ -1,6 +1,9 @@
 use crate::{AppState, APP_STATE};
-use bevy::prelude::*;
 use bevy::ui::prelude::ButtonBundle;
+use bevy::{
+    diagnostic::{Diagnostics, FrameTimeDiagnosticsPlugin},
+    prelude::*,
+};
 use serde::Deserialize;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -23,7 +26,8 @@ pub struct UiPlugin;
 
 impl Plugin for UiPlugin {
     fn build(&self, app: &mut AppBuilder) {
-        app.init_resource::<ButtonMaterials>()
+        app.add_plugin(FrameTimeDiagnosticsPlugin)
+            .init_resource::<ButtonMaterials>()
             .add_event::<Selection>()
             .add_startup_system(spawn_camera.system())
             .on_state_enter(APP_STATE, AppState::InGameMenu, spawn_menu.system())
@@ -35,7 +39,9 @@ impl Plugin for UiPlugin {
             .on_state_update(APP_STATE, AppState::InGameMenu, options.system())
             .on_state_update(APP_STATE, AppState::InGameMenu, multiplayer.system())
             .on_state_update(APP_STATE, AppState::InGame, open_menu_on_key.system())
-            .add_plugin(PlatformPlugin);
+            .add_plugin(PlatformPlugin)
+            .add_startup_system(spawn_diagnostics_text.system())
+            .add_system(update_diagnostics_text.system());
     }
 }
 
@@ -235,5 +241,51 @@ fn close_menu_on_key(input: ChangedRes<Input<KeyCode>>, mut state: ResMut<State<
 fn open_menu_on_key(input: ChangedRes<Input<KeyCode>>, mut state: ResMut<State<AppState>>) {
     if input.just_pressed(KeyCode::Escape) {
         state.set_next(AppState::InGameMenu).unwrap();
+    }
+}
+
+struct DiagnosticsText;
+
+fn spawn_diagnostics_text(commands: &mut Commands, asset_server: Res<AssetServer>) {
+    let font = asset_server.load("fonts/FiraSans-Bold.ttf");
+    commands
+        .spawn(TextBundle {
+            style: Style {
+                align_self: AlignSelf::FlexEnd,
+                position_type: PositionType::Absolute,
+                position: Rect {
+                    bottom: Val::Px(5.0),
+                    right: Val::Px(15.0),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            text: Text {
+                value: "This text changes in the bottom right".to_string(),
+                font: font.clone(),
+                style: TextStyle {
+                    font_size: 30.0,
+                    color: Color::WHITE,
+                    alignment: TextAlignment::default(),
+                },
+            },
+            ..Default::default()
+        })
+        .with(DiagnosticsText);
+}
+
+fn update_diagnostics_text(
+    diagnostics: Res<Diagnostics>,
+    mut query: Query<&mut Text, With<DiagnosticsText>>,
+) {
+    for mut text in query.iter_mut() {
+        let mut fps = 0.0;
+        if let Some(fps_diagnostic) = diagnostics.get(FrameTimeDiagnosticsPlugin::FPS) {
+            if let Some(fps_avg) = fps_diagnostic.average() {
+                fps = fps_avg;
+            }
+        }
+
+        text.value = format!("{:.0} FPS", fps,);
     }
 }
