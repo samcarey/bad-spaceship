@@ -264,7 +264,7 @@ fn spawn_diagnostics_text(commands: &mut Commands, asset_server: Res<AssetServer
                 font: asset_server.load("fonts/FiraMono-Medium.ttf"),
                 style: TextStyle {
                     font_size: 30.0,
-                    color: Color::WHITE,
+                    color: Color::PINK,
                     alignment: TextAlignment::default(),
                 },
             },
