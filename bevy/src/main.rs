@@ -1,6 +1,7 @@
 use bevy::render::pass::ClearColor;
-use bevy::{app::ScheduleRunnerSettings, prelude::*};
+use bevy::{app::ScheduleRunnerSettings, core::FixedTimestep, prelude::*};
 use bevy_rapier3d::{physics::RapierPhysicsPlugin, render::RapierRenderPlugin};
+use rapier3d::dynamics::IntegrationParameters;
 use std::time::Duration;
 #[macro_use]
 mod utils;
@@ -35,6 +36,8 @@ fn main() {
             )))
             .add_plugin(plugins::MapPlugin)
             .add_plugin(plugins::PlayerPlugin);
+        #[cfg(target_arch = "wasm32")]
+        app.add_startup_system(set_initial_fps.system());
     }
 
     app.add_resource(args);
@@ -51,3 +54,8 @@ pub const APP_STATE: &str = "app_state";
 
 #[cfg(target_arch = "wasm32")]
 const CONFIG_DIR: include_dir::Dir = include_dir::include_dir!("assets/config");
+
+#[cfg(target_arch = "wasm32")]
+fn set_initial_fps(mut integration_parameters: ResMut<IntegrationParameters>) {
+    integration_parameters.set_dt(1.0 / 30.0);
+}

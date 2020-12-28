@@ -11,7 +11,7 @@ impl Plugin for MapPlugin {
 }
 
 const PLATFORM_WIDTH_M: f32 = 50.0; // meters
-const PLATFORM_THICKNESS_M: f32 = 0.1; // meters
+const PLATFORM_THICKNESS_M: f32 = 1.0; // meters
 
 fn add_lighting(commands: &mut Commands) {
     commands.spawn(LightBundle {
