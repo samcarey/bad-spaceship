@@ -247,7 +247,7 @@ fn open_menu_on_key(input: ChangedRes<Input<KeyCode>>, mut state: ResMut<State<A
 struct DiagnosticsText;
 
 fn spawn_diagnostics_text(commands: &mut Commands, asset_server: Res<AssetServer>) {
-    let font = asset_server.load("fonts/FiraSans-Bold.ttf");
+    let font = asset_server.load("fonts/FiraMono-Medium.ttf");
     commands
         .spawn(TextBundle {
             style: Style {
