@@ -3,6 +3,7 @@ image: samcarey/nobo.games-docker-ci
 pages:
   stage: deploy
   script:
+    - ls
     - cd bevy && cargo make build-web
     - ls && mkdocs build --strict --verbose --site-dir public --config-file mkdocs.yml
   artifacts:
