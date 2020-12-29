@@ -4,7 +4,7 @@ pages:
   stage: deploy
   script:
     - cd bevy && cargo make build-web
-    - cd ~ && mkdocs build --strict --verbose --site-dir public --config-file mkdocs.yml
+    - ls && mkdocs build --strict --verbose --site-dir public --config-file mkdocs.yml
   artifacts:
     paths:
       - public
