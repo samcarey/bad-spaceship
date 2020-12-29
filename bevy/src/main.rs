@@ -1,5 +1,5 @@
 use bevy::render::pass::ClearColor;
-use bevy::{app::ScheduleRunnerSettings, core::FixedTimestep, prelude::*};
+use bevy::{app::ScheduleRunnerSettings, prelude::*};
 use bevy_rapier3d::{physics::RapierPhysicsPlugin, render::RapierRenderPlugin};
 use rapier3d::dynamics::IntegrationParameters;
 use std::time::Duration;
