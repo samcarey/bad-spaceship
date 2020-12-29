@@ -1,15 +1,9 @@
-image: rust:1.48
+image: samcarey/nobo.games-docker-ci
 
 pages:
   stage: deploy
   script:
-    - apt update && sudo apt upgrade -y && apt install -y curl
-    # - curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
-    # - cargo install cargo-make
-    # - rustup target add wasm32-unknown-unknown
-    # - cd bevy && cargo make build-web
-    - apt install -y python3-pip
-    - pip3 install -r requirements.txt
+    - cd bevy && cargo make build-web
     - mkdocs build --strict --verbose --site-dir public --config-file mkdocs.yml
   artifacts:
     paths:
