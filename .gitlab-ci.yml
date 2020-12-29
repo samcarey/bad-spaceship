@@ -1,16 +1,16 @@
-image: python:3.8-buster
+image: samcarey/nobo.games-docker-ci
 
 pages:
   stage: deploy
   script:
-    - pip install -r requirements.txt
+    - cd bevy && cargo make build-web && cd .. && cp bevy/target/{wasm_bg.wasm,wasm.js} docs/demo/
     - mkdocs build --strict --verbose --site-dir public --config-file mkdocs.yml
   artifacts:
     paths:
       - public
   rules:
     - if: '$CI_COMMIT_BRANCH == "master"'
-      changes:
-      - mkdocs.yml
-      - docs/*
+      # changes:
+      # - mkdocs.yml
+      # - docs/*
 
