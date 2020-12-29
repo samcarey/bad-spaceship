@@ -3,7 +3,7 @@ image: ubuntu:20.04
 pages:
   stage: deploy
   script:
-    - apt update && apt install curl
+    - apt update && apt install -y curl
     - curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
     - cd bevy && cargo make build-web
     - pip install -r requirements.txt
