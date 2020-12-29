@@ -1,4 +1,4 @@
-image: samcarey/nobo.games-docker-ci
+image: registry.gitlab.com/nobo.games/docker-ci-image
 
 pages:
   stage: deploy
