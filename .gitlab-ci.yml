@@ -6,6 +6,7 @@ pages:
     - ls
     # - cd bevy && cargo make build-web
     - cd bevy
+    -cd ~ && ls
     - cd ~ && ls && mkdocs build --strict --verbose --site-dir public --config-file mkdocs.yml
   artifacts:
     paths:
