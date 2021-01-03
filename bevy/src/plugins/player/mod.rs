@@ -228,10 +228,11 @@ fn process_keyboard_events(
 fn update_camera(mut player_query: Query<&mut Player>, mut camera_query: Query<&mut Transform>) {
     for player in player_query.iter_mut() {
         if let Some(camera_entity) = player.camera.entity {
-            let cam_pos = Vec3::new(0., player.camera.pitch.cos(), -player.camera.pitch.sin())
-                .normalize()
-                * player.camera.distance;
             if let Ok(mut transform) = camera_query.get_mut(camera_entity) {
+                let cam_pos = Vec3::new(0., player.camera.pitch.cos(), -player.camera.pitch.sin())
+                    .normalize()
+                    * player.camera.distance;
+
                 transform.translation = cam_pos;
 
                 let look = Mat4::face_toward(cam_pos, Vec3::zero(), Vec3::new(0.0, 1.0, 0.0));

@@ -1,6 +1,7 @@
 use bevy::render::pass::ClearColor;
 use bevy::{app::ScheduleRunnerSettings, prelude::*};
 use bevy_rapier3d::{physics::RapierPhysicsPlugin, render::RapierRenderPlugin};
+#[cfg(target_arch = "wasm32")]
 use rapier3d::dynamics::IntegrationParameters;
 use std::time::Duration;
 #[macro_use]
