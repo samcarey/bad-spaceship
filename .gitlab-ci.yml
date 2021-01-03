@@ -6,7 +6,7 @@ pages:
     - cd bevy && cargo make build-web && cd ..
     - mkdir -p docs/target/
     - mv bevy/target/{wasm_bg.wasm,wasm.js} docs/target/
-    - mv bevy/index.html docs/
+    - mv bevy/index.html docs/target/
     - mv bevy/assets docs/
     - mkdocs build --strict --verbose --site-dir public --config-file mkdocs.yml
   artifacts:
