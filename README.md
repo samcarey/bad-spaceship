@@ -6,58 +6,10 @@
 
 - [Meeting Notes](https://gitlab.com/nobo-games/bad-spaceship/-/issues?scope=all&utf8=%E2%9C%93&state=closed&label_name[]=Meeting%20Notes)
 
-# Installation
+# Running
 
-To play Bad Spaceship,
-you'll need to clone this repo and choose an implementation below
-(the only one so far is Bevy).
-
-## Bevy
-
-[Bevy Engine](https://bevyengine.org/) is a brand-new,
-in-development game engine written in the Rust programming language.
-Why am I using tools that are so new and unstable?
-Because I want to be on the _cutting edge_.
-
-To run this thang:
-
-1. Make sure you have Curl installed.
-1. Install [Rust](https://www.rust-lang.org/learn/get-started).
-1. If you are on Linux, install the additional Bevy [dependencies](https://github.com/bevyengine/bevy/blob/master/docs/linux_dependencies.md).
-1. Clone this repo.
-1. (Optional): Enable Fast Compiles for Bevy (you can always skip this and add it later).
-   See the instructions per OS [here](https://bevyengine.org/learn/book/getting-started/setup/),
-   in the section "Enable Fast Compiles (Optional)".
-   As part of this process,
-   you'll need to copy [bevy/.cargo/config_fast_builds](bevy/.cargo/config_fast_builds) to bevy/.cargo/config.
-   If you're on Mac, see the bottom of that file for more lines to uncomment.
-   This increases recompile time by ~40% but removes some debugging features.
-1. Navigate in your terminal to the "bevy" subdirectory.
-1. To build and run for your:
-    1. Native OS: `cargo make run`
-    2. Web Browser: `cargo make serve` (and then open the URL that is printed)
-
-The first time you run this it'll take quite a while to:
-
-1. Download all the dependencies.
-1. Compile all the dependencies.
-1. Compile the game itself.
-
-But the next time you change something and build again,
-it'll finish much faster.
-
-When developing for your native OS in VS Code with the rust-analyzer extension,
-ensure the lines beginning with "rust-analyzer" are commented in `.vscode/settings.json`.
-If developing for web, ensure they are uncommented.
-After commenting or uncommenting, you'll need to reload your window,
-and then when you build again you can expect that all the dependencies will need to be recompiled.
-So, switching between platform targets takes a bit of time.
-You can build for the opposite platform that rust-analyzer is configured for
-(e.g. run `cargo make run` when the lines in `settings.json` are uncommented),
-but this will confuse rust-analyzer, 
-causing it to need to rebuild all the dependencies for *both* platforms.
-Therefore it is recommended to infrequently switch platform targets, 
-adjusting `settings.json` and reloading VS Code when you do.
+See the instructions for 
+https://gitlab.com/nobo-games/templates/web-enabled-game
 
 # Building the Website
 
