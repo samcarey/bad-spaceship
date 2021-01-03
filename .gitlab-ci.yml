@@ -8,6 +8,7 @@ pages:
     - mv bevy/target/{wasm_bg.wasm,wasm.js} docs/target/
     - mv bevy/index.html docs/demo.html
     - mv bevy/assets docs/
+    - ls -a docs
     - mkdocs build --strict --verbose --site-dir public --config-file mkdocs.yml
   artifacts:
     paths:
