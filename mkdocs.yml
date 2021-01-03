@@ -6,4 +6,4 @@ nav:
   - Stages:
       - Home Planet: "stages/home_planet.md"
   - News: "news.md"
-  - Demo: "target/index.html"
+  - Demo: "index.html"
