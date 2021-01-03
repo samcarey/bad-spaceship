@@ -3,7 +3,11 @@ image: registry.gitlab.com/nobo-games/docker-ci-image
 pages:
   stage: deploy
   script:
-    - cd bevy && cargo make build-web && cd .. && cp bevy/target/{wasm_bg.wasm,wasm.js} docs/demo/
+    - cd bevy && cargo make build-web && cd ..
+    - mkdir -p docs/target/
+    - mv bevy/target/{wasm_bg.wasm,wasm.js} docs/target/
+    - mv bevy/index.html docs/
+    - mv bevy/assets docs/
     - mkdocs build --strict --verbose --site-dir public --config-file mkdocs.yml
   artifacts:
     paths:
