@@ -8,7 +8,7 @@ edition = "2018"
 
 [dependencies]
 bevy = {version="0.4.0", default-features=false}
-bevy_rapier3d = { version = "0.7.0", features = ["simd-stable"] }
+bevy_rapier3d = { version = "0.7.0" }
 serde = { version = "1.0.118", features = ["derive"] }
 ron = "0.6.2"
 nalgebra = "0.23.1"
@@ -17,7 +17,7 @@ bevy_networking_turbulence = {git = "https://github.com/smokku/bevy_networking_t
 log = "0.4"
 bevy_webgl2 = {version="0.4.0", optional = true}
 include_dir = {version="0.6.0", optional = true}
-winit = {version = "0.24.0"}
+winit = {version = "0.24.0", optional = true}
 gloo = {version = "0.2.0", optional = true}
 web-sys = {version = "0.3.4", optional = true}
 
@@ -26,11 +26,16 @@ opt-level = 3
 debug = 0
 
 [features]
+default = [
+  "bevy_rapier3d/simd-stable"
+]
+
 native = [
   "bevy/bevy_winit",
   "bevy/render",
   "bevy/bevy_wgpu",
   "bevy/bevy_gltf",
+  "bevy_rapier3d/parallel",
 ]
 
 web = [
