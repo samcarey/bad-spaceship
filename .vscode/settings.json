@@ -2,7 +2,6 @@
   "debug.allowBreakpointsEverywhere": true,
   "python.pythonPath": "venv/",
   "editor.formatOnSave": true,
-  "rust-analyzer.diagnostics.enableExperimental": false,
   // Uncomment when developing for Web/WASM
   "rust-analyzer.cargo.target": "wasm32-unknown-unknown",
   "rust-analyzer.checkOnSave.target": "wasm32-unknown-unknown",
