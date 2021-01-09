@@ -25,7 +25,7 @@ fn main() {
         app.add_plugins(bevy_webgl2::DefaultPlugins);
         #[cfg(not(target_arch = "wasm32"))]
         app.add_plugins(DefaultPlugins);
-        app.add_resource(State::new(AppState::InGame))
+        app.add_resource(State::new(AppState::Initial))
             .add_stage_after(stage::UPDATE, APP_STATE, StateStage::<AppState>::default())
             .add_plugin(plugins::UiPlugin)
             .add_plugin(RapierPhysicsPlugin)
@@ -47,6 +47,7 @@ fn main() {
 }
 #[derive(Clone)]
 pub enum AppState {
+    Initial,
     InGame,
     InGameMenu,
 }
