@@ -97,12 +97,13 @@ impl TransformExt for Transform {
     }
 }
 
-use nalgebra::Quaternion;
+use nalgebra::{Quaternion, UnitQuaternion};
 
 pub trait QuatExt {
     fn to(&self, other: Quat) -> Quat;
     fn to_rotation_vector(&self) -> Vector<f32>;
     fn to_quaternion(&self) -> Quaternion<f32>;
+    fn to_unit_quaternion(&self) -> UnitQuaternion<f32>;
 }
 
 impl QuatExt for Quat {
@@ -117,5 +118,9 @@ impl QuatExt for Quat {
 
     fn to_quaternion(&self) -> Quaternion<f32> {
         Quaternion::new(self.w, self.x, self.y, self.z)
+    }
+
+    fn to_unit_quaternion(&self) -> UnitQuaternion<f32> {
+        UnitQuaternion::from_quaternion(self.to_quaternion())
     }
 }

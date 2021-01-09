@@ -6,7 +6,6 @@ use bevy::prelude::*;
 use bevy_rapier3d::physics::RigidBodyHandleComponent;
 use bevy_rapier3d::rapier::dynamics::RigidBodyBuilder;
 use bevy_rapier3d::rapier::geometry::ColliderBuilder;
-use nalgebra::UnitQuaternion;
 use rapier3d::dynamics::RigidBodySet;
 use rapier3d::math::{Isometry, Vector};
 use serde::Deserialize;
@@ -197,8 +196,7 @@ fn rotate_character_based_on_mouse_input(
 ) {
     for (rigid_body, transform, yaw) in query.iter() {
         if let Some(rb) = bodies.get_mut(rigid_body.handle()) {
-            let rotation =
-                UnitQuaternion::from_quaternion(Quat::from_rotation_y(-yaw.0).to_quaternion());
+            let rotation = Quat::from_rotation_y(-yaw.0).to_unit_quaternion();
             let position = Isometry::from_parts(transform.translation.to_translation3(), rotation);
             rb.set_position(position, true);
         }
