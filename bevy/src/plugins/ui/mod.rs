@@ -1,4 +1,5 @@
 use crate::{AppState, APP_STATE};
+use bevy::input::mouse::MouseButtonInput;
 use bevy::ui::prelude::ButtonBundle;
 use bevy::{
     diagnostic::{Diagnostics, FrameTimeDiagnosticsPlugin},
@@ -29,6 +30,7 @@ impl Plugin for UiPlugin {
         app.add_plugin(FrameTimeDiagnosticsPlugin)
             .init_resource::<ButtonMaterials>()
             .add_event::<Selection>()
+            .init_resource::<TrackInputState>()
             .add_startup_system(spawn_camera.system())
             .on_state_enter(APP_STATE, AppState::InGameMenu, spawn_menu.system())
             .on_state_update(APP_STATE, AppState::InGameMenu, close_menu_on_key.system())
@@ -41,7 +43,12 @@ impl Plugin for UiPlugin {
             .on_state_update(APP_STATE, AppState::InGame, open_menu_on_key.system())
             .add_plugin(PlatformPlugin)
             .add_startup_system(spawn_diagnostics_text.system())
-            .add_system(update_diagnostics_text.system());
+            .add_system(update_diagnostics_text.system())
+            .on_state_update(
+                APP_STATE,
+                AppState::Initial,
+                capture_mouse_on_click.system(),
+            );
     }
 }
 
@@ -286,5 +293,20 @@ fn update_diagnostics_text(
         }
 
         text.value = format!("{:.0} FPS", fps,);
+    }
+}
+
+#[derive(Default)]
+struct TrackInputState {
+    mousebtn: EventReader<MouseButtonInput>,
+}
+
+fn capture_mouse_on_click(
+    mut input_state: ResMut<TrackInputState>,
+    ev_mousebtn: Res<Events<MouseButtonInput>>,
+    mut state: ResMut<State<AppState>>,
+) {
+    for _ev in input_state.mousebtn.iter(&ev_mousebtn) {
+        state.set_next(AppState::InGame).unwrap();
     }
 }
