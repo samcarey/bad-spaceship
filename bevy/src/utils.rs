@@ -26,14 +26,17 @@ mod platform {
         };
     }
 
-    pub mod html_body {
-        use web_sys::HtmlElement;
+    pub mod html {
+        use web_sys::{Document, HtmlElement};
 
-        pub fn get() -> HtmlElement {
+        pub fn get_document() -> Document {
             let window = web_sys::window().expect("no global `window` exists");
             let document = window.document().expect("should have a document on window");
-            let body = document.body().expect("document should have a body");
-            body
+            document
+        }
+
+        pub fn get_body() -> HtmlElement {
+            get_document().body().expect("document should have a body")
         }
     }
 }
@@ -122,5 +125,22 @@ impl QuatExt for Quat {
 
     fn to_unit_quaternion(&self) -> UnitQuaternion<f32> {
         UnitQuaternion::from_quaternion(self.to_quaternion())
+    }
+}
+
+use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+
+pub trait AtomicBoolExt {
+    fn toggle(&self);
+    fn set(&self, value: bool);
+}
+
+impl AtomicBoolExt for AtomicBool {
+    fn toggle(&self) {
+        self.store(!self.load(SeqCst), SeqCst);
+    }
+
+    fn set(&self, value: bool) {
+        self.store(value, SeqCst);
     }
 }

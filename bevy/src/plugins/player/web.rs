@@ -1,4 +1,4 @@
-use crate::utils::html_body;
+use crate::utils::html;
 use bevy::prelude::*;
 use bevy_webgl2::renderer::JsCast;
 use gloo::events::EventListener;
@@ -28,9 +28,9 @@ impl WasmMouseTracker {
 
         let dx = Arc::clone(&delta_x);
         let dy = Arc::clone(&delta_y);
-        let on_move = EventListener::new(&html_body::get(), "mousemove", move |_event| {
+        let on_move = EventListener::new(&html::get_body(), "mousemove", move |_event| {
             let me = _event.clone().dyn_into::<MouseEvent>().unwrap();
-            info!("Moved! {:?}, {:?}", me.movement_x(), me.movement_y());
+            // info!("Moved! {:?}, {:?}", me.movement_x(), me.movement_y());
             dx.store(me.movement_x(), SeqCst);
             dy.store(me.movement_y(), SeqCst);
         });

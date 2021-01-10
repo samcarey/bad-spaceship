@@ -33,14 +33,12 @@ impl Plugin for UiPlugin {
             .init_resource::<TrackInputState>()
             .add_startup_system(spawn_camera.system())
             .on_state_enter(APP_STATE, AppState::InGameMenu, spawn_menu.system())
-            .on_state_update(APP_STATE, AppState::InGameMenu, close_menu_on_key.system())
             .on_state_exit(APP_STATE, AppState::InGameMenu, despawn_menu.system())
             .on_state_update(APP_STATE, AppState::InGameMenu, button_interaction.system())
             .on_state_update(APP_STATE, AppState::InGameMenu, selection_listener.system())
             .on_state_update(APP_STATE, AppState::InGameMenu, resume.system())
             .on_state_update(APP_STATE, AppState::InGameMenu, options.system())
             .on_state_update(APP_STATE, AppState::InGameMenu, multiplayer.system())
-            .on_state_update(APP_STATE, AppState::InGame, open_menu_on_key.system())
             .add_plugin(PlatformPlugin)
             .add_startup_system(spawn_diagnostics_text.system())
             .add_system(update_diagnostics_text.system())
@@ -236,18 +234,6 @@ fn spawn_menu(
 fn despawn_menu(commands: &mut Commands, menu_query: Query<Entity, With<Menu>>) {
     for menu_entity in menu_query.iter() {
         commands.despawn_recursive(menu_entity);
-    }
-}
-
-fn close_menu_on_key(input: ChangedRes<Input<KeyCode>>, mut state: ResMut<State<AppState>>) {
-    if input.just_pressed(KeyCode::Escape) {
-        state.set_next(AppState::InGame).unwrap();
-    }
-}
-
-fn open_menu_on_key(input: ChangedRes<Input<KeyCode>>, mut state: ResMut<State<AppState>>) {
-    if input.just_pressed(KeyCode::Escape) {
-        state.set_next(AppState::InGameMenu).unwrap();
     }
 }
 
