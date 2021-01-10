@@ -13,7 +13,7 @@ serde = { version = "1.0.118", features = ["derive"] }
 ron = "0.6.2"
 nalgebra = "0.23.1"
 rapier3d = "0.4.2"
-bevy_networking_turbulence = {git = "https://github.com/smokku/bevy_networking_turbulence", rev="1bfe6f44397e510009a8a80abad1e105d875bf94"}
+# bevy_networking_turbulence = {git = "https://github.com/smokku/bevy_networking_turbulence", rev="1bfe6f44397e510009a8a80abad1e105d875bf94"}
 log = "0.4"
 bevy_webgl2 = {version="0.4.0", optional = true}
 include_dir = {version="0.6.0", optional = true}
