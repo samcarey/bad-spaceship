@@ -128,7 +128,7 @@ fn selection_listener(
     my_events: Res<Events<Selection>>,
 ) {
     for my_event in my_event_reader.iter(&my_events) {
-        println!("Selected menu option: {:?}", my_event);
+        info!("Selected menu option: {:?}", my_event);
     }
 }
 

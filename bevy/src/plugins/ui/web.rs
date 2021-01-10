@@ -34,7 +34,7 @@ impl WasmPointerLockTracker {
         // and https://rustwasm.github.io/wasm-bindgen/api/web_sys/struct.PointerEvent.html
         let lock = Arc::new(AtomicBool::new(false));
         let lock_clone = Arc::clone(&lock);
-        let on_focus =
+        let on_lock =
             EventListener::new(&html::get_document(), "pointerlockchange", move |_event| {
                 match html::get_document().pointer_lock_element() {
                     Some(element) => {
@@ -49,7 +49,13 @@ impl WasmPointerLockTracker {
                     }
                 }
             });
+        on_lock.forget();
+
+        let on_focus = EventListener::new(&html::get_document(), "onfocus", move |_event| {
+            info!("Focus!")
+        });
         on_focus.forget();
+
         Self { lock: lock }
     }
 
