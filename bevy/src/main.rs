@@ -30,11 +30,7 @@ fn main() {
             .add_plugin(plugins::UiPlugin)
             .add_plugin(RapierPhysicsPlugin)
             .add_plugin(RapierRenderPlugin)
-            .add_resource(ClearColor(Color::rgb(
-                0xF9 as f32 / 255.0,
-                0xF9 as f32 / 255.0,
-                0xFF as f32 / 255.0,
-            )))
+            .add_resource(ClearColor(Color::rgb(0.99, 0.99, 0.95)))
             .add_plugin(plugins::MapPlugin)
             .add_plugin(plugins::PlayerPlugin);
         #[cfg(target_arch = "wasm32")]
