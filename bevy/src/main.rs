@@ -31,7 +31,7 @@ fn main() {
             .add_plugin(RapierPhysicsPlugin)
             .add_plugin(RapierRenderPlugin)
             .add_resource(ClearColor(Color::rgb(0.99, 0.99, 0.95)))
-            .add_plugin(plugins::MapPlugin)
+            .add_plugins(plugins::EnvironmentPluginGroup)
             .add_plugin(plugins::PlayerPlugin);
         #[cfg(target_arch = "wasm32")]
         app.add_startup_system(set_initial_fps.system());
