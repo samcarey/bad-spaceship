@@ -1,10 +1,8 @@
-use crate::{AppState, APP_STATE};
+use crate::{utils, AppState, APP_STATE};
 use bevy::{input::mouse::MouseWheel, prelude::*};
 use serde::Deserialize;
 
 use super::character;
-
-use std::f32::consts::PI;
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
@@ -15,12 +13,10 @@ mod web;
 #[cfg(target_arch = "wasm32")]
 use web::{get_look, PlatformPlugin};
 
-const DEG_TO_RADIANS: f32 = PI / 180.;
 const MIN_CAMERA_PITCH_DEGREES: f32 = 1.;
 const MAX_CAMERA_PITCH_DEGREES: f32 = 179.;
-const MIN_CAMERA_PITCH: f32 = MIN_CAMERA_PITCH_DEGREES * DEG_TO_RADIANS;
-const MAX_CAMERA_PITCH: f32 = MAX_CAMERA_PITCH_DEGREES * DEG_TO_RADIANS;
-const TWO_PI: f32 = std::f32::consts::PI * 2.0;
+const MIN_CAMERA_PITCH: f32 = MIN_CAMERA_PITCH_DEGREES * utils::DEG_TO_RADIANS;
+const MAX_CAMERA_PITCH: f32 = MAX_CAMERA_PITCH_DEGREES * utils::DEG_TO_RADIANS;
 
 pub struct PlayerPlugin;
 use character::CharacterPlugin;
@@ -161,7 +157,7 @@ fn process_mouse_events(
     }
 
     for (mut player, config, mut yaw) in query.iter_mut() {
-        yaw.0 = (yaw.0 + look.x * time.delta_seconds() * config.look_sensitivity) % TWO_PI;
+        yaw.0 = (yaw.0 + look.x * time.delta_seconds() * config.look_sensitivity) % utils::TWO_PI;
         player.camera.pitch = (player.camera.pitch
             - look.y * time.delta_seconds() * config.look_sensitivity)
             .max(MIN_CAMERA_PITCH)
