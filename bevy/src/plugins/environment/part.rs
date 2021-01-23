@@ -5,8 +5,8 @@ use bevy_rapier3d::rapier::dynamics::RigidBodyBuilder;
 use bevy_rapier3d::rapier::geometry::ColliderBuilder;
 use rand::Rng;
 use std::f32;
+
 pub struct PartPlugin;
-// use crate::utils;
 
 impl Plugin for PartPlugin {
     fn build(&self, app: &mut AppBuilder) {
