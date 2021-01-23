@@ -59,5 +59,5 @@ impl WasmMouseTracker {
 }
 
 pub fn get_look(wasm_mouse_tracker: Res<WasmMouseTracker>) -> Vec2 {
-    wasm_mouse_tracker.get_delta_and_reset()
+    wasm_mouse_tracker.get_delta_and_reset() * 0.15
 }

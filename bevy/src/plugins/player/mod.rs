@@ -54,10 +54,10 @@ struct Config {
 #[derive(Default)]
 pub struct KeyboardDirectionalInput(pub Vec3);
 
-struct Camera {
+pub struct Camera {
     distance: f32,
     pitch: f32,
-    entity: Option<Entity>,
+    pub entity: Option<Entity>,
 }
 
 impl Default for Camera {
@@ -81,9 +81,17 @@ impl Camera {
 
 #[derive(Default, Bundle)]
 pub struct Player {
-    camera: Camera,
+    pub camera: Camera,
 }
 
+#[derive(Default)]
+pub struct FocusedInteractable {
+    pub current: Option<Entity>,
+    pub previous: Option<Entity>,
+    pub previous_color: Option<Color>,
+}
+
+#[derive(Default)]
 pub struct Yaw(pub f32);
 
 impl Player {
@@ -117,9 +125,10 @@ fn setup(
 
     let player_entity = commands
         .with(Player::new(camera_entity))
-        .with(Yaw(0.))
+        .with(Yaw::default())
         .with(config)
         .with(KeyboardDirectionalInput::default())
+        .with(FocusedInteractable::default())
         .current_entity();
 
     // This is simply a point that hovers above the character that the camera orbits around.
