@@ -1,10 +1,8 @@
-use crate::{AppState, APP_STATE};
+use crate::{utils, AppState, APP_STATE};
 use bevy::{input::mouse::MouseWheel, prelude::*};
 use serde::Deserialize;
 
 use super::character;
-
-use std::f32::consts::PI;
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
@@ -15,12 +13,10 @@ mod web;
 #[cfg(target_arch = "wasm32")]
 use web::{get_look, PlatformPlugin};
 
-const DEG_TO_RADIANS: f32 = PI / 180.;
 const MIN_CAMERA_PITCH_DEGREES: f32 = 1.;
 const MAX_CAMERA_PITCH_DEGREES: f32 = 179.;
-const MIN_CAMERA_PITCH: f32 = MIN_CAMERA_PITCH_DEGREES * DEG_TO_RADIANS;
-const MAX_CAMERA_PITCH: f32 = MAX_CAMERA_PITCH_DEGREES * DEG_TO_RADIANS;
-const TWO_PI: f32 = std::f32::consts::PI * 2.0;
+const MIN_CAMERA_PITCH: f32 = MIN_CAMERA_PITCH_DEGREES * utils::DEG_TO_RADIANS;
+const MAX_CAMERA_PITCH: f32 = MAX_CAMERA_PITCH_DEGREES * utils::DEG_TO_RADIANS;
 
 pub struct PlayerPlugin;
 use character::CharacterPlugin;
@@ -58,10 +54,10 @@ struct Config {
 #[derive(Default)]
 pub struct KeyboardDirectionalInput(pub Vec3);
 
-struct Camera {
+pub struct Camera {
     distance: f32,
     pitch: f32,
-    entity: Option<Entity>,
+    pub entity: Option<Entity>,
 }
 
 impl Default for Camera {
@@ -85,9 +81,17 @@ impl Camera {
 
 #[derive(Default, Bundle)]
 pub struct Player {
-    camera: Camera,
+    pub camera: Camera,
 }
 
+#[derive(Default)]
+pub struct FocusedInteractable {
+    pub current: Option<Entity>,
+    pub previous: Option<Entity>,
+    pub previous_color: Option<Color>,
+}
+
+#[derive(Default)]
 pub struct Yaw(pub f32);
 
 impl Player {
@@ -121,9 +125,10 @@ fn setup(
 
     let player_entity = commands
         .with(Player::new(camera_entity))
-        .with(Yaw(0.))
+        .with(Yaw::default())
         .with(config)
         .with(KeyboardDirectionalInput::default())
+        .with(FocusedInteractable::default())
         .current_entity();
 
     // This is simply a point that hovers above the character that the camera orbits around.
@@ -161,7 +166,7 @@ fn process_mouse_events(
     }
 
     for (mut player, config, mut yaw) in query.iter_mut() {
-        yaw.0 = (yaw.0 + look.x * time.delta_seconds() * config.look_sensitivity) % TWO_PI;
+        yaw.0 = (yaw.0 + look.x * time.delta_seconds() * config.look_sensitivity) % utils::TWO_PI;
         player.camera.pitch = (player.camera.pitch
             - look.y * time.delta_seconds() * config.look_sensitivity)
             .max(MIN_CAMERA_PITCH)
