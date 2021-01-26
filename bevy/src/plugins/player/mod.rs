@@ -37,7 +37,6 @@ impl Plugin for PlayerPlugin {
                 AppState::InGame,
                 process_keyboard_events.system(),
             )
-            .on_state_update(APP_STATE, AppState::InGame, process_mouse_clicks.system())
             // .add_system(update_camera.system())
             // .add_system(update_camera_distance.system())
             .add_plugin(PlatformPlugin)
@@ -286,18 +285,6 @@ fn process_keyboard_events(
         // If so, then normalize the vector components.
         if keyboard_directional_input.0 != Vec3::zero() {
             keyboard_directional_input.0.normalize();
-        }
-    }
-}
-
-fn process_mouse_clicks(
-    mouse_button_input: Res<Input<MouseButton>>,
-    mut players: Query<(&mut Holding, &FocusedInteractable), With<Player>>,
-) {
-    if mouse_button_input.just_pressed(MouseButton::Left) {
-        let (mut holding, interactable) = players.iter_mut().next().unwrap();
-        if let Some(_current_interactable) = interactable.current {
-            holding.0 = !holding.0;
         }
     }
 }
