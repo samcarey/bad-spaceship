@@ -82,32 +82,40 @@ const MAX_INTERACT_ANGLE: f32 = MAX_INTERACT_ANGLE_DEGREES * utils::DEG_TO_RADIA
 fn update_focused_interactables(
     mut players: Query<
         (
-            &Transform,
             &mut player::FocusedInteractable,
             &player::Holding,
+            &Children,
         ),
         With<player::Player>,
     >,
     mut interactables: Query<(&mut Transform, Entity), With<Interactable>>,
+    camera_orbit_centers: Query<&GlobalTransform, With<CameraOrbitCenter>>,
 ) {
     // Determine which iteractable entity each player is focused on (i.e. looking at, within range)
 
-    for (player_transform, mut focused_interactable, holding) in players.iter_mut() {
+    for (mut focused_interactable, holding, player_children) in players.iter_mut() {
         if holding.0 {
             return;
         }
 
-        // Search for the most appropriate interactable that should be focused by the player
-        let mut smallest_angle = MAX_INTERACT_ANGLE;
         let mut new_focused_interactable = None;
-        for (interactable_transform, interactable) in interactables.iter_mut() {
-            let vector_between = interactable_transform.translation - player_transform.translation;
-            if vector_between.length_squared() < MAX_INTERACT_DISTANCE_SQUARED {
-                let angle_from_look = player_transform.forward().angle_between(vector_between);
+        for player_child in player_children.iter() {
+            if let Ok(camera_orbit_center) = camera_orbit_centers.get(*player_child) {
+                // Search for the most appropriate interactable that should be focused by the player
+                let mut smallest_angle = MAX_INTERACT_ANGLE;
 
-                if angle_from_look < smallest_angle {
-                    smallest_angle = angle_from_look;
-                    new_focused_interactable = Some(interactable.clone());
+                for (interactable_transform, interactable) in interactables.iter_mut() {
+                    let vector_between =
+                        interactable_transform.translation - camera_orbit_center.translation;
+                    if vector_between.length_squared() < MAX_INTERACT_DISTANCE_SQUARED {
+                        let angle_from_look =
+                            camera_orbit_center.forward().angle_between(vector_between);
+
+                        if angle_from_look < smallest_angle {
+                            smallest_angle = angle_from_look;
+                            new_focused_interactable = Some(interactable.clone());
+                        }
+                    }
                 }
             }
         }
