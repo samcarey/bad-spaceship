@@ -15,9 +15,12 @@ pub struct State {
 }
 
 pub fn get_look(mut state: ResMut<State>, mouse_motion_events: Res<Events<MouseMotion>>) -> Vec2 {
-    let mut look = Vec2::zero();
-    for event in state.mouse_motion_event_reader.iter(&mouse_motion_events) {
-        look = event.delta;
+    match state
+        .mouse_motion_event_reader
+        .iter(&mouse_motion_events)
+        .last()
+    {
+        Some(event) => event.delta,
+        None => Vec2::zero(),
     }
-    look
 }

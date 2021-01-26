@@ -1,9 +1,14 @@
 use crate::plugins::{environment::map, player};
-use crate::utils;
+use crate::utils::{self, Vec3Ext};
 use bevy::prelude::*;
-use bevy_rapier3d::rapier::dynamics::RigidBodyBuilder;
-use bevy_rapier3d::rapier::geometry::ColliderBuilder;
+use bevy_rapier3d::{physics::RapierConfiguration, rapier::geometry::ColliderBuilder};
+use bevy_rapier3d::{physics::RigidBodyHandleComponent, rapier::dynamics::RigidBodyBuilder};
+use player::{CameraOrbitCenter, FocusedInteractable, Holding};
 use rand::Rng;
+use rapier3d::{
+    dynamics::{RigidBody, RigidBodySet},
+    math::Vector,
+};
 use std::f32;
 
 pub struct PartPlugin;
@@ -13,15 +18,22 @@ impl Plugin for PartPlugin {
         app.add_startup_system(spawn_parts.system())
             .add_system(replace_fallen_parts.system())
             .add_system(update_focused_interactables.system())
-            .add_system(highlight_interactables.system());
+            .add_system(highlight_interactables.system())
+            .add_resource(HoldingConfig::new(30.0))
+            .add_system(
+                get_active_hold_point_and_part
+                    .system()
+                    .chain(hold_part.system()),
+            );
     }
 }
 
 const NUM_PARTS: i32 = 10;
 const PART_SIZE: f32 = 1.0;
 
-#[derive(Default)]
 struct Interactable;
+
+struct Holdable;
 
 struct GetsReplaced;
 
@@ -38,7 +50,8 @@ fn spawn_part(commands: &mut Commands) {
         ColliderBuilder::cuboid(PART_SIZE / 2.0, PART_SIZE / 2.0, PART_SIZE / 2.0)
             .friction(1.0)
             .density(2.0),
-        Interactable::default(),
+        Interactable,
+        Holdable,
         GetsReplaced,
     ));
 }
@@ -67,12 +80,23 @@ const MAX_INTERACT_ANGLE_DEGREES: f32 = 20.0;
 const MAX_INTERACT_ANGLE: f32 = MAX_INTERACT_ANGLE_DEGREES * utils::DEG_TO_RADIANS;
 
 fn update_focused_interactables(
-    mut players: Query<(&Transform, &mut player::FocusedInteractable), With<player::Player>>,
+    mut players: Query<
+        (
+            &Transform,
+            &mut player::FocusedInteractable,
+            &player::Holding,
+        ),
+        With<player::Player>,
+    >,
     mut interactables: Query<(&mut Transform, Entity), With<Interactable>>,
 ) {
     // Determine which iteractable entity each player is focused on (i.e. looking at, within range)
 
-    for (player_transform, mut focused_interactable) in players.iter_mut() {
+    for (player_transform, mut focused_interactable, holding) in players.iter_mut() {
+        if holding.0 {
+            return;
+        }
+
         // Search for the most appropriate interactable that should be focused by the player
         let mut smallest_angle = MAX_INTERACT_ANGLE;
         let mut new_focused_interactable = None;
@@ -135,6 +159,78 @@ fn highlight_interactables(
                 // Make more yellowish
                 color.set_g((color.g() + 0.75).min(1.0));
                 color.set_r((color.r() + 0.75).min(1.0));
+            }
+        }
+    }
+}
+
+fn get_active_hold_point_and_part(
+    players: Query<(&Children, &FocusedInteractable, &Holding)>,
+    camera_orbit_centers: Query<&Children, With<CameraOrbitCenter>>,
+    hold_points: Query<&GlobalTransform, With<player::HoldPoint>>,
+) -> Option<(Entity, Entity)> {
+    let (player_children, focused_interactable, holding) = players.iter().next().unwrap();
+
+    if let Some(current) = focused_interactable.current {
+        if holding.0 {
+            for player_child in player_children.iter() {
+                if let Ok(camera_orbit_center_children) = camera_orbit_centers.get(*player_child) {
+                    for camera_orbit_center_child in camera_orbit_center_children.iter() {
+                        if let Ok(_hold_point) = hold_points.get(*camera_orbit_center_child) {
+                            return Some((camera_orbit_center_child.clone(), current.clone()));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+struct HoldingConfig {
+    stiffness: f32,
+    damping: f32,
+}
+
+impl HoldingConfig {
+    pub fn new(stiffness: f32) -> Self {
+        Self {
+            stiffness,
+            // Critically damped
+            damping: 2.0 * stiffness.sqrt(),
+        }
+    }
+
+    pub fn calc_positioning_force(
+        &self,
+        hold_point: &GlobalTransform,
+        part_transform: &Transform,
+        rb: &RigidBody,
+    ) -> Vector<f32> {
+        let vector_between: Vec3 = hold_point.translation - part_transform.translation;
+        let positioning_acceleration =
+            vector_between.to_vector() * self.stiffness - self.damping * rb.linvel();
+        positioning_acceleration * rb.mass()
+    }
+}
+
+fn hold_part(
+    In(hold_point_and_part_entity): In<Option<(Entity, Entity)>>,
+    hold_points: Query<&GlobalTransform, With<player::HoldPoint>>,
+    parts: Query<(&Transform, &RigidBodyHandleComponent), With<Holdable>>,
+    mut bodies: ResMut<RigidBodySet>,
+    physics_config: Res<RapierConfiguration>,
+    holding_config: Res<HoldingConfig>,
+) {
+    if let Some((hold_point_entity, part_entity)) = hold_point_and_part_entity {
+        if let Ok(hold_point) = hold_points.get(hold_point_entity) {
+            if let Ok((part_transform, part_rb_handle)) = parts.get(part_entity) {
+                if let Some(rb) = bodies.get_mut(part_rb_handle.handle()) {
+                    let gravity_cancelation_force = -rb.mass() * physics_config.gravity;
+                    let positioning_force =
+                        holding_config.calc_positioning_force(hold_point, part_transform, rb);
+                    rb.apply_force(positioning_force + gravity_cancelation_force, true);
+                }
             }
         }
     }
