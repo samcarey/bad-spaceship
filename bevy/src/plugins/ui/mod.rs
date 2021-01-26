@@ -46,7 +46,8 @@ impl Plugin for UiPlugin {
                 APP_STATE,
                 AppState::Initial,
                 capture_mouse_on_click.system(),
-            );
+            )
+            .add_startup_system(spawn_metadata_text.system());
     }
 }
 
@@ -295,4 +296,29 @@ fn capture_mouse_on_click(
     for _ev in input_state.mousebtn.iter(&ev_mousebtn) {
         state.set_next(AppState::InGame).unwrap();
     }
+}
+
+fn spawn_metadata_text(commands: &mut Commands, asset_server: Res<AssetServer>) {
+    commands.spawn(TextBundle {
+        style: Style {
+            align_self: AlignSelf::FlexEnd,
+            position_type: PositionType::Absolute,
+            position: Rect {
+                bottom: Val::Px(5.0),
+                left: Val::Px(15.0),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        text: Text {
+            value: format!("v.{}", env!("CARGO_PKG_VERSION")),
+            font: asset_server.load("fonts/FiraMono-Medium.ttf"),
+            style: TextStyle {
+                font_size: 30.0,
+                color: Color::PINK,
+                alignment: TextAlignment::default(),
+            },
+        },
+        ..Default::default()
+    });
 }
