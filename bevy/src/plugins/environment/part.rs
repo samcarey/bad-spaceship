@@ -177,21 +177,24 @@ fn get_active_hold_point_and_part(
     camera_orbit_centers: Query<&Children, With<CameraOrbitCenter>>,
     hold_points: Query<&GlobalTransform, With<player::HoldPoint>>,
 ) -> Option<(Entity, Entity)> {
-    let (player_children, focused_interactable, holding) = players.iter().next().unwrap();
-
-    if let Some(current) = focused_interactable.current {
-        if holding.0 {
-            for player_child in player_children.iter() {
-                if let Ok(camera_orbit_center_children) = camera_orbit_centers.get(*player_child) {
-                    for camera_orbit_center_child in camera_orbit_center_children.iter() {
-                        if let Ok(_hold_point) = hold_points.get(*camera_orbit_center_child) {
-                            return Some((camera_orbit_center_child.clone(), current.clone()));
+    if let Some((player_children, focused_interactable, holding)) = players.iter().next() {
+        if let Some(current) = focused_interactable.current {
+            if holding.0 {
+                for player_child in player_children.iter() {
+                    if let Ok(camera_orbit_center_children) =
+                        camera_orbit_centers.get(*player_child)
+                    {
+                        for camera_orbit_center_child in camera_orbit_center_children.iter() {
+                            if let Ok(_hold_point) = hold_points.get(*camera_orbit_center_child) {
+                                return Some((camera_orbit_center_child.clone(), current.clone()));
+                            }
                         }
                     }
                 }
             }
         }
     }
+
     None
 }
 

@@ -19,6 +19,8 @@ const MAX_CAMERA_PITCH_DEGREES: f32 = 89.;
 const MIN_CAMERA_PITCH_DEGREES: f32 = -89.;
 const MIN_CAMERA_PITCH: f32 = MIN_CAMERA_PITCH_DEGREES * utils::DEG_TO_RADIANS;
 const MAX_CAMERA_PITCH: f32 = MAX_CAMERA_PITCH_DEGREES * utils::DEG_TO_RADIANS;
+const INITIAL_CAMERA_PITCH_DEGREES: f32 = 30.;
+const INITIAL_CAMERA_PITCH: f32 = INITIAL_CAMERA_PITCH_DEGREES * utils::DEG_TO_RADIANS;
 
 pub struct PlayerPlugin;
 use character::CharacterPlugin;
@@ -39,6 +41,7 @@ impl Plugin for PlayerPlugin {
             )
             // .add_system(update_camera.system())
             // .add_system(update_camera_distance.system())
+            .add_system(respawn.system())
             .add_plugin(PlatformPlugin)
             .add_plugin(CharacterPlugin);
     }
@@ -54,6 +57,12 @@ struct Config {
     camera_offset_character_size_ratio: (f32, f32, f32),
 }
 
+impl Default for Config {
+    fn default() -> Self {
+        config_from_file!("player.ron")
+    }
+}
+
 #[derive(Default)]
 pub struct KeyboardDirectionalInput(pub Vec3);
 
@@ -65,7 +74,7 @@ pub struct OrbitingCamera {
 impl Default for OrbitingCamera {
     fn default() -> Self {
         OrbitingCamera {
-            pitch: -30.0f32.to_radians(),
+            pitch: INITIAL_CAMERA_PITCH,
             entity: None,
         }
     }
@@ -150,8 +159,6 @@ fn tuple_to_vec3(tuple: (f32, f32, f32)) -> Vec3 {
 }
 
 fn setup(commands: &mut Commands) {
-    let config: Config = config_from_file!("player.ron");
-
     let mut camera_transform =
         Transform::from_rotation(Quat::from_rotation_ypr(std::f32::consts::PI, 0.0, 0.0));
     camera_transform.translation = -Vec3::unit_z() * 20.0;
@@ -161,6 +168,42 @@ fn setup(commands: &mut Commands) {
             ..Default::default()
         })
         .current_entity();
+    spawn(commands, camera_entity);
+}
+
+fn respawn(
+    players: Query<(&Transform, Entity, &Children), With<Player>>,
+    camera_orbit_centers: Query<&Children, With<CameraOrbitCenter>>,
+    cameras: Query<Entity, With<Camera>>,
+    commands: &mut Commands,
+) {
+    for (player_transform, player_entity, player_children) in players.iter() {
+        if player_transform.translation.y < -30.0 {
+            let camera_orbit_center = player_children.iter().next().unwrap();
+
+            let mut camera_option = None;
+            for camera_orbit_center_child in camera_orbit_centers
+                .get(*camera_orbit_center)
+                .unwrap()
+                .iter()
+            {
+                if let Ok(camera) = cameras.get(*camera_orbit_center_child) {
+                    camera_option = Some(camera);
+                }
+            }
+            let camera = camera_option.unwrap();
+
+            commands
+                .despawn(player_entity)
+                .despawn(*camera_orbit_center);
+
+            spawn(commands, Some(camera));
+        }
+    }
+}
+
+fn spawn(commands: &mut Commands, camera_entity: Option<Entity>) {
+    let config: Config = config_from_file!("player.ron");
 
     let character_size = character::spawn(commands);
 
@@ -177,11 +220,13 @@ fn setup(commands: &mut Commands) {
     // This is for the purpose of making it easier to see over obstructions.
     // For now we generate this as a PbrComponent, which is overkill for an invisible point,
     // so we'll want to simplify this later to something with only the necessary components.
+    let mut camera_orbit_center_transform = Transform::from_translation(
+        tuple_to_vec3(config.camera_offset_character_size_ratio) * character_size,
+    );
+    camera_orbit_center_transform.rotation = Quat::from_rotation_x(INITIAL_CAMERA_PITCH);
     let camera_orbit_center = commands
         .spawn(CameraOrbitCenterBundle {
-            transform: Transform::from_translation(
-                tuple_to_vec3(config.camera_offset_character_size_ratio) * character_size,
-            ),
+            transform: camera_orbit_center_transform,
             ..Default::default()
         })
         .current_entity();
@@ -211,29 +256,29 @@ fn process_mouse_events(
     mut cameras: Query<&mut Transform, With<Camera>>,
     mut camera_orbit_centers: Query<&mut Transform, With<CameraOrbitCenter>>,
 ) {
-    let (mut player, config, mut yaw) = query.iter_mut().next().unwrap();
+    if let Some((mut player, config, mut yaw)) = query.iter_mut().next() {
+        let camera = &mut player.camera;
 
-    let camera = &mut player.camera;
+        yaw.0 = (yaw.0 + look.x * time.delta_seconds() * config.look_sensitivity) % utils::TWO_PI;
 
-    yaw.0 = (yaw.0 + look.x * time.delta_seconds() * config.look_sensitivity) % utils::TWO_PI;
+        camera.pitch = (camera.pitch + look.y * time.delta_seconds() * config.look_sensitivity)
+            .max(MIN_CAMERA_PITCH)
+            .min(MAX_CAMERA_PITCH);
 
-    camera.pitch = (camera.pitch + look.y * time.delta_seconds() * config.look_sensitivity)
-        .max(MIN_CAMERA_PITCH)
-        .min(MAX_CAMERA_PITCH);
+        // By tilting the orbit center that the camera is attached to,
+        // the camera itself is swung to the correct position
+        let mut camera_orbit_center_transform = camera_orbit_centers.iter_mut().next().unwrap();
+        camera_orbit_center_transform.rotation = Quat::from_rotation_x(camera.pitch);
 
-    // By tilting the orbit center that the camera is attached to,
-    // the camera itself is swung to the correct position
-    let mut camera_orbit_center_transform = camera_orbit_centers.iter_mut().next().unwrap();
-    camera_orbit_center_transform.rotation = Quat::from_rotation_x(camera.pitch);
-
-    if let Some(zoom_delta) = mouse_wheel_state.get_zoom_delta(&mouse_wheel_events) {
-        // Set the camera translation relative to the camera orbit center
-        let mut camera_transform = cameras.get_mut(camera.entity.unwrap()).unwrap();
-        camera_transform.translation = -Vec3::unit_z()
-            * (-camera_transform.translation.z
-                - zoom_delta * time.delta_seconds() * config.zoom_sensitivity)
-                .max(config.min_camera_distance)
-                .min(config.max_camera_distance);
+        if let Some(zoom_delta) = mouse_wheel_state.get_zoom_delta(&mouse_wheel_events) {
+            // Set the camera translation relative to the camera orbit center
+            let mut camera_transform = cameras.get_mut(camera.entity.unwrap()).unwrap();
+            camera_transform.translation = -Vec3::unit_z()
+                * (-camera_transform.translation.z
+                    - zoom_delta * time.delta_seconds() * config.zoom_sensitivity)
+                    .max(config.min_camera_distance)
+                    .min(config.max_camera_distance);
+        }
     }
 }
 

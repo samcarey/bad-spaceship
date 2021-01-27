@@ -29,4 +29,16 @@ fn add_platform(commands: &mut Commands) {
     );
 
     commands.spawn((platform_rigid_body, platform_collider));
+
+    let mut camera_transform = Transform::from_translation(Vec3::new(
+        PLATFORM_WIDTH_M * 2.,
+        PLATFORM_WIDTH_M * 2.,
+        PLATFORM_WIDTH_M * 2.,
+    ));
+    let look = Mat4::face_toward(camera_transform.translation, Vec3::zero(), Vec3::unit_y());
+    camera_transform.rotation = look.to_scale_rotation_translation().1;
+    commands.spawn(Camera3dBundle {
+        transform: camera_transform,
+        ..Default::default()
+    });
 }

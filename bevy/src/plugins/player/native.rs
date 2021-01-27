@@ -37,9 +37,10 @@ fn process_mouse_clicks(
     mut players: Query<(&mut Holding, &FocusedInteractable), With<Player>>,
 ) {
     if mouse_button_input.just_pressed(MouseButton::Left) {
-        let (mut holding, interactable) = players.iter_mut().next().unwrap();
-        if let Some(_current_interactable) = interactable.current {
-            holding.0 = !holding.0;
+        if let Some((mut holding, interactable)) = players.iter_mut().next() {
+            if let Some(_current_interactable) = interactable.current {
+                holding.0 = !holding.0;
+            }
         }
     }
 }
