@@ -3,11 +3,15 @@ use crate::{
     AppState, APP_STATE,
 };
 use bevy::prelude::*;
-use bevy_rapier3d::physics::RigidBodyHandleComponent;
+use bevy_rapier3d::physics::{EventQueue, RigidBodyHandleComponent};
 use bevy_rapier3d::rapier::dynamics::RigidBodyBuilder;
 use bevy_rapier3d::rapier::geometry::ColliderBuilder;
-use rapier3d::dynamics::RigidBodySet;
-use rapier3d::math::{Isometry, Vector};
+use player::Player;
+use rapier3d::{
+    dynamics::RigidBodyHandle,
+    math::{Isometry, Vector},
+};
+use rapier3d::{dynamics::RigidBodySet, geometry::ContactEvent};
 use serde::Deserialize;
 
 use crate::plugins::player;
@@ -24,13 +28,23 @@ impl Plugin for CharacterPlugin {
         .add_system_to_stage(
             stage::POST_UPDATE,
             rotate_character_based_on_mouse_input.system(),
-        );
+        )
+        .add_system(touching_ground.system());
     }
 }
 
 struct Name(String);
 struct MoveSpeed(f32);
 struct JumpForce(f32);
+
+#[derive(Default)]
+struct Touching(Vec<RigidBodyHandle>);
+
+impl Touching {
+    pub fn index(&self, handle: &RigidBodyHandle) -> Option<usize> {
+        self.0.iter().position(|x| *x == *handle)
+    }
+}
 
 #[derive(Deserialize)]
 struct Config {
@@ -49,8 +63,46 @@ pub fn spawn(commands: &mut Commands) -> f32 {
         .spawn((rigid_body, collider))
         .with(MoveSpeed(config.max_speed))
         .with(JumpForce(config.jump_force))
-        .with(Name(config.name));
+        .with(Name(config.name))
+        .with(Touching::default());
     return config.size;
+}
+
+fn touching_ground(
+    mut players: Query<(&mut Touching, &RigidBodyHandleComponent), With<Player>>,
+    events: Res<EventQueue>,
+) {
+    // TODO: Simplify this block?
+    while let Ok(contact_event) = events.contact_events.pop() {
+        for (mut touching, player_rb_handle) in players.iter_mut() {
+            match contact_event {
+                ContactEvent::Stopped(handle1, handle2) => {
+                    if player_rb_handle.handle() == handle1 {
+                        if let Some(index) = touching.index(&handle2) {
+                            touching.0.remove(index);
+                        }
+                    } else if player_rb_handle.handle() == handle2 {
+                        if let Some(index) = touching.index(&handle1) {
+                            touching.0.remove(index);
+                        }
+                    }
+                }
+                ContactEvent::Started(handle1, handle2) => {
+                    if player_rb_handle.handle() == handle1 {
+                        if let None = touching.index(&handle2) {
+                            touching.0.push(handle2);
+                        }
+                    } else if player_rb_handle.handle() == handle2 {
+                        if let None = touching.index(&handle1) {
+                            touching.0.push(handle1);
+                        }
+                    }
+                }
+            }
+
+            // println!("Received contact event: {:?}", contact_event);
+        }
+    }
 }
 
 fn move_character_based_on_keyboard_input(
@@ -61,9 +113,11 @@ fn move_character_based_on_keyboard_input(
         &Transform,
         &MoveSpeed,
         &JumpForce,
+        &Touching,
     )>,
 ) {
-    for (keyboard_directional_input, rigid_body, transform, move_speed, jump_force) in query.iter()
+    for (keyboard_directional_input, rigid_body, transform, move_speed, jump_force, touching) in
+        query.iter()
     {
         if let Some(rb) = bodies.get_mut(rigid_body.handle()) {
             //
@@ -89,7 +143,7 @@ fn move_character_based_on_keyboard_input(
             // Start with the horizontal plane (x,z)
             // Compute our desired horizontal velocity vector and apply an impulse to the rigid body.
             //
-            {
+            if !touching.0.is_empty() {
                 //
                 // Compute our desired horizontal velocity vector based on keyboard inputs and move speed
                 //  Note: Horizontal plane = (x,z), Vertical plane = (y)
@@ -136,11 +190,13 @@ fn move_character_based_on_keyboard_input(
                 rb.apply_impulse(horizontal_impulse, true);
             }
 
+            // TODO: Update this documentation and variable names,
+            // since we're doing an impulse instead of force now.
             //
             // Now consider the vertical plane (y)
             // Compute our desired vertical velocity vector and apply a force to the rigid body.
             //
-            {
+            if !touching.0.is_empty() {
                 //
                 // Compute our desired vertical velocity vector based on keyboard inputs and move speed
                 //  Note: Horizontal plane = (x,z), Vertical plane = (y)
@@ -184,7 +240,7 @@ fn move_character_based_on_keyboard_input(
                 // Apply the computed force to the character's rigid body
                 //
                 let vertical_force = rb.mass() * vertical_velocity;
-                rb.apply_force(vertical_force, true);
+                rb.apply_impulse(vertical_force, true);
             }
         }
     }
