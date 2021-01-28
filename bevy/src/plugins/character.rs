@@ -56,15 +56,15 @@ struct Config {
 
 pub fn spawn(commands: &mut Commands) -> f32 {
     let config: Config = config_from_file!("character.ron");
-    let rigid_body = RigidBodyBuilder::new_dynamic().translation(0.0, 10.0, 0.0);
-    let collider = ColliderBuilder::cuboid(config.size / 2.0, config.size / 2.0, config.size / 2.0);
 
-    commands
-        .spawn((rigid_body, collider))
-        .with(MoveSpeed(config.max_speed))
-        .with(JumpForce(config.jump_force))
-        .with(Name(config.name))
-        .with(Touching::default());
+    commands.spawn((
+        RigidBodyBuilder::new_dynamic().translation(0.0, 10.0, 0.0),
+        ColliderBuilder::cuboid(config.size / 2.0, config.size / 2.0, config.size / 2.0),
+        MoveSpeed(config.max_speed),
+        JumpForce(config.jump_force),
+        Name(config.name),
+        Touching::default(),
+    ));
     return config.size;
 }
 
