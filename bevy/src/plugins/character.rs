@@ -3,15 +3,15 @@ use crate::{
     AppState, APP_STATE,
 };
 use bevy::prelude::*;
-use bevy_rapier3d::physics::{EventQueue, RigidBodyHandleComponent};
+use bevy_rapier3d::physics::{ColliderHandleComponent, EventQueue, RigidBodyHandleComponent};
 use bevy_rapier3d::rapier::dynamics::RigidBodyBuilder;
 use bevy_rapier3d::rapier::geometry::ColliderBuilder;
 use player::Player;
+use rapier3d::{dynamics::RigidBodySet, geometry::ContactEvent};
 use rapier3d::{
-    dynamics::RigidBodyHandle,
+    geometry::ColliderHandle,
     math::{Isometry, Vector},
 };
-use rapier3d::{dynamics::RigidBodySet, geometry::ContactEvent};
 use serde::Deserialize;
 
 use crate::plugins::player;
@@ -38,10 +38,10 @@ struct MoveSpeed(f32);
 struct JumpForce(f32);
 
 #[derive(Default)]
-struct Touching(Vec<RigidBodyHandle>);
+struct Touching(Vec<ColliderHandle>);
 
 impl Touching {
-    pub fn index(&self, handle: &RigidBodyHandle) -> Option<usize> {
+    pub fn index(&self, handle: &ColliderHandle) -> Option<usize> {
         self.0.iter().position(|x| *x == *handle)
     }
 }
@@ -58,8 +58,10 @@ pub fn spawn(commands: &mut Commands) -> f32 {
     let config: Config = config_from_file!("character.ron");
 
     commands.spawn((
-        RigidBodyBuilder::new_dynamic().translation(0.0, 10.0, 0.0),
-        ColliderBuilder::cuboid(config.size / 2.0, config.size / 2.0, config.size / 2.0),
+        RigidBodyBuilder::new_dynamic()
+            .translation(0.0, 10.0, 0.0)
+            .restrict_rotations(false, false, false),
+        ColliderBuilder::ball(config.size / 2.0),
         MoveSpeed(config.max_speed),
         JumpForce(config.jump_force),
         Name(config.name),
@@ -69,7 +71,7 @@ pub fn spawn(commands: &mut Commands) -> f32 {
 }
 
 fn touching_ground(
-    mut players: Query<(&mut Touching, &RigidBodyHandleComponent), With<Player>>,
+    mut players: Query<(&mut Touching, &ColliderHandleComponent), With<Player>>,
     events: Res<EventQueue>,
 ) {
     // TODO: Simplify this block?

@@ -312,7 +312,7 @@ dependencies = [
  "bevy_utils",
  "bitflags",
  "downcast-rs",
- "fixedbitset 0.3.1",
+ "fixedbitset",
  "lazy_static",
  "parking_lot",
  "rand 0.7.3",
@@ -442,9 +442,9 @@ dependencies = [
 
 [[package]]
 name = "bevy_rapier3d"
-version = "0.7.0"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c11b4b13050eb907f824c92b598e418e75f710c50a3c35a2cd3f97f6f5afc0e1"
+checksum = "e5fc445c7cda1592ab9c2db7d3ef4e6dc341c31799af678ec13c01070b57894a"
 dependencies = [
  "bevy",
  "concurrent-queue",
@@ -1238,12 +1238,6 @@ dependencies = [
 
 [[package]]
 name = "fixedbitset"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "37ab347416e802de484e4d03c7316c48f1ecb56574dfd4a46a80f173ce1de04d"
-
-[[package]]
-name = "fixedbitset"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4e08c8bc7575d7e091fe0706963bd22e2a4be6a64da995f03b2a5a57d66ad015"
@@ -1753,12 +1747,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "hashbrown"
-version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "00d63df3d41950fb462ed38308eea019113ad1508da725bbedcd0fa5a85ef5f7"
-
-[[package]]
 name = "hermit-abi"
 version = "0.1.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1826,16 +1814,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
-]
-
-[[package]]
-name = "indexmap"
-version = "1.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "55e2e4c765aa53a0424761bf9f41aa7a6ac1efa87238f59560640e27fca028f2"
-dependencies = [
- "autocfg",
- "hashbrown",
 ]
 
 [[package]]
@@ -2141,9 +2119,9 @@ dependencies = [
 
 [[package]]
 name = "nalgebra"
-version = "0.23.1"
+version = "0.24.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4a41c09fb7e71f683dbdd1b251c12e72699670e2d63c4622690423658810b2d9"
+checksum = "1a9002895a0de45e3cde58b36d0cf2f83249e7dba4a43ee64dafbf01bfd464ff"
 dependencies = [
  "approx",
  "generic-array",
@@ -2155,25 +2133,6 @@ dependencies = [
  "rand_distr",
  "simba",
  "typenum",
-]
-
-[[package]]
-name = "ncollide3d"
-version = "0.26.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7fa86028ca1d3ac2ff5946c64e3f82fc6e9cdfaef2bef716f9fbf7e1559298ec"
-dependencies = [
- "approx",
- "bitflags",
- "downcast-rs",
- "either",
- "nalgebra",
- "num-traits",
- "petgraph",
- "simba",
- "slab",
- "slotmap",
- "smallvec",
 ]
 
 [[package]]
@@ -2445,6 +2404,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "parry3d"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6ebb1132c5aaa9b3bb07030a167058dcb1e40280c487a1ea1b61b2287af7b62c"
+dependencies = [
+ "approx",
+ "bitflags",
+ "downcast-rs",
+ "either",
+ "nalgebra",
+ "num-derive",
+ "num-traits",
+ "rustc-hash",
+ "simba",
+ "slab",
+ "smallvec",
+]
+
+[[package]]
 name = "paste"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2455,16 +2433,6 @@ name = "percent-encoding"
 version = "2.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d4fd5641d01c8f18a23da7b6fe29298ff4b55afcccdf78973b24cf3175fee32e"
-
-[[package]]
-name = "petgraph"
-version = "0.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "467d164a6de56270bd7c4d070df81d07beace25012d5103ced4e9ff08d6afdb7"
-dependencies = [
- "fixedbitset 0.2.0",
- "indexmap",
-]
 
 [[package]]
 name = "pin-project"
@@ -2660,9 +2628,9 @@ checksum = "a871f1e45a3a3f0c73fb60343c811238bb5143a81642e27c2ac7aac27ff01a63"
 
 [[package]]
 name = "rapier3d"
-version = "0.4.2"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c7f175c71f3c2b140f17fd4683097d1b166cd253b1d8dc4cdf3467bd6281b9ef"
+checksum = "c0f32c214cc33e884f3e52ba38cdf81c402cc984840be1bc69cbb5e47aefcae7"
 dependencies = [
  "approx",
  "arrayvec",
@@ -2673,9 +2641,9 @@ dependencies = [
  "generational-arena",
  "instant",
  "nalgebra",
- "ncollide3d",
  "num-derive",
  "num-traits",
+ "parry3d",
  "rayon",
  "rustc-hash",
  "simba",
@@ -2934,12 +2902,6 @@ name = "slab"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c111b5bd5695e56cffe5129854aa230b39c93a305372fdbb2668ca2394eea9f8"
-
-[[package]]
-name = "slotmap"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c46a3482db8f247956e464d783693ece164ca056e6e67563ee5505bdb86452cd"
 
 [[package]]
 name = "smallvec"

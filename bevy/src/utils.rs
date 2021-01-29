@@ -1,7 +1,6 @@
 use std::f32::consts::PI;
 
 pub const DEG_TO_RADIANS: f32 = PI / 180.;
-pub const TWO_PI: f32 = std::f32::consts::PI * 2.0;
 
 #[derive(Clone, Copy)]
 pub struct Args {

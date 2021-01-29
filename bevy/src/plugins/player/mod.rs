@@ -259,7 +259,8 @@ fn process_mouse_events(
     if let Some((mut player, config, mut yaw)) = query.iter_mut().next() {
         let camera = &mut player.camera;
 
-        yaw.0 = (yaw.0 + look.x * time.delta_seconds() * config.look_sensitivity) % utils::TWO_PI;
+        yaw.0 = (yaw.0 + look.x * time.delta_seconds() * config.look_sensitivity)
+            % std::f32::consts::TAU;
 
         camera.pitch = (camera.pitch + look.y * time.delta_seconds() * config.look_sensitivity)
             .max(MIN_CAMERA_PITCH)
