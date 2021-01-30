@@ -237,13 +237,15 @@ impl HoldingConfig {
         &self,
         hold_orientation: &Quat,
         part_transform: &Transform,
-        rb: &RigidBody,
+        rb: &mut RigidBody,
     ) -> Vector<f32> {
         let rotation_between: Quat = part_transform.rotation.conjugate() * hold_orientation.clone();
         let angular_acceleration = rotation_between.to_rotation_vector()
             * self.orientation_stiffness
             - self.orientation_damping * rb.angvel();
         let inertia_sqrt = rb.effective_world_inv_inertia_sqrt.inverse_unchecked();
+        // let dampening = &mut rb.angular_damping;
+        rb.angular_damping = 1.0;
         inertia_sqrt * (inertia_sqrt * angular_acceleration)
     }
 }
@@ -277,10 +279,9 @@ fn orient_part(
 ) {
     for (transform, target_orientation, part_rb_handle) in parts.iter() {
         if let Some(rb) = bodies.get_mut(part_rb_handle.handle()) {
-            rb.apply_torque(
-                holding_config.calc_orientating_torque(&target_orientation.0, transform, rb),
-                true,
-            );
+            let torque =
+                holding_config.calc_orientating_torque(&target_orientation.0, transform, rb);
+            rb.apply_torque(torque, true);
         }
     }
 }
