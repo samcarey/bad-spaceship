@@ -3,7 +3,9 @@ use crate::{
     AppState, APP_STATE,
 };
 use bevy::prelude::*;
-use bevy_rapier3d::physics::{ColliderHandleComponent, EventQueue, RigidBodyHandleComponent};
+use bevy_rapier3d::physics::{
+    ColliderHandleComponent, EventQueue, RapierConfiguration, RigidBodyHandleComponent,
+};
 use bevy_rapier3d::rapier::dynamics::RigidBodyBuilder;
 use bevy_rapier3d::rapier::geometry::ColliderBuilder;
 use player::Player;
@@ -43,6 +45,10 @@ struct Touching(Vec<ColliderHandle>);
 impl Touching {
     pub fn index(&self, handle: &ColliderHandle) -> Option<usize> {
         self.0.iter().position(|x| *x == *handle)
+    }
+
+    pub fn touching(&self) -> bool {
+        !self.0.is_empty()
     }
 }
 
@@ -118,8 +124,14 @@ fn move_character_based_on_keyboard_input(
         &Touching,
     )>,
 ) {
-    for (keyboard_directional_input, rigid_body, transform, move_speed, jump_force, touching) in
-        query.iter()
+    for (
+        keyboard_directional_input,
+        rigid_body,
+        transform,
+        move_speed,
+        jump_force,
+        touch_tracker,
+    ) in query.iter()
     {
         if let Some(rb) = bodies.get_mut(rigid_body.handle()) {
             //
@@ -145,7 +157,7 @@ fn move_character_based_on_keyboard_input(
             // Start with the horizontal plane (x,z)
             // Compute our desired horizontal velocity vector and apply an impulse to the rigid body.
             //
-            if !touching.0.is_empty() {
+            {
                 //
                 // Compute our desired horizontal velocity vector based on keyboard inputs and move speed
                 //  Note: Horizontal plane = (x,z), Vertical plane = (y)
@@ -185,10 +197,13 @@ fn move_character_based_on_keyboard_input(
                     false => -current_horizontal_velocity,
                 };
 
-                //
                 // Apply the computed impulse to the character's rigid body
-                //
-                let horizontal_impulse = rb.mass() * horizontal_velocity_change;
+                let mut horizontal_impulse = rb.mass() * horizontal_velocity_change * 0.13; // slowing down with fudge factor
+
+                if !touch_tracker.touching() {
+                    horizontal_impulse *= 0.13; // slowing down even more when in air
+                }
+
                 rb.apply_impulse(horizontal_impulse, true);
             }
 
@@ -198,7 +213,7 @@ fn move_character_based_on_keyboard_input(
             // Now consider the vertical plane (y)
             // Compute our desired vertical velocity vector and apply a force to the rigid body.
             //
-            if !touching.0.is_empty() {
+            if touch_tracker.touching() {
                 //
                 // Compute our desired vertical velocity vector based on keyboard inputs and move speed
                 //  Note: Horizontal plane = (x,z), Vertical plane = (y)
