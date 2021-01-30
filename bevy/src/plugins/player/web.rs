@@ -16,8 +16,7 @@ pub struct PlatformPlugin;
 impl Plugin for PlatformPlugin {
     fn build(&self, app: &mut AppBuilder) {
         app.add_resource(WasmMouseMovementTracker::new())
-            .add_resource(WasmMouseClickTracker::new())
-            .on_state_update(APP_STATE, AppState::InGame, process_mouse_clicks.system());
+            .add_resource(WasmMouseClickTracker::new());
     }
 }
 
@@ -88,15 +87,10 @@ impl WasmMouseClickTracker {
     }
 }
 
-fn process_mouse_clicks(
-    mouse_button_input: Res<WasmMouseClickTracker>,
-    mut players: Query<(&mut Holding, &FocusedInteractable), With<Player>>,
-) {
+pub fn process_mouse_clicks(mouse_button_input: Res<WasmMouseClickTracker>) -> Option<MouseButton> {
     if mouse_button_input.just_pressed() {
-        if let Some((mut holding, interactable)) = players.iter_mut().next() {
-            if let Some(_current_interactable) = interactable.current {
-                holding.0 = !holding.0;
-            }
-        }
+        Some(MouseButton::Left)
+    } else {
+        None
     }
 }
