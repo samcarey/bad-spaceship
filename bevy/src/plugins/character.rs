@@ -3,9 +3,7 @@ use crate::{
     AppState, APP_STATE,
 };
 use bevy::prelude::*;
-use bevy_rapier3d::physics::{
-    ColliderHandleComponent, EventQueue, RapierConfiguration, RigidBodyHandleComponent,
-};
+use bevy_rapier3d::physics::{ColliderHandleComponent, EventQueue, RigidBodyHandleComponent};
 use bevy_rapier3d::rapier::dynamics::RigidBodyBuilder;
 use bevy_rapier3d::rapier::geometry::ColliderBuilder;
 use player::Player;
