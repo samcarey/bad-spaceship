@@ -55,5 +55,5 @@ const CONFIG_DIR: include_dir::Dir = include_dir::include_dir!("assets/config");
 
 #[cfg(target_arch = "wasm32")]
 fn set_initial_fps(mut integration_parameters: ResMut<IntegrationParameters>) {
-    integration_parameters.set_dt(1.0 / 30.0);
+    integration_parameters.dt = 1.0 / 30.0;
 }
