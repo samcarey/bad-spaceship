@@ -1,5 +1,4 @@
 use crate::utils::html;
-use crate::{AppState, APP_STATE};
 use bevy::prelude::*;
 use bevy_webgl2::renderer::JsCast;
 use gloo::events::EventListener;
@@ -8,8 +7,6 @@ use std::sync::{
     Arc,
 };
 use web_sys::MouseEvent;
-
-use super::{FocusedInteractable, Holding, Player};
 
 pub struct PlatformPlugin;
 
