@@ -244,8 +244,6 @@ impl HoldingConfig {
             * self.orientation_stiffness
             - self.orientation_damping * rb.angvel();
         let inertia_sqrt = rb.effective_world_inv_inertia_sqrt.inverse_unchecked();
-        // let dampening = &mut rb.angular_damping;
-        rb.angular_damping = 1.0;
         inertia_sqrt * (inertia_sqrt * angular_acceleration)
     }
 }

@@ -2,6 +2,8 @@ use std::f32;
 
 use crate::{utils, AppState, APP_STATE};
 use bevy::{input::mouse::MouseWheel, prelude::*, render::camera::Camera};
+use bevy_rapier3d::physics::RigidBodyHandleComponent;
+use rapier3d::dynamics::RigidBodySet;
 use serde::Deserialize;
 
 use super::{
@@ -349,21 +351,26 @@ fn initiate_holding(
     In(click): In<Option<MouseButton>>,
     commands: &mut Commands,
     mut players: Query<(&mut Holding, &FocusedInteractable), With<Player>>,
-    holdables: Query<&GlobalTransform, With<Holdable>>,
+    holdables: Query<(&GlobalTransform, &RigidBodyHandleComponent), With<Holdable>>,
+    mut bodies: ResMut<RigidBodySet>,
 ) {
     if let Some(_mouse_button) = click {
         if let Some((mut holding, interactable)) = players.iter_mut().next() {
             if let Some(current_interactable) = interactable.current {
-                if let Ok(original_orientation) = holdables.get(current_interactable) {
-                    if holding.0 {
-                        holding.0 = false;
-                        commands.remove_one::<TargetOrientation>(current_interactable);
-                    } else {
-                        holding.0 = true;
-                        commands.insert(
-                            current_interactable,
-                            (TargetOrientation(original_orientation.rotation.clone()),),
-                        );
+                if let Ok((original_orientation, rb_handle)) = holdables.get(current_interactable) {
+                    if let Some(rb) = bodies.get_mut(rb_handle.handle()) {
+                        if holding.0 {
+                            holding.0 = false;
+                            commands.remove_one::<TargetOrientation>(current_interactable);
+                            rb.angular_damping = 0.0;
+                        } else {
+                            holding.0 = true;
+                            commands.insert(
+                                current_interactable,
+                                (TargetOrientation(original_orientation.rotation.clone()),),
+                            );
+                            rb.angular_damping = 1.0;
+                        }
                     }
                 }
             }
