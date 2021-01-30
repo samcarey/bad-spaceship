@@ -4,16 +4,19 @@ use crate::{utils, AppState, APP_STATE};
 use bevy::{input::mouse::MouseWheel, prelude::*, render::camera::Camera};
 use serde::Deserialize;
 
-use super::character;
+use super::{
+    character,
+    environment::part::{Holdable, TargetOrientation},
+};
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
 #[cfg(not(target_arch = "wasm32"))]
-use native::{get_look, PlatformPlugin};
+use native::{get_look, process_mouse_clicks, PlatformPlugin};
 #[cfg(target_arch = "wasm32")]
 mod web;
 #[cfg(target_arch = "wasm32")]
-use web::{get_look, PlatformPlugin};
+use web::{get_look, process_mouse_clicks, PlatformPlugin};
 
 const MAX_CAMERA_PITCH_DEGREES: f32 = 89.;
 const MIN_CAMERA_PITCH_DEGREES: f32 = -89.;
@@ -33,6 +36,13 @@ impl Plugin for PlayerPlugin {
                 APP_STATE,
                 AppState::InGame,
                 get_look.system().chain(process_mouse_events.system()),
+            )
+            .on_state_update(
+                APP_STATE,
+                AppState::InGame,
+                process_mouse_clicks
+                    .system()
+                    .chain(initiate_holding.system()),
             )
             .on_state_update(
                 APP_STATE,
@@ -331,6 +341,32 @@ fn process_keyboard_events(
         // If so, then normalize the vector components.
         if keyboard_directional_input.0 != Vec3::zero() {
             keyboard_directional_input.0.normalize();
+        }
+    }
+}
+
+fn initiate_holding(
+    In(click): In<Option<MouseButton>>,
+    commands: &mut Commands,
+    mut players: Query<(&mut Holding, &FocusedInteractable), With<Player>>,
+    holdables: Query<&GlobalTransform, With<Holdable>>,
+) {
+    if let Some(_mouse_button) = click {
+        if let Some((mut holding, interactable)) = players.iter_mut().next() {
+            if let Some(current_interactable) = interactable.current {
+                if let Ok(original_orientation) = holdables.get(current_interactable) {
+                    if holding.0 {
+                        holding.0 = false;
+                        commands.remove_one::<TargetOrientation>(current_interactable);
+                    } else {
+                        holding.0 = true;
+                        commands.insert(
+                            current_interactable,
+                            (TargetOrientation(original_orientation.rotation.clone()),),
+                        );
+                    }
+                }
+            }
         }
     }
 }

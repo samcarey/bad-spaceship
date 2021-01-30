@@ -10,6 +10,7 @@ use rapier3d::{
     math::Vector,
 };
 use std::f32;
+use utils::QuatExt;
 
 pub struct PartPlugin;
 
@@ -19,12 +20,13 @@ impl Plugin for PartPlugin {
             .add_system(replace_fallen_parts.system())
             .add_system(update_focused_interactables.system())
             .add_system(highlight_interactables.system())
-            .add_resource(HoldingConfig::new(30.0))
+            .add_resource(HoldingConfig::new(30.0, 30.0))
             .add_system(
                 get_active_hold_point_and_part
                     .system()
                     .chain(hold_part.system()),
-            );
+            )
+            .add_system(orient_part.system());
     }
 }
 
@@ -33,9 +35,11 @@ const PART_SIZE: f32 = 1.0;
 
 struct Interactable;
 
-struct Holdable;
+pub struct Holdable;
 
 struct GetsReplaced;
+
+pub struct TargetOrientation(pub Quat);
 
 const SPAWN_ZONE_HALF_WIDTH: f32 = map::PLATFORM_WIDTH_M / 2.0 * 0.7;
 
@@ -199,16 +203,21 @@ fn get_active_hold_point_and_part(
 }
 
 struct HoldingConfig {
-    stiffness: f32,
-    damping: f32,
+    positioning_stiffness: f32,
+    positioning_damping: f32,
+    orientation_stiffness: f32,
+    orientation_damping: f32,
 }
 
 impl HoldingConfig {
-    pub fn new(stiffness: f32) -> Self {
+    pub fn new(positioning_stiffness: f32, orientation_stiffness: f32) -> Self {
         Self {
-            stiffness,
+            positioning_stiffness,
             // Critically damped
-            damping: 2.0 * stiffness.sqrt(),
+            positioning_damping: 2.0 * positioning_stiffness.sqrt(),
+            orientation_stiffness,
+            // Critically damped
+            orientation_damping: 2.0 * orientation_stiffness.sqrt(),
         }
     }
 
@@ -219,9 +228,23 @@ impl HoldingConfig {
         rb: &RigidBody,
     ) -> Vector<f32> {
         let vector_between: Vec3 = hold_point.translation - part_transform.translation;
-        let positioning_acceleration =
-            vector_between.to_vector() * self.stiffness - self.damping * rb.linvel();
+        let positioning_acceleration = vector_between.to_vector() * self.positioning_stiffness
+            - self.positioning_damping * rb.linvel();
         positioning_acceleration * rb.mass()
+    }
+
+    pub fn calc_orientating_torque(
+        &self,
+        hold_orientation: &Quat,
+        part_transform: &Transform,
+        rb: &RigidBody,
+    ) -> Vector<f32> {
+        let rotation_between: Quat = part_transform.rotation.conjugate() * hold_orientation.clone();
+        let angular_acceleration = rotation_between.to_rotation_vector()
+            * self.orientation_stiffness
+            - self.orientation_damping * rb.angvel();
+        let inertia_sqrt = rb.effective_world_inv_inertia_sqrt.inverse_unchecked();
+        inertia_sqrt * (inertia_sqrt * angular_acceleration)
     }
 }
 
@@ -243,6 +266,21 @@ fn hold_part(
                     rb.apply_force(positioning_force + gravity_cancelation_force, true);
                 }
             }
+        }
+    }
+}
+
+fn orient_part(
+    parts: Query<(&Transform, &TargetOrientation, &RigidBodyHandleComponent)>,
+    mut bodies: ResMut<RigidBodySet>,
+    holding_config: Res<HoldingConfig>,
+) {
+    for (transform, target_orientation, part_rb_handle) in parts.iter() {
+        if let Some(rb) = bodies.get_mut(part_rb_handle.handle()) {
+            rb.apply_torque(
+                holding_config.calc_orientating_torque(&target_orientation.0, transform, rb),
+                true,
+            );
         }
     }
 }

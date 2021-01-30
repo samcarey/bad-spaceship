@@ -1,7 +1,7 @@
 use bevy::{app::PluginGroupBuilder, prelude::*};
 
 mod map;
-mod part;
+pub mod part;
 
 pub struct EnvironmentPluginGroup;
 
