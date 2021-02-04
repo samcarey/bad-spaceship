@@ -41,12 +41,12 @@ pub struct Holdable;
 
 struct GetsReplaced;
 
-struct CrirticallyDampedHarmonicOscillator {
+struct CriticallyDampedHarmonicOscillator {
     stiffness: f32,
     damping: f32,
 }
 
-impl CrirticallyDampedHarmonicOscillator {
+impl CriticallyDampedHarmonicOscillator {
     pub fn new(stiffness: f32) -> Self {
         Self {
             stiffness,
@@ -65,14 +65,14 @@ impl CrirticallyDampedHarmonicOscillator {
 
 pub struct TargetPosition {
     hold_point_entity: Entity,
-    oscillator: CrirticallyDampedHarmonicOscillator,
+    oscillator: CriticallyDampedHarmonicOscillator,
 }
 
 impl TargetPosition {
     pub fn new(hold_point_entity: Entity) -> Self {
         Self {
             hold_point_entity,
-            oscillator: CrirticallyDampedHarmonicOscillator::new(POSITIONING_STIFFNESS),
+            oscillator: CriticallyDampedHarmonicOscillator::new(POSITIONING_STIFFNESS),
         }
     }
 }
@@ -80,7 +80,7 @@ impl TargetPosition {
 pub struct TargetOrientation {
     pub quat: Quat,
     inertia_sqrt: SdpMatrix<f32>,
-    oscillator: CrirticallyDampedHarmonicOscillator,
+    oscillator: CriticallyDampedHarmonicOscillator,
 }
 
 impl TargetOrientation {
@@ -88,7 +88,7 @@ impl TargetOrientation {
         Self {
             quat,
             inertia_sqrt: rb.effective_world_inv_inertia_sqrt.inverse_unchecked(),
-            oscillator: CrirticallyDampedHarmonicOscillator::new(ORIENTING_STIFFNESS),
+            oscillator: CriticallyDampedHarmonicOscillator::new(ORIENTING_STIFFNESS),
         }
     }
 }
