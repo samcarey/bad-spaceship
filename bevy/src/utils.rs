@@ -104,7 +104,7 @@ impl TransformExt for Transform {
     }
 }
 
-use nalgebra::{Quaternion, UnitQuaternion};
+use nalgebra::{Quaternion, Unit, UnitQuaternion};
 
 pub trait QuatExt {
     fn to(&self, other: Quat) -> Quat;
@@ -129,6 +129,16 @@ impl QuatExt for Quat {
 
     fn to_unit_quaternion(&self) -> UnitQuaternion<f32> {
         UnitQuaternion::from_quaternion(self.to_quaternion())
+    }
+}
+
+pub trait QuaternionExt {
+    fn to_quat(&self) -> Quat;
+}
+
+impl QuaternionExt for Unit<Quaternion<f32>> {
+    fn to_quat(&self) -> Quat {
+        Quat::from_xyzw(self.i, self.j, self.k, self.w)
     }
 }
 

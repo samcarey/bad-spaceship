@@ -3,11 +3,11 @@ use crate::utils::{self, Vec3Ext};
 use bevy::prelude::*;
 use bevy_rapier3d::{physics::RapierConfiguration, rapier::geometry::ColliderBuilder};
 use bevy_rapier3d::{physics::RigidBodyHandleComponent, rapier::dynamics::RigidBodyBuilder};
-use player::{CameraOrbitCenter, FocusedInteractable, Holding};
+use player::CameraOrbitCenter;
 use rand::Rng;
 use rapier3d::{
     dynamics::{RigidBody, RigidBodySet},
-    math::Vector,
+    math::{SdpMatrix, Vector},
 };
 use std::f32;
 use utils::QuatExt;
@@ -20,18 +20,20 @@ impl Plugin for PartPlugin {
             .add_system(replace_fallen_parts.system())
             .add_system(update_focused_interactables.system())
             .add_system(highlight_interactables.system())
-            .add_resource(HoldingConfig::new(30.0, 30.0))
             .add_system(
-                get_active_hold_point_and_part
-                    .system()
-                    .chain(hold_part.system()),
+                // get_active_hold_point_and_part
+                // .system()
+                // .chain(
+                position_held_part.system(), // ),
             )
-            .add_system(orient_part.system());
+            .add_system(orient_held_part.system());
     }
 }
 
 const NUM_PARTS: i32 = 10;
 const PART_SIZE: f32 = 1.0;
+const POSITIONING_STIFFNESS: f32 = 30.0;
+const ORIENTING_STIFFNESS: f32 = 5.0;
 
 struct Interactable;
 
@@ -39,7 +41,57 @@ pub struct Holdable;
 
 struct GetsReplaced;
 
-pub struct TargetOrientation(pub Quat);
+struct CrirticallyDampedHarmonicOscillator {
+    stiffness: f32,
+    damping: f32,
+}
+
+impl CrirticallyDampedHarmonicOscillator {
+    pub fn new(stiffness: f32) -> Self {
+        Self {
+            stiffness,
+            damping: 2.0 * stiffness.sqrt(),
+        }
+    }
+
+    pub fn calculate_acceleration(
+        &self,
+        displacement: &Vector<f32>,
+        velocity: &Vector<f32>,
+    ) -> Vector<f32> {
+        displacement * self.stiffness - velocity * self.damping
+    }
+}
+
+pub struct TargetPosition {
+    hold_point_entity: Entity,
+    oscillator: CrirticallyDampedHarmonicOscillator,
+}
+
+impl TargetPosition {
+    pub fn new(hold_point_entity: Entity) -> Self {
+        Self {
+            hold_point_entity,
+            oscillator: CrirticallyDampedHarmonicOscillator::new(POSITIONING_STIFFNESS),
+        }
+    }
+}
+
+pub struct TargetOrientation {
+    pub quat: Quat,
+    inertia_sqrt: SdpMatrix<f32>,
+    oscillator: CrirticallyDampedHarmonicOscillator,
+}
+
+impl TargetOrientation {
+    pub fn new(rb: &RigidBody, quat: Quat) -> Self {
+        Self {
+            quat,
+            inertia_sqrt: rb.effective_world_inv_inertia_sqrt.inverse_unchecked(),
+            oscillator: CrirticallyDampedHarmonicOscillator::new(ORIENTING_STIFFNESS),
+        }
+    }
+}
 
 const SPAWN_ZONE_HALF_WIDTH: f32 = map::PLATFORM_WIDTH_M / 2.0 * 0.7;
 
@@ -176,109 +228,42 @@ fn highlight_interactables(
     }
 }
 
-fn get_active_hold_point_and_part(
-    players: Query<(&Children, &FocusedInteractable, &Holding)>,
-    camera_orbit_centers: Query<&Children, With<CameraOrbitCenter>>,
+fn position_held_part(
     hold_points: Query<&GlobalTransform, With<player::HoldPoint>>,
-) -> Option<(Entity, Entity)> {
-    if let Some((player_children, focused_interactable, holding)) = players.iter().next() {
-        if let Some(current) = focused_interactable.current {
-            if holding.0 {
-                for player_child in player_children.iter() {
-                    if let Ok(camera_orbit_center_children) =
-                        camera_orbit_centers.get(*player_child)
-                    {
-                        for camera_orbit_center_child in camera_orbit_center_children.iter() {
-                            if let Ok(_hold_point) = hold_points.get(*camera_orbit_center_child) {
-                                return Some((camera_orbit_center_child.clone(), current.clone()));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    None
-}
-
-struct HoldingConfig {
-    positioning_stiffness: f32,
-    positioning_damping: f32,
-    orientation_stiffness: f32,
-    orientation_damping: f32,
-}
-
-impl HoldingConfig {
-    pub fn new(positioning_stiffness: f32, orientation_stiffness: f32) -> Self {
-        Self {
-            positioning_stiffness,
-            // Critically damped
-            positioning_damping: 2.0 * positioning_stiffness.sqrt(),
-            orientation_stiffness,
-            // Critically damped
-            orientation_damping: 2.0 * orientation_stiffness.sqrt(),
-        }
-    }
-
-    pub fn calc_positioning_force(
-        &self,
-        hold_point: &GlobalTransform,
-        part_transform: &Transform,
-        rb: &RigidBody,
-    ) -> Vector<f32> {
-        let vector_between: Vec3 = hold_point.translation - part_transform.translation;
-        let positioning_acceleration = vector_between.to_vector() * self.positioning_stiffness
-            - self.positioning_damping * rb.linvel();
-        positioning_acceleration * rb.mass()
-    }
-
-    pub fn calc_orientating_torque(
-        &self,
-        hold_orientation: &Quat,
-        part_transform: &Transform,
-        rb: &mut RigidBody,
-    ) -> Vector<f32> {
-        let rotation_between: Quat = part_transform.rotation.conjugate() * hold_orientation.clone();
-        let angular_acceleration = rotation_between.to_rotation_vector()
-            * self.orientation_stiffness
-            - self.orientation_damping * rb.angvel();
-        let inertia_sqrt = rb.effective_world_inv_inertia_sqrt.inverse_unchecked();
-        inertia_sqrt * (inertia_sqrt * angular_acceleration)
-    }
-}
-
-fn hold_part(
-    In(hold_point_and_part_entity): In<Option<(Entity, Entity)>>,
-    hold_points: Query<&GlobalTransform, With<player::HoldPoint>>,
-    parts: Query<(&Transform, &RigidBodyHandleComponent), With<Holdable>>,
+    parts: Query<(&Transform, &RigidBodyHandleComponent, &TargetPosition)>,
     mut bodies: ResMut<RigidBodySet>,
     physics_config: Res<RapierConfiguration>,
-    holding_config: Res<HoldingConfig>,
 ) {
-    if let Some((hold_point_entity, part_entity)) = hold_point_and_part_entity {
-        if let Ok(hold_point) = hold_points.get(hold_point_entity) {
-            if let Ok((part_transform, part_rb_handle)) = parts.get(part_entity) {
-                if let Some(rb) = bodies.get_mut(part_rb_handle.handle()) {
-                    let gravity_cancelation_force = -rb.mass() * physics_config.gravity;
-                    let positioning_force =
-                        holding_config.calc_positioning_force(hold_point, part_transform, rb);
-                    rb.apply_force(positioning_force + gravity_cancelation_force, true);
-                }
+    for (part_transform, part_rb_handle, target_position) in parts.iter() {
+        if let Ok(hold_point_position) = hold_points.get(target_position.hold_point_entity) {
+            if let Some(rb) = bodies.get_mut(part_rb_handle.handle()) {
+                let vector_between =
+                    (hold_point_position.translation - part_transform.translation).to_vector();
+                let positioning_acceleration = target_position
+                    .oscillator
+                    .calculate_acceleration(&vector_between, rb.linvel());
+
+                let gravity_cancelation_force = -rb.mass() * physics_config.gravity;
+                let positioning_force = positioning_acceleration * rb.mass();
+                rb.apply_force(positioning_force + gravity_cancelation_force, true);
             }
         }
     }
 }
 
-fn orient_part(
+fn orient_held_part(
     parts: Query<(&Transform, &TargetOrientation, &RigidBodyHandleComponent)>,
     mut bodies: ResMut<RigidBodySet>,
-    holding_config: Res<HoldingConfig>,
 ) {
-    for (transform, target_orientation, part_rb_handle) in parts.iter() {
+    for (part_transform, target_orientation, part_rb_handle) in parts.iter() {
         if let Some(rb) = bodies.get_mut(part_rb_handle.handle()) {
-            let torque =
-                holding_config.calc_orientating_torque(&target_orientation.0, transform, rb);
+            let rotation_between = (target_orientation.quat * part_transform.rotation.conjugate())
+                .to_rotation_vector();
+            let angular_acceleration = target_orientation
+                .oscillator
+                .calculate_acceleration(&rotation_between, rb.angvel());
+            let torque = target_orientation.inertia_sqrt
+                * (target_orientation.inertia_sqrt * angular_acceleration);
             rb.apply_torque(torque, true);
         }
     }

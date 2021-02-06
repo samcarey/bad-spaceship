@@ -14,7 +14,7 @@ use serde::Deserialize;
 
 use super::{
     character,
-    environment::part::{Holdable, TargetOrientation},
+    environment::part::{Holdable, TargetOrientation, TargetPosition},
 };
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -49,9 +49,7 @@ impl Plugin for PlayerPlugin {
             .on_state_update(
                 APP_STATE,
                 AppState::InGame,
-                process_mouse_clicks
-                    .system()
-                    .chain(initiate_holding.system()),
+                process_mouse_clicks.system().chain(toggle_holding.system()),
             )
             .on_state_update(APP_STATE, AppState::InGame, gamepad_system.system())
             .on_state_update(
@@ -355,29 +353,57 @@ fn process_keyboard_events(
     }
 }
 
-fn initiate_holding(
+fn get_hold_point_entity(
+    player_children: &Children,
+    camera_orbit_centers: Query<&Children>,
+    hold_points: Query<Entity, With<HoldPoint>>,
+) -> Option<Entity> {
+    let mut held_entity: Option<Entity> = None;
+    if let Some(camera_orbit_center) = player_children.iter().next() {
+        if let Ok(potential_hold_points) = camera_orbit_centers.get(*camera_orbit_center) {
+            for potential_hold_point in potential_hold_points.iter() {
+                if let Ok(held_entity_component) = hold_points.get(*potential_hold_point) {
+                    held_entity = Some(held_entity_component);
+                }
+            }
+        }
+    }
+    held_entity
+}
+
+fn toggle_holding(
     In(click): In<Option<MouseButton>>,
     commands: &mut Commands,
-    mut players: Query<(&mut Holding, &FocusedInteractable), With<Player>>,
+    mut players: Query<(&mut Holding, &FocusedInteractable, &Children), With<Player>>,
+    camera_orbit_centers: Query<&Children>,
+    hold_points: Query<Entity, With<HoldPoint>>,
     holdables: Query<(&GlobalTransform, &RigidBodyHandleComponent), With<Holdable>>,
-    mut bodies: ResMut<RigidBodySet>,
+    bodies: Res<RigidBodySet>,
 ) {
     if let Some(_mouse_button) = click {
-        if let Some((mut holding, interactable)) = players.iter_mut().next() {
+        if let Some((mut holding, interactable, player_children)) = players.iter_mut().next() {
             if let Some(current_interactable) = interactable.current {
                 if let Ok((original_orientation, rb_handle)) = holdables.get(current_interactable) {
-                    if let Some(rb) = bodies.get_mut(rb_handle.handle()) {
+                    if let Some(hold_point_entity) =
+                        get_hold_point_entity(player_children, camera_orbit_centers, hold_points)
+                    {
                         if holding.0 {
                             holding.0 = false;
-                            commands.remove_one::<TargetOrientation>(current_interactable);
-                            rb.angular_damping = 0.0;
+
+                            commands.remove::<(TargetPosition, TargetOrientation)>(
+                                current_interactable,
+                            );
                         } else {
                             holding.0 = true;
-                            commands.insert(
-                                current_interactable,
-                                (TargetOrientation(original_orientation.rotation.clone()),),
-                            );
-                            rb.angular_damping = 1.0;
+                            if let Some(rb) = bodies.get(rb_handle.handle()) {
+                                commands.insert(
+                                    current_interactable,
+                                    (
+                                        TargetPosition::new(hold_point_entity),
+                                        TargetOrientation::new(rb, original_orientation.rotation),
+                                    ),
+                                );
+                            }
                         }
                     }
                 }
