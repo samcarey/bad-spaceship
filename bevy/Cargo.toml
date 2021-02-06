@@ -38,6 +38,7 @@ native = [
   "bevy/bevy_wgpu",
   "bevy/bevy_gltf",
   "bevy_rapier3d/parallel",
+  "bevy/bevy_gilrs"
 ]
 
 web = [
