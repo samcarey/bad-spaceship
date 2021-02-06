@@ -461,14 +461,14 @@ fn gamepad_system(
                 .get(GamepadAxis(gamepad, GamepadAxisType::LeftStickX))
                 .unwrap();
             if left_stick_x.abs() > 0.01 {
-                println!("{:?} LeftStickX value is {}", gamepad, left_stick_x);
+                //println!("{:?} LeftStickX value is {}", gamepad, left_stick_x);
                 gamepad_directional_input.0.x = left_stick_x;
             }
             let left_stick_y = axes
                 .get(GamepadAxis(gamepad, GamepadAxisType::LeftStickY))
                 .unwrap();
             if left_stick_y.abs() > 0.01 {
-                println!("{:?} LeftStickY value is {}", gamepad, left_stick_y);
+                //println!("{:?} LeftStickY value is {}", gamepad, left_stick_y);
                 gamepad_directional_input.0.z = left_stick_y;
             }
 
@@ -477,7 +477,7 @@ fn gamepad_system(
             //  NOTE: Jump => movement y-component
             //
             if button_inputs.just_pressed(GamepadButton(gamepad, GamepadButtonType::South)) {
-                println!("{:?} just pressed South", gamepad);
+                //println!("{:?} just pressed South", gamepad);
                 gamepad_directional_input.0.y += 1.0;
             }
         }
