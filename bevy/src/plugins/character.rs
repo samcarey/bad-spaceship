@@ -115,6 +115,7 @@ fn move_character_based_on_keyboard_input(
     mut bodies: ResMut<RigidBodySet>,
     query: Query<(
         &player::KeyboardDirectionalInput,
+        &player::GameStickDirectionalInput,
         &RigidBodyHandleComponent,
         &Transform,
         &MoveSpeed,
@@ -124,6 +125,7 @@ fn move_character_based_on_keyboard_input(
 ) {
     for (
         keyboard_directional_input,
+        gamepad_directional_input,
         rigid_body,
         transform,
         move_speed,
@@ -136,6 +138,20 @@ fn move_character_based_on_keyboard_input(
             // Get the current velocity from the physics engine
             //
             let current_velocity = rb.linvel().clone_owned();
+
+            //
+            // Combine the keyboard and gamepad directional inputs
+            //
+            let mut combined_directional_input = Vec3::zero();
+            combined_directional_input.x =
+                keyboard_directional_input.0.x + gamepad_directional_input.0.x;
+            combined_directional_input.y =
+                keyboard_directional_input.0.y + gamepad_directional_input.0.y;
+            combined_directional_input.z =
+                keyboard_directional_input.0.z + gamepad_directional_input.0.z;
+            if combined_directional_input != Vec3::zero() {
+                combined_directional_input.normalize();
+            }
 
             //
             // In moving the character we want to use two different physics principles: impulse and force.
@@ -160,8 +176,8 @@ fn move_character_based_on_keyboard_input(
                 // Compute our desired horizontal velocity vector based on keyboard inputs and move speed
                 //  Note: Horizontal plane = (x,z), Vertical plane = (y)
                 //
-                let forward = transform.forward() * keyboard_directional_input.0.z;
-                let right = -transform.right() * keyboard_directional_input.0.x;
+                let forward = transform.forward() * combined_directional_input.z;
+                let right = -transform.right() * combined_directional_input.x;
                 let desired_horizontal_velocity =
                     Vec3::from(forward + right).to_vector() * move_speed.0;
 
@@ -220,7 +236,7 @@ fn move_character_based_on_keyboard_input(
                 //          then a long keypress will act more like "thrust" upwards than singular
                 //          jump event.
                 //
-                let up = transform.up() * keyboard_directional_input.0.y;
+                let up = transform.up() * combined_directional_input.y;
                 let desired_vertical_velocity = Vec3::from(up).to_vector() * jump_force.0;
 
                 //

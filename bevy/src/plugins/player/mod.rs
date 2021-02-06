@@ -1,7 +1,13 @@
 use std::f32;
 
 use crate::{utils, AppState, APP_STATE};
-use bevy::{input::mouse::MouseWheel, prelude::*, render::camera::Camera};
+use bevy::{
+    input::gamepad::{Gamepad, GamepadButton, GamepadEvent, GamepadEventType},
+    input::mouse::MouseWheel,
+    prelude::*,
+    render::camera::Camera,
+    utils::HashSet,
+};
 use bevy_rapier3d::physics::RigidBodyHandleComponent;
 use rapier3d::dynamics::RigidBodySet;
 use serde::Deserialize;
@@ -34,6 +40,7 @@ impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut AppBuilder) {
         app.init_resource::<MouseWheelState>()
             .add_startup_system(setup.system())
+            .add_system_to_stage(stage::PRE_UPDATE, connection_system.system())
             .on_state_update(
                 APP_STATE,
                 AppState::InGame,
@@ -46,13 +53,13 @@ impl Plugin for PlayerPlugin {
                     .system()
                     .chain(initiate_holding.system()),
             )
+            .on_state_update(APP_STATE, AppState::InGame, gamepad_system.system())
             .on_state_update(
                 APP_STATE,
                 AppState::InGame,
                 process_keyboard_events.system(),
             )
-            // .add_system(update_camera.system())
-            // .add_system(update_camera_distance.system())
+            .init_resource::<GamepadLobby>()
             .add_system(respawn.system())
             .add_plugin(PlatformPlugin)
             .add_plugin(CharacterPlugin);
@@ -74,9 +81,6 @@ impl Default for Config {
         config_from_file!("player.ron")
     }
 }
-
-#[derive(Default)]
-pub struct KeyboardDirectionalInput(pub Vec3);
 
 pub struct OrbitingCamera {
     pitch: f32,
@@ -224,6 +228,7 @@ fn spawn(commands: &mut Commands, camera_entity: Option<Entity>) {
         .with(Yaw::default())
         .with(config)
         .with(KeyboardDirectionalInput::default())
+        .with(GameStickDirectionalInput::default())
         .with(FocusedInteractable::default())
         .with(Holding::default())
         .current_entity();
@@ -294,6 +299,9 @@ fn process_mouse_events(
         }
     }
 }
+
+#[derive(Default)]
+pub struct KeyboardDirectionalInput(pub Vec3);
 
 fn process_keyboard_events(
     keyboard_input: Res<Input<KeyCode>>,
@@ -374,6 +382,84 @@ fn initiate_holding(
                     }
                 }
             }
+        }
+    }
+}
+
+#[derive(Default)]
+struct GamepadLobby {
+    gamepads: HashSet<Gamepad>,
+    gamepad_event_reader: EventReader<GamepadEvent>,
+}
+
+fn connection_system(mut lobby: ResMut<GamepadLobby>, gamepad_event: Res<Events<GamepadEvent>>) {
+    for event in lobby.gamepad_event_reader.iter(&gamepad_event) {
+        match &event {
+            GamepadEvent(gamepad, GamepadEventType::Connected) => {
+                lobby.gamepads.insert(*gamepad);
+                println!("{:?} Connected", gamepad);
+            }
+            GamepadEvent(gamepad, GamepadEventType::Disconnected) => {
+                lobby.gamepads.remove(gamepad);
+                println!("{:?} Disconnected", gamepad);
+            }
+            _ => (),
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct GameStickDirectionalInput(pub Vec3);
+
+fn gamepad_system(
+    lobby: Res<GamepadLobby>,
+    button_inputs: Res<Input<GamepadButton>>,
+    axes: Res<Axis<GamepadAxis>>,
+    mut query: Query<Mut<GameStickDirectionalInput>>,
+) {
+    for mut gamepad_directional_input in query.iter_mut() {
+        //
+        // Initialize gamepad direction to zero every frame then overwrite below if we have gamepad inputs
+        //
+        gamepad_directional_input.0 = Vec3::zero();
+
+        //
+        // confirm that the controller is connected
+        //
+        for gamepad in lobby.gamepads.iter().cloned() {
+            //
+            // Left stick controls movement
+            //  NOTE: Gamepad Stick X axis => left/right => movement x-component
+            //                      Y axis => forward/backward => movement z-component
+            let left_stick_x = axes
+                .get(GamepadAxis(gamepad, GamepadAxisType::LeftStickX))
+                .unwrap();
+            if left_stick_x.abs() > 0.01 {
+                println!("{:?} LeftStickX value is {}", gamepad, left_stick_x);
+                gamepad_directional_input.0.x = left_stick_x;
+            }
+            let left_stick_y = axes
+                .get(GamepadAxis(gamepad, GamepadAxisType::LeftStickY))
+                .unwrap();
+            if left_stick_y.abs() > 0.01 {
+                println!("{:?} LeftStickY value is {}", gamepad, left_stick_y);
+                gamepad_directional_input.0.z = left_stick_y;
+            }
+
+            //
+            // "South" button [PS4 "X"] designates "jump"
+            //  NOTE: Jump => movement y-component
+            //
+            if button_inputs.just_pressed(GamepadButton(gamepad, GamepadButtonType::South)) {
+                println!("{:?} just pressed South", gamepad);
+                gamepad_directional_input.0.y += 1.0;
+            }
+        }
+
+        // Check here to see if any keypresses were registered.
+        // If so, then normalize the vector components.
+        if gamepad_directional_input.0 != Vec3::zero() {
+            gamepad_directional_input.0.normalize();
         }
     }
 }
