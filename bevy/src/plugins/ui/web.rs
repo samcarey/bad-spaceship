@@ -1,5 +1,5 @@
 use crate::utils::{html, AtomicBoolExt};
-use crate::{AppState, APP_STATE};
+use crate::AppState;
 use bevy::prelude::*;
 use bevy_webgl2::renderer::JsCast;
 use gloo::events::EventListener;
@@ -13,13 +13,14 @@ pub struct PlatformPlugin;
 
 impl Plugin for PlatformPlugin {
     fn build(&self, app: &mut AppBuilder) {
-        app.add_resource(WasmPointerLockTracker::new())
-            .on_state_enter(APP_STATE, AppState::InGame, hide_cursor.system())
-            .on_state_update(APP_STATE, AppState::InGame, open_menu_if_unlocked.system())
-            .on_state_update(
-                APP_STATE,
-                AppState::InGameMenu,
-                close_menu_if_locked.system(),
+        app.insert_resource(WasmPointerLockTracker::new())
+            .add_system_set(SystemSet::on_enter(AppState::InGame).with_system(hide_cursor.system()))
+            .add_system_set(
+                SystemSet::on_update(AppState::InGame).with_system(open_menu_if_unlocked.system()),
+            )
+            .add_system_set(
+                SystemSet::on_update(AppState::InGameMenu)
+                    .with_system(close_menu_if_locked.system()),
             );
     }
 }
@@ -73,7 +74,7 @@ fn close_menu_if_locked(
     mut state: ResMut<State<AppState>>,
 ) {
     if lock_state.get() {
-        state.set_next(AppState::InGame).unwrap();
+        state.set(AppState::InGame).unwrap();
     }
 }
 
@@ -82,6 +83,6 @@ fn open_menu_if_unlocked(
     mut state: ResMut<State<AppState>>,
 ) {
     if !lock_state.get() {
-        state.set_next(AppState::InGameMenu).unwrap();
+        state.set(AppState::InGameMenu).unwrap();
     }
 }

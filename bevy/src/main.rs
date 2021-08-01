@@ -1,8 +1,11 @@
 use bevy::render::pass::ClearColor;
 use bevy::{app::ScheduleRunnerSettings, prelude::*};
+use bevy_rapier3d::physics::NoUserData;
 use bevy_rapier3d::{physics::RapierPhysicsPlugin, render::RapierRenderPlugin};
+
 #[cfg(target_arch = "wasm32")]
-use rapier3d::dynamics::IntegrationParameters;
+use bevy_rapier3d::prelude::IntegrationParameters;
+
 use std::time::Duration;
 #[macro_use]
 mod utils;
@@ -16,7 +19,7 @@ fn main() {
     let mut app = App::build();
 
     if args.is_server {
-        app.add_resource(ScheduleRunnerSettings::run_loop(Duration::from_secs_f64(
+        app.insert_resource(ScheduleRunnerSettings::run_loop(Duration::from_secs_f64(
             1.0 / 60.,
         )))
         .add_plugins(MinimalPlugins);
@@ -25,23 +28,23 @@ fn main() {
         app.add_plugins(bevy_webgl2::DefaultPlugins);
         #[cfg(not(target_arch = "wasm32"))]
         app.add_plugins(DefaultPlugins);
-        app.add_resource(State::new(AppState::Initial))
-            .add_stage_after(stage::UPDATE, APP_STATE, StateStage::<AppState>::default())
+        app.add_state(AppState::Initial)
             .add_plugin(plugins::UiPlugin)
-            .add_plugin(RapierPhysicsPlugin)
+            .add_plugin(RapierPhysicsPlugin::<NoUserData>::default())
             .add_plugin(RapierRenderPlugin)
-            .add_resource(ClearColor(Color::rgb(0.99, 0.99, 0.95)))
+            .insert_resource(ClearColor(Color::rgb(0.99, 0.99, 0.95)))
             .add_plugins(plugins::EnvironmentPluginGroup)
             .add_plugin(plugins::PlayerPlugin);
         #[cfg(target_arch = "wasm32")]
         app.add_startup_system(set_initial_fps.system());
     }
 
-    app.add_resource(args);
+    app.insert_resource(args);
 
     app.run();
 }
-#[derive(Clone)]
+
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub enum AppState {
     Initial,
     InGame,

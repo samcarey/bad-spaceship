@@ -1,4 +1,4 @@
-use crate::{AppState, APP_STATE};
+use crate::AppState;
 use bevy::prelude::*;
 
 pub struct PlatformPlugin;
@@ -6,10 +6,11 @@ pub struct PlatformPlugin;
 impl Plugin for PlatformPlugin {
     fn build(&self, app: &mut AppBuilder) {
         app.add_startup_system(show_cursor.system())
-            .on_state_update(APP_STATE, AppState::InGame, open_menu_on_key.system())
-            .on_state_update(APP_STATE, AppState::InGameMenu, close_menu_on_key.system())
-            .on_state_enter(APP_STATE, AppState::InGameMenu, show_cursor.system())
-            .on_state_enter(APP_STATE, AppState::InGame, hide_cursor.system());
+            .add_system_set(
+                SystemSet::on_enter(AppState::InGameMenu).with_system(show_cursor.system()),
+            )
+            .add_system_set(SystemSet::on_enter(AppState::InGame).with_system(hide_cursor.system()))
+            .add_system(toggle_menu_on_key.system());
     }
 }
 
@@ -25,14 +26,12 @@ fn hide_cursor(mut windows: ResMut<Windows>) {
     window.set_cursor_visibility(false);
 }
 
-fn close_menu_on_key(input: ChangedRes<Input<KeyCode>>, mut state: ResMut<State<AppState>>) {
+fn toggle_menu_on_key(input: Res<Input<KeyCode>>, mut state: ResMut<State<AppState>>) {
     if input.just_pressed(KeyCode::Escape) {
-        state.set_next(AppState::InGame).unwrap();
-    }
-}
-
-fn open_menu_on_key(input: ChangedRes<Input<KeyCode>>, mut state: ResMut<State<AppState>>) {
-    if input.just_pressed(KeyCode::Escape) {
-        state.set_next(AppState::InGameMenu).unwrap();
+        match state.current() {
+            AppState::InGame => state.set(AppState::InGameMenu).unwrap(),
+            AppState::InGameMenu => state.set(AppState::InGame).unwrap(),
+            _ => {}
+        }
     }
 }

@@ -10,18 +10,12 @@ impl Plugin for PlatformPlugin {
 }
 
 #[derive(Default)]
-pub struct State {
-    mouse_motion_event_reader: EventReader<MouseMotion>,
-}
+pub struct State;
 
-pub fn get_look(mut state: ResMut<State>, mouse_motion_events: Res<Events<MouseMotion>>) -> Vec2 {
-    match state
-        .mouse_motion_event_reader
-        .iter(&mouse_motion_events)
-        .last()
-    {
+pub fn get_look(mut mouse_motion_events: EventReader<MouseMotion>) -> Vec2 {
+    match mouse_motion_events.iter().last() {
         Some(event) => event.delta,
-        None => Vec2::zero(),
+        None => Vec2::ZERO,
     }
 }
 

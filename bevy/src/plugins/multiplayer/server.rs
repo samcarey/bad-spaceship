@@ -8,10 +8,10 @@ pub struct ServerPlugin;
 impl Plugin for ServerPlugin {
     fn build(&self, app: &mut AppBuilder) {
         app.add_startup_system(setup.system())
-            .add_resource(NetworkBroadcast { frame: 0 })
-            .add_resource(GameState::default())
-            .add_system_to_stage(stage::PRE_UPDATE, handle_messages.system())
-            .add_system_to_stage(stage::POST_UPDATE, broadcast_game_state.system())
+            .insert_resource(NetworkBroadcast { frame: 0 })
+            .insert_resource(GameState::default())
+            .add_system_to_stage(CoreStage::PreUpdate, handle_messages.system())
+            .add_system_to_stage(CoreStage::PostUpdate, broadcast_game_state.system())
             .add_system(spawn.system());
     }
 }
@@ -24,8 +24,8 @@ pub fn setup(mut net: ResMut<NetworkResource>) {
     net.listen(socket_address);
 }
 
-pub fn spawn(commands: &mut Commands) {
-    commands.spawn(SerializablePlayer {
+pub fn spawn(mut commands: Commands) {
+    commands.spawn().insert_bundle(SerializablePlayer {
         id: 0,
         transform: Transform::default().compute_matrix(),
     });

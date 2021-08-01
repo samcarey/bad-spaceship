@@ -12,8 +12,10 @@
       "args": [],
       "stopAtEntry": false,
       "cwd": "${workspaceRoot}/bevy",
-      "environment": [],
-      "externalConsole": true,
+      "env": {
+        "CARGO_MANIFEST_DIR": "${workspaceFolder}/bevy"
+      },
+      "console": "externalTerminal",
       "preLaunchTask": "build (windows)",
     },
     {
@@ -26,8 +28,10 @@
       ],
       "stopAtEntry": false,
       "cwd": "${workspaceRoot}/bevy",
-      "environment": [],
-      "externalConsole": true,
+      "env": {
+        "CARGO_MANIFEST_DIR": "${workspaceFolder}/bevy"
+      },
+      "console": "externalTerminal",
       "preLaunchTask": "build (windows)",
     },
     {
@@ -37,6 +41,9 @@
       "program": "${workspaceFolder}/bevy/target/debug/bad-spaceship-bevy",
       "args": [],
       "cwd": "${workspaceFolder}/bevy",
+      "env": {
+        "CARGO_MANIFEST_DIR": "${workspaceFolder}/bevy"
+      },
       "preLaunchTask": "build (unix)"
     }
   ]

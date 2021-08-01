@@ -9,7 +9,7 @@ pub struct ClientPlugin;
 impl Plugin for ClientPlugin {
     fn build(&self, app: &mut AppBuilder) {
         app.add_startup_system(setup.system())
-            .add_system_to_stage(stage::PRE_UPDATE, handle_messages.system())
+            .add_system_to_stage(CoreStage::PreUpdate, handle_messages.system())
             .add_system(ball_control_system.system());
     }
 }

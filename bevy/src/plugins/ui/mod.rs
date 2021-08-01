@@ -1,4 +1,4 @@
-use crate::{AppState, APP_STATE};
+use crate::AppState;
 use bevy::input::mouse::MouseButtonInput;
 use bevy::ui::prelude::ButtonBundle;
 use bevy::{
@@ -32,20 +32,26 @@ impl Plugin for UiPlugin {
             .add_event::<Selection>()
             .init_resource::<TrackInputState>()
             .add_startup_system(spawn_camera.system())
-            .on_state_enter(APP_STATE, AppState::InGameMenu, spawn_menu.system())
-            .on_state_exit(APP_STATE, AppState::InGameMenu, despawn_menu.system())
-            .on_state_update(APP_STATE, AppState::InGameMenu, button_interaction.system())
-            .on_state_update(APP_STATE, AppState::InGameMenu, selection_listener.system())
-            .on_state_update(APP_STATE, AppState::InGameMenu, resume.system())
-            .on_state_update(APP_STATE, AppState::InGameMenu, options.system())
-            .on_state_update(APP_STATE, AppState::InGameMenu, multiplayer.system())
+            .add_system_set(
+                SystemSet::on_enter(AppState::InGameMenu).with_system(spawn_menu.system()),
+            )
+            .add_system_set(
+                SystemSet::on_exit(AppState::InGameMenu).with_system(despawn_menu.system()),
+            )
+            .add_system_set(
+                SystemSet::on_update(AppState::InGameMenu)
+                    .with_system(button_interaction.system())
+                    .with_system(selection_listener.system())
+                    .with_system(resume.system())
+                    .with_system(options.system())
+                    .with_system(multiplayer.system()),
+            )
             .add_plugin(PlatformPlugin)
             .add_startup_system(spawn_diagnostics_text.system())
             .add_system(update_diagnostics_text.system())
-            .on_state_update(
-                APP_STATE,
-                AppState::Initial,
-                capture_mouse_on_click.system(),
+            .add_system_set(
+                SystemSet::on_update(AppState::Initial)
+                    .with_system(capture_mouse_on_click.system()),
             )
             .add_startup_system(spawn_metadata_text.system());
     }
@@ -59,9 +65,9 @@ struct ButtonMaterials {
     pressed: Handle<ColorMaterial>,
 }
 
-impl FromResources for ButtonMaterials {
-    fn from_resources(resources: &Resources) -> Self {
-        let mut materials = resources.get_mut::<Assets<ColorMaterial>>().unwrap();
+impl FromWorld for ButtonMaterials {
+    fn from_world(world: &mut World) -> Self {
+        let mut materials = world.get_resource_mut::<Assets<ColorMaterial>>().unwrap();
         ButtonMaterials {
             normal: materials.add(Color::rgb(0.15, 0.15, 0.15).into()),
             hovered: materials.add(Color::rgb(0.25, 0.25, 0.25).into()),
@@ -72,10 +78,10 @@ impl FromResources for ButtonMaterials {
 
 fn button_interaction(
     button_materials: Res<ButtonMaterials>,
-    mut selection_events: ResMut<Events<Selection>>,
+    mut selection_events: EventWriter<Selection>,
     mut query: Query<
-        (&Selection, &Interaction, Mut<Handle<ColorMaterial>>),
-        (With<Button>, Mutated<Interaction>),
+        (&Selection, &Interaction, &mut Handle<ColorMaterial>),
+        (With<Button>, Changed<Interaction>),
     >,
 ) {
     for (selection, interaction, mut material) in query.iter_mut() {
@@ -94,42 +100,29 @@ fn button_interaction(
     }
 }
 
-fn resume(
-    mut state: ResMut<State<AppState>>,
-    mut selection_event_reader: Local<EventReader<Selection>>,
-    selection_events: Res<Events<Selection>>,
-) {
-    for selection in selection_event_reader.iter(&selection_events) {
+fn resume(mut state: ResMut<State<AppState>>, mut selections: EventReader<Selection>) {
+    for selection in selections.iter() {
         if *selection == Selection::Resume {
-            state.set_next(AppState::InGame).unwrap();
+            state.set(AppState::InGame).unwrap();
         }
     }
 }
 
-fn options(
-    mut selection_event_reader: Local<EventReader<Selection>>,
-    selection_events: Res<Events<Selection>>,
-) {
-    for selection in selection_event_reader.iter(&selection_events) {
+fn options(mut selections: EventReader<Selection>) {
+    for selection in selections.iter() {
         if *selection == Selection::Options {}
     }
 }
 
-fn multiplayer(
-    mut selection_event_reader: Local<EventReader<Selection>>,
-    selection_events: Res<Events<Selection>>,
-) {
-    for selection in selection_event_reader.iter(&selection_events) {
+fn multiplayer(mut selections: EventReader<Selection>) {
+    for selection in selections.iter() {
         if *selection == Selection::Multiplayer {}
     }
 }
 
-fn selection_listener(
-    mut my_event_reader: Local<EventReader<Selection>>,
-    my_events: Res<Events<Selection>>,
-) {
-    for my_event in my_event_reader.iter(&my_events) {
-        info!("Selected menu option: {:?}", my_event);
+fn selection_listener(mut selections: EventReader<Selection>) {
+    for selection in selections.iter() {
+        info!("Selected menu option: {:?}", selection);
     }
 }
 
@@ -145,12 +138,12 @@ const MENU_OPTIONS: [Selection; 3] = [
     Selection::Resume,
 ];
 
-fn spawn_camera(commands: &mut Commands) {
-    commands.spawn(CameraUiBundle::default());
+fn spawn_camera(mut commands: Commands) {
+    commands.spawn().insert_bundle(UiCameraBundle::default());
 }
 
 fn spawn_menu(
-    commands: &mut Commands,
+    mut commands: Commands,
     asset_server: Res<AssetServer>,
     mut materials: ResMut<Assets<ColorMaterial>>,
     button_materials: Res<ButtonMaterials>,
@@ -162,7 +155,8 @@ fn spawn_menu(
 
     commands
         // root menu node
-        .spawn(NodeBundle {
+        .spawn()
+        .insert_bundle(NodeBundle {
             style: Style {
                 size: Size::new(Val::Percent(100.0), Val::Percent(100.0)),
                 justify_content: JustifyContent::Center,
@@ -172,11 +166,12 @@ fn spawn_menu(
             material: materials.add(Color::NONE.into()),
             ..Default::default()
         })
-        .with(Menu)
+        .insert(Menu)
         .with_children(|parent| {
             parent
                 // button portion of menu
-                .spawn(NodeBundle {
+                .spawn()
+                .insert_bundle(NodeBundle {
                     style: Style {
                         size: Size::new(
                             Val::Px(config.menu_button_width),
@@ -193,7 +188,8 @@ fn spawn_menu(
                     // buttons
                     for (i, selection) in MENU_OPTIONS.iter().enumerate() {
                         parent
-                            .spawn(ButtonBundle {
+                            .spawn()
+                            .insert_bundle(ButtonBundle {
                                 style: Style {
                                     size: Size::new(Val::Percent(100.0), Val::Px(65.0)),
                                     // center button
@@ -212,18 +208,18 @@ fn spawn_menu(
                                 material: button_materials.normal.clone(),
                                 ..Default::default()
                             })
-                            .with(selection.clone())
+                            .insert(selection.clone())
                             .with_children(|parent| {
-                                parent.spawn(TextBundle {
-                                    text: Text {
-                                        value: format!("{:?}", selection),
-                                        font: asset_server.load("fonts/FiraSans-Bold.ttf"),
-                                        style: TextStyle {
+                                parent.spawn().insert_bundle(TextBundle {
+                                    text: Text::with_section(
+                                        format!("{:?}", selection),
+                                        TextStyle {
+                                            font: asset_server.load("fonts/FiraSans-Bold.ttf"),
                                             font_size: 40.0,
                                             color: Color::rgb(0.9, 0.9, 0.9),
-                                            alignment: TextAlignment::default(),
                                         },
-                                    },
+                                        TextAlignment::default(),
+                                    ),
                                     ..Default::default()
                                 });
                             });
@@ -232,17 +228,18 @@ fn spawn_menu(
         });
 }
 
-fn despawn_menu(commands: &mut Commands, menu_query: Query<Entity, With<Menu>>) {
+fn despawn_menu(mut commands: Commands, menu_query: Query<Entity, With<Menu>>) {
     for menu_entity in menu_query.iter() {
-        commands.despawn_recursive(menu_entity);
+        commands.entity(menu_entity).despawn_recursive();
     }
 }
 
 struct DiagnosticsText;
 
-fn spawn_diagnostics_text(commands: &mut Commands, asset_server: Res<AssetServer>) {
+fn spawn_diagnostics_text(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands
-        .spawn(TextBundle {
+        .spawn()
+        .insert_bundle(TextBundle {
             style: Style {
                 align_self: AlignSelf::FlexEnd,
                 position_type: PositionType::Absolute,
@@ -253,18 +250,18 @@ fn spawn_diagnostics_text(commands: &mut Commands, asset_server: Res<AssetServer
                 },
                 ..Default::default()
             },
-            text: Text {
-                value: "This text changes in the bottom right".to_string(),
-                font: asset_server.load("fonts/FiraMono-Medium.ttf"),
-                style: TextStyle {
+            text: Text::with_section(
+                "This text changes in the bottom right".to_string(),
+                TextStyle {
+                    font: asset_server.load("fonts/FiraMono-Medium.ttf"),
                     font_size: 30.0,
                     color: Color::PINK,
-                    alignment: TextAlignment::default(),
                 },
-            },
+                TextAlignment::default(),
+            ),
             ..Default::default()
         })
-        .with(DiagnosticsText);
+        .insert(DiagnosticsText);
 }
 
 fn update_diagnostics_text(
@@ -279,27 +276,27 @@ fn update_diagnostics_text(
             }
         }
 
-        text.value = format!("{:.0} FPS", fps,);
+        text.sections[0].value = format!("{:.0} FPS", fps,);
     }
 }
 
 #[derive(Default)]
 struct TrackInputState {
-    mousebtn: EventReader<MouseButtonInput>,
+    // mousebtn: EventReader<MouseButtonInput>,
 }
 
 fn capture_mouse_on_click(
-    mut input_state: ResMut<TrackInputState>,
-    ev_mousebtn: Res<Events<MouseButtonInput>>,
+    mut mouse_button_input_events: EventReader<MouseButtonInput>,
+    // mut input_state: ResMut<TrackInputState>,
     mut state: ResMut<State<AppState>>,
 ) {
-    for _ev in input_state.mousebtn.iter(&ev_mousebtn) {
-        state.set_next(AppState::InGame).unwrap();
+    for _ev in mouse_button_input_events.iter() {
+        state.set(AppState::InGame).unwrap();
     }
 }
 
-fn spawn_metadata_text(commands: &mut Commands, asset_server: Res<AssetServer>) {
-    commands.spawn(TextBundle {
+fn spawn_metadata_text(mut commands: Commands, asset_server: Res<AssetServer>) {
+    commands.spawn().insert_bundle(TextBundle {
         style: Style {
             align_self: AlignSelf::FlexEnd,
             position_type: PositionType::Absolute,
@@ -310,15 +307,15 @@ fn spawn_metadata_text(commands: &mut Commands, asset_server: Res<AssetServer>) 
             },
             ..Default::default()
         },
-        text: Text {
-            value: format!("v.{}", env!("CARGO_PKG_VERSION")),
-            font: asset_server.load("fonts/FiraMono-Medium.ttf"),
-            style: TextStyle {
+        text: Text::with_section(
+            format!("v.{}", env!("CARGO_PKG_VERSION")),
+            TextStyle {
+                font: asset_server.load("fonts/FiraMono-Medium.ttf"),
                 font_size: 30.0,
                 color: Color::PINK,
-                alignment: TextAlignment::default(),
             },
-        },
+            TextAlignment::default(),
+        ),
         ..Default::default()
     });
 }

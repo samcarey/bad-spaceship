@@ -1,6 +1,6 @@
 use std::f32;
 
-use crate::{utils, AppState, APP_STATE};
+use crate::{utils, AppState};
 use bevy::{
     input::gamepad::{Gamepad, GamepadButton, GamepadEvent, GamepadEventType},
     input::mouse::MouseWheel,
@@ -8,12 +8,11 @@ use bevy::{
     render::camera::Camera,
     utils::HashSet,
 };
-use bevy_rapier3d::physics::RigidBodyHandleComponent;
-use rapier3d::dynamics::RigidBodySet;
+use bevy_rapier3d::prelude::RigidBodyMassProps;
 use serde::Deserialize;
 
 use super::{
-    character,
+    character::{self, CharacterToSpawn},
     environment::part::{Holdable, TargetOrientation, TargetPosition},
 };
 
@@ -40,25 +39,18 @@ impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut AppBuilder) {
         app.init_resource::<MouseWheelState>()
             .add_startup_system(setup.system())
-            .add_system_to_stage(stage::PRE_UPDATE, connection_system.system())
-            .on_state_update(
-                APP_STATE,
-                AppState::InGame,
-                get_look.system().chain(process_mouse_events.system()),
-            )
-            .on_state_update(
-                APP_STATE,
-                AppState::InGame,
-                process_mouse_clicks.system().chain(toggle_holding.system()),
-            )
-            .on_state_update(APP_STATE, AppState::InGame, gamepad_system.system())
-            .on_state_update(
-                APP_STATE,
-                AppState::InGame,
-                process_keyboard_events.system(),
+            .add_system_to_stage(CoreStage::PreUpdate, connection_system.system())
+            .add_system_set(
+                SystemSet::on_update(AppState::InGame)
+                    .with_system(get_look.system().chain(process_mouse_events.system()))
+                    .with_system(process_mouse_clicks.system().chain(toggle_holding.system()))
+                    .with_system(gamepad_system.system())
+                    .with_system(process_keyboard_events.system()),
             )
             .init_resource::<GamepadLobby>()
             .add_system(respawn.system())
+            .add_system(spawn.system())
+            .add_event::<PlayerToSpawn>()
             .add_plugin(PlatformPlugin)
             .add_plugin(CharacterPlugin);
     }
@@ -150,17 +142,14 @@ pub struct HoldPointBundle {
 pub struct Holding(pub bool);
 
 #[derive(Default)]
-struct MouseWheelState {
-    mouse_wheel_event_reader: EventReader<MouseWheel>,
-}
+struct MouseWheelState;
 
 impl MouseWheelState {
-    pub fn get_zoom_delta(&mut self, mouse_wheel_events: &Events<MouseWheel>) -> Option<f32> {
-        match self
-            .mouse_wheel_event_reader
-            .iter(&mouse_wheel_events)
-            .last()
-        {
+    pub fn get_zoom_delta(
+        &mut self,
+        mouse_wheel_events: &mut EventReader<MouseWheel>,
+    ) -> Option<f32> {
+        match mouse_wheel_events.iter().last() {
             Some(event) => Some(event.y),
             None => None,
         }
@@ -172,24 +161,28 @@ fn tuple_to_vec3(tuple: (f32, f32, f32)) -> Vec3 {
     Vec3::new(x, y, z)
 }
 
-fn setup(commands: &mut Commands) {
+fn setup(mut commands: Commands, mut characters_to_spawn: EventWriter<CharacterToSpawn>) {
     let mut camera_transform =
         Transform::from_rotation(Quat::from_rotation_ypr(std::f32::consts::PI, 0.0, 0.0));
-    camera_transform.translation = -Vec3::unit_z() * 20.0;
+    camera_transform.translation = -Vec3::Z * 20.0;
     let camera_entity = commands
-        .spawn(Camera3dBundle {
+        .spawn()
+        .insert_bundle(PerspectiveCameraBundle {
             transform: camera_transform,
             ..Default::default()
         })
-        .current_entity();
-    spawn(commands, camera_entity);
+        .id();
+    characters_to_spawn.send(CharacterToSpawn {
+        camera: Some(camera_entity),
+    });
 }
 
 fn respawn(
     players: Query<(&Transform, Entity, &Children), With<Player>>,
     camera_orbit_centers: Query<&Children, With<CameraOrbitCenter>>,
     cameras: Query<Entity, With<Camera>>,
-    commands: &mut Commands,
+    mut commands: Commands,
+    mut characters_to_spawn: EventWriter<CharacterToSpawn>,
 ) {
     for (player_transform, player_entity, player_children) in players.iter() {
         if player_transform.translation.y < -30.0 {
@@ -207,69 +200,94 @@ fn respawn(
             }
             let camera = camera_option.unwrap();
 
-            commands
-                .despawn(player_entity)
-                .despawn(*camera_orbit_center);
+            commands.entity(player_entity).despawn();
+            commands.entity(*camera_orbit_center).despawn();
 
-            spawn(commands, Some(camera));
+            characters_to_spawn.send(CharacterToSpawn {
+                camera: Some(camera),
+            });
         }
     }
 }
 
-fn spawn(commands: &mut Commands, camera_entity: Option<Entity>) {
-    let config: Config = config_from_file!("player.ron");
+pub struct PlayerToSpawn {
+    pub camera: Entity,
+    pub size: f32,
+    pub character: Entity,
+}
 
-    let character_size = character::spawn(commands);
+fn spawn(mut commands: Commands, mut players_to_spawn: EventReader<PlayerToSpawn>) {
+    for PlayerToSpawn {
+        camera,
+        size,
+        character,
+    } in players_to_spawn.iter()
+    {
+        let config: Config = config_from_file!("player.ron");
 
-    let player_entity = commands
-        .with(Player::new(camera_entity))
-        .with(Yaw::default())
-        .with(config)
-        .with(KeyboardDirectionalInput::default())
-        .with(GameStickDirectionalInput::default())
-        .with(FocusedInteractable::default())
-        .with(Holding::default())
-        .current_entity();
+        let player_entity = commands
+            .entity(*character)
+            .insert_bundle((
+                Player::new(Some(*camera)),
+                Yaw::default(),
+                config,
+                KeyboardDirectionalInput::default(),
+                GameStickDirectionalInput::default(),
+                FocusedInteractable::default(),
+                Holding::default(),
+            ))
+            .id();
 
-    // This is simply a point that hovers above the character that the camera orbits around.
-    // This is for the purpose of making it easier to see over obstructions.
-    // For now we generate this as a PbrComponent, which is overkill for an invisible point,
-    // so we'll want to simplify this later to something with only the necessary components.
-    let mut camera_orbit_center_transform = Transform::from_translation(
-        tuple_to_vec3(config.camera_offset_character_size_ratio) * character_size,
-    );
-    camera_orbit_center_transform.rotation = Quat::from_rotation_x(INITIAL_CAMERA_PITCH);
-    let camera_orbit_center = commands
-        .spawn(CameraOrbitCenterBundle {
-            transform: camera_orbit_center_transform,
-            ..Default::default()
-        })
-        .current_entity();
+        // This is simply a point that hovers above the character that the camera orbits around.
+        // This is for the purpose of making it easier to see over obstructions.
+        // For now we generate this as a PbrComponent, which is overkill for an invisible point,
+        // so we'll want to simplify this later to something with only the necessary components.
+        let mut camera_orbit_center_transform = Transform::from_translation(
+            tuple_to_vec3(config.camera_offset_character_size_ratio) * *size,
+        );
+        camera_orbit_center_transform.rotation = Quat::from_rotation_x(INITIAL_CAMERA_PITCH);
+        let camera_orbit_center = commands
+            .spawn()
+            .insert_bundle(CameraOrbitCenterBundle {
+                transform: camera_orbit_center_transform,
+                ..Default::default()
+            })
+            .id();
 
-    let hold_point = commands
-        .spawn(HoldPointBundle {
-            transform: Transform::from_translation(Vec3::unit_z() * 5.0),
-            ..Default::default()
-        })
-        .current_entity();
+        let hold_point = commands
+            .spawn()
+            .insert_bundle(HoldPointBundle {
+                transform: Transform::from_translation(Vec3::Z * 5.0),
+                ..Default::default()
+            })
+            .id();
 
-    // Mount the camera center to the player
-    commands.push_children(player_entity.unwrap(), &[camera_orbit_center.unwrap()]);
+        // Mount the camera center to the player
+        commands
+            .entity(player_entity)
+            .push_children(&[camera_orbit_center]);
 
-    // Mount the camera to the camera orbit center
-    commands.push_children(camera_orbit_center.unwrap(), &[camera_entity.unwrap()]);
+        // Mount the camera to the camera orbit center
+        commands
+            .entity(camera_orbit_center)
+            .push_children(&[*camera]);
 
-    commands.push_children(camera_orbit_center.unwrap(), &[hold_point.unwrap()]);
+        commands
+            .entity(camera_orbit_center)
+            .push_children(&[hold_point]);
+    }
 }
 
 fn process_mouse_events(
     In(look): In<Vec2>,
     time: Res<Time>,
     mut mouse_wheel_state: ResMut<MouseWheelState>,
-    mouse_wheel_events: Res<Events<MouseWheel>>,
+    mut mouse_wheel_events: EventReader<MouseWheel>,
     mut query: Query<(&mut Player, &Config, &mut Yaw)>,
-    mut cameras: Query<&mut Transform, With<Camera>>,
-    mut camera_orbit_centers: Query<&mut Transform, With<CameraOrbitCenter>>,
+    mut camera_queries: QuerySet<(
+        Query<&mut Transform, With<Camera>>,
+        Query<&mut Transform, With<CameraOrbitCenter>>,
+    )>,
 ) {
     if let Some((mut player, config, mut yaw)) = query.iter_mut().next() {
         let camera = &mut player.camera;
@@ -283,13 +301,16 @@ fn process_mouse_events(
 
         // By tilting the orbit center that the camera is attached to,
         // the camera itself is swung to the correct position
-        let mut camera_orbit_center_transform = camera_orbit_centers.iter_mut().next().unwrap();
+        let mut camera_orbit_center_transform = camera_queries.q1_mut().iter_mut().next().unwrap();
         camera_orbit_center_transform.rotation = Quat::from_rotation_x(camera.pitch);
 
-        if let Some(zoom_delta) = mouse_wheel_state.get_zoom_delta(&mouse_wheel_events) {
+        if let Some(zoom_delta) = mouse_wheel_state.get_zoom_delta(&mut mouse_wheel_events) {
             // Set the camera translation relative to the camera orbit center
-            let mut camera_transform = cameras.get_mut(camera.entity.unwrap()).unwrap();
-            camera_transform.translation = -Vec3::unit_z()
+            let mut camera_transform = camera_queries
+                .q0_mut()
+                .get_mut(camera.entity.unwrap())
+                .unwrap();
+            camera_transform.translation = -Vec3::Z
                 * (-camera_transform.translation.z
                     - zoom_delta * time.delta_seconds() * config.zoom_sensitivity)
                     .max(config.min_camera_distance)
@@ -303,7 +324,7 @@ pub struct KeyboardDirectionalInput(pub Vec3);
 
 fn process_keyboard_events(
     keyboard_input: Res<Input<KeyCode>>,
-    mut query: Query<Mut<KeyboardDirectionalInput>>,
+    mut query: Query<&mut KeyboardDirectionalInput>,
 ) {
     for mut keyboard_directional_input in query.iter_mut() {
         //
@@ -313,7 +334,7 @@ fn process_keyboard_events(
         //
 
         // Initialize to zero every time - if a key is pressed then it will overwrite in the section below.
-        keyboard_directional_input.0 = Vec3::zero();
+        keyboard_directional_input.0 = Vec3::ZERO;
 
         // "W" keypress indicates forward movement
         if keyboard_input.pressed(KeyCode::W) {
@@ -347,7 +368,7 @@ fn process_keyboard_events(
 
         // Check here to see if any keypresses were registered.
         // If so, then normalize the vector components.
-        if keyboard_directional_input.0 != Vec3::zero() {
+        if keyboard_directional_input.0 != Vec3::ZERO {
             keyboard_directional_input.0.normalize();
         }
     }
@@ -373,37 +394,35 @@ fn get_hold_point_entity(
 
 fn toggle_holding(
     In(click): In<Option<MouseButton>>,
-    commands: &mut Commands,
+    mut commands: Commands,
     mut players: Query<(&mut Holding, &FocusedInteractable, &Children), With<Player>>,
     camera_orbit_centers: Query<&Children>,
     hold_points: Query<Entity, With<HoldPoint>>,
-    holdables: Query<(&GlobalTransform, &RigidBodyHandleComponent), With<Holdable>>,
-    bodies: Res<RigidBodySet>,
+    holdables: Query<(&GlobalTransform, &RigidBodyMassProps), With<Holdable>>,
 ) {
     if let Some(_mouse_button) = click {
         if let Some((mut holding, interactable, player_children)) = players.iter_mut().next() {
             if let Some(current_interactable) = interactable.current {
-                if let Ok((original_orientation, rb_handle)) = holdables.get(current_interactable) {
+                if let Ok((original_orientation, mass_properties)) =
+                    holdables.get(current_interactable)
+                {
                     if let Some(hold_point_entity) =
                         get_hold_point_entity(player_children, camera_orbit_centers, hold_points)
                     {
                         if holding.0 {
                             holding.0 = false;
-
-                            commands.remove::<(TargetPosition, TargetOrientation)>(
-                                current_interactable,
-                            );
+                            commands
+                                .entity(current_interactable)
+                                .remove_bundle::<(TargetPosition, TargetOrientation)>();
                         } else {
                             holding.0 = true;
-                            if let Some(rb) = bodies.get(rb_handle.handle()) {
-                                commands.insert(
-                                    current_interactable,
-                                    (
-                                        TargetPosition::new(hold_point_entity),
-                                        TargetOrientation::new(rb, original_orientation.rotation),
-                                    ),
-                                );
-                            }
+                            commands.entity(current_interactable).insert_bundle((
+                                TargetPosition::new(hold_point_entity),
+                                TargetOrientation::new(
+                                    &mass_properties,
+                                    original_orientation.rotation,
+                                ),
+                            ));
                         }
                     }
                 }
@@ -415,11 +434,13 @@ fn toggle_holding(
 #[derive(Default)]
 struct GamepadLobby {
     gamepads: HashSet<Gamepad>,
-    gamepad_event_reader: EventReader<GamepadEvent>,
 }
 
-fn connection_system(mut lobby: ResMut<GamepadLobby>, gamepad_event: Res<Events<GamepadEvent>>) {
-    for event in lobby.gamepad_event_reader.iter(&gamepad_event) {
+fn connection_system(
+    mut lobby: ResMut<GamepadLobby>,
+    mut gamepad_event: EventReader<GamepadEvent>,
+) {
+    for event in gamepad_event.iter() {
         match &event {
             GamepadEvent(gamepad, GamepadEventType::Connected) => {
                 lobby.gamepads.insert(*gamepad);
@@ -441,13 +462,13 @@ fn gamepad_system(
     lobby: Res<GamepadLobby>,
     button_inputs: Res<Input<GamepadButton>>,
     axes: Res<Axis<GamepadAxis>>,
-    mut query: Query<Mut<GameStickDirectionalInput>>,
+    mut query: Query<&mut GameStickDirectionalInput>,
 ) {
     for mut gamepad_directional_input in query.iter_mut() {
         //
         // Initialize gamepad direction to zero every frame then overwrite below if we have gamepad inputs
         //
-        gamepad_directional_input.0 = Vec3::zero();
+        gamepad_directional_input.0 = Vec3::ZERO;
 
         //
         // confirm that the controller is connected
@@ -484,7 +505,7 @@ fn gamepad_system(
 
         // Check here to see if any keypresses were registered.
         // If so, then normalize the vector components.
-        if gamepad_directional_input.0 != Vec3::zero() {
+        if gamepad_directional_input.0 != Vec3::ZERO {
             gamepad_directional_input.0.normalize();
         }
     }

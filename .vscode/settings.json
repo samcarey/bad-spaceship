@@ -9,4 +9,7 @@
   //   "web"
   // ]
   // END Web/WASM settings
+  "rust-analyzer.cargo.features": [
+    "native"
+  ],
 }

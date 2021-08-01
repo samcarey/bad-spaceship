@@ -1,13 +1,16 @@
 use bevy::prelude::*;
-use bevy_rapier3d::rapier::dynamics::RigidBodyBuilder;
-use bevy_rapier3d::rapier::geometry::ColliderBuilder;
-use nalgebra::Point3;
+use bevy_rapier3d::na::Point3;
+use bevy_rapier3d::physics::ColliderPositionSync;
+use bevy_rapier3d::render::ColliderDebugRender;
+use bevy_rapier3d::{
+    physics::{ColliderBundle, RigidBodyBundle},
+    prelude::ColliderShape,
+};
 pub struct MapPlugin;
 
 impl Plugin for MapPlugin {
     fn build(&self, app: &mut AppBuilder) {
         app.add_startup_system(add_lighting.system())
-            // .add_startup_system(add_platform.system())
             .add_startup_system(spawn_map.system());
     }
 }
@@ -15,17 +18,15 @@ impl Plugin for MapPlugin {
 pub const PLATFORM_WIDTH_M: f32 = 50.0; // meters
 pub const PLATFORM_THICKNESS_M: f32 = 3.0; // meters
 
-fn add_lighting(commands: &mut Commands) {
-    commands.spawn(LightBundle {
+fn add_lighting(mut commands: Commands) {
+    commands.spawn().insert_bundle(LightBundle {
         transform: Transform::from_translation(Vec3::new(0.0, 8.0, 0.0)), // meters
         ..Default::default()
     });
 }
 
-fn spawn_map(commands: &mut Commands) {
-    // Create a bowl with a cosine cross-section,
-    // so that we can join the end of the ramp smoothly
-    // to the lip of the bowl.
+fn spawn_map(mut commands: Commands) {
+    // Create a bowl with a cosine cross-section
     let mut vertices: Vec<Point3<f32>> = Vec::new();
     let mut indices: Vec<[u32; 3]> = Vec::new();
     let segments = 32;
@@ -56,7 +57,22 @@ fn spawn_map(commands: &mut Commands) {
         }
     }
 
-    let rigid_body = RigidBodyBuilder::new_static().translation(0.0, 0.0, 0.0);
-    let collider = ColliderBuilder::trimesh(vertices, indices);
-    commands.spawn((rigid_body, collider));
+    let rigid_body = RigidBodyBundle {
+        body_type: bevy_rapier3d::prelude::RigidBodyType::Static,
+        position: [0.0, 0.0, 0.0].into(),
+        ..Default::default()
+    };
+    let collider = ColliderBundle {
+        shape: ColliderShape::trimesh(vertices, indices),
+        ..Default::default()
+    };
+
+    commands
+        .spawn()
+        .insert_bundle(rigid_body)
+        .insert_bundle(collider)
+        .insert_bundle((
+            ColliderDebugRender::default(),
+            ColliderPositionSync::Discrete,
+        ));
 }

@@ -12,8 +12,8 @@ pub struct PlatformPlugin;
 
 impl Plugin for PlatformPlugin {
     fn build(&self, app: &mut AppBuilder) {
-        app.add_resource(WasmMouseMovementTracker::new())
-            .add_resource(WasmMouseClickTracker::new());
+        app.insert_resource(WasmMouseMovementTracker::new())
+            .insert_resource(WasmMouseClickTracker::new());
     }
 }
 

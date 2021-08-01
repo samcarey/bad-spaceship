@@ -26,7 +26,7 @@ impl Plugin for CommonPlugin {
     fn build(&self, app: &mut AppBuilder) {
         app.add_plugin(NetworkingPlugin)
             .add_startup_system(network_setup.system())
-            .add_resource(NetworkReader::default())
+            .insert_resource(NetworkReader::default())
             .add_system(handle_packets.system());
     }
 }

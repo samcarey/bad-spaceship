@@ -1,32 +1,32 @@
 use crate::plugins::{environment::map, player};
-use crate::utils::{self, Vec3Ext};
+use crate::utils::{self};
 use bevy::prelude::*;
-use bevy_rapier3d::{physics::RapierConfiguration, rapier::geometry::ColliderBuilder};
-use bevy_rapier3d::{physics::RigidBodyHandleComponent, rapier::dynamics::RigidBodyBuilder};
+use bevy_rapier3d::na::Vector3;
+use bevy_rapier3d::physics::{
+    ColliderBundle, ColliderPositionSync, RapierConfiguration, RigidBodyBundle,
+};
+use bevy_rapier3d::prelude::{
+    ColliderMassProps, ColliderMaterial, ColliderShape, RigidBodyForces, RigidBodyMassProps,
+    RigidBodyVelocity, SdpMatrix,
+};
+use bevy_rapier3d::render::ColliderDebugRender;
 use player::CameraOrbitCenter;
 use rand::Rng;
-use rapier3d::{
-    dynamics::{RigidBody, RigidBodySet},
-    math::{SdpMatrix, Vector},
-};
 use std::f32;
-use utils::QuatExt;
+use utils::{QuatExt, TransformExt};
 
 pub struct PartPlugin;
 
 impl Plugin for PartPlugin {
     fn build(&self, app: &mut AppBuilder) {
-        app.add_startup_system(spawn_parts.system())
+        app.add_startup_system(spawn_initial_parts.system())
             .add_system(replace_fallen_parts.system())
             .add_system(update_focused_interactables.system())
             .add_system(highlight_interactables.system())
-            .add_system(
-                // get_active_hold_point_and_part
-                // .system()
-                // .chain(
-                position_held_part.system(), // ),
-            )
-            .add_system(orient_held_part.system());
+            .add_system(position_held_part.system())
+            .add_event::<NewPart>()
+            .add_system(orient_held_part.system())
+            .add_system(spawn_part.system());
     }
 }
 
@@ -56,9 +56,9 @@ impl CriticallyDampedHarmonicOscillator {
 
     pub fn calculate_acceleration(
         &self,
-        displacement: &Vector<f32>,
-        velocity: &Vector<f32>,
-    ) -> Vector<f32> {
+        displacement: &Vector3<f32>,
+        velocity: &Vector3<f32>,
+    ) -> Vector3<f32> {
         displacement * self.stiffness - velocity * self.damping
     }
 }
@@ -84,10 +84,10 @@ pub struct TargetOrientation {
 }
 
 impl TargetOrientation {
-    pub fn new(rb: &RigidBody, quat: Quat) -> Self {
+    pub fn new(mass_properties: &RigidBodyMassProps, quat: Quat) -> Self {
         Self {
             quat,
-            inertia_sqrt: rb.effective_world_inv_inertia_sqrt.inverse_unchecked(),
+            inertia_sqrt: mass_properties.effective_world_inv_inertia_sqrt,
             oscillator: CriticallyDampedHarmonicOscillator::new(ORIENTING_STIFFNESS),
         }
     }
@@ -95,37 +95,58 @@ impl TargetOrientation {
 
 const SPAWN_ZONE_HALF_WIDTH: f32 = map::PLATFORM_WIDTH_M / 2.0 * 0.7;
 
-fn spawn_part(commands: &mut Commands) {
+struct NewPart;
+
+fn spawn_part(mut commands: Commands, mut new_part_events: EventReader<NewPart>) {
     let mut rng = rand::thread_rng();
-    commands.spawn((
-        RigidBodyBuilder::new_dynamic().translation(
-            rng.gen_range(-SPAWN_ZONE_HALF_WIDTH..=SPAWN_ZONE_HALF_WIDTH),
-            rng.gen_range(5.0..=15.0),
-            rng.gen_range(-SPAWN_ZONE_HALF_WIDTH..=SPAWN_ZONE_HALF_WIDTH),
-        ),
-        ColliderBuilder::cuboid(PART_SIZE / 2.0, PART_SIZE / 2.0, PART_SIZE / 2.0)
-            .friction(1.0)
-            .density(2.0),
-        Interactable,
-        Holdable,
-        GetsReplaced,
-    ));
+    for _ in new_part_events.iter() {
+        commands
+            .spawn()
+            .insert_bundle(RigidBodyBundle {
+                body_type: bevy_rapier3d::prelude::RigidBodyType::Dynamic,
+                position: [
+                    rng.gen_range(-SPAWN_ZONE_HALF_WIDTH..=SPAWN_ZONE_HALF_WIDTH),
+                    rng.gen_range(5.0..=15.0),
+                    rng.gen_range(-SPAWN_ZONE_HALF_WIDTH..=SPAWN_ZONE_HALF_WIDTH),
+                ]
+                .into(),
+                ..Default::default()
+            })
+            .insert_bundle(ColliderBundle {
+                shape: ColliderShape::cuboid(PART_SIZE / 2.0, PART_SIZE / 2.0, PART_SIZE / 2.0),
+                mass_properties: ColliderMassProps::Density(2.0),
+                material: ColliderMaterial {
+                    friction: 1.0,
+                    restitution: 0.1,
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .insert_bundle((
+                Interactable,
+                Holdable,
+                GetsReplaced,
+                ColliderDebugRender::with_id(1),
+                ColliderPositionSync::Discrete,
+            ));
+    }
 }
 
-fn spawn_parts(commands: &mut Commands) {
+fn spawn_initial_parts(mut new_part_events: EventWriter<NewPart>) {
     for _ in 0..NUM_PARTS {
-        spawn_part(commands);
+        new_part_events.send(NewPart);
     }
 }
 
 fn replace_fallen_parts(
-    commands: &mut Commands,
+    mut commands: Commands,
     parts: Query<(&Transform, Entity), With<GetsReplaced>>,
+    mut new_part_events: EventWriter<NewPart>,
 ) {
     for (transform, entity) in parts.iter() {
         if transform.translation.y < -10.0 {
-            commands.despawn(entity);
-            spawn_part(commands);
+            commands.entity(entity).despawn();
+            new_part_events.send(NewPart);
         }
     }
 }
@@ -210,14 +231,14 @@ fn highlight_interactables(
         if let Some(previous) = focused_interactable.previous {
             if let Ok(material_handle) = interactables.get_mut(previous) {
                 let material = materials.get_mut(&*material_handle).unwrap();
-                material.albedo = focused_interactable.previous_color.unwrap();
+                material.base_color = focused_interactable.previous_color.unwrap();
             }
         }
 
         // Now, store the newly focused interactable's color and then higlight it
         if let Some(current) = focused_interactable.current {
             if let Ok(material_handle) = interactables.get_mut(current) {
-                let color = &mut materials.get_mut(&*material_handle).unwrap().albedo;
+                let color = &mut materials.get_mut(&*material_handle).unwrap().base_color;
                 focused_interactable.previous_color = Some(color.clone());
 
                 // Make more yellowish
@@ -230,41 +251,46 @@ fn highlight_interactables(
 
 fn position_held_part(
     hold_points: Query<&GlobalTransform, With<player::HoldPoint>>,
-    parts: Query<(&Transform, &RigidBodyHandleComponent, &TargetPosition)>,
-    mut bodies: ResMut<RigidBodySet>,
+    mut parts: Query<(
+        &Transform,
+        &TargetPosition,
+        &RigidBodyMassProps,
+        &RigidBodyVelocity,
+        &mut RigidBodyForces,
+    )>,
     physics_config: Res<RapierConfiguration>,
 ) {
-    for (part_transform, part_rb_handle, target_position) in parts.iter() {
+    for (part_transform, target_position, mass_properties, velocity, mut forces) in parts.iter_mut()
+    {
         if let Ok(hold_point_position) = hold_points.get(target_position.hold_point_entity) {
-            if let Some(rb) = bodies.get_mut(part_rb_handle.handle()) {
-                let vector_between =
-                    (hold_point_position.translation - part_transform.translation).to_vector();
-                let positioning_acceleration = target_position
-                    .oscillator
-                    .calculate_acceleration(&vector_between, rb.linvel());
+            let vector_between = hold_point_position.translation - part_transform.translation;
+            let positioning_acceleration = target_position
+                .oscillator
+                .calculate_acceleration(&vector_between.into(), &velocity.linvel);
 
-                let gravity_cancelation_force = -rb.mass() * physics_config.gravity;
-                let positioning_force = positioning_acceleration * rb.mass();
-                rb.apply_force(positioning_force + gravity_cancelation_force, true);
-            }
+            let gravity_cancelation_force = -mass_properties.mass() * physics_config.gravity;
+            let positioning_force = positioning_acceleration * mass_properties.mass();
+            forces.force += positioning_force + gravity_cancelation_force;
         }
     }
 }
 
 fn orient_held_part(
-    parts: Query<(&Transform, &TargetOrientation, &RigidBodyHandleComponent)>,
-    mut bodies: ResMut<RigidBodySet>,
+    mut parts: Query<(
+        &Transform,
+        &TargetOrientation,
+        &RigidBodyVelocity,
+        &mut RigidBodyForces,
+    )>,
 ) {
-    for (part_transform, target_orientation, part_rb_handle) in parts.iter() {
-        if let Some(rb) = bodies.get_mut(part_rb_handle.handle()) {
-            let rotation_between = (target_orientation.quat * part_transform.rotation.conjugate())
-                .to_rotation_vector();
-            let angular_acceleration = target_orientation
-                .oscillator
-                .calculate_acceleration(&rotation_between, rb.angvel());
-            let torque = target_orientation.inertia_sqrt
-                * (target_orientation.inertia_sqrt * angular_acceleration);
-            rb.apply_torque(torque, true);
-        }
+    for (part_transform, target_orientation, velocity, mut forces) in parts.iter_mut() {
+        let rotation_between =
+            (target_orientation.quat * part_transform.rotation.conjugate()).to_rotation_vector();
+        let angular_acceleration = target_orientation
+            .oscillator
+            .calculate_acceleration(&rotation_between, &velocity.angvel);
+        let torque = target_orientation.inertia_sqrt
+            * (target_orientation.inertia_sqrt * angular_acceleration);
+        forces.torque += torque;
     }
 }

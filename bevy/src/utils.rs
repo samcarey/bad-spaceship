@@ -1,3 +1,6 @@
+use bevy::prelude::*;
+use bevy_rapier3d::na::{Translation3, Vector3};
+pub use platform::*;
 use std::f32::consts::PI;
 
 pub const DEG_TO_RADIANS: f32 = PI / 180.;
@@ -68,39 +71,53 @@ mod platform {
     }
 }
 
-pub use platform::*;
-
-use bevy::prelude::*;
-use rapier3d::math::{Translation, Vector};
-
 pub trait Vec3Ext {
-    fn to_vector(&self) -> Vector<f32>;
-    fn to_translation3(&self) -> Translation<f32>;
+    fn to_vector(&self) -> Vector3<f32>;
+    fn to_translation3(&self) -> Translation3<f32>;
 }
 
-impl Vec3Ext for Vec3 {
-    fn to_vector(&self) -> Vector<f32> {
-        Vector::new(self.x, self.y, self.z)
-    }
+// impl Vec3Ext for Vec3 {
+//     fn to_vector(&self) -> Vector3<f32> {
+//         Vector3::from(self.x, self.y, self.z)
+//     }
 
-    fn to_translation3(&self) -> Translation<f32> {
-        Translation::new(self.x, self.y, self.z)
-    }
-}
+//     fn to_translation3(&self) -> Translation3<f32> {
+//         Translation3::new(self.x, self.y, self.z)
+//     }
+// }
 
 // TODO: submit this to bevy project
 pub trait TransformExt {
+    fn forward(&self) -> Vec3;
     fn right(&self) -> Vec3;
     fn up(&self) -> Vec3;
 }
 
 impl TransformExt for Transform {
+    fn forward(&self) -> Vec3 {
+        self.local_z()
+    }
+
     fn right(&self) -> Vec3 {
-        self.rotation * Vec3::unit_x()
+        -self.local_x()
     }
 
     fn up(&self) -> Vec3 {
-        self.rotation * Vec3::unit_y()
+        self.local_y()
+    }
+}
+
+impl TransformExt for GlobalTransform {
+    fn forward(&self) -> Vec3 {
+        self.local_z()
+    }
+
+    fn right(&self) -> Vec3 {
+        -self.local_x()
+    }
+
+    fn up(&self) -> Vec3 {
+        self.local_y()
     }
 }
 
@@ -108,7 +125,7 @@ use nalgebra::{Quaternion, Unit, UnitQuaternion};
 
 pub trait QuatExt {
     fn to(&self, other: Quat) -> Quat;
-    fn to_rotation_vector(&self) -> Vector<f32>;
+    fn to_rotation_vector(&self) -> Vector3<f32>;
     fn to_quaternion(&self) -> Quaternion<f32>;
     fn to_unit_quaternion(&self) -> UnitQuaternion<f32>;
 }
@@ -118,9 +135,9 @@ impl QuatExt for Quat {
         (self.conjugate() * other).normalize()
     }
 
-    fn to_rotation_vector(&self) -> Vector<f32> {
+    fn to_rotation_vector(&self) -> Vector3<f32> {
         let (axis, angle) = self.to_axis_angle();
-        axis.to_vector() * angle
+        (axis * angle).into()
     }
 
     fn to_quaternion(&self) -> Quaternion<f32> {
