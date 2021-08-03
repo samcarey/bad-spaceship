@@ -8,13 +8,10 @@
       "name": "debug (windows)",
       "type": "cppvsdbg",
       "request": "launch",
-      "program": "${workspaceFolder}/bevy/target/debug/bad-spaceship-bevy",
+      "program": "${workspaceFolder}/target/debug/bad-spaceship-bevy",
       "args": [],
       "stopAtEntry": false,
-      "cwd": "${workspaceRoot}/bevy",
-      "env": {
-        "CARGO_MANIFEST_DIR": "${workspaceFolder}/bevy"
-      },
+      "cwd": "${workspaceRoot}",
       "console": "externalTerminal",
       "preLaunchTask": "build (windows)",
     },
@@ -22,15 +19,12 @@
       "name": "debug (windows, server)",
       "type": "cppvsdbg",
       "request": "launch",
-      "program": "${workspaceFolder}/bevy/target/debug/bad-spaceship-bevy",
+      "program": "${workspaceFolder}/target/debug/bad-spaceship-bevy",
       "args": [
         "--server"
       ],
       "stopAtEntry": false,
-      "cwd": "${workspaceRoot}/bevy",
-      "env": {
-        "CARGO_MANIFEST_DIR": "${workspaceFolder}/bevy"
-      },
+      "cwd": "${workspaceRoot}",
       "console": "externalTerminal",
       "preLaunchTask": "build (windows)",
     },
@@ -38,12 +32,9 @@
       "name": "debug (unix)",
       "type": "lldb",
       "request": "launch",
-      "program": "${workspaceFolder}/bevy/target/debug/bad-spaceship-bevy",
+      "program": "${workspaceFolder}/target/debug/bad-spaceship-bevy",
       "args": [],
-      "cwd": "${workspaceFolder}/bevy",
-      "env": {
-        "CARGO_MANIFEST_DIR": "${workspaceFolder}/bevy"
-      },
+      "cwd": "${workspaceFolder}",
       "preLaunchTask": "build (unix)"
     }
   ]

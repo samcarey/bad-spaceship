@@ -1,9 +1,0 @@
-site_name: Bad Spaceship
-theme:
-  name: darkly
-nav:
-  - Home: "README.md"
-  - Stages:
-      - Home Planet: "stages/home_planet.md"
-  - News: "news.md"
-  - Demo: "demo.html"
