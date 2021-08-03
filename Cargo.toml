@@ -43,3 +43,11 @@ web = [
   "gloo",
   "winit/web-sys",
 ]
+
+# Recommended for rapier: https://rapier.rs/docs/user_guides/bevy_plugin/common_mistakes
+[profile.dev.package.bevy_rapier3d]
+opt-level = 3
+
+# Recommended for rapier: https://rapier.rs/docs/user_guides/bevy_plugin/common_mistakes
+[profile.release]
+codegen-units = 1

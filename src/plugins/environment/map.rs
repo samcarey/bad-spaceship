@@ -1,6 +1,7 @@
 use bevy::prelude::*;
 use bevy_rapier3d::na::Point3;
 use bevy_rapier3d::physics::ColliderPositionSync;
+use bevy_rapier3d::prelude::RigidBodyMassProps;
 use bevy_rapier3d::render::ColliderDebugRender;
 use bevy_rapier3d::{
     physics::{ColliderBundle, RigidBodyBundle},
@@ -59,6 +60,10 @@ fn spawn_map(mut commands: Commands) {
 
     let rigid_body = RigidBodyBundle {
         body_type: bevy_rapier3d::prelude::RigidBodyType::Static,
+        mass_properties: RigidBodyMassProps {
+            effective_inv_mass: 1.0,
+            ..Default::default()
+        },
         position: [0.0, 0.0, 0.0].into(),
         ..Default::default()
     };
