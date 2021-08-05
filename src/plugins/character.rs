@@ -258,7 +258,7 @@ fn move_character_based_on_keyboard_input(
         // Now consider the vertical plane (y)
         // Compute our desired vertical velocity vector and apply a force to the rigid body.
         //
-        if touch_tracker.touching() {
+        if touch_tracker.touching() && combined_directional_input.y != 0. {
             //
             // Compute our desired vertical velocity vector based on keyboard inputs and move speed
             //  Note: Horizontal plane = (x,z), Vertical plane = (y)
