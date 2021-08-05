@@ -15,13 +15,7 @@ impl Plugin for PlatformPlugin {
     fn build(&self, app: &mut AppBuilder) {
         app.insert_resource(WasmPointerLockTracker::new())
             .add_system_set(SystemSet::on_enter(AppState::InGame).with_system(hide_cursor.system()))
-            .add_system_set(
-                SystemSet::on_update(AppState::InGame).with_system(open_menu_if_unlocked.system()),
-            )
-            .add_system_set(
-                SystemSet::on_update(AppState::InGameMenu)
-                    .with_system(close_menu_if_locked.system()),
-            );
+            .add_system(toggle_menu_on_pointer_lock.system());
     }
 }
 
@@ -69,20 +63,17 @@ fn hide_cursor() {
     html::get_body().request_pointer_lock();
 }
 
-fn close_menu_if_locked(
+fn toggle_menu_on_pointer_lock(
     lock_state: Res<WasmPointerLockTracker>,
     mut state: ResMut<State<AppState>>,
 ) {
     if lock_state.get() {
-        state.set(AppState::InGame).unwrap();
-    }
-}
-
-fn open_menu_if_unlocked(
-    lock_state: Res<WasmPointerLockTracker>,
-    mut state: ResMut<State<AppState>>,
-) {
-    if !lock_state.get() {
-        state.set(AppState::InGameMenu).unwrap();
+        if *state.current() == AppState::InGameMenu {
+            state.set(AppState::InGame).unwrap();
+        }
+    } else {
+        if *state.current() == AppState::InGame {
+            state.set(AppState::InGameMenu).unwrap();
+        }
     }
 }
