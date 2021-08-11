@@ -1,8 +1,10 @@
 use bevy::prelude::*;
 use bevy_rapier3d::na::{Translation3, Vector3};
+#[cfg(target_arch = "wasm32")]
 use gloo::events::EventListener;
 pub use platform::*;
 use std::{f32::consts::PI, sync::atomic::AtomicI32};
+#[cfg(target_arch = "wasm32")]
 use web_sys::Event;
 
 pub const DEG_TO_RADIANS: f32 = PI / 180.;
@@ -198,6 +200,7 @@ impl AtomicI32Ext for AtomicI32 {
     }
 }
 
+#[cfg(target_arch = "wasm32")]
 pub fn listen<F>(event_type: &'static str, callback: F)
 where
     F: FnMut(&Event) + 'static,
