@@ -19,11 +19,11 @@ use super::{
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
 #[cfg(not(target_arch = "wasm32"))]
-use native::{get_look, process_keyboard_events, process_mouse_clicks, PlatformPlugin};
+use native::{get_keyboard_input, get_look, process_mouse_clicks, PlatformPlugin};
 #[cfg(target_arch = "wasm32")]
 mod web;
 #[cfg(target_arch = "wasm32")]
-use web::{get_look, process_keyboard_events, process_mouse_clicks, PlatformPlugin};
+use web::{get_keyboard_input, get_look, process_mouse_clicks, PlatformPlugin};
 
 const MAX_CAMERA_PITCH_DEGREES: f32 = 89.;
 const MIN_CAMERA_PITCH_DEGREES: f32 = -89.;
@@ -46,7 +46,7 @@ impl Plugin for PlayerPlugin {
                     .with_system(process_mouse_clicks.system().chain(toggle_holding.system()))
                     .with_system(gamepad_system.system())
                     .with_system(
-                        process_keyboard_events
+                        get_keyboard_input
                             .system()
                             .chain(process_keyboard_input.system()),
                     ),
@@ -323,17 +323,60 @@ fn process_mouse_events(
     }
 }
 
-#[derive(Default)]
-pub struct KeyboardDirectionalInput(pub Vec3);
-
-fn process_keyboard_input(
-    In(keyboard_input): In<Vec3>,
+pub fn process_keyboard_input(
+    // For Web, it's unclear when it will use the native or web capture of keyboard events.
+    // Therefore try to capture the native input and add to it any web input if there is any.
+    // `other_keyboard_input` will come either a native (always Vec3::ZERO) or Web source
+    In(other_keyboard_input): In<Vec3>,
+    keyboard_input: Res<Input<KeyCode>>,
     mut query: Query<&mut KeyboardDirectionalInput>,
 ) {
+    //
+    // Note: keyboard_directional_input vector components match Bevy/Rapier vector definitions:
+    //  Horizontal = (X,Z)
+    //  Vertical = Y
+    //
+
+    // Initialize to zero every time - if a key is pressed then it will overwrite in the section below.
+    let mut direction = other_keyboard_input;
+
+    // "W" keypress indicates forward movement
+    if keyboard_input.pressed(KeyCode::W) {
+        direction.z += 1.;
+    }
+
+    // "S" keypress indicates forward movement
+    if keyboard_input.pressed(KeyCode::S) {
+        direction.z -= 1.;
+    }
+
+    // "D" keypress indicates forward movement
+    if keyboard_input.pressed(KeyCode::D) {
+        direction.x += 1.;
+    }
+
+    // "A" keypress indicates forward movement
+    if keyboard_input.pressed(KeyCode::A) {
+        direction.x -= 1.;
+    }
+
+    //
+    // "Spacebar" keypress indicates vertical jump / thrust.
+    //
+    //  TODO:   We need to control directional input here to isolate jump event vs. continuous
+    //          upward thrust.
+    //
+    if keyboard_input.pressed(KeyCode::Space) {
+        direction.y += 1.;
+    }
+
     for mut keyboard_directional_input in query.iter_mut() {
-        keyboard_directional_input.0 = keyboard_input.normalize_or_zero();
+        keyboard_directional_input.0 = direction.normalize_or_zero();
     }
 }
+
+#[derive(Default)]
+pub struct KeyboardDirectionalInput(pub Vec3);
 
 fn get_hold_point_entity(
     player_children: &Children,

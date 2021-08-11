@@ -1,3 +1,4 @@
 .DS_STORE
 .cargo/config.toml
 /target
+settings.json

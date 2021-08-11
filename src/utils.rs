@@ -1,7 +1,9 @@
 use bevy::prelude::*;
 use bevy_rapier3d::na::{Translation3, Vector3};
+use gloo::events::EventListener;
 pub use platform::*;
-use std::f32::consts::PI;
+use std::{f32::consts::PI, sync::atomic::AtomicI32};
+use web_sys::Event;
 
 pub const DEG_TO_RADIANS: f32 = PI / 180.;
 
@@ -164,6 +166,7 @@ use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
 pub trait AtomicBoolExt {
     fn toggle(&self);
     fn set(&self, value: bool);
+    fn get(&self) -> bool;
 }
 
 impl AtomicBoolExt for AtomicBool {
@@ -174,4 +177,31 @@ impl AtomicBoolExt for AtomicBool {
     fn set(&self, value: bool) {
         self.store(value, SeqCst);
     }
+
+    fn get(&self) -> bool {
+        self.load(SeqCst)
+    }
+}
+
+pub trait AtomicI32Ext {
+    fn set(&self, value: i32);
+    fn get(&self) -> i32;
+}
+
+impl AtomicI32Ext for AtomicI32 {
+    fn set(&self, value: i32) {
+        self.store(value, SeqCst);
+    }
+
+    fn get(&self) -> i32 {
+        self.load(SeqCst)
+    }
+}
+
+pub fn listen<F>(event_type: &'static str, callback: F)
+where
+    F: FnMut(&Event) + 'static,
+{
+    let listener = EventListener::new(&html::get_document(), event_type, callback);
+    listener.forget();
 }
