@@ -5,6 +5,7 @@ use bevy_rapier3d::{physics::RapierPhysicsPlugin, render::RapierRenderPlugin};
 
 #[cfg(target_arch = "wasm32")]
 use bevy_rapier3d::prelude::IntegrationParameters;
+use bevy_web_fullscreen::FullViewportPlugin;
 
 use std::time::Duration;
 #[macro_use]
@@ -36,7 +37,8 @@ fn main() {
             .add_plugins(plugins::EnvironmentPluginGroup)
             .add_plugin(plugins::PlayerPlugin);
         #[cfg(target_arch = "wasm32")]
-        app.add_startup_system(set_initial_fps.system());
+        app.add_startup_system(set_initial_fps.system())
+            .add_plugin(FullViewportPlugin);
     }
 
     app.insert_resource(args);
