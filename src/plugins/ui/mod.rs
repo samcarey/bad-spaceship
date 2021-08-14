@@ -1,11 +1,13 @@
 use crate::AppState;
-use bevy::input::mouse::MouseButtonInput;
 use bevy::{
     diagnostic::{Diagnostics, FrameTimeDiagnosticsPlugin},
+    input::mouse::MouseButtonInput,
     prelude::*,
 };
-use bevy_egui::egui::{Align, Align2, Color32, Frame, Layout};
-use bevy_egui::{egui, EguiContext, EguiPlugin, EguiSettings};
+use bevy_egui::{
+    egui::{self, Align, Align2, Color32, Frame, Layout},
+    EguiContext, EguiPlugin, EguiSettings,
+};
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
