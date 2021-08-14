@@ -30,7 +30,8 @@ impl Plugin for CharacterPlugin {
         )
         .add_system(touching_ground.system())
         .add_event::<CharacterToSpawn>()
-        .add_system(spawn.system());
+        .add_system(spawn.system())
+        .init_resource::<Config>();
     }
 }
 
@@ -59,18 +60,23 @@ struct Config {
     jump_force: f32,
 }
 
+impl Default for Config {
+    fn default() -> Self {
+        config_from_file!("character.ron")
+    }
+}
+
 pub struct CharacterToSpawn {
     pub camera: Option<Entity>,
 }
 
-pub fn spawn(
+fn spawn(
     mut commands: Commands,
     mut characters_to_spawn: EventReader<CharacterToSpawn>,
     mut players_to_spawn: EventWriter<PlayerToSpawn>,
+    config: Res<Config>,
 ) {
     for character_to_spawn in characters_to_spawn.iter() {
-        let config: Config = config_from_file!("character.ron");
-
         let entity = commands
             .spawn()
             .insert_bundle(RigidBodyBundle {
@@ -90,7 +96,7 @@ pub fn spawn(
             .insert_bundle((
                 MoveSpeed(config.max_speed),
                 JumpForce(config.jump_force),
-                Name(config.name),
+                Name(config.name.clone()),
                 Touching::default(),
                 ColliderDebugRender::with_id(0),
                 ColliderPositionSync::Discrete,

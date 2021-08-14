@@ -56,7 +56,8 @@ impl Plugin for PlayerPlugin {
             .add_system(spawn.system())
             .add_event::<PlayerToSpawn>()
             .add_plugin(PlatformPlugin)
-            .add_plugin(CharacterPlugin);
+            .add_plugin(CharacterPlugin)
+            .init_resource::<Config>();
     }
 }
 
@@ -220,21 +221,23 @@ pub struct PlayerToSpawn {
     pub character: Entity,
 }
 
-fn spawn(mut commands: Commands, mut players_to_spawn: EventReader<PlayerToSpawn>) {
+fn spawn(
+    mut commands: Commands,
+    mut players_to_spawn: EventReader<PlayerToSpawn>,
+    config: Res<Config>,
+) {
     for PlayerToSpawn {
         camera,
         size,
         character,
     } in players_to_spawn.iter()
     {
-        let config: Config = config_from_file!("player.ron");
-
         let player_entity = commands
             .entity(*character)
             .insert_bundle((
                 Player::new(Some(*camera)),
                 Yaw::default(),
-                config,
+                *config,
                 KeyboardDirectionalInput::default(),
                 GameStickDirectionalInput::default(),
                 FocusedInteractable::default(),
@@ -287,13 +290,14 @@ fn process_mouse_events(
     time: Res<Time>,
     mut mouse_wheel_state: ResMut<MouseWheelState>,
     mut mouse_wheel_events: EventReader<MouseWheel>,
-    mut query: Query<(&mut Player, &Config, &mut Yaw)>,
+    mut query: Query<(&mut Player, &mut Yaw)>,
     mut camera_queries: QuerySet<(
         Query<&mut Transform, With<Camera>>,
         Query<&mut Transform, With<CameraOrbitCenter>>,
     )>,
+    config: Res<Config>,
 ) {
-    if let Some((mut player, config, mut yaw)) = query.iter_mut().next() {
+    if let Some((mut player, mut yaw)) = query.iter_mut().next() {
         let camera = &mut player.camera;
 
         yaw.0 = (yaw.0 + look.x * time.delta_seconds() * config.look_sensitivity)
