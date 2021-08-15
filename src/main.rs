@@ -20,6 +20,11 @@ fn main() {
 
     let mut app = App::build();
 
+    app.insert_resource(WindowDescriptor {
+        title: "Bad Spaceship".to_string(),
+        ..Default::default()
+    });
+
     if args.is_server {
         app.insert_resource(ScheduleRunnerSettings::run_loop(Duration::from_secs_f64(
             1.0 / 60.,
