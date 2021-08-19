@@ -1,4 +1,3 @@
-use crate::{utils::TransformExt, AppState};
 use bevy::prelude::*;
 use bevy_rapier3d::{
     na::{Isometry, UnitQuaternion, Vector3},
@@ -10,28 +9,26 @@ use bevy_rapier3d::{
     render::ColliderDebugRender,
 };
 
-use player::Player;
-use player::PlayerToSpawn;
 use serde::Deserialize;
 
-use crate::plugins::player;
+use crate::{
+    config_from_file, utils::TransformExt, GameStickDirectionalInput, KeyboardDirectionalInput,
+    PlayerToSpawn, Yaw,
+};
 
 pub struct CharacterPlugin;
 
 impl Plugin for CharacterPlugin {
     fn build(&self, app: &mut AppBuilder) {
-        app.add_system_set(
-            SystemSet::on_update(AppState::InGame)
-                .with_system(move_character_based_on_keyboard_input.system()),
-        )
-        .add_system_to_stage(
-            CoreStage::PostUpdate,
-            rotate_character_based_on_mouse_input.system(),
-        )
-        .add_system(touching_ground.system())
-        .add_event::<CharacterToSpawn>()
-        .add_system(spawn.system())
-        .init_resource::<Config>();
+        app.add_system(move_character_based_on_keyboard_input.system())
+            .add_system_to_stage(
+                CoreStage::PostUpdate,
+                rotate_character_based_on_mouse_input.system(),
+            )
+            .add_system(touching_ground.system())
+            .add_event::<CharacterToSpawn>()
+            .add_system(spawn.system())
+            .init_resource::<Config>();
     }
 }
 
@@ -52,7 +49,7 @@ impl Touching {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 struct Config {
     size: f32,
     name: String,
@@ -114,7 +111,7 @@ fn spawn(
 }
 
 fn touching_ground(
-    mut players: Query<(Entity, &mut Touching), With<Player>>,
+    mut players: Query<(Entity, &mut Touching)>,
     mut events: EventReader<ContactEvent>,
 ) {
     // TODO: Simplify this block?
@@ -150,8 +147,8 @@ fn touching_ground(
 
 fn move_character_based_on_keyboard_input(
     mut query: Query<(
-        &player::KeyboardDirectionalInput,
-        &player::GameStickDirectionalInput,
+        &mut KeyboardDirectionalInput,
+        &GameStickDirectionalInput,
         &Transform,
         &MoveSpeed,
         &JumpForce,
@@ -161,7 +158,7 @@ fn move_character_based_on_keyboard_input(
     )>,
 ) {
     for (
-        keyboard_directional_input,
+        mut keyboard_directional_input,
         gamepad_directional_input,
         transform,
         move_speed,
@@ -189,6 +186,9 @@ fn move_character_based_on_keyboard_input(
         if combined_directional_input != Vec3::ZERO {
             combined_directional_input.normalize();
         }
+
+        // Now that we've read this, reset it so it can be summed up again next frame
+        keyboard_directional_input.0 = Vec3::ZERO;
 
         //
         // In moving the character we want to use two different physics principles: impulse and force.
@@ -313,7 +313,7 @@ fn move_character_based_on_keyboard_input(
 }
 
 fn rotate_character_based_on_mouse_input(
-    mut query: Query<(&Transform, &player::Yaw, &mut RigidBodyPosition), With<player::Player>>,
+    mut query: Query<(&Transform, &Yaw, &mut RigidBodyPosition)>,
 ) {
     for (transform, yaw, mut position) in query.iter_mut() {
         let rotation = UnitQuaternion::from_axis_angle(&Vector3::y_axis(), -yaw.0);

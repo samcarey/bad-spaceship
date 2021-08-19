@@ -1,6 +1,5 @@
 use std::f32;
 
-use crate::{utils, AppState};
 use bevy::{
     input::gamepad::{Gamepad, GamepadButton, GamepadEvent, GamepadEventType},
     input::mouse::MouseWheel,
@@ -11,52 +10,37 @@ use bevy::{
 use bevy_rapier3d::prelude::RigidBodyMassProps;
 use serde::Deserialize;
 
-use super::{
-    character::{self, CharacterToSpawn},
-    environment::part::{Holdable, TargetOrientation, TargetPosition},
+use crate::{
+    character::{CharacterPlugin, CharacterToSpawn},
+    config_from_file,
+    part::{Holdable, TargetOrientation, TargetPosition},
+    utils::DEG_TO_RADIANS,
+    CameraOrbitCenter, FocusedInteractable, GameStickDirectionalInput, HoldPoint, Holding,
+    KeyboardDirectionalInput, MouseMotionDelta, Player, PlayerClick, PlayerToSpawn, Yaw,
+    INITIAL_CAMERA_PITCH,
 };
-
-#[cfg(not(target_arch = "wasm32"))]
-mod native;
-#[cfg(not(target_arch = "wasm32"))]
-use native::{get_keyboard_input, get_look, process_mouse_clicks, PlatformPlugin};
-#[cfg(target_arch = "wasm32")]
-mod web;
-#[cfg(target_arch = "wasm32")]
-use web::{get_keyboard_input, get_look, process_mouse_clicks, PlatformPlugin};
 
 const MAX_CAMERA_PITCH_DEGREES: f32 = 89.;
 const MIN_CAMERA_PITCH_DEGREES: f32 = -89.;
-const MIN_CAMERA_PITCH: f32 = MIN_CAMERA_PITCH_DEGREES * utils::DEG_TO_RADIANS;
-const MAX_CAMERA_PITCH: f32 = MAX_CAMERA_PITCH_DEGREES * utils::DEG_TO_RADIANS;
-const INITIAL_CAMERA_PITCH_DEGREES: f32 = 30.;
-const INITIAL_CAMERA_PITCH: f32 = INITIAL_CAMERA_PITCH_DEGREES * utils::DEG_TO_RADIANS;
+const MIN_CAMERA_PITCH: f32 = MIN_CAMERA_PITCH_DEGREES * DEG_TO_RADIANS;
+const MAX_CAMERA_PITCH: f32 = MAX_CAMERA_PITCH_DEGREES * DEG_TO_RADIANS;
 
 pub struct PlayerPlugin;
-use character::CharacterPlugin;
 
 impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut AppBuilder) {
         app.init_resource::<MouseWheelState>()
             .add_startup_system(setup.system())
             .add_system_to_stage(CoreStage::PreUpdate, connection_system.system())
-            .add_system_set(
-                SystemSet::on_update(AppState::InGame)
-                    .with_system(get_look.system().chain(process_mouse_events.system()))
-                    .with_system(process_mouse_clicks.system().chain(toggle_holding.system()))
-                    .with_system(gamepad_system.system())
-                    .with_system(
-                        get_keyboard_input
-                            .system()
-                            .chain(process_keyboard_input.system()),
-                    ),
-            )
+            .add_system(process_mouse_events.system())
+            .add_system(toggle_holding.system())
+            .add_system(gamepad_system.system())
             .init_resource::<GamepadLobby>()
             .add_system(respawn.system())
             .add_system(spawn.system())
             .add_event::<PlayerToSpawn>()
-            .add_plugin(PlatformPlugin)
             .add_plugin(CharacterPlugin)
+            .add_event::<PlayerClick>()
             .init_resource::<Config>();
     }
 }
@@ -77,55 +61,6 @@ impl Default for Config {
     }
 }
 
-pub struct OrbitingCamera {
-    pitch: f32,
-    pub entity: Option<Entity>,
-}
-
-impl Default for OrbitingCamera {
-    fn default() -> Self {
-        OrbitingCamera {
-            pitch: INITIAL_CAMERA_PITCH,
-            entity: None,
-        }
-    }
-}
-
-impl OrbitingCamera {
-    fn new(camera_entity: Option<Entity>) -> Self {
-        OrbitingCamera {
-            entity: camera_entity,
-            ..Default::default()
-        }
-    }
-}
-
-#[derive(Default, Bundle)]
-pub struct Player {
-    pub camera: OrbitingCamera,
-}
-
-#[derive(Default)]
-pub struct FocusedInteractable {
-    pub current: Option<Entity>,
-    pub previous: Option<Entity>,
-    pub previous_color: Option<Color>,
-}
-
-#[derive(Default)]
-pub struct Yaw(pub f32);
-
-impl Player {
-    fn new(camera_entity: Option<Entity>) -> Self {
-        Player {
-            camera: OrbitingCamera::new(camera_entity),
-        }
-    }
-}
-
-#[derive(Default)]
-pub struct CameraOrbitCenter;
-
 #[derive(Bundle, Default)]
 pub struct CameraOrbitCenterBundle {
     pub transform: Transform,
@@ -133,18 +68,12 @@ pub struct CameraOrbitCenterBundle {
     camera_orbit_center: CameraOrbitCenter,
 }
 
-#[derive(Default)]
-pub struct HoldPoint;
-
 #[derive(Bundle, Default)]
 pub struct HoldPointBundle {
     pub transform: Transform,
     pub global_transform: GlobalTransform,
     hold_point: HoldPoint,
 }
-
-#[derive(Default)]
-pub struct Holding(pub bool);
 
 #[derive(Default)]
 struct MouseWheelState;
@@ -215,12 +144,6 @@ fn respawn(
     }
 }
 
-pub struct PlayerToSpawn {
-    pub camera: Entity,
-    pub size: f32,
-    pub character: Entity,
-}
-
 fn spawn(
     mut commands: Commands,
     mut players_to_spawn: EventReader<PlayerToSpawn>,
@@ -242,6 +165,7 @@ fn spawn(
                 GameStickDirectionalInput::default(),
                 FocusedInteractable::default(),
                 Holding::default(),
+                MouseMotionDelta::default(),
             ))
             .id();
 
@@ -286,24 +210,24 @@ fn spawn(
 }
 
 fn process_mouse_events(
-    In(look): In<Vec2>,
     time: Res<Time>,
     mut mouse_wheel_state: ResMut<MouseWheelState>,
     mut mouse_wheel_events: EventReader<MouseWheel>,
-    mut query: Query<(&mut Player, &mut Yaw)>,
+    mut query: Query<(&mut Player, &mut Yaw, &MouseMotionDelta)>,
     mut camera_queries: QuerySet<(
         Query<&mut Transform, With<Camera>>,
         Query<&mut Transform, With<CameraOrbitCenter>>,
     )>,
     config: Res<Config>,
 ) {
-    if let Some((mut player, mut yaw)) = query.iter_mut().next() {
+    if let Some((mut player, mut yaw, mouse_delta)) = query.iter_mut().next() {
         let camera = &mut player.camera;
 
-        yaw.0 = (yaw.0 + look.x * time.delta_seconds() * config.look_sensitivity)
+        yaw.0 = (yaw.0 + mouse_delta.0.x * time.delta_seconds() * config.look_sensitivity)
             % std::f32::consts::TAU;
 
-        camera.pitch = (camera.pitch + look.y * time.delta_seconds() * config.look_sensitivity)
+        camera.pitch = (camera.pitch
+            + mouse_delta.0.y * time.delta_seconds() * config.look_sensitivity)
             .max(MIN_CAMERA_PITCH)
             .min(MAX_CAMERA_PITCH);
 
@@ -327,61 +251,6 @@ fn process_mouse_events(
     }
 }
 
-pub fn process_keyboard_input(
-    // For Web, it's unclear when it will use the native or web capture of keyboard events.
-    // Therefore try to capture the native input and add to it any web input if there is any.
-    // `other_keyboard_input` will come either a native (always Vec3::ZERO) or Web source
-    In(other_keyboard_input): In<Vec3>,
-    keyboard_input: Res<Input<KeyCode>>,
-    mut query: Query<&mut KeyboardDirectionalInput>,
-) {
-    //
-    // Note: keyboard_directional_input vector components match Bevy/Rapier vector definitions:
-    //  Horizontal = (X,Z)
-    //  Vertical = Y
-    //
-
-    // Initialize to zero every time - if a key is pressed then it will overwrite in the section below.
-    let mut direction = other_keyboard_input;
-
-    // "W" keypress indicates forward movement
-    if keyboard_input.pressed(KeyCode::W) {
-        direction.z += 1.;
-    }
-
-    // "S" keypress indicates forward movement
-    if keyboard_input.pressed(KeyCode::S) {
-        direction.z -= 1.;
-    }
-
-    // "D" keypress indicates forward movement
-    if keyboard_input.pressed(KeyCode::D) {
-        direction.x += 1.;
-    }
-
-    // "A" keypress indicates forward movement
-    if keyboard_input.pressed(KeyCode::A) {
-        direction.x -= 1.;
-    }
-
-    //
-    // "Spacebar" keypress indicates vertical jump / thrust.
-    //
-    //  TODO:   We need to control directional input here to isolate jump event vs. continuous
-    //          upward thrust.
-    //
-    if keyboard_input.pressed(KeyCode::Space) {
-        direction.y += 1.;
-    }
-
-    for mut keyboard_directional_input in query.iter_mut() {
-        keyboard_directional_input.0 = direction.normalize_or_zero();
-    }
-}
-
-#[derive(Default)]
-pub struct KeyboardDirectionalInput(pub Vec3);
-
 fn get_hold_point_entity(
     player_children: &Children,
     camera_orbit_centers: Query<&Children>,
@@ -401,14 +270,14 @@ fn get_hold_point_entity(
 }
 
 fn toggle_holding(
-    In(click): In<Option<MouseButton>>,
+    mut clicks: EventReader<PlayerClick>,
     mut commands: Commands,
     mut players: Query<(&mut Holding, &FocusedInteractable, &Children), With<Player>>,
     camera_orbit_centers: Query<&Children>,
     hold_points: Query<Entity, With<HoldPoint>>,
     holdables: Query<(&GlobalTransform, &RigidBodyMassProps), With<Holdable>>,
 ) {
-    if let Some(_mouse_button) = click {
+    if clicks.iter().next().is_some() {
         if let Some((mut holding, interactable, player_children)) = players.iter_mut().next() {
             if let Some(current_interactable) = interactable.current {
                 if let Ok((original_orientation, mass_properties)) =
@@ -462,9 +331,6 @@ fn connection_system(
         }
     }
 }
-
-#[derive(Default)]
-pub struct GameStickDirectionalInput(pub Vec3);
 
 fn gamepad_system(
     lobby: Res<GamepadLobby>,

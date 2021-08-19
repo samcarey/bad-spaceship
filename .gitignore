@@ -1,4 +1,5 @@
 .DS_STORE
 .cargo/config.toml
-/target
-settings.json
+*/settings.json
+target
+Cargo.lock

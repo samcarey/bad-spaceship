@@ -9,15 +9,6 @@ use bevy_egui::{
     EguiContext, EguiPlugin, EguiSettings,
 };
 
-#[cfg(not(target_arch = "wasm32"))]
-mod native;
-#[cfg(not(target_arch = "wasm32"))]
-use native::PlatformPlugin;
-#[cfg(target_arch = "wasm32")]
-mod web;
-#[cfg(target_arch = "wasm32")]
-use web::PlatformPlugin;
-
 pub struct UiPlugin;
 
 impl Plugin for UiPlugin {
@@ -27,7 +18,6 @@ impl Plugin for UiPlugin {
             .add_system_set(
                 SystemSet::on_update(AppState::InGameMenu).with_system(show_menu.system()),
             )
-            .add_plugin(PlatformPlugin)
             .add_system_set(
                 SystemSet::on_update(AppState::Initial)
                     .with_system(capture_mouse_on_click.system()),

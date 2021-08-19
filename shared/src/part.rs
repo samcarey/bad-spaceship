@@ -1,5 +1,6 @@
-use crate::plugins::{environment::map, player};
-use crate::utils::{self};
+use crate::map::PLATFORM_WIDTH_M;
+use crate::utils::{self, QuatExt, TransformExt};
+use crate::{CameraOrbitCenter, FocusedInteractable, HoldPoint, Holding, Player};
 use bevy::prelude::*;
 use bevy_rapier3d::na::Vector3;
 use bevy_rapier3d::physics::{
@@ -10,10 +11,8 @@ use bevy_rapier3d::prelude::{
     RigidBodyVelocity, SdpMatrix,
 };
 use bevy_rapier3d::render::ColliderDebugRender;
-use player::CameraOrbitCenter;
 use rand::Rng;
 use std::f32;
-use utils::{QuatExt, TransformExt};
 
 pub struct PartPlugin;
 
@@ -93,7 +92,7 @@ impl TargetOrientation {
     }
 }
 
-const SPAWN_ZONE_HALF_WIDTH: f32 = map::PLATFORM_WIDTH_M / 2.0 * 0.7;
+const SPAWN_ZONE_HALF_WIDTH: f32 = PLATFORM_WIDTH_M / 2.0 * 0.7;
 
 struct NewPart;
 
@@ -157,14 +156,7 @@ const MAX_INTERACT_ANGLE_DEGREES: f32 = 20.0;
 const MAX_INTERACT_ANGLE: f32 = MAX_INTERACT_ANGLE_DEGREES * utils::DEG_TO_RADIANS;
 
 fn update_focused_interactables(
-    mut players: Query<
-        (
-            &mut player::FocusedInteractable,
-            &player::Holding,
-            &Children,
-        ),
-        With<player::Player>,
-    >,
+    mut players: Query<(&mut FocusedInteractable, &Holding, &Children), With<Player>>,
     mut interactables: Query<(&mut Transform, Entity), With<Interactable>>,
     camera_orbit_centers: Query<&GlobalTransform, With<CameraOrbitCenter>>,
 ) {
@@ -222,7 +214,7 @@ fn update_focused_interactables(
 }
 
 fn highlight_interactables(
-    mut interactors: Query<&mut player::FocusedInteractable, Changed<player::FocusedInteractable>>,
+    mut interactors: Query<&mut FocusedInteractable, Changed<FocusedInteractable>>,
     mut interactables: Query<&Handle<StandardMaterial>, With<Interactable>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
@@ -250,7 +242,7 @@ fn highlight_interactables(
 }
 
 fn position_held_part(
-    hold_points: Query<&GlobalTransform, With<player::HoldPoint>>,
+    hold_points: Query<&GlobalTransform, With<HoldPoint>>,
     mut parts: Query<(
         &Transform,
         &TargetPosition,
