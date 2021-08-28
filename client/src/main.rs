@@ -1,6 +1,9 @@
+use bad_spaceship_shared::character;
+use bad_spaceship_shared::config::ConfigPlugin;
 use bad_spaceship_shared::map::MapPlugin;
 use bad_spaceship_shared::part::PartPlugin;
-use bad_spaceship_shared::player::PlayerPlugin;
+use bad_spaceship_shared::player::{self, PlayerPlugin};
+use bevy::asset::AssetServerSettings;
 use bevy::prelude::*;
 use bevy::render::pass::ClearColor;
 use bevy_rapier3d::physics::NoUserData;
@@ -40,7 +43,9 @@ fn main() {
         .add_plugin(MapPlugin)
         .add_plugin(PartPlugin)
         .add_plugin(PlayerPlugin)
-        .add_plugin(PlatformPlugin);
+        .add_plugin(PlatformPlugin)
+        .add_plugin(ConfigPlugin)
+        .add_startup_system(load_configs.system());
     #[cfg(target_arch = "wasm32")]
     app.add_startup_system(set_initial_fps.system())
         .add_plugin(FullViewportPlugin);
@@ -60,4 +65,23 @@ pub const APP_STATE: &str = "app_state";
 #[cfg(target_arch = "wasm32")]
 fn set_initial_fps(mut integration_parameters: ResMut<IntegrationParameters>) {
     integration_parameters.dt = 1.0 / 30.0;
+}
+
+fn load_configs(
+    asset_server: Res<AssetServer>,
+    // TODO: Fix this
+    // mut handles: Local<Option<Vec<HandleUntyped>>>,
+    mut handle: Local<Option<Handle<character::Config>>>,
+    mut handle2: Local<Option<Handle<player::Config>>>,
+) {
+    // We're not going to use these handles,
+    // but we need to store them or else the assets will be dropped
+    *handle = Some(asset_server.load("config\\character.ron"));
+    *handle2 = Some(asset_server.load("config\\player.ron"));
+
+    // TODO: Fix this
+    // Theoretically this should work instead of the above, but it doesn't...
+    // *handles = Some(asset_server.load_folder("config").unwrap());
+
+    asset_server.watch_for_changes().unwrap();
 }

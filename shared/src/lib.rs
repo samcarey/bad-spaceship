@@ -4,6 +4,7 @@ use bevy::{
 };
 
 pub mod character;
+pub mod config;
 pub mod map;
 pub mod part;
 pub mod player;
@@ -17,6 +18,7 @@ mod tests {
     }
 }
 
+#[derive(Clone, Copy)]
 pub struct PlayerToSpawn {
     pub camera: Entity,
     pub size: f32,
@@ -92,5 +94,5 @@ pub struct MouseMotionDelta(pub Vec2);
 
 pub struct PlayerClick;
 
-#[cfg(target_arch = "wasm32")]
-const CONFIG_DIR: include_dir::Dir = include_dir::include_dir!("assets/config");
+// #[cfg(target_arch = "wasm32")]
+// const CONFIG_DIR: include_dir::Dir = include_dir::include_dir!("assets/config");

@@ -1,4 +1,5 @@
 use bevy::prelude::*;
+use bevy::reflect::TypeUuid;
 use bevy_rapier3d::{
     na::{Isometry, UnitQuaternion, Vector3},
     physics::{ColliderBundle, ColliderPositionSync, IntoEntity, RigidBodyBundle},
@@ -12,8 +13,7 @@ use bevy_rapier3d::{
 use serde::Deserialize;
 
 use crate::{
-    config_from_file, utils::TransformExt, GameStickDirectionalInput, KeyboardDirectionalInput,
-    PlayerToSpawn, Yaw,
+    utils::TransformExt, GameStickDirectionalInput, KeyboardDirectionalInput, PlayerToSpawn, Yaw,
 };
 
 pub struct CharacterPlugin;
@@ -28,7 +28,7 @@ impl Plugin for CharacterPlugin {
             .add_system(touching_ground.system())
             .add_event::<CharacterToSpawn>()
             .add_system(spawn.system())
-            .init_resource::<Config>();
+            .add_asset::<Config>();
     }
 }
 
@@ -49,20 +49,16 @@ impl Touching {
     }
 }
 
-#[derive(Deserialize, Clone)]
-struct Config {
+#[derive(Deserialize, Clone, TypeUuid, Debug)]
+#[uuid = "39cadc56-aa9c-4543-8640-a018b74b5051"]
+pub struct Config {
     size: f32,
     name: String,
     max_speed: f32,
     jump_force: f32,
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        config_from_file!("character.ron")
-    }
-}
-
+#[derive(Clone, Copy)]
 pub struct CharacterToSpawn {
     pub camera: Option<Entity>,
 }
@@ -71,41 +67,44 @@ fn spawn(
     mut commands: Commands,
     mut characters_to_spawn: EventReader<CharacterToSpawn>,
     mut players_to_spawn: EventWriter<PlayerToSpawn>,
-    config: Res<Config>,
+    configs: Res<Assets<Config>>,
 ) {
     for character_to_spawn in characters_to_spawn.iter() {
-        let entity = commands
-            .spawn()
-            .insert_bundle(RigidBodyBundle {
-                body_type: bevy_rapier3d::prelude::RigidBodyType::Dynamic,
-                position: [0.0, 10., 0.].into(),
-                mass_properties: RigidBodyMassProps {
-                    flags: RigidBodyMassPropsFlags::ROTATION_LOCKED,
+        if let Some((_, config)) = configs.iter().next() {
+            let entity = commands
+                .spawn()
+                .insert_bundle(RigidBodyBundle {
+                    body_type: bevy_rapier3d::prelude::RigidBodyType::Dynamic,
+                    position: [0.0, 10., 0.].into(),
+                    mass_properties: RigidBodyMassProps {
+                        flags: RigidBodyMassPropsFlags::ROTATION_LOCKED,
+                        ..Default::default()
+                    },
                     ..Default::default()
-                },
-                ..Default::default()
-            })
-            .insert_bundle(ColliderBundle {
-                shape: ColliderShape::ball(config.size / 2.0),
-                flags: (ActiveEvents::INTERSECTION_EVENTS | ActiveEvents::CONTACT_EVENTS).into(),
-                ..Default::default()
-            })
-            .insert_bundle((
-                MoveSpeed(config.max_speed),
-                JumpForce(config.jump_force),
-                Name(config.name.clone()),
-                Touching::default(),
-                ColliderDebugRender::with_id(0),
-                ColliderPositionSync::Discrete,
-            ))
-            .id();
+                })
+                .insert_bundle(ColliderBundle {
+                    shape: ColliderShape::ball(config.size / 2.0),
+                    flags: (ActiveEvents::INTERSECTION_EVENTS | ActiveEvents::CONTACT_EVENTS)
+                        .into(),
+                    ..Default::default()
+                })
+                .insert_bundle((
+                    MoveSpeed(config.max_speed),
+                    JumpForce(config.jump_force),
+                    Name(config.name.clone()),
+                    Touching::default(),
+                    ColliderDebugRender::with_id(0),
+                    ColliderPositionSync::Discrete,
+                ))
+                .id();
 
-        if let Some(camera) = character_to_spawn.camera {
-            players_to_spawn.send(PlayerToSpawn {
-                camera,
-                size: config.size,
-                character: entity,
-            })
+            if let Some(camera) = character_to_spawn.camera {
+                players_to_spawn.send(PlayerToSpawn {
+                    camera,
+                    size: config.size,
+                    character: entity,
+                })
+            }
         }
     }
 }
