@@ -63,12 +63,6 @@ pub struct Config {
     camera_offset_character_size_ratio: (f32, f32, f32),
 }
 
-// impl Default for Config {
-//     fn default() -> Self {
-//         config_from_file!("player.ron")
-//     }
-// }
-
 #[derive(Bundle, Default)]
 pub struct CameraOrbitCenterBundle {
     pub transform: Transform,
