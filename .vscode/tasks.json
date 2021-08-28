@@ -2,20 +2,37 @@
     // See https://go.microsoft.com/fwlink/?LinkId=733558
     // for the documentation about the tasks.json format
     "version": "2.0.0",
+    "options": {
+        "env": {
+            "CARGO_MANIFEST_DIR": "${workspaceFolder}"
+        }
+    },
     "tasks": [
         {
             "label": "run (release)",
             "type": "shell",
-            "command": "cargo make run --profile release",
+            "command": "cd client ; cargo make run --profile release",
             "group": {
                 "kind": "build",
                 "isDefault": true
             }
         },
         {
+            "label": "build (release)",
+            "type": "shell",
+            "command": "cd client ; cargo make build-native --profile release",
+            "group": "build"
+        },
+        {
+            "label": "serve (release)",
+            "type": "shell",
+            "command": "cd client ; cargo make serve --profile release",
+            "group": "test"
+        },
+        {
             "label": "build (debug)",
             "type": "shell",
-            "command": "cargo make build-native"
+            "command": "cd client ; cargo make build-native"
         },
     ]
 }
