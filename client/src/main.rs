@@ -3,7 +3,6 @@ use bad_spaceship_shared::config::ConfigPlugin;
 use bad_spaceship_shared::map::MapPlugin;
 use bad_spaceship_shared::part::PartPlugin;
 use bad_spaceship_shared::player::{self, PlayerPlugin};
-use bevy::asset::AssetServerSettings;
 use bevy::prelude::*;
 use bevy::render::pass::ClearColor;
 use bevy_rapier3d::physics::NoUserData;
