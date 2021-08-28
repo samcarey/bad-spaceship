@@ -7,21 +7,20 @@ pub struct PlatformPlugin;
 
 impl Plugin for PlatformPlugin {
     fn build(&self, app: &mut AppBuilder) {
-        app.init_resource::<State>()
-            .add_startup_system(show_cursor.system())
+        app.add_startup_system(show_cursor.system())
             .add_system_set(
                 SystemSet::on_enter(AppState::InGameMenu).with_system(show_cursor.system()),
             )
             .add_system_set(SystemSet::on_enter(AppState::InGame).with_system(hide_cursor.system()))
             .add_system(toggle_menu_on_key.system())
             .add_event::<PlayerClick>()
-            .add_system(get_look.system())
-            .add_system(process_mouse_clicks.system());
+            .add_system_set(
+                SystemSet::on_update(AppState::InGame)
+                    .with_system(process_mouse_clicks.system())
+                    .with_system(get_look.system()),
+            );
     }
 }
-
-#[derive(Default)]
-pub struct State;
 
 pub fn get_look(
     mut mouse_motion_events: EventReader<MouseMotion>,
