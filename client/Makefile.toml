@@ -33,7 +33,6 @@ command = "cargo"
 
 [tasks.build-web]
 args = [
-    "--verbose",
     "--out-dir",
     "${TARGET_DIR}",
     "--out-name",
