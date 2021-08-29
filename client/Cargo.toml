@@ -8,10 +8,10 @@ edition = "2018"
 
 [dependencies]
 bevy = { version = "0.5.0", default-features = false }
-bevy_rapier3d = "0.10.2"
+bevy_rapier3d = "0.11.0"
 serde = { version = "1.0.126", features = ["derive"] }
 ron = "0.6.4"
-nalgebra = "0.28.0"
+nalgebra = "0.29.0"
 log = "0.4.14"
 bevy_webgl2 = { version = "0.5.2", optional = true }
 winit = { version = "0.25.0" }
