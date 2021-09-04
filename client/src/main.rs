@@ -46,8 +46,7 @@ fn main() {
         .add_plugin(ConfigPlugin)
         .add_startup_system(load_configs.system());
     #[cfg(target_arch = "wasm32")]
-    app.add_startup_system(set_initial_fps.system())
-        .add_plugin(FullViewportPlugin);
+    app.add_plugin(FullViewportPlugin);
 
     app.run();
 }
@@ -60,11 +59,6 @@ pub enum AppState {
 }
 
 pub const APP_STATE: &str = "app_state";
-
-#[cfg(target_arch = "wasm32")]
-fn set_initial_fps(mut integration_parameters: ResMut<IntegrationParameters>) {
-    integration_parameters.dt = 1.0 / 30.0;
-}
 
 fn load_configs(
     asset_server: Res<AssetServer>,
