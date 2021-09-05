@@ -13,15 +13,17 @@ use bevy_rapier3d::{
 use serde::Deserialize;
 
 use crate::{
-    utils::TransformExt, Character, GameStickDirectionalInput, KeyboardDirectionalInput, Player,
-    Yaw,
+    utils::TransformExt, Character, DirectionalInput, GameStickDirectionalInput,
+    KeyboardDirectionalInput, Player, Yaw,
 };
 
 pub struct CharacterPlugin;
 
 impl Plugin for CharacterPlugin {
     fn build(&self, app: &mut AppBuilder) {
-        app.add_system(move_character_based_on_keyboard_input.system())
+        app.add_system(combine_directional_inputs.system().label(CombineInputs))
+            .add_system(walk_based_on_input.system().after(CombineInputs))
+            .add_system(jump_based_on_input.system().after(CombineInputs))
             .add_system_to_stage(
                 CoreStage::PostUpdate,
                 rotate_character_based_on_mouse_input.system(),
@@ -92,7 +94,6 @@ fn touching_ground(
     mut players: Query<(Entity, &mut Touching)>,
     mut events: EventReader<ContactEvent>,
 ) {
-    // TODO: Simplify this block?
     for contact_event in events.iter() {
         for (player_entity, mut touching) in players.iter_mut() {
             match contact_event {
@@ -123,10 +124,48 @@ fn touching_ground(
     }
 }
 
-fn move_character_based_on_keyboard_input(
+#[derive(SystemLabel, Clone, Hash, Debug, PartialEq, Eq)]
+struct CombineInputs;
+
+fn combine_directional_inputs(
     mut query: Query<(
         &mut KeyboardDirectionalInput,
         &GameStickDirectionalInput,
+        &mut DirectionalInput,
+    )>,
+) {
+    for (mut keyboard_directional_input, gamepad_directional_input, mut directional_input) in
+        query.iter_mut()
+    {
+        directional_input.0 = Vec3::ZERO;
+        directional_input.0.x = keyboard_directional_input.0.x + gamepad_directional_input.0.x;
+        directional_input.0.y = keyboard_directional_input.0.y + gamepad_directional_input.0.y;
+        directional_input.0.z = keyboard_directional_input.0.z + gamepad_directional_input.0.z;
+        directional_input.0.normalize_or_zero();
+
+        // Now that we've read this, reset it so it can be summed up again next frame
+        keyboard_directional_input.0 = Vec3::ZERO;
+    }
+}
+
+fn velocity_adjustment(
+    current_velocity: Vec3,
+    desired_velocity: Vec3,
+    current_relevant_velocity: Vec3,
+) -> Vec3 {
+    let current_speed_along_desired_direction =
+        current_velocity.dot(desired_velocity.normalize()).abs();
+    let current_velocity_along_propulsion_direction = if current_relevant_velocity != Vec3::ZERO {
+        current_speed_along_desired_direction * current_relevant_velocity.normalize()
+    } else {
+        Vec3::ZERO
+    };
+    desired_velocity - current_velocity_along_propulsion_direction
+}
+
+fn walk_based_on_input(
+    mut query: Query<(
+        &mut DirectionalInput,
         &Transform,
         &Touching,
         &mut RigidBodyVelocity,
@@ -135,157 +174,86 @@ fn move_character_based_on_keyboard_input(
     configs: Res<Assets<Config>>,
 ) {
     if let Some((_, config)) = configs.iter().next() {
-        for (
-            mut keyboard_directional_input,
-            gamepad_directional_input,
-            transform,
-            touch_tracker,
-            mut velocity,
-            mass_properties,
-        ) in query.iter_mut()
+        for (directional_input, transform, touch_tracker, mut velocity, mass_properties) in
+            query.iter_mut()
         {
-            //
-            // Get the current velocity from the physics engine
-            //
-            let current_velocity = velocity.linvel.clone_owned();
+            let current_velocity: Vec3 = velocity.linvel.clone_owned().into();
 
-            //
-            // Combine the keyboard and gamepad directional inputs
-            //
-            let mut combined_directional_input = Vec3::ZERO;
-            combined_directional_input.x =
-                keyboard_directional_input.0.x + gamepad_directional_input.0.x;
-            combined_directional_input.y =
-                keyboard_directional_input.0.y + gamepad_directional_input.0.y;
-            combined_directional_input.z =
-                keyboard_directional_input.0.z + gamepad_directional_input.0.z;
-            if combined_directional_input != Vec3::ZERO {
-                combined_directional_input.normalize();
+            // Compute our desired horizontal velocity vector based on keyboard inputs and move speed
+            // Note: Horizontal plane = (x,z), Vertical plane = (y)
+            let forward = transform.forward() * directional_input.0.z;
+            let right = transform.right() * directional_input.0.x;
+            let desired_velocity = Vec3::from(forward + right) * config.max_speed;
+
+            // get a copy of the current velocity from rapier, isolated to horizontal components only
+            // (ie, zero out current vertical [y] component)
+            let current_horizontal_velocity =
+                Vec3::new(current_velocity.x, 0.0, current_velocity.z);
+
+            // To move the character, we increase the speed to match the maximum speed in whatever
+            // direction is indicated by user keypress; or, if no keys pressed then we cancel out
+            // any velocity to stop horizontally.
+            let horizontal_velocity_change = if desired_velocity != Vec3::ZERO {
+                velocity_adjustment(
+                    current_velocity,
+                    desired_velocity,
+                    current_horizontal_velocity,
+                )
+            } else {
+                -current_horizontal_velocity
+            };
+
+            let mut horizontal_impulse = mass_properties.mass() * horizontal_velocity_change * 0.13; // slowing down with fudge factor
+
+            if !touch_tracker.touching() {
+                horizontal_impulse *= 0.13; // slowing down even more when in air
             }
 
-            // Now that we've read this, reset it so it can be summed up again next frame
-            keyboard_directional_input.0 = Vec3::ZERO;
+            // Apply the computed impulse to the character's rigid body
+            velocity.apply_impulse(mass_properties, horizontal_impulse.into());
+        }
+    }
+}
 
-            //
-            // In moving the character we want to use two different physics principles: impulse and force.
-            //
-            // Since we want the character's movement in the horizontal plane (x,z) to be precisely controlled
-            // WRT movement and stop via keypresses, we use rapier to apply an impulse for movement,
-            // and then negate that impulse to stop instantaneously.  We need a different approach for
-            // the vertical plane; if the same is applied to the vertical plane (y), the character will hover
-            // instead of responding to gravity. In the vertical direction we want to apply "force" which then
-            // releases and allows the rapier gravity to re-engage.
-            //
-            // To accomplish this, we compute separate vectors for horizontal/vertical contributions
-            // and then use them to apply separate impulse/force actions (respectively) to our rigid body.
-            //
+fn jump_based_on_input(
+    mut query: Query<(
+        &mut DirectionalInput,
+        &Transform,
+        &Touching,
+        &mut RigidBodyVelocity,
+        &RigidBodyMassProps,
+    )>,
+    configs: Res<Assets<Config>>,
+) {
+    if let Some((_, config)) = configs.iter().next() {
+        for (directional_input, transform, touch_tracker, mut velocity, mass_properties) in
+            query.iter_mut()
+        {
+            if touch_tracker.touching() && directional_input.0.y != 0. {
+                let current_velocity: Vec3 = velocity.linvel.clone_owned().into();
 
-            //
-            // Start with the horizontal plane (x,z)
-            // Compute our desired horizontal velocity vector and apply an impulse to the rigid body.
-            //
-            {
-                //
                 // Compute our desired horizontal velocity vector based on keyboard inputs and move speed
-                //  Note: Horizontal plane = (x,z), Vertical plane = (y)
-                //
-                let forward = transform.forward() * combined_directional_input.z;
-                let right = transform.right() * combined_directional_input.x;
-                let desired_horizontal_velocity = Vec3::from(forward + right) * config.max_speed;
+                // Note: Horizontal plane = (x,z), Vertical plane = (y)
+                let up = transform.up() * directional_input.0.y;
+                let desired_velocity = Vec3::from(up) * config.jump_force;
 
-                //
-                // get a copy of the current velocity from rapier, isolated to horizontal components only
-                // (ie, zero out current vertical [y] component)
-                //
-                let current_horizontal_velocity =
-                    Vec3::new(current_velocity[(0, 0)], 0.0, current_velocity[(2, 0)]);
-
-                //
-                // To move the character, we increase the speed to match the maximum speed in whatever
-                // direction is indicated by user keypress; or, if no keys pressed then we cancel out
-                // any velocity to stop horizontally.
-                //
-                let horizontal_velocity_change =
-                    match desired_horizontal_velocity.abs().max_element() > 0.0 {
-                        true => {
-                            let current_speed_along_propulsion_direction = current_velocity
-                                .dot(&desired_horizontal_velocity.normalize().into())
-                                .abs();
-                            let current_velocity_along_propulsion_direction =
-                                match current_horizontal_velocity.abs().max_element() > 0.0 {
-                                    true => {
-                                        current_speed_along_propulsion_direction
-                                            * current_horizontal_velocity.normalize()
-                                    }
-                                    false => Vec3::ZERO,
-                                };
-                            desired_horizontal_velocity
-                                - current_velocity_along_propulsion_direction
-                        }
-                        false => -current_horizontal_velocity,
-                    };
-
-                // Apply the computed impulse to the character's rigid body
-                let mut horizontal_impulse =
-                    mass_properties.mass() * horizontal_velocity_change * 0.13; // slowing down with fudge factor
-
-                if !touch_tracker.touching() {
-                    horizontal_impulse *= 0.13; // slowing down even more when in air
-                }
-
-                velocity.apply_impulse(mass_properties, horizontal_impulse.into());
-            }
-
-            // TODO: Update this documentation and variable names,
-            // since we're doing an impulse instead of force now.
-            //
-            // Now consider the vertical plane (y)
-            // Compute our desired vertical velocity vector and apply a force to the rigid body.
-            //
-            if touch_tracker.touching() && combined_directional_input.y != 0. {
-                //
-                // Compute our desired vertical velocity vector based on keyboard inputs and move speed
-                //  Note: Horizontal plane = (x,z), Vertical plane = (y)
-                //
-                //  Note: We presume that keyboard directional input is limited externally.  If not,
-                //          then a long keypress will act more like "thrust" upwards than singular
-                //          jump event.
-                //
-                let up = transform.up() * combined_directional_input.y;
-                let desired_vertical_velocity = Vec3::from(up) * config.jump_force;
-
-                //
-                // get a copy of the current velocity from rapier, isolated to vertical component only
+                // Get a copy of the current velocity from rapier, isolated to vertical component only
                 // (ie, zero out current horizontal [x,z] components)
-                //
-                let current_vertical_velocity = Vec3::new(0.0, current_velocity[(1, 0)], 0.0);
+                let current_vertical_velocity = Vec3::new(0.0, current_velocity.y, 0.0);
 
-                //
-                // To "jump" we allow apply force in the vertical direction
-                //
-                let vertical_velocity = match desired_vertical_velocity.abs().max_element() > 0.0 {
-                    true => {
-                        let current_speed_along_propulsion_direction = current_velocity
-                            .dot(&desired_vertical_velocity.normalize().into())
-                            .abs();
-                        let current_velocity_along_propulsion_direction =
-                            match current_vertical_velocity.abs().max_element() > 0.0 {
-                                true => {
-                                    current_speed_along_propulsion_direction
-                                        * current_vertical_velocity.normalize()
-                                }
-                                false => Vec3::ZERO,
-                            };
-                        desired_vertical_velocity - current_velocity_along_propulsion_direction
-                    }
-                    false => Vec3::ZERO,
+                let vertical_velocity = if desired_velocity != Vec3::ZERO {
+                    velocity_adjustment(
+                        current_velocity,
+                        desired_velocity,
+                        current_vertical_velocity,
+                    )
+                } else {
+                    Vec3::ZERO
                 };
 
-                //
                 // Apply the computed force to the character's rigid body
-                //
-                let vertical_force = mass_properties.mass() * vertical_velocity;
-                velocity.apply_impulse(mass_properties, vertical_force.into());
+                let vertical_impulse = mass_properties.mass() * vertical_velocity;
+                velocity.apply_impulse(mass_properties, vertical_impulse.into());
             }
         }
     }

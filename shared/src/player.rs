@@ -14,10 +14,10 @@ use serde::Deserialize;
 use crate::{
     character::CharacterPlugin,
     part::{Holdable, TargetOrientation, TargetPosition},
-    utils::DEG_TO_RADIANS,
-    CameraOrbitCenter, Character, FocusedInteractable, GameStickDirectionalInput, HoldPoint,
-    Holding, KeyboardDirectionalInput, MouseMotionDelta, Player, PlayerClick, PlayerToSpawn, Yaw,
-    INITIAL_CAMERA_PITCH,
+    utils::{ToVec3, DEG_TO_RADIANS},
+    CameraOrbitCenter, Character, DirectionalInput, FocusedInteractable, GameStickDirectionalInput,
+    HoldPoint, Holding, KeyboardDirectionalInput, MouseMotionDelta, OrbitingCamera, Player,
+    PlayerClick, PlayerToSpawn, Yaw, INITIAL_CAMERA_PITCH,
 };
 
 const MAX_CAMERA_PITCH_DEGREES: f32 = 89.;
@@ -33,7 +33,8 @@ impl Plugin for PlayerPlugin {
             .add_startup_system(spawn_camera.system())
             .add_system(spawn.system())
             .add_system_to_stage(CoreStage::PreUpdate, connection_system.system())
-            .add_system(process_mouse_events.system())
+            .add_system(mouse_motion.system())
+            .add_system(mouse_zoom.system())
             .add_system(toggle_holding.system())
             .add_system(gamepad_system.system())
             .init_resource::<GamepadLobby>()
@@ -86,11 +87,6 @@ impl MouseWheelState {
     }
 }
 
-fn tuple_to_vec3(tuple: (f32, f32, f32)) -> Vec3 {
-    let (x, y, z) = tuple;
-    Vec3::new(x, y, z)
-}
-
 fn spawn_camera(mut commands: Commands) {
     let mut camera_transform =
         Transform::from_rotation(Quat::from_rotation_ypr(std::f32::consts::PI, 0.0, 0.0));
@@ -101,22 +97,36 @@ fn spawn_camera(mut commands: Commands) {
     });
 }
 
+#[derive(Bundle, Default)]
+struct PlayerBundle {
+    player: Player,
+    orbiting_camera: OrbitingCamera,
+    yaw: Yaw,
+    keyboard_directional_input: KeyboardDirectionalInput,
+    gamestick_directional_input: GameStickDirectionalInput,
+    directional_input: DirectionalInput,
+    focused_interactable: FocusedInteractable,
+    holding: Holding,
+    mouse_motion_delta: MouseMotionDelta,
+}
+
+impl PlayerBundle {
+    fn new(camera_entity: Entity) -> Self {
+        Self {
+            orbiting_camera: OrbitingCamera::new(camera_entity),
+            ..Default::default()
+        }
+    }
+}
+
 fn spawn(
     mut commands: Commands,
     cameras: Query<Entity, With<Camera>>,
     players: Query<(), With<Player>>,
 ) {
     if players.iter().next().is_none() {
-        if let Some(camera) = cameras.iter().next() {
-            commands.spawn_bundle((
-                Player::new(Some(camera)),
-                Yaw::default(),
-                KeyboardDirectionalInput::default(),
-                GameStickDirectionalInput::default(),
-                FocusedInteractable::default(),
-                Holding::default(),
-                MouseMotionDelta::default(),
-            ));
+        if let Some(camera_entity) = cameras.iter().next() {
+            commands.spawn_bundle(PlayerBundle::new(camera_entity));
         }
     }
 }
@@ -148,7 +158,7 @@ fn attach_camera_orbit(
                 // For now we generate this as a PbrComponent, which is overkill for an invisible point,
                 // so we'll want to simplify this later to something with only the necessary components.
                 let mut camera_orbit_center_transform = Transform::from_translation(
-                    tuple_to_vec3(config.camera_offset_character_size_ratio)
+                    config.camera_offset_character_size_ratio.to_vec3()
                         * character_collider.compute_local_bounding_sphere().radius
                         * 2.0,
                 );
@@ -158,14 +168,6 @@ fn attach_camera_orbit(
                     .spawn()
                     .insert_bundle(CameraOrbitCenterBundle {
                         transform: camera_orbit_center_transform,
-                        ..Default::default()
-                    })
-                    .id();
-
-                let hold_point = commands
-                    .spawn()
-                    .insert_bundle(HoldPointBundle {
-                        transform: Transform::from_translation(Vec3::Z * 5.0),
                         ..Default::default()
                     })
                     .id();
@@ -180,6 +182,14 @@ fn attach_camera_orbit(
                     .entity(camera_orbit_center)
                     .push_children(&[camera]);
 
+                let hold_point = commands
+                    .spawn()
+                    .insert_bundle(HoldPointBundle {
+                        transform: Transform::from_translation(Vec3::Z * 5.0),
+                        ..Default::default()
+                    })
+                    .id();
+
                 commands
                     .entity(camera_orbit_center)
                     .push_children(&[hold_point]);
@@ -188,42 +198,45 @@ fn attach_camera_orbit(
     }
 }
 
-fn process_mouse_events(
+fn mouse_motion(
     time: Res<Time>,
-    mut mouse_wheel_state: ResMut<MouseWheelState>,
-    mut mouse_wheel_events: EventReader<MouseWheel>,
-    mut query: Query<(&mut Player, &mut Yaw, &MouseMotionDelta)>,
-    mut camera_queries: QuerySet<(
-        Query<&mut Transform, With<Camera>>,
-        Query<&mut Transform, With<CameraOrbitCenter>>,
-    )>,
+    mut query: Query<(&mut OrbitingCamera, &mut Yaw, &MouseMotionDelta)>,
+    mut camera_orbit_center_transforms: Query<&mut Transform, With<CameraOrbitCenter>>,
     configs: ResMut<Assets<Config>>,
 ) {
     if let Some((_, config)) = configs.iter().next() {
-        if let Some((mut player, mut yaw, mouse_delta)) = query.iter_mut().next() {
-            let camera = &mut player.camera;
-
+        if let Some((mut orbiting_camera, mut yaw, mouse_delta)) = query.iter_mut().next() {
             yaw.0 = (yaw.0 + mouse_delta.0.x * time.delta_seconds() * config.look_sensitivity)
                 % std::f32::consts::TAU;
 
-            camera.pitch = (camera.pitch
+            orbiting_camera.pitch = (orbiting_camera.pitch
                 + mouse_delta.0.y * time.delta_seconds() * config.look_sensitivity)
                 .max(MIN_CAMERA_PITCH)
                 .min(MAX_CAMERA_PITCH);
 
             // By tilting the orbit center that the camera is attached to,
             // the camera itself is swung to the correct position
-            if let Some(mut camera_orbit_center_transform) =
-                camera_queries.q1_mut().iter_mut().next()
-            {
-                camera_orbit_center_transform.rotation = Quat::from_rotation_x(camera.pitch);
+            if let Some(mut transform) = camera_orbit_center_transforms.iter_mut().next() {
+                transform.rotation = Quat::from_rotation_x(orbiting_camera.pitch);
             }
+        }
+    }
+}
 
+fn mouse_zoom(
+    time: Res<Time>,
+    mut mouse_wheel_state: ResMut<MouseWheelState>,
+    mut mouse_wheel_events: EventReader<MouseWheel>,
+    mut query: Query<&mut OrbitingCamera>,
+    mut camera_transforms: Query<&mut Transform, With<Camera>>,
+    configs: ResMut<Assets<Config>>,
+) {
+    if let Some((_, config)) = configs.iter().next() {
+        if let Some(orbiting_camera) = query.iter_mut().next() {
             if let Some(zoom_delta) = mouse_wheel_state.get_zoom_delta(&mut mouse_wheel_events) {
                 // Set the camera translation relative to the camera orbit center
-                let mut camera_transform = camera_queries
-                    .q0_mut()
-                    .get_mut(camera.entity.unwrap())
+                let mut camera_transform = camera_transforms
+                    .get_mut(orbiting_camera.entity.unwrap())
                     .unwrap();
                 camera_transform.translation = -Vec3::Z
                     * (-camera_transform.translation.z

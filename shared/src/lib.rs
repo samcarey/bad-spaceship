@@ -1,6 +1,6 @@
 use bevy::{
     math::{Vec2, Vec3},
-    prelude::{Bundle, Color, Entity},
+    prelude::{Color, Entity},
 };
 
 pub mod character;
@@ -47,10 +47,8 @@ pub struct FocusedInteractable {
 #[derive(Default)]
 pub struct Holding(pub bool);
 
-#[derive(Default, Bundle)]
-pub struct Player {
-    pub camera: OrbitingCamera,
-}
+#[derive(Default)]
+struct Player;
 
 pub struct OrbitingCamera {
     pub pitch: f32,
@@ -70,18 +68,10 @@ impl Default for OrbitingCamera {
 }
 
 impl OrbitingCamera {
-    fn new(camera_entity: Option<Entity>) -> Self {
+    fn new(camera_entity: Entity) -> Self {
         OrbitingCamera {
-            entity: camera_entity,
+            entity: Some(camera_entity),
             ..Default::default()
-        }
-    }
-}
-
-impl Player {
-    pub fn new(camera_entity: Option<Entity>) -> Self {
-        Player {
-            camera: OrbitingCamera::new(camera_entity),
         }
     }
 }
@@ -95,3 +85,6 @@ pub struct MouseMotionDelta(pub Vec2);
 pub struct PlayerClick;
 
 pub struct Character;
+
+#[derive(Default)]
+struct DirectionalInput(Vec3);

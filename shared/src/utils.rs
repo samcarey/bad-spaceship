@@ -12,6 +12,16 @@ pub trait Vec3Ext {
     fn to_translation3(&self) -> Translation3<f32>;
 }
 
+pub trait ToVec3 {
+    fn to_vec3(self) -> Vec3;
+}
+
+impl ToVec3 for (f32, f32, f32) {
+    fn to_vec3(self) -> Vec3 {
+        Vec3::new(self.0, self.1, self.2)
+    }
+}
+
 pub trait TransformExt {
     fn forward(&self) -> Vec3;
     fn right(&self) -> Vec3;
