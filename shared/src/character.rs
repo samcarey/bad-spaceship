@@ -26,7 +26,7 @@ impl Plugin for CharacterPlugin {
             .add_system(jump_based_on_input.system().after(CombineInputs))
             .add_system_to_stage(
                 CoreStage::PostUpdate,
-                rotate_character_based_on_mouse_input.system(),
+                rotate_character_based_on_input.system(),
             )
             .add_system(touching_ground.system())
             .add_system(spawn.system())
@@ -259,9 +259,7 @@ fn jump_based_on_input(
     }
 }
 
-fn rotate_character_based_on_mouse_input(
-    mut query: Query<(&Transform, &Yaw, &mut RigidBodyPosition)>,
-) {
+fn rotate_character_based_on_input(mut query: Query<(&Transform, &Yaw, &mut RigidBodyPosition)>) {
     for (transform, yaw, mut position) in query.iter_mut() {
         let rotation = UnitQuaternion::from_axis_angle(&Vector3::y_axis(), -yaw.0);
         let new_position = Isometry::from_parts(transform.translation.into(), rotation);
