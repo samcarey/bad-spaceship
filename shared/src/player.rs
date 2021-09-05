@@ -1,7 +1,6 @@
 use std::f32;
 
 use bevy::{
-    core::FixedTimestep,
     input::gamepad::{Gamepad, GamepadButton, GamepadEvent, GamepadEventType},
     input::mouse::MouseWheel,
     prelude::*,
@@ -9,15 +8,15 @@ use bevy::{
     render::camera::Camera,
     utils::HashSet,
 };
-use bevy_rapier3d::prelude::RigidBodyMassProps;
+use bevy_rapier3d::prelude::{ColliderShape, RigidBodyMassProps};
 use serde::Deserialize;
 
 use crate::{
-    character::{CharacterPlugin, CharacterToSpawn},
+    character::CharacterPlugin,
     part::{Holdable, TargetOrientation, TargetPosition},
     utils::DEG_TO_RADIANS,
-    CameraOrbitCenter, FocusedInteractable, GameStickDirectionalInput, HoldPoint, Holding,
-    KeyboardDirectionalInput, MouseMotionDelta, Player, PlayerClick, PlayerToSpawn, Yaw,
+    CameraOrbitCenter, Character, FocusedInteractable, GameStickDirectionalInput, HoldPoint,
+    Holding, KeyboardDirectionalInput, MouseMotionDelta, Player, PlayerClick, PlayerToSpawn, Yaw,
     INITIAL_CAMERA_PITCH,
 };
 
@@ -32,22 +31,17 @@ impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut AppBuilder) {
         app.init_resource::<MouseWheelState>()
             .add_startup_system(spawn_camera.system())
-            .add_system_set(
-                SystemSet::new()
-                    .with_run_criteria(FixedTimestep::step(1.0))
-                    .with_system(respawn.system()),
-            )
+            .add_system(spawn.system())
             .add_system_to_stage(CoreStage::PreUpdate, connection_system.system())
             .add_system(process_mouse_events.system())
             .add_system(toggle_holding.system())
             .add_system(gamepad_system.system())
             .init_resource::<GamepadLobby>()
             .add_system(despawn.system())
-            .add_system(spawn.system())
+            .add_system(attach_camera_orbit.system())
             .add_event::<PlayerToSpawn>()
             .add_plugin(CharacterPlugin)
             .add_event::<PlayerClick>()
-            .init_resource::<PlayerCamera>()
             .add_asset::<Config>();
     }
 }
@@ -97,33 +91,33 @@ fn tuple_to_vec3(tuple: (f32, f32, f32)) -> Vec3 {
     Vec3::new(x, y, z)
 }
 
-#[derive(Default)]
-struct PlayerCamera(Option<Entity>);
-
-fn spawn_camera(mut commands: Commands, mut player_camera: ResMut<PlayerCamera>) {
+fn spawn_camera(mut commands: Commands) {
     let mut camera_transform =
         Transform::from_rotation(Quat::from_rotation_ypr(std::f32::consts::PI, 0.0, 0.0));
     camera_transform.translation = -Vec3::Z * 20.0;
-    player_camera.0 = Some(
-        commands
-            .spawn()
-            .insert_bundle(PerspectiveCameraBundle {
-                transform: camera_transform,
-                ..Default::default()
-            })
-            .id(),
-    );
+    commands.spawn_bundle(PerspectiveCameraBundle {
+        transform: camera_transform,
+        ..Default::default()
+    });
 }
 
-fn respawn(
-    mut characters_to_spawn: EventWriter<CharacterToSpawn>,
-    player_camera: ResMut<PlayerCamera>,
-    players: Query<&Player>,
+fn spawn(
+    mut commands: Commands,
+    cameras: Query<Entity, With<Camera>>,
+    players: Query<(), With<Player>>,
 ) {
     if players.iter().next().is_none() {
-        characters_to_spawn.send(CharacterToSpawn {
-            camera: Some(player_camera.0.unwrap()),
-        });
+        if let Some(camera) = cameras.iter().next() {
+            commands.spawn_bundle((
+                Player::new(Some(camera)),
+                Yaw::default(),
+                KeyboardDirectionalInput::default(),
+                GameStickDirectionalInput::default(),
+                FocusedInteractable::default(),
+                Holding::default(),
+                MouseMotionDelta::default(),
+            ));
+        }
     }
 }
 
@@ -137,65 +131,59 @@ fn despawn(players: Query<(&Transform, Entity, &Children), With<Player>>, mut co
     }
 }
 
-fn spawn(
+fn attach_camera_orbit(
     mut commands: Commands,
-    mut players_to_spawn: EventReader<PlayerToSpawn>,
+    cameras: Query<Entity, With<Camera>>,
+    characters_without_players: Query<
+        (Entity, &ColliderShape),
+        (With<Character>, Without<Children>),
+    >,
     configs: ResMut<Assets<Config>>,
 ) {
-    for player_to_spawn in players_to_spawn.iter() {
-        if let Some((_, config)) = configs.iter().next() {
-            bevy::log::info!("Player");
-            let player_entity = commands
-                .entity(player_to_spawn.character)
-                .insert_bundle((
-                    Player::new(Some(player_to_spawn.camera)),
-                    Yaw::default(),
-                    *config,
-                    KeyboardDirectionalInput::default(),
-                    GameStickDirectionalInput::default(),
-                    FocusedInteractable::default(),
-                    Holding::default(),
-                    MouseMotionDelta::default(),
-                ))
-                .id();
+    if let Some((_, config)) = configs.iter().next() {
+        if let Some(camera) = cameras.iter().next() {
+            for (character_entity, character_collider) in characters_without_players.iter() {
+                // This is simply a point that hovers above the character that the camera orbits around.
+                // This is for the purpose of making it easier to see over obstructions.
+                // For now we generate this as a PbrComponent, which is overkill for an invisible point,
+                // so we'll want to simplify this later to something with only the necessary components.
+                let mut camera_orbit_center_transform = Transform::from_translation(
+                    tuple_to_vec3(config.camera_offset_character_size_ratio)
+                        * character_collider.compute_local_bounding_sphere().radius
+                        * 2.0,
+                );
+                camera_orbit_center_transform.rotation =
+                    Quat::from_rotation_x(INITIAL_CAMERA_PITCH);
+                let camera_orbit_center = commands
+                    .spawn()
+                    .insert_bundle(CameraOrbitCenterBundle {
+                        transform: camera_orbit_center_transform,
+                        ..Default::default()
+                    })
+                    .id();
 
-            // This is simply a point that hovers above the character that the camera orbits around.
-            // This is for the purpose of making it easier to see over obstructions.
-            // For now we generate this as a PbrComponent, which is overkill for an invisible point,
-            // so we'll want to simplify this later to something with only the necessary components.
-            let mut camera_orbit_center_transform = Transform::from_translation(
-                tuple_to_vec3(config.camera_offset_character_size_ratio) * player_to_spawn.size,
-            );
-            camera_orbit_center_transform.rotation = Quat::from_rotation_x(INITIAL_CAMERA_PITCH);
-            let camera_orbit_center = commands
-                .spawn()
-                .insert_bundle(CameraOrbitCenterBundle {
-                    transform: camera_orbit_center_transform,
-                    ..Default::default()
-                })
-                .id();
+                let hold_point = commands
+                    .spawn()
+                    .insert_bundle(HoldPointBundle {
+                        transform: Transform::from_translation(Vec3::Z * 5.0),
+                        ..Default::default()
+                    })
+                    .id();
 
-            let hold_point = commands
-                .spawn()
-                .insert_bundle(HoldPointBundle {
-                    transform: Transform::from_translation(Vec3::Z * 5.0),
-                    ..Default::default()
-                })
-                .id();
+                // Mount the camera center to the player
+                commands
+                    .entity(character_entity)
+                    .push_children(&[camera_orbit_center]);
 
-            // Mount the camera center to the player
-            commands
-                .entity(player_entity)
-                .push_children(&[camera_orbit_center]);
+                // Mount the camera to the camera orbit center
+                commands
+                    .entity(camera_orbit_center)
+                    .push_children(&[camera]);
 
-            // Mount the camera to the camera orbit center
-            commands
-                .entity(camera_orbit_center)
-                .push_children(&[player_to_spawn.camera]);
-
-            commands
-                .entity(camera_orbit_center)
-                .push_children(&[hold_point]);
+                commands
+                    .entity(camera_orbit_center)
+                    .push_children(&[hold_point]);
+            }
         }
     }
 }
@@ -225,9 +213,11 @@ fn process_mouse_events(
 
             // By tilting the orbit center that the camera is attached to,
             // the camera itself is swung to the correct position
-            let mut camera_orbit_center_transform =
-                camera_queries.q1_mut().iter_mut().next().unwrap();
-            camera_orbit_center_transform.rotation = Quat::from_rotation_x(camera.pitch);
+            if let Some(mut camera_orbit_center_transform) =
+                camera_queries.q1_mut().iter_mut().next()
+            {
+                camera_orbit_center_transform.rotation = Quat::from_rotation_x(camera.pitch);
+            }
 
             if let Some(zoom_delta) = mouse_wheel_state.get_zoom_delta(&mut mouse_wheel_events) {
                 // Set the camera translation relative to the camera orbit center

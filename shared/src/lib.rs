@@ -94,5 +94,4 @@ pub struct MouseMotionDelta(pub Vec2);
 
 pub struct PlayerClick;
 
-// #[cfg(target_arch = "wasm32")]
-// const CONFIG_DIR: include_dir::Dir = include_dir::include_dir!("assets/config");
+pub struct Character;

@@ -13,7 +13,8 @@ use bevy_rapier3d::{
 use serde::Deserialize;
 
 use crate::{
-    utils::TransformExt, GameStickDirectionalInput, KeyboardDirectionalInput, PlayerToSpawn, Yaw,
+    utils::TransformExt, Character, GameStickDirectionalInput, KeyboardDirectionalInput, Player,
+    Yaw,
 };
 
 pub struct CharacterPlugin;
@@ -26,7 +27,6 @@ impl Plugin for CharacterPlugin {
                 rotate_character_based_on_mouse_input.system(),
             )
             .add_system(touching_ground.system())
-            .add_event::<CharacterToSpawn>()
             .add_system(spawn.system())
             .add_asset::<Config>();
     }
@@ -53,21 +53,16 @@ pub struct Config {
     jump_force: f32,
 }
 
-#[derive(Clone, Copy)]
-pub struct CharacterToSpawn {
-    pub camera: Option<Entity>,
-}
-
 fn spawn(
     mut commands: Commands,
-    mut characters_to_spawn: EventReader<CharacterToSpawn>,
-    mut players_to_spawn: EventWriter<PlayerToSpawn>,
+    players_without_characters: Query<Entity, (With<Player>, Without<Character>)>,
     configs: Res<Assets<Config>>,
 ) {
-    for character_to_spawn in characters_to_spawn.iter() {
-        if let Some((_, config)) = configs.iter().next() {
-            let entity = commands
-                .spawn()
+    if let Some((_, config)) = configs.iter().next() {
+        for player_entity in players_without_characters.iter() {
+            commands
+                .entity(player_entity)
+                .insert(Character)
                 .insert_bundle(RigidBodyBundle {
                     body_type: bevy_rapier3d::prelude::RigidBodyType::Dynamic,
                     position: [0.0, 10., 0.].into(),
@@ -89,14 +84,6 @@ fn spawn(
                     ColliderPositionSync::Discrete,
                 ))
                 .id();
-
-            if let Some(camera) = character_to_spawn.camera {
-                players_to_spawn.send(PlayerToSpawn {
-                    camera,
-                    size: config.size,
-                    character: entity,
-                })
-            }
         }
     }
 }
