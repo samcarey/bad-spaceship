@@ -43,7 +43,7 @@ fn spawn_map(mut commands: Commands) {
             let z = shifted_z * bowl_size.z / 2.0;
             let y =
                 ((clamped_radius - 0.5) * std::f32::consts::TAU / 2.0).sin() * bowl_size.y / 2.0;
-            vertices.push(Point3::new(x, y, z));
+            vertices.push([x, y, z].into());
         }
     }
     for ix in 0..segments {
