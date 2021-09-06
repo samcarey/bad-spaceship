@@ -9,8 +9,6 @@ use bevy_rapier3d::physics::NoUserData;
 use bevy_rapier3d::{physics::RapierPhysicsPlugin, render::RapierRenderPlugin};
 
 #[cfg(target_arch = "wasm32")]
-use bevy_rapier3d::prelude::IntegrationParameters;
-#[cfg(target_arch = "wasm32")]
 use bevy_web_fullscreen::FullViewportPlugin;
 use input::InputPlugin;
 use platform::PlatformPlugin;
