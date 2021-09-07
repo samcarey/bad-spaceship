@@ -35,7 +35,7 @@ impl Plugin for PlayerPlugin {
             .add_system_to_stage(CoreStage::PreUpdate, connection_system.system())
             .add_system(mouse_motion.system())
             .add_system(mouse_zoom.system())
-            .add_system(toggle_holding.system())
+            .add_system(toggle_holding.system().after(PlayerClick))
             .add_system(gamepad_system.system())
             .init_resource::<GamepadLobby>()
             .add_system(despawn.system())

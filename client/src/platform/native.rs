@@ -16,7 +16,8 @@ impl Plugin for PlatformPlugin {
             .add_event::<PlayerClick>()
             .add_system(get_look.system())
             .add_system_set(
-                SystemSet::on_update(AppState::InGame).with_system(process_mouse_clicks.system()),
+                SystemSet::on_update(AppState::InGame)
+                    .with_system(process_mouse_clicks.system().label(PlayerClick)),
             );
     }
 }

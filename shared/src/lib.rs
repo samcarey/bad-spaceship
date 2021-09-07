@@ -1,6 +1,6 @@
 use bevy::{
     math::{Vec2, Vec3},
-    prelude::{Color, Entity},
+    prelude::{Color, Entity, SystemLabel},
 };
 
 pub mod character;
@@ -82,6 +82,7 @@ pub struct HoldPoint;
 #[derive(Default)]
 pub struct MouseMotionDelta(pub Vec2);
 
+#[derive(SystemLabel, Clone, Hash, Debug, PartialEq, Eq)]
 pub struct PlayerClick;
 
 pub struct Character;

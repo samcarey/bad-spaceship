@@ -20,7 +20,7 @@ impl Plugin for PlatformPlugin {
             .insert_resource(WasmMouseClickTracker::new())
             .insert_resource(WasmKeyboardTracker::new())
             .add_system(get_look.system())
-            .add_system(process_mouse_clicks.system())
+            .add_system(process_mouse_clicks.system().label(PlayerClick))
             .add_system(get_keyboard_input.system());
     }
 }
