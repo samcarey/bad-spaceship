@@ -89,3 +89,6 @@ pub struct Character;
 
 #[derive(Default)]
 struct DirectionalInput(Vec3);
+
+#[derive(SystemLabel, Hash, Debug, PartialEq, Eq, Clone)]
+pub struct InputEvents;

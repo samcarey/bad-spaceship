@@ -2,7 +2,7 @@ use std::f32;
 
 use bevy::{
     input::gamepad::{Gamepad, GamepadButton, GamepadEvent, GamepadEventType},
-    input::mouse::MouseWheel,
+    input::mouse::{MouseScrollUnit, MouseWheel},
     prelude::*,
     reflect::TypeUuid,
     render::camera::Camera,
@@ -16,8 +16,8 @@ use crate::{
     part::{Holdable, TargetOrientation, TargetPosition},
     utils::{ToVec3, DEG_TO_RADIANS},
     CameraOrbitCenter, Character, DirectionalInput, FocusedInteractable, GameStickDirectionalInput,
-    HoldPoint, Holding, KeyboardDirectionalInput, MouseMotionDelta, OrbitingCamera, Player,
-    PlayerClick, PlayerToSpawn, Yaw, INITIAL_CAMERA_PITCH,
+    HoldPoint, Holding, InputEvents, KeyboardDirectionalInput, MouseMotionDelta, OrbitingCamera,
+    Player, PlayerClick, PlayerToSpawn, Yaw, INITIAL_CAMERA_PITCH,
 };
 
 const MAX_CAMERA_PITCH_DEGREES: f32 = 89.;
@@ -29,13 +29,12 @@ pub struct PlayerPlugin;
 
 impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut AppBuilder) {
-        app.init_resource::<MouseWheelState>()
-            .add_startup_system(spawn_camera.system())
+        app.add_startup_system(spawn_camera.system())
             .add_system(spawn.system())
             .add_system_to_stage(CoreStage::PreUpdate, connection_system.system())
             .add_system(mouse_motion.system())
-            .add_system(mouse_zoom.system())
-            .add_system(toggle_holding.system().after(PlayerClick))
+            .add_system(mouse_zoom.system().after(InputEvents))
+            .add_system(toggle_holding.system().after(InputEvents))
             .add_system(gamepad_system.system())
             .init_resource::<GamepadLobby>()
             .add_system(despawn.system())
@@ -70,21 +69,6 @@ pub struct HoldPointBundle {
     pub transform: Transform,
     pub global_transform: GlobalTransform,
     hold_point: HoldPoint,
-}
-
-#[derive(Default)]
-struct MouseWheelState;
-
-impl MouseWheelState {
-    pub fn get_zoom_delta(
-        &mut self,
-        mouse_wheel_events: &mut EventReader<MouseWheel>,
-    ) -> Option<f32> {
-        match mouse_wheel_events.iter().last() {
-            Some(event) => Some(event.y),
-            None => None,
-        }
-    }
 }
 
 fn spawn_camera(mut commands: Commands) {
@@ -225,7 +209,6 @@ fn mouse_motion(
 
 fn mouse_zoom(
     time: Res<Time>,
-    mut mouse_wheel_state: ResMut<MouseWheelState>,
     mut mouse_wheel_events: EventReader<MouseWheel>,
     mut query: Query<&mut OrbitingCamera>,
     mut camera_transforms: Query<&mut Transform, With<Camera>>,
@@ -233,14 +216,18 @@ fn mouse_zoom(
 ) {
     if let Some((_, config)) = configs.iter().next() {
         if let Some(orbiting_camera) = query.iter_mut().next() {
-            if let Some(zoom_delta) = mouse_wheel_state.get_zoom_delta(&mut mouse_wheel_events) {
+            if let Some(mouse_wheel) = mouse_wheel_events.iter().last() {
+                let scroll = match mouse_wheel.unit {
+                    MouseScrollUnit::Line => mouse_wheel.y,
+                    MouseScrollUnit::Pixel => mouse_wheel.y / 108.0,
+                };
                 // Set the camera translation relative to the camera orbit center
                 let mut camera_transform = camera_transforms
                     .get_mut(orbiting_camera.entity.unwrap())
                     .unwrap();
                 camera_transform.translation = -Vec3::Z
                     * (-camera_transform.translation.z
-                        - zoom_delta * time.delta_seconds() * config.zoom_sensitivity)
+                        - scroll * time.delta_seconds() * config.zoom_sensitivity)
                         .max(config.min_camera_distance)
                         .min(config.max_camera_distance);
             }

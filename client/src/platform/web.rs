@@ -1,13 +1,16 @@
 use crate::AppState;
-use bad_spaceship_shared::{KeyboardDirectionalInput, MouseMotionDelta, PlayerClick};
-use bevy::prelude::*;
+use bad_spaceship_shared::{InputEvents, KeyboardDirectionalInput, MouseMotionDelta, PlayerClick};
+use bevy::{
+    input::mouse::{MouseScrollUnit, MouseWheel},
+    prelude::*,
+};
 use bevy_webgl2::renderer::JsCast;
 use gloo::events::EventListener;
 use std::sync::{
     atomic::{AtomicBool, AtomicI32, Ordering::SeqCst},
     Arc,
 };
-use web_sys::{Document, Element, Event, HtmlElement, KeyboardEvent, MouseEvent};
+use web_sys::{Document, Element, Event, HtmlElement, KeyboardEvent, MouseEvent, WheelEvent};
 
 pub struct PlatformPlugin;
 
@@ -19,9 +22,11 @@ impl Plugin for PlatformPlugin {
             .insert_resource(WasmMouseMovementTracker::new())
             .insert_resource(WasmMouseClickTracker::new())
             .insert_resource(WasmKeyboardTracker::new())
+            .insert_resource(WasmWheelTracker::new())
             .add_system(get_look.system())
-            .add_system(process_mouse_clicks.system().label(PlayerClick))
-            .add_system(get_keyboard_input.system());
+            .add_system(process_mouse_clicks.system().label(InputEvents))
+            .add_system(get_keyboard_input.system())
+            .add_system(get_wheel.system().label(InputEvents));
     }
 }
 
@@ -282,5 +287,51 @@ impl AtomicI32Ext for AtomicI32 {
 
     fn get(&self) -> i32 {
         self.load(SeqCst)
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct WasmWheelTracker {
+    delta_y: Arc<AtomicI32>,
+    delta_mode: Arc<AtomicI32>,
+}
+
+impl WasmWheelTracker {
+    pub fn new() -> Self {
+        let new = Self::default();
+        let clone = new.clone();
+        listen("wheel", move |_event| {
+            let we = _event.clone().dyn_into::<WheelEvent>().unwrap();
+            // bevy::log::info!("{:?}", we.delta_y());
+            clone.delta_y.set((we.delta_y() * 1000.0) as i32);
+            clone.delta_mode.set(we.delta_mode() as i32);
+        });
+        new
+    }
+
+    fn get(&self) -> Option<MouseWheel> {
+        match self.delta_y.get() {
+            0 => None,
+            y => {
+                self.delta_y.set(0);
+                Some(MouseWheel {
+                    unit: match self.delta_mode.get() {
+                        0 => MouseScrollUnit::Pixel,
+                        _ => MouseScrollUnit::Line,
+                    },
+                    y: (y as f32) / 1000.0,
+                    x: 0.0,
+                })
+            }
+        }
+    }
+}
+
+fn get_wheel(
+    wheel_tracker: ResMut<WasmWheelTracker>,
+    mut mouse_wheel_events: EventWriter<MouseWheel>,
+) {
+    if let Some(event) = wheel_tracker.get() {
+        mouse_wheel_events.send(event);
     }
 }
