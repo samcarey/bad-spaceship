@@ -1,5 +1,5 @@
 use crate::AppState;
-use bad_spaceship_shared::{MouseMotionDelta, PlayerClick};
+use bad_spaceship_shared::{InputEvents, MouseMotionDelta, PlayerClick};
 use bevy::input::mouse::MouseMotion;
 use bevy::prelude::*;
 
