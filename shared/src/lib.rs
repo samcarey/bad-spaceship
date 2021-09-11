@@ -18,13 +18,6 @@ mod tests {
     }
 }
 
-#[derive(Clone, Copy)]
-pub struct PlayerToSpawn {
-    pub camera: Entity,
-    pub size: f32,
-    pub character: Entity,
-}
-
 #[derive(Default)]
 pub struct KeyboardDirectionalInput(pub Vec3);
 
