@@ -1,7 +1,7 @@
 use crate::AppState;
-use bad_spaceship_shared::{InputEvents, KeyboardDirectionalInput, MouseMotionDelta, PlayerClick};
+use bad_spaceship_shared::{InputEvents, WebKeyCode, WebMouseButton};
 use bevy::{
-    input::mouse::{MouseScrollUnit, MouseWheel},
+    input::mouse::{MouseMotion, MouseScrollUnit, MouseWheel},
     prelude::*,
 };
 use bevy_webgl2::renderer::JsCast;
@@ -16,42 +16,42 @@ pub struct PlatformPlugin;
 
 impl Plugin for PlatformPlugin {
     fn build(&self, app: &mut AppBuilder) {
-        app.insert_resource(WasmPointerLockTracker::new())
+        app.insert_resource(PointerLockTracker::new())
             .add_system_set(SystemSet::on_enter(AppState::InGame).with_system(hide_cursor.system()))
             .add_system(toggle_menu_on_pointer_lock.system())
-            .insert_resource(WasmMouseMovementTracker::new())
-            .insert_resource(WasmMouseClickTracker::new())
-            .insert_resource(WasmKeyboardTracker::new())
-            .insert_resource(WasmWheelTracker::new())
-            .add_system(get_look.system())
+            .insert_resource(MouseMovementTracker::new())
+            .insert_resource(MouseClickTracker::new())
+            .insert_resource(KeyboardTracker::new())
+            .insert_resource(WheelTracker::new())
+            .add_system(get_mouse_motion.system().before(InputEvents))
             .add_system(process_mouse_clicks.system().label(InputEvents))
-            .add_system(get_keyboard_input.system())
+            .add_system(get_keyboard_input.system().before(InputEvents))
             .add_system(get_wheel.system().label(InputEvents));
     }
 }
 
 #[derive(Clone, Default)]
-struct WasmPointerLockTracker {
+struct PointerLockTracker {
     lock: Arc<AtomicBool>,
 }
 
-impl WasmPointerLockTracker {
+impl PointerLockTracker {
     pub fn new() -> Self {
-        let lock = Self::default();
-        let lock_clone = lock.clone();
+        let new = Self::default();
+        let clone = new.clone();
         listen("pointerlockchange", move |_event| {
             match get_document().pointer_lock_element() {
                 Some(element) => {
                     if element == get_body().dyn_into::<Element>().unwrap() {
-                        lock_clone.lock.set(true);
+                        clone.lock.set(true);
                     }
                 }
                 None => {
-                    lock_clone.lock.set(false);
+                    clone.lock.set(false);
                 }
             }
         });
-        lock
+        new
     }
 
     fn get(&self) -> bool {
@@ -64,7 +64,7 @@ fn hide_cursor() {
 }
 
 fn toggle_menu_on_pointer_lock(
-    lock_state: Res<WasmPointerLockTracker>,
+    lock_state: Res<PointerLockTracker>,
     mut state: ResMut<State<AppState>>,
 ) {
     if lock_state.get() {
@@ -79,55 +79,57 @@ fn toggle_menu_on_pointer_lock(
 }
 
 #[derive(Clone, Default)]
-pub struct WasmMouseMovementTracker {
+pub struct MouseMovementTracker {
     delta_x: Arc<AtomicI32>,
     delta_y: Arc<AtomicI32>,
 }
 
-impl WasmMouseMovementTracker {
+impl MouseMovementTracker {
     pub fn new() -> Self {
         let new = Self::default();
-
         let clone = new.clone();
-        let on_move = EventListener::new(&get_document(), "mousemove", move |_event| {
+        listen("mousemove", move |_event| {
             let me = _event.clone().dyn_into::<MouseEvent>().unwrap();
             clone.delta_x.set(me.movement_x());
             clone.delta_y.set(me.movement_y());
         });
-        on_move.forget();
         new
     }
 
-    pub fn get_delta_and_reset(&self) -> Vec2 {
+    pub fn get_and_reset(&self) -> Option<MouseMotion> {
         let delta = Vec2::new(self.delta_x.get() as f32, self.delta_y.get() as f32);
-        self.delta_x.set(0);
-        self.delta_y.set(0);
-        delta
+
+        if delta != Vec2::ZERO {
+            self.delta_x.set(0);
+            self.delta_y.set(0);
+            bevy::log::info!("reset {:?}", delta);
+            Some(MouseMotion {
+                delta: delta * 0.15,
+            })
+        } else {
+            None
+        }
     }
 }
 
-pub fn get_look(
-    wasm_mouse_tracker: Res<WasmMouseMovementTracker>,
-    mut query: Query<&mut MouseMotionDelta>,
-    state: Res<State<AppState>>,
+fn get_mouse_motion(
+    mouse_motion_tracker: Res<MouseMovementTracker>,
+    mut mouse_motion_events: EventWriter<MouseMotion>,
 ) {
-    let input = match state.current() {
-        AppState::InGame => wasm_mouse_tracker.get_delta_and_reset() * 0.15,
-        _ => Vec2::ZERO,
-    };
-    for mut mouse_motion in query.iter_mut() {
-        mouse_motion.0 = input;
+    if let Some(mouse_motion) = mouse_motion_tracker.get_and_reset() {
+        bevy::log::info!("get {:?}", mouse_motion);
+        mouse_motion_events.send(mouse_motion);
     }
 }
 
 #[derive(Clone, Default)]
-pub struct WasmMouseClickTracker {
+pub struct MouseClickTracker {
     just_pressed: Arc<AtomicBool>,
     x: Arc<AtomicI32>,
     y: Arc<AtomicI32>,
 }
 
-impl WasmMouseClickTracker {
+impl MouseClickTracker {
     pub fn new() -> Self {
         let new = Self::default();
         let clone = new.clone();
@@ -142,30 +144,32 @@ impl WasmMouseClickTracker {
         });
         new
     }
+}
 
-    pub fn just_pressed(&self) -> bool {
-        let just_pressed = self.just_pressed.get();
-        if just_pressed {
-            self.just_pressed.set(false);
+trait SetWebMouseButton {
+    fn set(&mut self, atomic_bool: &Arc<AtomicBool>, key: MouseButton);
+}
+
+impl SetWebMouseButton for Input<WebMouseButton> {
+    fn set(&mut self, atomic_key: &Arc<AtomicBool>, button: MouseButton) {
+        if atomic_key.get() {
+            self.press(WebMouseButton(button));
+            atomic_key.set(false);
+        } else {
+            self.release(WebMouseButton(button));
         }
-        just_pressed
     }
 }
 
 pub fn process_mouse_clicks(
-    mouse_button_input: Res<WasmMouseClickTracker>,
-    mut clicks: EventWriter<PlayerClick>,
-    state: Res<State<AppState>>,
+    mouse_button_tracker: Res<MouseClickTracker>,
+    mut web_mouse_button_input: ResMut<Input<WebMouseButton>>,
 ) {
-    if *state.current() == AppState::InGame {
-        if mouse_button_input.just_pressed() {
-            clicks.send(PlayerClick);
-        }
-    }
+    web_mouse_button_input.set(&mouse_button_tracker.just_pressed, MouseButton::Left);
 }
 
 #[derive(Clone, Default)]
-pub struct WasmKeyboardTracker {
+pub struct KeyboardTracker {
     w: Arc<AtomicBool>,
     s: Arc<AtomicBool>,
     d: Arc<AtomicBool>,
@@ -173,8 +177,8 @@ pub struct WasmKeyboardTracker {
     space: Arc<AtomicBool>,
 }
 
-impl WasmKeyboardTracker {
-    pub fn listen(self, event_type: &'static str, set_value: bool) {
+impl KeyboardTracker {
+    fn listen(self, event_type: &'static str, set_value: bool) {
         listen(&event_type, move |_event| {
             let cast_event = _event.clone().dyn_into::<KeyboardEvent>().unwrap();
             if let Some(arc) = self.key_to_arc(&cast_event.key()) {
@@ -200,41 +204,31 @@ impl WasmKeyboardTracker {
         new.clone().listen("keyup", false);
         new
     }
+}
 
-    pub fn get(&self) -> Vec3 {
-        let mut direction = Vec3::ZERO;
-        if self.w.get() {
-            direction.z += 1.;
+trait SetWebKey {
+    fn set(&mut self, atomic_key: &Arc<AtomicBool>, key: KeyCode);
+}
+
+impl SetWebKey for Input<WebKeyCode> {
+    fn set(&mut self, atomic_key: &Arc<AtomicBool>, key: KeyCode) {
+        if atomic_key.get() {
+            self.press(WebKeyCode(key));
+        } else {
+            self.release(WebKeyCode(key));
         }
-        if self.s.get() {
-            direction.z -= 1.;
-        }
-        if self.d.get() {
-            direction.x += 1.;
-        }
-        if self.a.get() {
-            direction.x -= 1.;
-        }
-        if self.space.get() {
-            direction.y += 1.;
-        }
-        direction.normalize_or_zero()
     }
 }
 
 pub fn get_keyboard_input(
-    keyboard_input: Res<WasmKeyboardTracker>,
-    mut query: Query<&mut KeyboardDirectionalInput>,
-    state: Res<State<AppState>>,
+    keyboard_tracker: Res<KeyboardTracker>,
+    mut keyboard_input: ResMut<Input<WebKeyCode>>,
 ) {
-    let input = match state.current() {
-        AppState::InGame => keyboard_input.get(),
-        _ => Vec3::ZERO,
-    };
-    for mut keyboard_directional_input in query.iter_mut() {
-        // Sum with whatever other input is also being applied (e.g. web)
-        keyboard_directional_input.0 += input;
-    }
+    keyboard_input.set(&keyboard_tracker.w, KeyCode::W);
+    keyboard_input.set(&keyboard_tracker.s, KeyCode::S);
+    keyboard_input.set(&keyboard_tracker.d, KeyCode::D);
+    keyboard_input.set(&keyboard_tracker.a, KeyCode::A);
+    keyboard_input.set(&keyboard_tracker.space, KeyCode::Space);
 }
 
 pub fn listen<F>(event_type: &'static str, callback: F)
@@ -291,12 +285,12 @@ impl AtomicI32Ext for AtomicI32 {
 }
 
 #[derive(Clone, Default)]
-pub struct WasmWheelTracker {
+pub struct WheelTracker {
     delta_y: Arc<AtomicI32>,
     delta_mode: Arc<AtomicI32>,
 }
 
-impl WasmWheelTracker {
+impl WheelTracker {
     pub fn new() -> Self {
         let new = Self::default();
         let clone = new.clone();
@@ -327,10 +321,7 @@ impl WasmWheelTracker {
     }
 }
 
-fn get_wheel(
-    wheel_tracker: ResMut<WasmWheelTracker>,
-    mut mouse_wheel_events: EventWriter<MouseWheel>,
-) {
+fn get_wheel(wheel_tracker: ResMut<WheelTracker>, mut mouse_wheel_events: EventWriter<MouseWheel>) {
     if let Some(event) = wheel_tracker.get() {
         mouse_wheel_events.send(event);
     }

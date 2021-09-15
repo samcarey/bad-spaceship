@@ -1,5 +1,8 @@
-use bad_spaceship_shared::KeyboardDirectionalInput;
-use bevy::prelude::*;
+use bad_spaceship_shared::{
+    InputEvents, KeyboardDirectionalInput, MouseMotionDelta, PlayerClick, WebKeyCode,
+    WebMouseButton,
+};
+use bevy::{input::mouse::MouseMotion, prelude::*};
 
 use crate::AppState;
 
@@ -7,18 +10,40 @@ pub struct InputPlugin;
 
 impl Plugin for InputPlugin {
     fn build(&self, app: &mut bevy::prelude::AppBuilder) {
-        app.add_system(process_keyboard_input.system());
+        app.add_system(process_keyboard_input.system().label(InputEvents))
+            .init_resource::<Input<WebKeyCode>>()
+            .init_resource::<Input<WebMouseButton>>()
+            .add_system(get_look.system().label(InputEvents))
+            .add_system_set(
+                SystemSet::on_update(AppState::InGame)
+                    .with_system(process_mouse_clicks.system().label(InputEvents)),
+            )
+            .add_event::<PlayerClick>();
+    }
+}
+
+struct MergedKeyboardInput<'a> {
+    native_keyboard_input: &'a Res<'a, Input<KeyCode>>,
+    web_keyboard_input: &'a Res<'a, Input<WebKeyCode>>,
+}
+
+impl<'a> MergedKeyboardInput<'a> {
+    pub fn pressed(&self, input: KeyCode) -> bool {
+        self.native_keyboard_input.pressed(input)
+            || self.web_keyboard_input.pressed(WebKeyCode(input))
     }
 }
 
 fn process_keyboard_input(
-    // For Web, it's unclear when it will use the native or web capture of keyboard events.
-    // Therefore try to capture the native input and add to it any web input if there is any.
-    // `other_keyboard_input` will come either a native (always Vec3::ZERO) or Web source
     keyboard_input: Res<Input<KeyCode>>,
+    web_keyboard_input: Res<Input<WebKeyCode>>,
     mut query: Query<&mut KeyboardDirectionalInput>,
     state: Res<State<AppState>>,
 ) {
+    let input = MergedKeyboardInput {
+        native_keyboard_input: &keyboard_input,
+        web_keyboard_input: &web_keyboard_input,
+    };
     //
     // Note: keyboard_directional_input vector components match Bevy/Rapier vector definitions:
     //  Horizontal = (X,Z)
@@ -30,22 +55,22 @@ fn process_keyboard_input(
 
     if *state.current() == AppState::InGame {
         // "W" keypress indicates forward movement
-        if keyboard_input.pressed(KeyCode::W) {
+        if input.pressed(KeyCode::W) {
             direction.z += 1.;
         }
 
         // "S" keypress indicates forward movement
-        if keyboard_input.pressed(KeyCode::S) {
+        if input.pressed(KeyCode::S) {
             direction.z -= 1.;
         }
 
         // "D" keypress indicates forward movement
-        if keyboard_input.pressed(KeyCode::D) {
+        if input.pressed(KeyCode::D) {
             direction.x += 1.;
         }
 
         // "A" keypress indicates forward movement
-        if keyboard_input.pressed(KeyCode::A) {
+        if input.pressed(KeyCode::A) {
             direction.x -= 1.;
         }
 
@@ -55,7 +80,7 @@ fn process_keyboard_input(
         //  TODO:   We need to control directional input here to isolate jump event vs. continuous
         //          upward thrust.
         //
-        if keyboard_input.pressed(KeyCode::Space) {
+        if input.pressed(KeyCode::Space) {
             direction.y += 1.;
         }
     }
@@ -64,5 +89,38 @@ fn process_keyboard_input(
         // Sum with whatever other input is also being applied (e.g. web)
         keyboard_directional_input.0 =
             (keyboard_directional_input.0 + direction).normalize_or_zero();
+    }
+}
+
+pub fn get_look(
+    mut mouse_motion_events: EventReader<MouseMotion>,
+    mut mouse_deltas: Query<&mut MouseMotionDelta>,
+    state: Res<bevy::prelude::State<AppState>>,
+) {
+    let motion = match state.current() {
+        AppState::InGame => match mouse_motion_events.iter().last() {
+            Some(event) => event.delta,
+            None => Vec2::ZERO,
+        },
+        _ => Vec2::ZERO,
+    };
+    bevy::log::info!("input {:?}", motion);
+    for mut mouse_delta in mouse_deltas.iter_mut() {
+        *mouse_delta = MouseMotionDelta(motion);
+    }
+}
+
+pub fn process_mouse_clicks(
+    native_mouse_button_input: Res<Input<MouseButton>>,
+    web_mouse_button_input: Res<Input<WebMouseButton>>,
+    mut player_clicks: EventWriter<PlayerClick>,
+    state: Res<State<AppState>>,
+) {
+    if *state.current() == AppState::InGame {
+        if native_mouse_button_input.just_pressed(MouseButton::Left)
+            || web_mouse_button_input.pressed(WebMouseButton(MouseButton::Left))
+        {
+            player_clicks.send(PlayerClick);
+        }
     }
 }

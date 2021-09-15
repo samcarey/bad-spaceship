@@ -1,6 +1,6 @@
 use bevy::{
     math::{Vec2, Vec3},
-    prelude::{Color, Entity, SystemLabel},
+    prelude::{Color, Entity, KeyCode, MouseButton, SystemLabel},
 };
 
 pub mod character;
@@ -85,3 +85,11 @@ struct DirectionalInput(Vec3);
 
 #[derive(SystemLabel, Hash, Debug, PartialEq, Eq, Clone)]
 pub struct InputEvents;
+
+#[derive(Debug, Hash, Ord, PartialOrd, PartialEq, Eq, Clone, Copy)]
+#[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
+pub struct WebKeyCode(pub KeyCode);
+
+#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
+#[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
+pub struct WebMouseButton(pub MouseButton);
