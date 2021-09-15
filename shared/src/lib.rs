@@ -1,5 +1,5 @@
 use bevy::{
-    math::{Vec2, Vec3},
+    math::{Quat, Vec2, Vec3},
     prelude::{Color, Entity, KeyCode, MouseButton, SystemLabel},
 };
 
@@ -86,6 +86,8 @@ struct DirectionalInput(Vec3);
 #[derive(SystemLabel, Hash, Debug, PartialEq, Eq, Clone)]
 pub struct InputEvents;
 
+#[derive(Default)]
+pub struct PartRotation(pub Quat);
 #[derive(Debug, Hash, Ord, PartialOrd, PartialEq, Eq, Clone, Copy)]
 #[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
 pub struct WebKeyCode(pub KeyCode);

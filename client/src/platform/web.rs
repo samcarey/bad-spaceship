@@ -23,10 +23,14 @@ impl Plugin for PlatformPlugin {
             .insert_resource(MouseClickTracker::new())
             .insert_resource(KeyboardTracker::new())
             .insert_resource(WheelTracker::new())
-            .add_system(get_mouse_motion.system().before(InputEvents))
-            .add_system(process_mouse_clicks.system().label(InputEvents))
-            .add_system(get_keyboard_input.system().before(InputEvents))
-            .add_system(get_wheel.system().label(InputEvents));
+            .add_system_set(
+                SystemSet::new()
+                    .before(InputEvents)
+                    .with_system(get_wheel.system())
+                    .with_system(get_keyboard_input.system())
+                    .with_system(process_mouse_clicks.system())
+                    .with_system(get_mouse_motion.system()),
+            );
     }
 }
 
@@ -175,6 +179,7 @@ pub struct KeyboardTracker {
     d: Arc<AtomicBool>,
     a: Arc<AtomicBool>,
     space: Arc<AtomicBool>,
+    shift: Arc<AtomicBool>,
 }
 
 impl KeyboardTracker {
@@ -194,6 +199,7 @@ impl KeyboardTracker {
             "d" => Some(&self.d),
             "a" => Some(&self.a),
             " " => Some(&self.space),
+            "Shift" => Some(&self.shift),
             _ => None,
         }
     }
@@ -229,6 +235,7 @@ pub fn get_keyboard_input(
     keyboard_input.set(&keyboard_tracker.d, KeyCode::D);
     keyboard_input.set(&keyboard_tracker.a, KeyCode::A);
     keyboard_input.set(&keyboard_tracker.space, KeyCode::Space);
+    keyboard_input.set(&keyboard_tracker.shift, KeyCode::LShift);
 }
 
 pub fn listen<F>(event_type: &'static str, callback: F)

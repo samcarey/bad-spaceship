@@ -1,8 +1,8 @@
 use bad_spaceship_shared::{
-    InputEvents, KeyboardDirectionalInput, MouseMotionDelta, PlayerClick, WebKeyCode,
-    WebMouseButton,
+    utils::TransformExt, CameraOrbitCenter, InputEvents, KeyboardDirectionalInput,
+    MouseMotionDelta, PartRotation, PlayerClick, WebKeyCode, WebMouseButton,
 };
-use bevy::{input::mouse::MouseMotion, prelude::*};
+use bevy::{input::mouse::MouseMotion, input::mouse::MouseWheel, prelude::*};
 
 use crate::AppState;
 
@@ -10,7 +10,8 @@ pub struct InputPlugin;
 
 impl Plugin for InputPlugin {
     fn build(&self, app: &mut bevy::prelude::AppBuilder) {
-        app.add_system(process_keyboard_input.system().label(InputEvents))
+        app.add_system(get_part_rotation.system())
+            .add_system(process_keyboard_input.system().label(InputEvents))
             .init_resource::<Input<WebKeyCode>>()
             .init_resource::<Input<WebMouseButton>>()
             .add_system(get_look.system().label(InputEvents))
@@ -92,6 +93,50 @@ fn process_keyboard_input(
     }
 }
 
+fn get_part_rotation(
+    native_keyboard_input: Res<Input<KeyCode>>,
+    web_keyboard_input: Res<Input<WebKeyCode>>,
+    mut mouse_wheel_events: EventReader<MouseWheel>,
+    mut players: Query<(&mut PartRotation, &Children)>,
+    camera_orbit_centers: Query<&GlobalTransform, With<CameraOrbitCenter>>,
+    mouse_deltas: Query<&MouseMotionDelta>,
+) {
+    if let Some((mut rotation, player_children)) = players.iter_mut().next() {
+        rotation.0 = Quat::default();
+        let input = MergedKeyboardInput {
+            native_keyboard_input: &native_keyboard_input,
+            web_keyboard_input: &web_keyboard_input,
+        };
+        if input.pressed(KeyCode::LShift) | input.pressed(KeyCode::RShift) {
+            for child in player_children.iter() {
+                if let Ok(camera_orbit_center) = camera_orbit_centers.get(*child) {
+                    for mouse_wheel in mouse_wheel_events.iter() {
+                        rotation.0 = Quat::from_axis_angle(
+                            camera_orbit_center.forward(),
+                            mouse_wheel.y / 10.,
+                        ) * rotation.0;
+                    }
+                    for mouse_delta in mouse_deltas.iter() {
+                        if mouse_delta.0 != Vec2::ZERO {
+                            let rotation_input = camera_orbit_center.rotation.mul_vec3(Vec3::new(
+                                -mouse_delta.0.x,
+                                -mouse_delta.0.y,
+                                0.0,
+                            ));
+                            let rotation_axis = rotation_input
+                                .cross(camera_orbit_center.forward())
+                                .normalize();
+                            rotation.0 = Quat::from_axis_angle(
+                                rotation_axis,
+                                rotation_input.length() / 100.,
+                            ) * rotation.0;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
 pub fn get_look(
     mut mouse_motion_events: EventReader<MouseMotion>,
     mut mouse_deltas: Query<&mut MouseMotionDelta>,

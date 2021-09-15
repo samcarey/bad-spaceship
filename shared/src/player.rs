@@ -17,7 +17,7 @@ use crate::{
     utils::{ToVec3, DEG_TO_RADIANS},
     CameraOrbitCenter, Character, DirectionalInput, FocusedInteractable, GameStickDirectionalInput,
     HoldPoint, Holding, InputEvents, KeyboardDirectionalInput, MouseMotionDelta, OrbitingCamera,
-    Player, PlayerClick, Yaw, INITIAL_CAMERA_PITCH,
+    PartRotation, Player, PlayerClick, Yaw, INITIAL_CAMERA_PITCH,
 };
 
 const MAX_CAMERA_PITCH_DEGREES: f32 = 89.;
@@ -41,7 +41,8 @@ impl Plugin for PlayerPlugin {
             .add_system(attach_camera_orbit.system())
             .add_plugin(CharacterPlugin)
             .add_event::<PlayerClick>()
-            .add_asset::<Config>();
+            .add_asset::<Config>()
+            .add_system(apply_part_rotation.system());
     }
 }
 
@@ -91,6 +92,7 @@ struct PlayerBundle {
     focused_interactable: FocusedInteractable,
     holding: Holding,
     mouse_motion_delta: MouseMotionDelta,
+    part_rotation: PartRotation,
 }
 
 impl PlayerBundle {
@@ -186,21 +188,24 @@ fn mouse_motion(
     mut query: Query<(&mut OrbitingCamera, &mut Yaw, &MouseMotionDelta)>,
     mut camera_orbit_center_transforms: Query<&mut Transform, With<CameraOrbitCenter>>,
     configs: ResMut<Assets<Config>>,
+    keyboard_input: Res<Input<KeyCode>>,
 ) {
-    if let Some((_, config)) = configs.iter().next() {
-        if let Some((mut orbiting_camera, mut yaw, mouse_delta)) = query.iter_mut().next() {
-            yaw.0 = (yaw.0 + mouse_delta.0.x * time.delta_seconds() * config.look_sensitivity)
-                % std::f32::consts::TAU;
+    if !(keyboard_input.pressed(KeyCode::LShift) | keyboard_input.pressed(KeyCode::RShift)) {
+        if let Some((_, config)) = configs.iter().next() {
+            if let Some((mut orbiting_camera, mut yaw, mouse_delta)) = query.iter_mut().next() {
+                yaw.0 = (yaw.0 + mouse_delta.0.x * time.delta_seconds() * config.look_sensitivity)
+                    % std::f32::consts::TAU;
 
-            orbiting_camera.pitch = (orbiting_camera.pitch
-                + mouse_delta.0.y * time.delta_seconds() * config.look_sensitivity)
-                .max(MIN_CAMERA_PITCH)
-                .min(MAX_CAMERA_PITCH);
+                orbiting_camera.pitch = (orbiting_camera.pitch
+                    + mouse_delta.0.y * time.delta_seconds() * config.look_sensitivity)
+                    .max(MIN_CAMERA_PITCH)
+                    .min(MAX_CAMERA_PITCH);
 
-            // By tilting the orbit center that the camera is attached to,
-            // the camera itself is swung to the correct position
-            if let Some(mut transform) = camera_orbit_center_transforms.iter_mut().next() {
-                transform.rotation = Quat::from_rotation_x(orbiting_camera.pitch);
+                // By tilting the orbit center that the camera is attached to,
+                // the camera itself is swung to the correct position
+                if let Some(mut transform) = camera_orbit_center_transforms.iter_mut().next() {
+                    transform.rotation = Quat::from_rotation_x(orbiting_camera.pitch);
+                }
             }
         }
     }
@@ -212,23 +217,26 @@ fn mouse_zoom(
     mut query: Query<&mut OrbitingCamera>,
     mut camera_transforms: Query<&mut Transform, With<Camera>>,
     configs: ResMut<Assets<Config>>,
+    keyboard_input: Res<Input<KeyCode>>,
 ) {
-    if let Some((_, config)) = configs.iter().next() {
-        if let Some(orbiting_camera) = query.iter_mut().next() {
-            if let Some(mouse_wheel) = mouse_wheel_events.iter().last() {
-                let scroll = match mouse_wheel.unit {
-                    MouseScrollUnit::Line => mouse_wheel.y,
-                    MouseScrollUnit::Pixel => mouse_wheel.y / 108.0,
-                };
-                // Set the camera translation relative to the camera orbit center
-                let mut camera_transform = camera_transforms
-                    .get_mut(orbiting_camera.entity.unwrap())
-                    .unwrap();
-                camera_transform.translation = -Vec3::Z
-                    * (-camera_transform.translation.z
-                        - scroll * time.delta_seconds() * config.zoom_sensitivity)
-                        .max(config.min_camera_distance)
-                        .min(config.max_camera_distance);
+    if !(keyboard_input.pressed(KeyCode::LShift) | keyboard_input.pressed(KeyCode::RShift)) {
+        if let Some(mouse_wheel) = mouse_wheel_events.iter().last() {
+            if let Some((_, config)) = configs.iter().next() {
+                if let Some(orbiting_camera) = query.iter_mut().next() {
+                    let scroll = match mouse_wheel.unit {
+                        MouseScrollUnit::Line => mouse_wheel.y,
+                        MouseScrollUnit::Pixel => mouse_wheel.y / 108.0,
+                    };
+                    // Set the camera translation relative to the camera orbit center
+                    let mut camera_transform = camera_transforms
+                        .get_mut(orbiting_camera.entity.unwrap())
+                        .unwrap();
+                    camera_transform.translation = -Vec3::Z
+                        * (-camera_transform.translation.z
+                            - scroll * time.delta_seconds() * config.zoom_sensitivity)
+                            .max(config.min_camera_distance)
+                            .min(config.max_camera_distance);
+                }
             }
         }
     }
@@ -364,6 +372,21 @@ fn gamepad_system(
         // If so, then normalize the vector components.
         if gamepad_directional_input.0 != Vec3::ZERO {
             gamepad_directional_input.0.normalize();
+        }
+    }
+}
+
+fn apply_part_rotation(
+    players: Query<(&PartRotation, &Holding, &FocusedInteractable)>,
+    mut parts: Query<&mut TargetOrientation>,
+) {
+    for (part_rotation, holding, focused_interactables) in players.iter() {
+        if holding.0 {
+            if let Some(focused_interactable) = focused_interactables.current {
+                if let Ok(mut orientation) = parts.get_mut(focused_interactable) {
+                    orientation.quat = part_rotation.0 * orientation.quat;
+                }
+            }
         }
     }
 }
