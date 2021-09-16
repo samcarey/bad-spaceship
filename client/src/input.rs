@@ -149,7 +149,6 @@ pub fn get_look(
         },
         _ => Vec2::ZERO,
     };
-    bevy::log::info!("input {:?}", motion);
     for mut mouse_delta in mouse_deltas.iter_mut() {
         *mouse_delta = MouseMotionDelta(motion);
     }
