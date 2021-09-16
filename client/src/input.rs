@@ -137,6 +137,7 @@ fn get_part_rotation(
         }
     }
 }
+
 pub fn get_look(
     mut mouse_motion_events: EventReader<MouseMotion>,
     mut mouse_deltas: Query<&mut MouseMotionDelta>,
