@@ -1,6 +1,6 @@
 use bevy::{
     math::{Quat, Vec2, Vec3},
-    prelude::{Color, Entity, KeyCode, MouseButton, SystemLabel},
+    prelude::{Entity, KeyCode, MouseButton, SystemLabel},
 };
 
 pub mod character;
@@ -31,11 +31,7 @@ pub struct Yaw(pub f32);
 pub struct CameraOrbitCenter;
 
 #[derive(Default)]
-pub struct FocusedInteractable {
-    pub current: Option<Entity>,
-    pub previous: Option<Entity>,
-    pub previous_color: Option<Color>,
-}
+pub struct FocusedInteractable(Option<Entity>);
 
 #[derive(Default)]
 pub struct Holding(pub bool);
@@ -78,6 +74,7 @@ pub struct MouseMotionDelta(pub Vec2);
 #[derive(SystemLabel, Clone, Hash, Debug, PartialEq, Eq)]
 pub struct PlayerClick;
 
+#[derive(Default)]
 pub struct Character;
 
 #[derive(Default)]

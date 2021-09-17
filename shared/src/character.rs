@@ -55,6 +55,14 @@ pub struct Config {
     jump_force: f32,
 }
 
+#[derive(Default, Bundle)]
+struct CharacterBundle {
+    character: Character,
+    touching: Touching,
+    collider_debug_render: ColliderDebugRender,
+    collider_position_sync: ColliderPositionSync,
+}
+
 fn spawn(
     mut commands: Commands,
     players_without_characters: Query<Entity, (With<Player>, Without<Character>)>,
@@ -64,7 +72,6 @@ fn spawn(
         for player_entity in players_without_characters.iter() {
             commands
                 .entity(player_entity)
-                .insert(Character)
                 .insert_bundle(RigidBodyBundle {
                     body_type: bevy_rapier3d::prelude::RigidBodyType::Dynamic,
                     position: [0.0, 10., 0.].into(),
@@ -80,11 +87,7 @@ fn spawn(
                         .into(),
                     ..Default::default()
                 })
-                .insert_bundle((
-                    Touching::default(),
-                    ColliderDebugRender::with_id(0),
-                    ColliderPositionSync::Discrete,
-                ))
+                .insert_bundle(CharacterBundle::default())
                 .id();
         }
     }

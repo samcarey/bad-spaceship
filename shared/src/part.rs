@@ -20,8 +20,9 @@ impl Plugin for PartPlugin {
     fn build(&self, app: &mut AppBuilder) {
         app.add_startup_system(spawn_initial_parts.system())
             .add_system(replace_fallen_parts.system())
-            .add_system(update_focused_interactables.system())
-            .add_system(highlight_interactables.system())
+            .add_system(update_focused.system())
+            .add_system(add_highlight.system())
+            .add_system(remove_highlight.system())
             .add_system(position_held_part.system())
             .add_event::<NewPart>()
             .add_system(orient_held_part.system())
@@ -34,10 +35,13 @@ const PART_SIZE: f32 = 1.0;
 const POSITIONING_STIFFNESS: f32 = 30.0;
 const ORIENTING_STIFFNESS: f32 = 5.0;
 
+#[derive(Default)]
 struct Interactable;
 
+#[derive(Default)]
 pub struct Holdable;
 
+#[derive(Default)]
 struct GetsReplaced;
 
 struct CriticallyDampedHarmonicOscillator {
@@ -94,6 +98,15 @@ impl TargetOrientation {
 
 const SPAWN_ZONE_HALF_WIDTH: f32 = PLATFORM_WIDTH_M / 2.0 * 0.7;
 
+#[derive(Bundle, Default)]
+struct PartBundle {
+    interactable: Interactable,
+    holdable: Holdable,
+    gets_replaced: GetsReplaced,
+    collider_debug_render: ColliderDebugRender,
+    collider_position_sync: ColliderPositionSync,
+}
+
 struct NewPart;
 
 fn spawn_part(mut commands: Commands, mut new_part_events: EventReader<NewPart>) {
@@ -121,13 +134,10 @@ fn spawn_part(mut commands: Commands, mut new_part_events: EventReader<NewPart>)
                 },
                 ..Default::default()
             })
-            .insert_bundle((
-                Interactable,
-                Holdable,
-                GetsReplaced,
-                ColliderDebugRender::with_id(1),
-                ColliderPositionSync::Discrete,
-            ));
+            .insert_bundle(PartBundle {
+                collider_debug_render: ColliderDebugRender::with_id(1),
+                ..Default::default()
+            });
     }
 }
 
@@ -155,89 +165,98 @@ const MAX_INTERACT_DISTANCE_SQUARED: f32 = MAX_INTERACT_DISTANCE * MAX_INTERACT_
 const MAX_INTERACT_ANGLE_DEGREES: f32 = 20.0;
 const MAX_INTERACT_ANGLE: f32 = MAX_INTERACT_ANGLE_DEGREES * utils::DEG_TO_RADIANS;
 
-fn update_focused_interactables(
+struct Focused;
+
+struct Highlight {
+    base_color: Color,
+}
+
+fn update_focused(
+    mut commands: Commands,
     mut players: Query<(&mut FocusedInteractable, &Holding, &Children), With<Player>>,
     mut interactables: Query<(&mut Transform, Entity), With<Interactable>>,
     camera_orbit_centers: Query<&GlobalTransform, With<CameraOrbitCenter>>,
 ) {
     // Determine which iteractable entity each player is focused on (i.e. looking at, within range)
-
     for (mut focused_interactable, holding, player_children) in players.iter_mut() {
-        if holding.0 {
-            return;
-        }
+        if !holding.0 {
+            let mut newly_focused_interactable_option = None;
+            for player_child in player_children.iter() {
+                if let Ok(camera_orbit_center) = camera_orbit_centers.get(*player_child) {
+                    // Search for the most appropriate interactable that should be focused by the player
+                    let mut smallest_angle = MAX_INTERACT_ANGLE;
 
-        let mut new_focused_interactable = None;
-        for player_child in player_children.iter() {
-            if let Ok(camera_orbit_center) = camera_orbit_centers.get(*player_child) {
-                // Search for the most appropriate interactable that should be focused by the player
-                let mut smallest_angle = MAX_INTERACT_ANGLE;
+                    for (interactable_transform, interactable) in interactables.iter_mut() {
+                        let vector_between =
+                            interactable_transform.translation - camera_orbit_center.translation;
+                        if vector_between.length_squared() < MAX_INTERACT_DISTANCE_SQUARED {
+                            let angle_from_look =
+                                camera_orbit_center.forward().angle_between(vector_between);
 
-                for (interactable_transform, interactable) in interactables.iter_mut() {
-                    let vector_between =
-                        interactable_transform.translation - camera_orbit_center.translation;
-                    if vector_between.length_squared() < MAX_INTERACT_DISTANCE_SQUARED {
-                        let angle_from_look =
-                            camera_orbit_center.forward().angle_between(vector_between);
-
-                        if angle_from_look < smallest_angle {
-                            smallest_angle = angle_from_look;
-                            new_focused_interactable = Some(interactable.clone());
+                            if angle_from_look < smallest_angle {
+                                smallest_angle = angle_from_look;
+                                newly_focused_interactable_option = Some(interactable);
+                            }
                         }
                     }
                 }
             }
-        }
 
-        // If a new interactable should be focused by this player, first save the previous one
-        if let Some(newly_focused) = new_focused_interactable {
-            if let Some(currently_focused) = focused_interactable.current {
-                // There was something before, and something now
-                if newly_focused != currently_focused {
-                    // The new thing is different from the previous thing
-                    focused_interactable.previous = Some(currently_focused);
-                    focused_interactable.current = Some(newly_focused);
+            let mut interactable_to_unfocus = None;
+            if let Some(newly_focused_interactable) = newly_focused_interactable_option {
+                let mut interactable_to_focus = Some(newly_focused_interactable);
+                if let Some(previously_focused_interactable) = focused_interactable.0 {
+                    if newly_focused_interactable == previously_focused_interactable {
+                        interactable_to_focus = None;
+                    } else {
+                        interactable_to_unfocus = Some(previously_focused_interactable);
+                    }
                 }
+                if let Some(entity) = interactable_to_focus {
+                    commands.entity(entity).insert(Focused);
+                }
+
+                focused_interactable.0 = Some(newly_focused_interactable);
             } else {
-                // There wasn't anything before
-                focused_interactable.current = Some(newly_focused)
+                if let Some(previous_focused_interactable) = focused_interactable.0 {
+                    interactable_to_unfocus = Some(previous_focused_interactable);
+                }
+                focused_interactable.0 = None;
             }
-        } else {
-            // There should not be anything
-            if let Some(currently_focused) = focused_interactable.current {
-                // There was something before
-                focused_interactable.previous = Some(currently_focused);
-                focused_interactable.current = None;
+
+            if let Some(interactable) = interactable_to_unfocus {
+                commands.entity(interactable).remove::<Focused>();
             }
         }
     }
 }
 
-fn highlight_interactables(
-    mut interactors: Query<&mut FocusedInteractable, Changed<FocusedInteractable>>,
-    mut interactables: Query<&Handle<StandardMaterial>, With<Interactable>>,
+fn add_highlight(
+    mut commands: Commands,
+    newly_focused: Query<(Entity, &Handle<StandardMaterial>), (With<Focused>, Without<Highlight>)>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    for mut focused_interactable in interactors.iter_mut() {
-        // First, restore the previously focused interactable to its original color
-        if let Some(previous) = focused_interactable.previous {
-            if let Ok(material_handle) = interactables.get_mut(previous) {
-                let material = materials.get_mut(&*material_handle).unwrap();
-                material.base_color = focused_interactable.previous_color.unwrap();
-            }
-        }
+    for (entity, material_handle) in newly_focused.iter() {
+        let color = &mut materials.get_mut(&*material_handle).unwrap().base_color;
+        commands.entity(entity).insert(Highlight {
+            base_color: color.clone(),
+        });
 
-        // Now, store the newly focused interactable's color and then higlight it
-        if let Some(current) = focused_interactable.current {
-            if let Ok(material_handle) = interactables.get_mut(current) {
-                let color = &mut materials.get_mut(&*material_handle).unwrap().base_color;
-                focused_interactable.previous_color = Some(color.clone());
+        // Make more yellowish
+        color.set_g((color.g() + 0.75).min(1.0));
+        color.set_r((color.r() + 0.75).min(1.0));
+    }
+}
 
-                // Make more yellowish
-                color.set_g((color.g() + 0.75).min(1.0));
-                color.set_r((color.r() + 0.75).min(1.0));
-            }
-        }
+fn remove_highlight(
+    mut commands: Commands,
+    newly_focused: Query<(Entity, &Handle<StandardMaterial>, &Highlight), Without<Focused>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    for (entity, material_handle, highlight) in newly_focused.iter() {
+        let color = &mut materials.get_mut(&*material_handle).unwrap().base_color;
+        *color = highlight.base_color;
+        commands.entity(entity).remove::<Highlight>();
     }
 }
 

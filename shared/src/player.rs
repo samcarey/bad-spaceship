@@ -270,7 +270,7 @@ fn toggle_holding(
 ) {
     if clicks.iter().next().is_some() {
         if let Some((mut holding, interactable, player_children)) = players.iter_mut().next() {
-            if let Some(current_interactable) = interactable.current {
+            if let Some(current_interactable) = interactable.0 {
                 if let Ok((original_orientation, mass_properties)) =
                     holdables.get(current_interactable)
                 {
@@ -382,7 +382,7 @@ fn apply_part_rotation(
 ) {
     for (part_rotation, holding, focused_interactables) in players.iter() {
         if holding.0 {
-            if let Some(focused_interactable) = focused_interactables.current {
+            if let Some(focused_interactable) = focused_interactables.0 {
                 if let Ok(mut orientation) = parts.get_mut(focused_interactable) {
                     orientation.quat = part_rotation.0 * orientation.quat;
                 }
