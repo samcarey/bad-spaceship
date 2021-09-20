@@ -1,7 +1,7 @@
-use bad_spaceship_shared::character;
 use bad_spaceship_shared::character::CharacterPlugin;
 use bad_spaceship_shared::config::ConfigPlugin;
 use bad_spaceship_shared::contact::ContactPlugin;
+use bad_spaceship_shared::{character, CommonPlugins};
 pub mod highlight;
 use bad_spaceship_shared::map::MapPlugin;
 use bad_spaceship_shared::part::PartPlugin;
@@ -41,14 +41,9 @@ fn main() {
         .add_plugin(RapierPhysicsPlugin::<NoUserData>::default())
         .add_plugin(RapierRenderPlugin)
         .insert_resource(ClearColor(Color::rgb(0.99, 0.99, 0.95)))
-        .add_plugin(MapPlugin)
-        .add_plugin(PartPlugin)
-        .add_plugin(PlayerPlugin)
         .add_plugin(PlatformPlugin)
-        .add_plugin(ConfigPlugin)
-        .add_plugin(ContactPlugin)
         .add_plugin(HighlightPlugin)
-        .add_plugin(CharacterPlugin)
+        .add_plugins(CommonPlugins)
         .add_startup_system(load_configs.system());
     #[cfg(target_arch = "wasm32")]
     app.add_plugin(FullViewportPlugin);

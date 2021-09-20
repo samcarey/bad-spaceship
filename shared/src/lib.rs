@@ -1,8 +1,14 @@
 use bevy::{
     math::{Quat, Vec2, Vec3},
-    prelude::{Entity, KeyCode, MouseButton, SystemLabel},
+    prelude::{Entity, KeyCode, MouseButton, PluginGroup, SystemLabel},
 };
 use bevy_rapier3d::prelude::ColliderHandle;
+use character::CharacterPlugin;
+use config::ConfigPlugin;
+use contact::ContactPlugin;
+use map::MapPlugin;
+use part::PartPlugin;
+use player::PlayerPlugin;
 
 pub mod character;
 pub mod config;
@@ -11,6 +17,20 @@ pub mod map;
 pub mod part;
 pub mod player;
 pub mod utils;
+
+pub struct CommonPlugins;
+
+impl PluginGroup for CommonPlugins {
+    fn build(&mut self, group: &mut bevy::app::PluginGroupBuilder) {
+        group
+            .add(CharacterPlugin)
+            .add(ConfigPlugin)
+            .add(ContactPlugin)
+            .add(MapPlugin)
+            .add(PartPlugin)
+            .add(PlayerPlugin);
+    }
+}
 
 #[derive(Default)]
 pub struct KeyboardDirectionalInput(pub Vec3);
