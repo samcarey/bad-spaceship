@@ -1,15 +1,8 @@
-use bad_spaceship_shared::character::CharacterPlugin;
-use bad_spaceship_shared::config::ConfigPlugin;
-use bad_spaceship_shared::contact::ContactPlugin;
 use bad_spaceship_shared::{character, CommonPlugins};
 pub mod highlight;
-use bad_spaceship_shared::map::MapPlugin;
-use bad_spaceship_shared::part::PartPlugin;
-use bad_spaceship_shared::player::{self, PlayerPlugin};
+use bad_spaceship_shared::player;
 use bevy::prelude::*;
 use bevy::render::pass::ClearColor;
-use bevy_rapier3d::physics::NoUserData;
-use bevy_rapier3d::{physics::RapierPhysicsPlugin, render::RapierRenderPlugin};
 
 #[cfg(target_arch = "wasm32")]
 use bevy_web_fullscreen::FullViewportPlugin;
@@ -38,8 +31,6 @@ fn main() {
     app.add_state(AppState::Initial)
         .add_plugin(UiPlugin)
         .add_plugin(InputPlugin)
-        .add_plugin(RapierPhysicsPlugin::<NoUserData>::default())
-        .add_plugin(RapierRenderPlugin)
         .insert_resource(ClearColor(Color::rgb(0.99, 0.99, 0.95)))
         .add_plugin(PlatformPlugin)
         .add_plugin(HighlightPlugin)

@@ -2,7 +2,11 @@ use bevy::{
     math::{Quat, Vec2, Vec3},
     prelude::{Entity, KeyCode, MouseButton, PluginGroup, SystemLabel},
 };
-use bevy_rapier3d::prelude::ColliderHandle;
+use bevy_rapier3d::{
+    physics::{NoUserData, RapierPhysicsPlugin},
+    prelude::ColliderHandle,
+    render::RapierRenderPlugin,
+};
 use character::CharacterPlugin;
 use config::ConfigPlugin;
 use contact::ContactPlugin;
@@ -22,6 +26,12 @@ pub struct CommonPlugins;
 
 impl PluginGroup for CommonPlugins {
     fn build(&mut self, group: &mut bevy::app::PluginGroupBuilder) {
+        // Third-party plugins
+        group
+            .add(RapierPhysicsPlugin::<NoUserData>::default())
+            .add(RapierRenderPlugin);
+
+        // Custom plugins
         group
             .add(CharacterPlugin)
             .add(ConfigPlugin)
