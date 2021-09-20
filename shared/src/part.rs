@@ -1,14 +1,16 @@
 use crate::map::PLATFORM_WIDTH_M;
-use crate::utils::{self, QuatExt, TransformExt};
-use crate::{CameraOrbitCenter, FocusedInteractable, HoldPoint, Holding, Player};
+use crate::utils::{self, Orderable, QuatExt, TransformExt};
+use crate::{
+    Attachable, CameraOrbitCenter, Focused, FocusedInteractable, HoldPoint, Holding, Player,
+};
 use bevy::prelude::*;
 use bevy_rapier3d::na::Vector3;
 use bevy_rapier3d::physics::{
-    ColliderBundle, ColliderPositionSync, RapierConfiguration, RigidBodyBundle,
+    ColliderBundle, ColliderPositionSync, IntoEntity, RapierConfiguration, RigidBodyBundle,
 };
 use bevy_rapier3d::prelude::{
-    ColliderMassProps, ColliderMaterial, ColliderShape, RigidBodyForces, RigidBodyMassProps,
-    RigidBodyVelocity, SdpMatrix,
+    ActiveEvents, ColliderMassProps, ColliderMaterial, ColliderShape, ContactEvent,
+    RigidBodyForces, RigidBodyMassProps, RigidBodyVelocity, SdpMatrix,
 };
 use bevy_rapier3d::render::ColliderDebugRender;
 use rand::Rng;
@@ -21,12 +23,12 @@ impl Plugin for PartPlugin {
         app.add_startup_system(spawn_initial_parts.system())
             .add_system(replace_fallen_parts.system())
             .add_system(update_focused.system())
-            .add_system(add_highlight.system())
-            .add_system(remove_highlight.system())
             .add_system(position_held_part.system())
             .add_event::<NewPart>()
             .add_system(orient_held_part.system())
-            .add_system(spawn_part.system());
+            .add_system(spawn_part.system())
+            .add_system(add_attachable.system())
+            .add_system(remove_attachable.system());
     }
 }
 
@@ -132,6 +134,7 @@ fn spawn_part(mut commands: Commands, mut new_part_events: EventReader<NewPart>)
                     restitution: 0.1,
                     ..Default::default()
                 },
+                flags: (ActiveEvents::INTERSECTION_EVENTS | ActiveEvents::CONTACT_EVENTS).into(),
                 ..Default::default()
             })
             .insert_bundle(PartBundle {
@@ -164,12 +167,6 @@ const MAX_INTERACT_DISTANCE: f32 = 7.5;
 const MAX_INTERACT_DISTANCE_SQUARED: f32 = MAX_INTERACT_DISTANCE * MAX_INTERACT_DISTANCE;
 const MAX_INTERACT_ANGLE_DEGREES: f32 = 20.0;
 const MAX_INTERACT_ANGLE: f32 = MAX_INTERACT_ANGLE_DEGREES * utils::DEG_TO_RADIANS;
-
-struct Focused;
-
-struct Highlight {
-    base_color: Color,
-}
 
 fn update_focused(
     mut commands: Commands,
@@ -231,34 +228,43 @@ fn update_focused(
     }
 }
 
-fn add_highlight(
+fn add_attachable(
     mut commands: Commands,
-    newly_focused: Query<(Entity, &Handle<StandardMaterial>), (With<Focused>, Without<Highlight>)>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    helds: Query<Entity, With<TargetPosition>>,
+    potential_attachables: Query<Entity, (With<Holdable>, Without<Attachable>)>,
+    mut contact_events: EventReader<ContactEvent>,
 ) {
-    for (entity, material_handle) in newly_focused.iter() {
-        let color = &mut materials.get_mut(&*material_handle).unwrap().base_color;
-        commands.entity(entity).insert(Highlight {
-            base_color: color.clone(),
-        });
-
-        // Make more yellowish
-        color.set_g((color.g() + 0.75).min(1.0));
-        color.set_r((color.r() + 0.75).min(1.0));
+    for contact_event in contact_events
+        .iter()
+        .filter_map(|x| x.order(&(|entity| helds.get(entity).is_ok())))
+    {
+        if let ContactEvent::Started(_handle1, handle2) = contact_event {
+            if let Ok(entity) = potential_attachables.get(handle2.entity()) {
+                commands.entity(entity).insert(Attachable);
+            }
+        }
     }
 }
 
-fn remove_highlight(
+fn remove_attachable(
     mut commands: Commands,
-    newly_focused: Query<(Entity, &Handle<StandardMaterial>, &Highlight), Without<Focused>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    helds: Query<Entity, With<TargetPosition>>,
+    potential_attachables: Query<Entity, (With<Holdable>, With<Attachable>)>,
+    mut contact_events: EventReader<ContactEvent>,
 ) {
-    for (entity, material_handle, highlight) in newly_focused.iter() {
-        let color = &mut materials.get_mut(&*material_handle).unwrap().base_color;
-        *color = highlight.base_color;
-        commands.entity(entity).remove::<Highlight>();
+    for contact_event in contact_events
+        .iter()
+        .filter_map(|x| x.order(&(|entity| helds.get(entity).is_ok())))
+    {
+        if let ContactEvent::Stopped(_handle1, handle2) = contact_event {
+            if let Ok(entity) = potential_attachables.get(handle2.entity()) {
+                commands.entity(entity).remove::<Attachable>();
+            }
+        }
     }
 }
+
+// then in new branch, make shared plugin group
 
 fn position_held_part(
     hold_points: Query<&GlobalTransform, With<HoldPoint>>,

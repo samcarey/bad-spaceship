@@ -8,16 +8,20 @@ use bevy::{
     render::camera::Camera,
     utils::HashSet,
 };
-use bevy_rapier3d::prelude::{ColliderShape, RigidBodyMassProps};
+use bevy_rapier3d::{
+    physics::{IntoEntity, IntoHandle},
+    prelude::{ColliderShape, NarrowPhase, RigidBodyMassProps},
+};
 use serde::Deserialize;
 
 use crate::{
     character::CharacterPlugin,
     part::{Holdable, TargetOrientation, TargetPosition},
     utils::{ToVec3, DEG_TO_RADIANS},
-    CameraOrbitCenter, Character, DirectionalInput, FocusedInteractable, GameStickDirectionalInput,
-    HoldPoint, Holding, InputEvents, KeyboardDirectionalInput, MouseMotionDelta, OrbitingCamera,
-    PartRotation, Player, PlayerClick, Yaw, INITIAL_CAMERA_PITCH,
+    Attachable, CameraOrbitCenter, Character, DirectionalInput, FocusedInteractable,
+    GameStickDirectionalInput, HoldPoint, Holding, InputEvents, KeyboardDirectionalInput,
+    MouseMotionDelta, OrbitingCamera, PartRotation, Player, PlayerClick, TouchingColliders, Yaw,
+    INITIAL_CAMERA_PITCH,
 };
 
 const MAX_CAMERA_PITCH_DEGREES: f32 = 89.;
@@ -260,6 +264,23 @@ fn get_hold_point_entity(
     held_entity
 }
 
+#[derive(Bundle)]
+struct HeldBundle {
+    target_position: TargetPosition,
+    target_orientation: TargetOrientation,
+    touching: TouchingColliders,
+}
+
+impl HeldBundle {
+    fn new(hold_point: Entity, mass_properties: &RigidBodyMassProps, rotation: Quat) -> Self {
+        Self {
+            target_position: TargetPosition::new(hold_point),
+            target_orientation: TargetOrientation::new(mass_properties, rotation),
+            touching: TouchingColliders::default(),
+        }
+    }
+}
+
 fn toggle_holding(
     mut clicks: EventReader<PlayerClick>,
     mut commands: Commands,
@@ -267,6 +288,7 @@ fn toggle_holding(
     camera_orbit_centers: Query<&Children>,
     hold_points: Query<Entity, With<HoldPoint>>,
     holdables: Query<(&GlobalTransform, &RigidBodyMassProps), With<Holdable>>,
+    narrow_phase: Res<NarrowPhase>,
 ) {
     if clicks.iter().next().is_some() {
         if let Some((mut holding, interactable, player_children)) = players.iter_mut().next() {
@@ -277,20 +299,39 @@ fn toggle_holding(
                     if let Some(hold_point_entity) =
                         get_hold_point_entity(player_children, camera_orbit_centers, hold_points)
                     {
+                        let currently_touching_held_part = narrow_phase
+                            .contacts_with(current_interactable.handle())
+                            .filter(|x| x.has_any_active_contact)
+                            .map(|contact_pair| {
+                                if contact_pair.collider1.entity() == current_interactable {
+                                    contact_pair.collider2.entity()
+                                } else {
+                                    contact_pair.collider1.entity()
+                                }
+                            })
+                            .collect::<Vec<Entity>>();
+
                         if holding.0 {
                             holding.0 = false;
                             commands
                                 .entity(current_interactable)
-                                .remove_bundle::<(TargetPosition, TargetOrientation)>();
+                                .remove_bundle::<HeldBundle>();
+
+                            for entity in currently_touching_held_part.iter() {
+                                commands.entity(*entity).remove::<Attachable>();
+                            }
                         } else {
                             holding.0 = true;
-                            commands.entity(current_interactable).insert_bundle((
-                                TargetPosition::new(hold_point_entity),
-                                TargetOrientation::new(
+                            commands
+                                .entity(current_interactable)
+                                .insert_bundle(HeldBundle::new(
+                                    hold_point_entity,
                                     &mass_properties,
                                     original_orientation.rotation,
-                                ),
-                            ));
+                                ));
+                            for entity in currently_touching_held_part.iter() {
+                                commands.entity(*entity).insert(Attachable);
+                            }
                         }
                     }
                 }

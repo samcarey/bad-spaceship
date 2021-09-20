@@ -1,8 +1,12 @@
 use bevy::{
     math::{Quat, Vec3},
-    prelude::{GlobalTransform, Transform},
+    prelude::{Entity, GlobalTransform, Transform},
 };
-use bevy_rapier3d::na::{Quaternion, Translation3, Unit, UnitQuaternion, Vector3};
+use bevy_rapier3d::{
+    na::{Quaternion, Translation3, Unit, UnitQuaternion, Vector3},
+    physics::IntoEntity,
+    prelude::ContactEvent,
+};
 use std::f32::consts::PI;
 
 pub const DEG_TO_RADIANS: f32 = PI / 180.;
@@ -89,5 +93,39 @@ pub trait QuaternionExt {
 impl QuaternionExt for Unit<Quaternion<f32>> {
     fn to_quat(&self) -> Quat {
         Quat::from_xyzw(self.i, self.j, self.k, self.w)
+    }
+}
+
+pub trait Orderable {
+    fn order(self, is_first: &dyn Fn(Entity) -> bool) -> Option<Self>
+    where
+        Self: Sized;
+}
+
+impl Orderable for ContactEvent {
+    fn order(self, is_first: &dyn Fn(Entity) -> bool) -> Option<Self>
+    where
+        Self: Sized,
+    {
+        match self {
+            ContactEvent::Started(handle1, handle2) => {
+                if is_first(handle1.entity()) {
+                    Some(self)
+                } else if is_first(handle2.entity()) {
+                    Some(ContactEvent::Started(handle2, handle1))
+                } else {
+                    None
+                }
+            }
+            ContactEvent::Stopped(handle1, handle2) => {
+                if is_first(handle1.entity()) {
+                    Some(self)
+                } else if is_first(handle2.entity()) {
+                    Some(ContactEvent::Stopped(handle2, handle1))
+                } else {
+                    None
+                }
+            }
+        }
     }
 }

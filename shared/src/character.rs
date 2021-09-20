@@ -2,10 +2,10 @@ use bevy::prelude::*;
 use bevy::reflect::TypeUuid;
 use bevy_rapier3d::{
     na::{Isometry, UnitQuaternion, Vector3},
-    physics::{ColliderBundle, ColliderPositionSync, IntoEntity, RigidBodyBundle},
+    physics::{ColliderBundle, ColliderPositionSync, IntoHandle, RigidBodyBundle},
     prelude::{
-        ActiveEvents, ColliderHandle, ColliderShape, ContactEvent, RigidBodyMassProps,
-        RigidBodyMassPropsFlags, RigidBodyPosition, RigidBodyVelocity,
+        ActiveEvents, ColliderShape, NarrowPhase, RigidBodyMassProps, RigidBodyMassPropsFlags,
+        RigidBodyPosition, RigidBodyVelocity,
     },
     render::ColliderDebugRender,
 };
@@ -28,22 +28,8 @@ impl Plugin for CharacterPlugin {
                 CoreStage::PostUpdate,
                 rotate_character_based_on_input.system(),
             )
-            .add_system(touching_ground.system())
             .add_system(spawn.system())
             .add_asset::<Config>();
-    }
-}
-
-#[derive(Default)]
-struct Touching(Vec<ColliderHandle>);
-
-impl Touching {
-    pub fn index(&self, handle: &ColliderHandle) -> Option<usize> {
-        self.0.iter().position(|x| *x == *handle)
-    }
-
-    pub fn touching(&self) -> bool {
-        !self.0.is_empty()
     }
 }
 
@@ -58,7 +44,6 @@ pub struct Config {
 #[derive(Default, Bundle)]
 struct CharacterBundle {
     character: Character,
-    touching: Touching,
     collider_debug_render: ColliderDebugRender,
     collider_position_sync: ColliderPositionSync,
 }
@@ -89,40 +74,6 @@ fn spawn(
                 })
                 .insert_bundle(CharacterBundle::default())
                 .id();
-        }
-    }
-}
-
-fn touching_ground(
-    mut players: Query<(Entity, &mut Touching)>,
-    mut events: EventReader<ContactEvent>,
-) {
-    for contact_event in events.iter() {
-        for (player_entity, mut touching) in players.iter_mut() {
-            match contact_event {
-                ContactEvent::Stopped(handle1, handle2) => {
-                    if player_entity == handle1.entity() {
-                        if let Some(index) = touching.index(&handle2) {
-                            touching.0.remove(index);
-                        }
-                    } else if player_entity == handle2.entity() {
-                        if let Some(index) = touching.index(&handle1) {
-                            touching.0.remove(index);
-                        }
-                    }
-                }
-                ContactEvent::Started(handle1, handle2) => {
-                    if player_entity == handle1.entity() {
-                        if let None = touching.index(&handle2) {
-                            touching.0.push(*handle2);
-                        }
-                    } else if player_entity == handle2.entity() {
-                        if let None = touching.index(&handle1) {
-                            touching.0.push(*handle1);
-                        }
-                    }
-                }
-            }
         }
     }
 }
@@ -168,16 +119,17 @@ fn velocity_adjustment(
 
 fn walk_based_on_input(
     mut query: Query<(
+        Entity,
         &mut DirectionalInput,
         &Transform,
-        &Touching,
         &mut RigidBodyVelocity,
         &RigidBodyMassProps,
     )>,
     configs: Res<Assets<Config>>,
+    narrow_phase: Res<NarrowPhase>,
 ) {
     if let Some((_, config)) = configs.iter().next() {
-        for (directional_input, transform, touch_tracker, mut velocity, mass_properties) in
+        for (entity, directional_input, transform, mut velocity, mass_properties) in
             query.iter_mut()
         {
             let current_velocity: Vec3 = velocity.linvel.clone_owned().into();
@@ -208,7 +160,10 @@ fn walk_based_on_input(
 
             let mut horizontal_impulse = mass_properties.mass() * horizontal_velocity_change * 0.13; // slowing down with fudge factor
 
-            if !touch_tracker.touching() {
+            let player_is_touching_something = narrow_phase
+                .contacts_with(entity.handle())
+                .any(|contact_pair| contact_pair.has_any_active_contact);
+            if !player_is_touching_something {
                 horizontal_impulse *= 0.13; // slowing down even more when in air
             }
 
@@ -220,43 +175,50 @@ fn walk_based_on_input(
 
 fn jump_based_on_input(
     mut query: Query<(
+        Entity,
         &mut DirectionalInput,
         &Transform,
-        &Touching,
         &mut RigidBodyVelocity,
         &RigidBodyMassProps,
     )>,
     configs: Res<Assets<Config>>,
+    narrow_phase: Res<NarrowPhase>,
 ) {
     if let Some((_, config)) = configs.iter().next() {
-        for (directional_input, transform, touch_tracker, mut velocity, mass_properties) in
+        for (entity, directional_input, transform, mut velocity, mass_properties) in
             query.iter_mut()
         {
-            if touch_tracker.touching() && directional_input.0.y != 0. {
-                let current_velocity: Vec3 = velocity.linvel.clone_owned().into();
+            if directional_input.0.y != 0. {
+                let player_is_touching_something = narrow_phase
+                    .contacts_with(entity.handle())
+                    .any(|contact_pair| contact_pair.has_any_active_contact);
 
-                // Compute our desired horizontal velocity vector based on keyboard inputs and move speed
-                // Note: Horizontal plane = (x,z), Vertical plane = (y)
-                let up = transform.up() * directional_input.0.y;
-                let desired_velocity = Vec3::from(up) * config.jump_force;
+                if player_is_touching_something {
+                    let current_velocity: Vec3 = velocity.linvel.clone_owned().into();
 
-                // Get a copy of the current velocity from rapier, isolated to vertical component only
-                // (ie, zero out current horizontal [x,z] components)
-                let current_vertical_velocity = Vec3::new(0.0, current_velocity.y, 0.0);
+                    // Compute our desired horizontal velocity vector based on keyboard inputs and move speed
+                    // Note: Horizontal plane = (x,z), Vertical plane = (y)
+                    let up = transform.up() * directional_input.0.y;
+                    let desired_velocity = Vec3::from(up) * config.jump_force;
 
-                let vertical_velocity = if desired_velocity != Vec3::ZERO {
-                    velocity_adjustment(
-                        current_velocity,
-                        desired_velocity,
-                        current_vertical_velocity,
-                    )
-                } else {
-                    Vec3::ZERO
-                };
+                    // Get a copy of the current velocity from rapier, isolated to vertical component only
+                    // (ie, zero out current horizontal [x,z] components)
+                    let current_vertical_velocity = Vec3::new(0.0, current_velocity.y, 0.0);
 
-                // Apply the computed force to the character's rigid body
-                let vertical_impulse = mass_properties.mass() * vertical_velocity;
-                velocity.apply_impulse(mass_properties, vertical_impulse.into());
+                    let vertical_velocity = if desired_velocity != Vec3::ZERO {
+                        velocity_adjustment(
+                            current_velocity,
+                            desired_velocity,
+                            current_vertical_velocity,
+                        )
+                    } else {
+                        Vec3::ZERO
+                    };
+
+                    // Apply the computed force to the character's rigid body
+                    let vertical_impulse = mass_properties.mass() * vertical_velocity;
+                    velocity.apply_impulse(mass_properties, vertical_impulse.into());
+                }
             }
         }
     }

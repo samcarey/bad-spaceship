@@ -2,9 +2,11 @@ use bevy::{
     math::{Quat, Vec2, Vec3},
     prelude::{Entity, KeyCode, MouseButton, SystemLabel},
 };
+use bevy_rapier3d::prelude::ColliderHandle;
 
 pub mod character;
 pub mod config;
+pub mod contact;
 pub mod map;
 pub mod part;
 pub mod player;
@@ -92,3 +94,20 @@ pub struct WebKeyCode(pub KeyCode);
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
 #[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
 pub struct WebMouseButton(pub MouseButton);
+
+#[derive(Default)]
+pub struct TouchingColliders(Vec<ColliderHandle>);
+
+impl TouchingColliders {
+    pub fn index(&self, handle: &ColliderHandle) -> Option<usize> {
+        self.0.iter().position(|x| *x == *handle)
+    }
+
+    pub fn touching(&self) -> bool {
+        !self.0.is_empty()
+    }
+}
+
+pub struct Focused;
+
+pub struct Attachable;

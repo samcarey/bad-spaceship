@@ -1,5 +1,7 @@
 use bad_spaceship_shared::character;
 use bad_spaceship_shared::config::ConfigPlugin;
+use bad_spaceship_shared::contact::ContactPlugin;
+pub mod highlight;
 use bad_spaceship_shared::map::MapPlugin;
 use bad_spaceship_shared::part::PartPlugin;
 use bad_spaceship_shared::player::{self, PlayerPlugin};
@@ -10,6 +12,7 @@ use bevy_rapier3d::{physics::RapierPhysicsPlugin, render::RapierRenderPlugin};
 
 #[cfg(target_arch = "wasm32")]
 use bevy_web_fullscreen::FullViewportPlugin;
+use highlight::HighlightPlugin;
 use input::InputPlugin;
 use platform::PlatformPlugin;
 use ui::UiPlugin;
@@ -42,6 +45,8 @@ fn main() {
         .add_plugin(PlayerPlugin)
         .add_plugin(PlatformPlugin)
         .add_plugin(ConfigPlugin)
+        .add_plugin(ContactPlugin)
+        .add_plugin(HighlightPlugin)
         .add_startup_system(load_configs.system());
     #[cfg(target_arch = "wasm32")]
     app.add_plugin(FullViewportPlugin);
