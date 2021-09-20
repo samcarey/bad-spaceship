@@ -15,7 +15,6 @@ use bevy_rapier3d::{
 use serde::Deserialize;
 
 use crate::{
-    character::CharacterPlugin,
     part::{Holdable, TargetOrientation, TargetPosition},
     utils::{ToVec3, DEG_TO_RADIANS},
     Attachable, CameraOrbitCenter, Character, DirectionalInput, FocusedInteractable,
@@ -43,7 +42,6 @@ impl Plugin for PlayerPlugin {
             .init_resource::<GamepadLobby>()
             .add_system(despawn.system())
             .add_system(attach_camera_orbit.system())
-            .add_plugin(CharacterPlugin)
             .add_event::<PlayerClick>()
             .add_asset::<Config>()
             .add_system(apply_part_rotation.system());

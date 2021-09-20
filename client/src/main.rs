@@ -1,4 +1,5 @@
 use bad_spaceship_shared::character;
+use bad_spaceship_shared::character::CharacterPlugin;
 use bad_spaceship_shared::config::ConfigPlugin;
 use bad_spaceship_shared::contact::ContactPlugin;
 pub mod highlight;
@@ -47,6 +48,7 @@ fn main() {
         .add_plugin(ConfigPlugin)
         .add_plugin(ContactPlugin)
         .add_plugin(HighlightPlugin)
+        .add_plugin(CharacterPlugin)
         .add_startup_system(load_configs.system());
     #[cfg(target_arch = "wasm32")]
     app.add_plugin(FullViewportPlugin);
