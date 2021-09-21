@@ -15,8 +15,6 @@ impl Plugin for ConfigPlugin {
     }
 }
 
-use std::any::type_name;
-
 fn load_ron<'a, T: TypeUuid + AssetDynamic + Deserialize<'a>>(
     bytes: &'a [u8],
     load_context: &'a mut bevy::asset::LoadContext,
