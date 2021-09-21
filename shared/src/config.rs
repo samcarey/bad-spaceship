@@ -23,7 +23,6 @@ fn load_ron<'a, T: TypeUuid + AssetDynamic + Deserialize<'a>>(
 ) -> Result<(), ron::Error> {
     let custom_asset = ron::de::from_bytes::<T>(bytes)?;
     load_context.set_default_asset(LoadedAsset::new(custom_asset));
-    bevy::log::info!("Loaded: {}", type_name::<T>());
     Ok(())
 }
 
