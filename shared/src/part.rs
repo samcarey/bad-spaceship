@@ -264,8 +264,6 @@ fn remove_attachable(
     }
 }
 
-// then in new branch, make shared plugin group
-
 fn position_held_part(
     hold_points: Query<&GlobalTransform, With<HoldPoint>>,
     mut parts: Query<(
