@@ -3,9 +3,7 @@ use bevy::{
     prelude::{Entity, KeyCode, MouseButton, PluginGroup, SystemLabel},
 };
 use bevy_rapier3d::{
-    physics::{NoUserData, RapierPhysicsPlugin},
-    prelude::ColliderHandle,
-    render::RapierRenderPlugin,
+    physics::RapierPhysicsPlugin, prelude::ColliderHandle, render::RapierRenderPlugin,
 };
 use character::CharacterPlugin;
 use config::ConfigPlugin;
@@ -28,7 +26,7 @@ impl PluginGroup for CommonPlugins {
     fn build(&mut self, group: &mut bevy::app::PluginGroupBuilder) {
         // Third-party plugins
         group
-            .add(RapierPhysicsPlugin::<NoUserData>::default())
+            .add(RapierPhysicsPlugin::<&IgnoreContactsWith>::default())
             .add(RapierRenderPlugin);
 
         // Custom plugins
@@ -133,3 +131,16 @@ impl TouchingColliders {
 pub struct Focused;
 
 pub struct Attachable;
+
+#[derive(Default)]
+pub struct LeftClicked(pub bool);
+
+#[derive(Default)]
+pub struct ManipulatingPart(pub bool);
+
+#[derive(Clone, Copy)]
+struct IgnoreContactsWith(Entity);
+
+struct ReleaseEvent {
+    primary_entity: Entity,
+}

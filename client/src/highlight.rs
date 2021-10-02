@@ -24,7 +24,11 @@ fn attacheable_add_highlight(
     mut commands: Commands,
     attachables: Query<
         (Entity, &Handle<StandardMaterial>),
-        (With<Attachable>, Without<AttachableHighlight>),
+        (
+            With<Attachable>,
+            Without<AttachableHighlight>,
+            Without<FocusedHighlight>,
+        ),
     >,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
@@ -44,7 +48,11 @@ fn focused_add_highlight(
     mut commands: Commands,
     newly_focused: Query<
         (Entity, &Handle<StandardMaterial>),
-        (With<Focused>, Without<FocusedHighlight>),
+        (
+            With<Focused>,
+            Without<FocusedHighlight>,
+            Without<AttachableHighlight>,
+        ),
     >,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {

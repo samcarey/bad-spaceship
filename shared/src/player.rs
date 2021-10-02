@@ -8,19 +8,16 @@ use bevy::{
     render::camera::Camera,
     utils::HashSet,
 };
-use bevy_rapier3d::{
-    physics::{IntoEntity, IntoHandle},
-    prelude::{ColliderShape, NarrowPhase, RigidBodyMassProps},
-};
+use bevy_rapier3d::prelude::{ColliderShape, RigidBodyMassProps};
 use serde::Deserialize;
 
 use crate::{
     part::{Holdable, TargetOrientation, TargetPosition},
     utils::{ToVec3, DEG_TO_RADIANS},
-    Attachable, CameraOrbitCenter, Character, DirectionalInput, FocusedInteractable,
-    GameStickDirectionalInput, HoldPoint, Holding, InputEvents, KeyboardDirectionalInput,
-    MouseMotionDelta, OrbitingCamera, PartRotation, Player, PlayerClick, TouchingColliders, Yaw,
-    INITIAL_CAMERA_PITCH,
+    CameraOrbitCenter, Character, DirectionalInput, FocusedInteractable, GameStickDirectionalInput,
+    HoldPoint, Holding, InputEvents, KeyboardDirectionalInput, LeftClicked, ManipulatingPart,
+    MouseMotionDelta, OrbitingCamera, PartRotation, Player, PlayerClick, ReleaseEvent,
+    TouchingColliders, Yaw, INITIAL_CAMERA_PITCH,
 };
 
 const MAX_CAMERA_PITCH_DEGREES: f32 = 89.;
@@ -44,7 +41,8 @@ impl Plugin for PlayerPlugin {
             .add_system(attach_camera_orbit.system())
             .add_event::<PlayerClick>()
             .add_asset::<Config>()
-            .add_system(apply_part_rotation.system());
+            .add_system(apply_part_rotation.system())
+            .add_event::<ReleaseEvent>();
     }
 }
 
@@ -95,6 +93,8 @@ struct PlayerBundle {
     holding: Holding,
     mouse_motion_delta: MouseMotionDelta,
     part_rotation: PartRotation,
+    clicked: LeftClicked,
+    manipulating_part: ManipulatingPart,
 }
 
 impl PlayerBundle {
@@ -282,41 +282,40 @@ impl HeldBundle {
 fn toggle_holding(
     mut clicks: EventReader<PlayerClick>,
     mut commands: Commands,
-    mut players: Query<(&mut Holding, &FocusedInteractable, &Children), With<Player>>,
+    mut players: Query<
+        (
+            &mut Holding,
+            &FocusedInteractable,
+            &Children,
+            &ManipulatingPart,
+        ),
+        With<Player>,
+    >,
     camera_orbit_centers: Query<&Children>,
     hold_points: Query<Entity, With<HoldPoint>>,
     holdables: Query<(&GlobalTransform, &RigidBodyMassProps), With<Holdable>>,
-    narrow_phase: Res<NarrowPhase>,
+    mut attach_events: EventWriter<ReleaseEvent>,
 ) {
     if clicks.iter().next().is_some() {
-        if let Some((mut holding, interactable, player_children)) = players.iter_mut().next() {
+        if let Some((mut holding, interactable, player_children, manipulating_part)) =
+            players.iter_mut().next()
+        {
             if let Some(current_interactable) = interactable.0 {
-                if let Ok((original_orientation, mass_properties)) =
+                if let Ok((original_transform, mass_properties)) =
                     holdables.get(current_interactable)
                 {
                     if let Some(hold_point_entity) =
                         get_hold_point_entity(player_children, camera_orbit_centers, hold_points)
                     {
-                        let currently_touching_held_part = narrow_phase
-                            .contacts_with(current_interactable.handle())
-                            .filter(|x| x.has_any_active_contact)
-                            .map(|contact_pair| {
-                                if contact_pair.collider1.entity() == current_interactable {
-                                    contact_pair.collider2.entity()
-                                } else {
-                                    contact_pair.collider1.entity()
-                                }
-                            })
-                            .collect::<Vec<Entity>>();
-
                         if holding.0 {
                             holding.0 = false;
                             commands
                                 .entity(current_interactable)
                                 .remove_bundle::<HeldBundle>();
-
-                            for entity in currently_touching_held_part.iter() {
-                                commands.entity(*entity).remove::<Attachable>();
+                            if manipulating_part.0 {
+                                attach_events.send(ReleaseEvent {
+                                    primary_entity: current_interactable,
+                                });
                             }
                         } else {
                             holding.0 = true;
@@ -325,11 +324,8 @@ fn toggle_holding(
                                 .insert_bundle(HeldBundle::new(
                                     hold_point_entity,
                                     &mass_properties,
-                                    original_orientation.rotation,
+                                    original_transform.rotation,
                                 ));
-                            for entity in currently_touching_held_part.iter() {
-                                commands.entity(*entity).insert(Attachable);
-                            }
                         }
                     }
                 }
@@ -369,16 +365,11 @@ fn gamepad_system(
     mut query: Query<&mut GameStickDirectionalInput>,
 ) {
     for mut gamepad_directional_input in query.iter_mut() {
-        //
         // Initialize gamepad direction to zero every frame then overwrite below if we have gamepad inputs
-        //
         gamepad_directional_input.0 = Vec3::ZERO;
 
-        //
         // confirm that the controller is connected
-        //
         for gamepad in lobby.gamepads.iter().cloned() {
-            //
             // Left stick controls movement
             //  NOTE: Gamepad Stick X axis => left/right => movement x-component
             //                      Y axis => forward/backward => movement z-component
@@ -397,10 +388,8 @@ fn gamepad_system(
                 gamepad_directional_input.0.z = left_stick_y;
             }
 
-            //
             // "South" button [PS4 "X"] designates "jump"
             //  NOTE: Jump => movement y-component
-            //
             if button_inputs.just_pressed(GamepadButton(gamepad, GamepadButtonType::South)) {
                 //println!("{:?} just pressed South", gamepad);
                 gamepad_directional_input.0.y += 1.0;

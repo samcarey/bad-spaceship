@@ -1,6 +1,6 @@
 use bad_spaceship_shared::{
-    utils::TransformExt, CameraOrbitCenter, InputEvents, KeyboardDirectionalInput,
-    MouseMotionDelta, PartRotation, PlayerClick, WebKeyCode, WebMouseButton,
+    utils::TransformExt, CameraOrbitCenter, InputEvents, KeyboardDirectionalInput, LeftClicked,
+    ManipulatingPart, MouseMotionDelta, PartRotation, PlayerClick, WebKeyCode, WebMouseButton,
 };
 use bevy::{input::mouse::MouseMotion, input::mouse::MouseWheel, prelude::*};
 
@@ -19,7 +19,9 @@ impl Plugin for InputPlugin {
                 SystemSet::on_update(AppState::InGame)
                     .with_system(process_mouse_clicks.system().label(InputEvents)),
             )
-            .add_event::<PlayerClick>();
+            .add_event::<PlayerClick>()
+            .add_system(get_left_click.system())
+            .add_system(get_manipulating_part.system());
     }
 }
 
@@ -167,5 +169,34 @@ pub fn process_mouse_clicks(
         {
             player_clicks.send(PlayerClick);
         }
+    }
+}
+
+fn get_left_click(
+    native_mouse_button_input: Res<Input<MouseButton>>,
+    web_mouse_button_input: Res<Input<WebMouseButton>>,
+    state: Res<State<AppState>>,
+    mut clicked_query: Query<&mut LeftClicked>,
+) {
+    if let Some(mut clicked) = clicked_query.iter_mut().next() {
+        clicked.0 = (*state.current() == AppState::InGame)
+            && (native_mouse_button_input.just_pressed(MouseButton::Left)
+                || web_mouse_button_input.pressed(WebMouseButton(MouseButton::Left)));
+    }
+}
+
+fn get_manipulating_part(
+    native_keyboard_input: Res<Input<KeyCode>>,
+    web_keyboard_input: Res<Input<WebKeyCode>>,
+    mut players: Query<&mut ManipulatingPart>,
+    state: Res<State<AppState>>,
+) {
+    if let Some(mut manipulating_part) = players.iter_mut().next() {
+        let input = MergedKeyboardInput {
+            native_keyboard_input: &native_keyboard_input,
+            web_keyboard_input: &web_keyboard_input,
+        };
+        manipulating_part.0 = (*state.current() == AppState::InGame)
+            && (input.pressed(KeyCode::LShift) | input.pressed(KeyCode::RShift));
     }
 }

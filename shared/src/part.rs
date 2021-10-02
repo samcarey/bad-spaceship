@@ -1,16 +1,20 @@
 use crate::map::PLATFORM_WIDTH_M;
-use crate::utils::{self, Orderable, QuatExt, TransformExt};
+use crate::utils::{self, QuatExt, TransformExt};
 use crate::{
-    Attachable, CameraOrbitCenter, Focused, FocusedInteractable, HoldPoint, Holding, Player,
+    Attachable, CameraOrbitCenter, Focused, FocusedInteractable, HoldPoint, Holding,
+    IgnoreContactsWith, Player, ReleaseEvent,
 };
 use bevy::prelude::*;
 use bevy_rapier3d::na::Vector3;
 use bevy_rapier3d::physics::{
-    ColliderBundle, ColliderPositionSync, IntoEntity, RapierConfiguration, RigidBodyBundle,
+    ColliderBundle, ColliderComponentsSet, ColliderPositionSync, IntoEntity, IntoHandle,
+    JointBuilderComponent, PhysicsHooksWithQuery, PhysicsHooksWithQueryObject, RapierConfiguration,
+    RigidBodyBundle, RigidBodyComponentsSet,
 };
 use bevy_rapier3d::prelude::{
-    ActiveEvents, ColliderMassProps, ColliderMaterial, ColliderShape, ContactEvent,
-    RigidBodyForces, RigidBodyMassProps, RigidBodyVelocity, SdpMatrix,
+    ActiveEvents, ActiveHooks, BallJoint, ColliderFlags, ColliderMassProps, ColliderMaterial,
+    ColliderShape, NarrowPhase, PairFilterContext, RigidBodyForces, RigidBodyMassProps,
+    RigidBodyVelocity, SdpMatrix, SolverFlags,
 };
 use bevy_rapier3d::render::ColliderDebugRender;
 use rand::Rng;
@@ -27,13 +31,35 @@ impl Plugin for PartPlugin {
             .add_event::<NewPart>()
             .add_system(orient_held_part.system())
             .add_system(spawn_part.system())
-            .add_system(add_attachable.system())
-            .add_system(remove_attachable.system());
+            .add_system(update_attachable.system())
+            .insert_resource(PhysicsHooksWithQueryObject(Box::new(
+                IgnoreContactsWithData {},
+            )))
+            .add_system(attach.system());
     }
 }
 
-const NUM_PARTS: i32 = 10;
-const PART_SIZE: f32 = 1.0;
+#[derive(Clone, Copy)]
+struct IgnoreContactsWithData;
+
+impl<'a> PhysicsHooksWithQuery<&'a IgnoreContactsWith> for IgnoreContactsWithData {
+    fn filter_contact_pair(
+        &self,
+        context: &PairFilterContext<RigidBodyComponentsSet, ColliderComponentsSet>,
+        ignores: &Query<&'a IgnoreContactsWith>,
+    ) -> Option<SolverFlags> {
+        let mut option = Some(SolverFlags::COMPUTE_IMPULSES);
+        if let Ok(ignore1) = ignores.get(context.collider1.entity()) {
+            if ignore1.0 == context.collider2.entity() {
+                option = None
+            }
+        }
+        option
+    }
+}
+
+const NUM_PARTS: i32 = 50;
+pub const PART_SIZE: f32 = 1.0;
 const POSITIONING_STIFFNESS: f32 = 30.0;
 const ORIENTING_STIFFNESS: f32 = 5.0;
 
@@ -134,7 +160,11 @@ fn spawn_part(mut commands: Commands, mut new_part_events: EventReader<NewPart>)
                     restitution: 0.1,
                     ..Default::default()
                 },
-                flags: (ActiveEvents::INTERSECTION_EVENTS | ActiveEvents::CONTACT_EVENTS).into(),
+                flags: ColliderFlags {
+                    active_events: ActiveEvents::INTERSECTION_EVENTS | ActiveEvents::CONTACT_EVENTS,
+                    active_hooks: ActiveHooks::FILTER_CONTACT_PAIRS,
+                    ..Default::default()
+                },
                 ..Default::default()
             })
             .insert_bundle(PartBundle {
@@ -228,38 +258,40 @@ fn update_focused(
     }
 }
 
-fn add_attachable(
+fn update_attachable(
     mut commands: Commands,
     helds: Query<Entity, With<TargetPosition>>,
-    potential_attachables: Query<Entity, (With<Holdable>, Without<Attachable>)>,
-    mut contact_events: EventReader<ContactEvent>,
+    holdables: Query<(), With<Holdable>>,
+    attachables: Query<Entity, (With<Holdable>, With<Attachable>)>,
+    not_attachables: Query<Entity, (With<Holdable>, Without<Attachable>)>,
+    narrow_phase: Res<NarrowPhase>,
 ) {
-    for contact_event in contact_events
-        .iter()
-        .filter_map(|x| x.order(&(|entity| helds.get(entity).is_ok())))
-    {
-        if let ContactEvent::Started(_handle1, handle2) = contact_event {
-            if let Ok(entity) = potential_attachables.get(handle2.entity()) {
-                commands.entity(entity).insert(Attachable);
+    if let Some(held) = helds.iter().next() {
+        let contacted = narrow_phase
+            .contacts_with(held.handle())
+            .filter(|x| x.has_any_active_contact)
+            .map(|contact_pair| {
+                if contact_pair.collider1.entity() == held {
+                    contact_pair.collider2.entity()
+                } else {
+                    contact_pair.collider1.entity()
+                }
+            })
+            .filter(|&contacted| holdables.get(contacted).is_ok())
+            .collect::<Vec<_>>();
+        for not_attachable in not_attachables.iter() {
+            if contacted.contains(&not_attachable) {
+                commands.entity(not_attachable).insert(Attachable);
             }
         }
-    }
-}
-
-fn remove_attachable(
-    mut commands: Commands,
-    helds: Query<Entity, With<TargetPosition>>,
-    potential_attachables: Query<Entity, (With<Holdable>, With<Attachable>)>,
-    mut contact_events: EventReader<ContactEvent>,
-) {
-    for contact_event in contact_events
-        .iter()
-        .filter_map(|x| x.order(&(|entity| helds.get(entity).is_ok())))
-    {
-        if let ContactEvent::Stopped(_handle1, handle2) = contact_event {
-            if let Ok(entity) = potential_attachables.get(handle2.entity()) {
-                commands.entity(entity).remove::<Attachable>();
+        for attachable in attachables.iter() {
+            if !contacted.contains(&attachable) {
+                commands.entity(attachable).remove::<Attachable>();
             }
+        }
+    } else {
+        for attachable in attachables.iter() {
+            commands.entity(attachable).remove::<Attachable>();
         }
     }
 }
@@ -307,5 +339,53 @@ fn orient_held_part(
         let torque = target_orientation.inertia_sqrt
             * (target_orientation.inertia_sqrt * angular_acceleration);
         forces.torque += torque;
+    }
+}
+
+fn attach(
+    mut commands: Commands,
+    mut attach_events: EventReader<ReleaseEvent>,
+    holdables: Query<(), With<Holdable>>,
+    narrow_phase: Res<NarrowPhase>,
+) {
+    for attach_event in attach_events.iter() {
+        for contact_pair in narrow_phase
+            .contacts_with(attach_event.primary_entity.handle())
+            .filter(|x| x.has_any_active_contact)
+        {
+            let ordered = contact_pair.collider1.entity() == attach_event.primary_entity;
+            let other_entity = if ordered {
+                contact_pair.collider2.entity()
+            } else {
+                contact_pair.collider1.entity()
+            };
+            if holdables.get(other_entity).is_ok() {
+                for manifold in &contact_pair.manifolds {
+                    for point in &manifold.points {
+                        // This can be used to prevent attached colliders from interacting, but I don't think it's necessary right now.
+                        // I originally added this because I thought the physics would be unstable otherwise, but it's actually OK.
+                        //
+                        // commands
+                        //     .entity(attach_event.primary_entity)
+                        //     .insert(IgnoreContactsWith(other_entity));
+                        // commands
+                        //     .entity(other_entity)
+                        //     .insert(IgnoreContactsWith(attach_event.primary_entity));
+
+                        let points = if ordered {
+                            (point.local_p1, point.local_p2)
+                        } else {
+                            (point.local_p2, point.local_p1)
+                        };
+
+                        commands.spawn().insert(JointBuilderComponent::new(
+                            BallJoint::new(points.0, points.1),
+                            attach_event.primary_entity,
+                            other_entity,
+                        ));
+                    }
+                }
+            }
+        }
     }
 }
