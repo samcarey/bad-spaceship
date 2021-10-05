@@ -8,7 +8,9 @@ use bevy_egui::{
     egui::{self, Align, Align2, Color32, Frame, Layout},
     EguiContext, EguiPlugin, EguiSettings,
 };
+use shadow_rs::shadow;
 
+shadow!(build);
 pub struct UiPlugin;
 
 impl Plugin for UiPlugin {
@@ -94,7 +96,11 @@ fn show_bottom_panel(egui_ctx: ResMut<EguiContext>, diagnostics: Res<Diagnostics
             ui.horizontal(|ui| {
                 ui.colored_label(
                     Color32::from_rgb(255, 0, 0),
-                    format!("v.{}", env!("CARGO_PKG_VERSION")),
+                    format!(
+                        "Commit: {}, Built: {}",
+                        env!("SHORT_GIT_HASH"),
+                        build::BUILD_TIME_2822
+                    ),
                 );
                 ui.with_layout(Layout::right_to_left(), |ui| {
                     ui.colored_label(Color32::from_rgb(255, 0, 0), format!("{:.0} FPS", fps,));
