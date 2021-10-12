@@ -15,10 +15,13 @@
       touch-action: none;
     }
   </style>
+  <p id="loading">Loading...</p>
 </head>
+
 <script type="module">
   import init from './target/wasm.js'
   init()
+  document.getElementById('loading').remove();
 </script>
 
 </html>
