@@ -317,7 +317,7 @@ impl WheelTracker {
                         0 => MouseScrollUnit::Pixel,
                         _ => MouseScrollUnit::Line,
                     },
-                    y: (y as f32) / 1000.0,
+                    y: (y as f32) / 1000.0 / 50.0,
                     x: 0.0,
                 })
             }
