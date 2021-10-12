@@ -106,7 +106,6 @@ impl MouseMovementTracker {
         if delta != Vec2::ZERO {
             self.delta_x.set(0);
             self.delta_y.set(0);
-            bevy::log::info!("reset {:?}", delta);
             Some(MouseMotion {
                 delta: delta * 0.15,
             })
@@ -121,7 +120,6 @@ fn get_mouse_motion(
     mut mouse_motion_events: EventWriter<MouseMotion>,
 ) {
     if let Some(mouse_motion) = mouse_motion_tracker.get_and_reset() {
-        bevy::log::info!("get {:?}", mouse_motion);
         mouse_motion_events.send(mouse_motion);
     }
 }
@@ -303,7 +301,6 @@ impl WheelTracker {
         let clone = new.clone();
         listen("wheel", move |_event| {
             let we = _event.clone().dyn_into::<WheelEvent>().unwrap();
-            // bevy::log::info!("{:?}", we.delta_y());
             clone.delta_y.set((we.delta_y() * 1000.0) as i32);
             clone.delta_mode.set(we.delta_mode() as i32);
         });
