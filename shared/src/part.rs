@@ -17,6 +17,7 @@ use bevy_rapier3d::prelude::{
     RigidBodyVelocity, SdpMatrix, SolverFlags,
 };
 use bevy_rapier3d::render::ColliderDebugRender;
+use rand::prelude::ThreadRng;
 use rand::Rng;
 use std::f32;
 
@@ -58,8 +59,11 @@ impl<'a> PhysicsHooksWithQuery<&'a IgnoreContactsWith> for IgnoreContactsWithDat
     }
 }
 
-const NUM_PARTS: i32 = 50;
-pub const PART_SIZE: f32 = 1.0;
+const NUM_PARTS: i32 = 10;
+pub const MAX_PART_SIZE: f32 = 10.0;
+const MIN_PART_SIZE: f32 = 0.1;
+const MIN_PART_VOLUME: f32 = 1.0;
+const MAX_PART_VOLUME: f32 = 2.0;
 const POSITIONING_STIFFNESS: f32 = 30.0;
 const ORIENTING_STIFFNESS: f32 = 5.0;
 
@@ -110,15 +114,13 @@ impl TargetPosition {
 
 pub struct TargetOrientation {
     pub quat: Quat,
-    inertia_sqrt: SdpMatrix<f32>,
     oscillator: CriticallyDampedHarmonicOscillator,
 }
 
 impl TargetOrientation {
-    pub fn new(mass_properties: &RigidBodyMassProps, quat: Quat) -> Self {
+    pub fn new(quat: Quat) -> Self {
         Self {
             quat,
-            inertia_sqrt: mass_properties.effective_world_inv_inertia_sqrt,
             oscillator: CriticallyDampedHarmonicOscillator::new(ORIENTING_STIFFNESS),
         }
     }
@@ -137,6 +139,20 @@ struct PartBundle {
 
 struct NewPart;
 
+fn get_random_shape(rng: &mut ThreadRng) -> ColliderShape {
+    loop {
+        let (x, y, z) = (
+            rng.gen_range(MIN_PART_SIZE..=MAX_PART_SIZE),
+            rng.gen_range(MIN_PART_SIZE..=MAX_PART_SIZE),
+            rng.gen_range(MIN_PART_SIZE..=MAX_PART_SIZE),
+        );
+        let volume = x * y * z;
+        if volume < MAX_PART_VOLUME && volume > MIN_PART_VOLUME {
+            return ColliderShape::cuboid(x / 2.0, y / 2.0, z / 2.0);
+        }
+    }
+}
+
 fn spawn_part(mut commands: Commands, mut new_part_events: EventReader<NewPart>) {
     let mut rng = rand::thread_rng();
     for _ in new_part_events.iter() {
@@ -153,7 +169,7 @@ fn spawn_part(mut commands: Commands, mut new_part_events: EventReader<NewPart>)
                 ..Default::default()
             })
             .insert_bundle(ColliderBundle {
-                shape: ColliderShape::cuboid(PART_SIZE / 2.0, PART_SIZE / 2.0, PART_SIZE / 2.0),
+                shape: get_random_shape(&mut rng),
                 mass_properties: ColliderMassProps::Density(2.0),
                 material: ColliderMaterial {
                     friction: 1.0,
@@ -328,16 +344,21 @@ fn orient_held_part(
         &TargetOrientation,
         &RigidBodyVelocity,
         &mut RigidBodyForces,
+        &RigidBodyMassProps,
     )>,
 ) {
-    for (part_transform, target_orientation, velocity, mut forces) in parts.iter_mut() {
+    for (part_transform, target_orientation, velocity, mut forces, mass_properties) in
+        parts.iter_mut()
+    {
         let rotation_between =
             (target_orientation.quat * part_transform.rotation.conjugate()).to_rotation_vector();
         let angular_acceleration = target_orientation
             .oscillator
             .calculate_acceleration(&rotation_between, &velocity.angvel);
-        let torque = target_orientation.inertia_sqrt
-            * (target_orientation.inertia_sqrt * angular_acceleration);
+        let inertia_sqrt = mass_properties
+            .effective_world_inv_inertia_sqrt
+            .inverse_unchecked();
+        let torque = inertia_sqrt * (inertia_sqrt * angular_acceleration);
         forces.torque += torque;
     }
 }
