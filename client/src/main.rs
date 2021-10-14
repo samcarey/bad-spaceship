@@ -1,6 +1,7 @@
 use bad_spaceship_shared::{character, CommonPlugins};
 pub mod highlight;
 use bad_spaceship_shared::player;
+use bevy::pbr::AmbientLight;
 use bevy::prelude::*;
 use bevy::render::pass::ClearColor;
 
@@ -18,6 +19,11 @@ mod ui;
 #[bevy_main]
 fn main() {
     let mut app = App::build();
+
+    app.insert_resource(AmbientLight {
+        color: Color::WHITE,
+        brightness: 1.0 / 6.0,
+    });
 
     app.insert_resource(WindowDescriptor {
         title: "Bad Spaceship".to_string(),
