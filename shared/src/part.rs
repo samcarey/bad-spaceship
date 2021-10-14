@@ -1,20 +1,18 @@
 use crate::map::PLATFORM_WIDTH_M;
 use crate::utils::{self, QuatExt, TransformExt};
 use crate::{
-    Attachable, CameraOrbitCenter, Focused, FocusedInteractable, HoldPoint, Holding,
-    IgnoreContactsWith, Player, ReleaseEvent,
+    Attachable, CameraOrbitCenter, Focused, FocusedInteractable, HoldPoint, Holding, Player,
+    ReleaseEvent,
 };
 use bevy::prelude::*;
 use bevy_rapier3d::na::Vector3;
 use bevy_rapier3d::physics::{
-    ColliderBundle, ColliderComponentsSet, ColliderPositionSync, IntoEntity, IntoHandle,
-    JointBuilderComponent, PhysicsHooksWithQuery, PhysicsHooksWithQueryObject, RapierConfiguration,
-    RigidBodyBundle, RigidBodyComponentsSet,
+    ColliderBundle, ColliderPositionSync, IntoEntity, IntoHandle, JointBuilderComponent,
+    RapierConfiguration, RigidBodyBundle,
 };
 use bevy_rapier3d::prelude::{
-    ActiveEvents, ActiveHooks, BallJoint, ColliderFlags, ColliderMassProps, ColliderMaterial,
-    ColliderShape, NarrowPhase, PairFilterContext, RigidBodyForces, RigidBodyMassProps,
-    RigidBodyVelocity, SdpMatrix, SolverFlags,
+    ActiveEvents, BallJoint, ColliderFlags, ColliderMassProps, ColliderMaterial, ColliderShape,
+    NarrowPhase, RigidBodyForces, RigidBodyMassProps, RigidBodyVelocity,
 };
 use bevy_rapier3d::render::ColliderDebugRender;
 use rand::prelude::ThreadRng;
@@ -33,29 +31,7 @@ impl Plugin for PartPlugin {
             .add_system(orient_held_part.system())
             .add_system(spawn_part.system())
             .add_system(update_attachable.system())
-            .insert_resource(PhysicsHooksWithQueryObject(Box::new(
-                IgnoreContactsWithData {},
-            )))
             .add_system(attach.system());
-    }
-}
-
-#[derive(Clone, Copy)]
-struct IgnoreContactsWithData;
-
-impl<'a> PhysicsHooksWithQuery<&'a IgnoreContactsWith> for IgnoreContactsWithData {
-    fn filter_contact_pair(
-        &self,
-        context: &PairFilterContext<RigidBodyComponentsSet, ColliderComponentsSet>,
-        ignores: &Query<&'a IgnoreContactsWith>,
-    ) -> Option<SolverFlags> {
-        let mut option = Some(SolverFlags::COMPUTE_IMPULSES);
-        if let Ok(ignore1) = ignores.get(context.collider1.entity()) {
-            if ignore1.0 == context.collider2.entity() {
-                option = None
-            }
-        }
-        option
     }
 }
 
@@ -178,7 +154,6 @@ fn spawn_part(mut commands: Commands, mut new_part_events: EventReader<NewPart>)
                 },
                 flags: ColliderFlags {
                     active_events: ActiveEvents::INTERSECTION_EVENTS | ActiveEvents::CONTACT_EVENTS,
-                    active_hooks: ActiveHooks::FILTER_CONTACT_PAIRS,
                     ..Default::default()
                 },
                 ..Default::default()

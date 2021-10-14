@@ -8,7 +8,7 @@ use bevy::{
     render::camera::Camera,
     utils::HashSet,
 };
-use bevy_rapier3d::prelude::{ColliderShape, RigidBodyMassProps};
+use bevy_rapier3d::prelude::ColliderShape;
 use serde::Deserialize;
 
 use crate::{
@@ -270,10 +270,10 @@ struct HeldBundle {
 }
 
 impl HeldBundle {
-    fn new(hold_point: Entity, mass_properties: &RigidBodyMassProps, rotation: Quat) -> Self {
+    fn new(hold_point: Entity, rotation: Quat) -> Self {
         Self {
             target_position: TargetPosition::new(hold_point),
-            target_orientation: TargetOrientation::new(mass_properties, rotation),
+            target_orientation: TargetOrientation::new(rotation),
             touching: TouchingColliders::default(),
         }
     }
@@ -293,7 +293,7 @@ fn toggle_holding(
     >,
     camera_orbit_centers: Query<&Children>,
     hold_points: Query<Entity, With<HoldPoint>>,
-    holdables: Query<(&GlobalTransform, &RigidBodyMassProps), With<Holdable>>,
+    holdables: Query<&GlobalTransform, With<Holdable>>,
     mut attach_events: EventWriter<ReleaseEvent>,
 ) {
     if clicks.iter().next().is_some() {
@@ -301,9 +301,7 @@ fn toggle_holding(
             players.iter_mut().next()
         {
             if let Some(current_interactable) = interactable.0 {
-                if let Ok((original_transform, mass_properties)) =
-                    holdables.get(current_interactable)
-                {
+                if let Ok(original_transform) = holdables.get(current_interactable) {
                     if let Some(hold_point_entity) =
                         get_hold_point_entity(player_children, camera_orbit_centers, hold_points)
                     {
@@ -323,7 +321,6 @@ fn toggle_holding(
                                 .entity(current_interactable)
                                 .insert_bundle(HeldBundle::new(
                                     hold_point_entity,
-                                    &mass_properties,
                                     original_transform.rotation,
                                 ));
                         }
