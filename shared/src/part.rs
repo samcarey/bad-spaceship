@@ -153,7 +153,7 @@ fn spawn_part(mut commands: Commands, mut new_part_events: EventReader<NewPart>)
                     ..Default::default()
                 },
                 flags: ColliderFlags {
-                    active_events: ActiveEvents::INTERSECTION_EVENTS | ActiveEvents::CONTACT_EVENTS,
+                    active_events: ActiveEvents::CONTACT_EVENTS,
                     ..Default::default()
                 },
                 ..Default::default()
