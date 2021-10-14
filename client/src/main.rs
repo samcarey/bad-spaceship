@@ -9,10 +9,12 @@ use bevy::render::pass::ClearColor;
 use bevy_web_fullscreen::FullViewportPlugin;
 use highlight::HighlightPlugin;
 use input::InputPlugin;
+use materials::MaterialsPlugin;
 use platform::PlatformPlugin;
 use ui::UiPlugin;
 
 mod input;
+mod materials;
 mod platform;
 mod ui;
 
@@ -40,6 +42,7 @@ fn main() {
         .insert_resource(ClearColor(Color::rgb(0.99, 0.99, 0.95)))
         .add_plugin(PlatformPlugin)
         .add_plugin(HighlightPlugin)
+        .add_plugin(MaterialsPlugin)
         .add_plugins(CommonPlugins)
         .add_startup_system(load_configs.system());
     #[cfg(target_arch = "wasm32")]
