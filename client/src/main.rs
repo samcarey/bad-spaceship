@@ -7,12 +7,14 @@ use bevy::render::pass::ClearColor;
 
 #[cfg(target_arch = "wasm32")]
 use bevy_web_fullscreen::FullViewportPlugin;
+use gizmo::TransformGizmoPlugin;
 use highlight::HighlightPlugin;
 use input::InputPlugin;
 use materials::MaterialsPlugin;
 use platform::PlatformPlugin;
 use ui::UiPlugin;
 
+mod gizmo;
 mod input;
 mod materials;
 mod platform;
@@ -36,6 +38,7 @@ fn main() {
     app.add_plugins(bevy_webgl2::DefaultPlugins);
     #[cfg(not(target_arch = "wasm32"))]
     app.add_plugins(DefaultPlugins);
+
     app.add_state(AppState::Initial)
         .add_plugin(UiPlugin)
         .add_plugin(InputPlugin)
@@ -43,8 +46,10 @@ fn main() {
         .add_plugin(PlatformPlugin)
         .add_plugin(HighlightPlugin)
         .add_plugin(MaterialsPlugin)
+        .add_plugin(TransformGizmoPlugin)
         .add_plugins(CommonPlugins)
         .add_startup_system(load_configs.system());
+
     #[cfg(target_arch = "wasm32")]
     app.add_plugin(FullViewportPlugin);
 

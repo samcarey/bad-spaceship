@@ -75,7 +75,7 @@ impl CriticallyDampedHarmonicOscillator {
 }
 
 pub struct TargetPosition {
-    hold_point_entity: Entity,
+    pub hold_point_entity: Entity,
     oscillator: CriticallyDampedHarmonicOscillator,
 }
 
