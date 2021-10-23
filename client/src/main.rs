@@ -7,14 +7,14 @@ use bevy::render::pass::ClearColor;
 
 #[cfg(target_arch = "wasm32")]
 use bevy_web_fullscreen::FullViewportPlugin;
-use gizmo::TransformGizmoPlugin;
 use highlight::HighlightPlugin;
+use hud::TransformGizmoPlugin;
 use input::InputPlugin;
 use materials::MaterialsPlugin;
 use platform::PlatformPlugin;
 use ui::UiPlugin;
 
-mod gizmo;
+mod hud;
 mod input;
 mod materials;
 mod platform;

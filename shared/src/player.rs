@@ -309,9 +309,7 @@ fn toggle_holding(
                                 .entity(current_interactable)
                                 .remove_bundle::<HeldBundle>();
                             if manipulating_part.0 {
-                                attach_events.send(ReleaseEvent {
-                                    primary_entity: current_interactable,
-                                });
+                                attach_events.send(ReleaseEvent);
                             }
                         } else {
                             holding.0 = true;

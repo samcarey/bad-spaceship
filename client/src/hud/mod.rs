@@ -1,6 +1,6 @@
 use bad_spaceship_shared::{
-    part::{TargetOrientation, TargetPosition},
-    HoldPoint,
+    part::{Holdable, TargetOrientation, TargetPosition},
+    AttachPoint, AttachPoints, HoldPoint,
 };
 use bevy::{prelude::*, render::render_graph::base::MainPass};
 use normalization::*;
@@ -16,7 +16,10 @@ impl Plugin for TransformGizmoPlugin {
     fn build(&self, app: &mut AppBuilder) {
         app.add_startup_system(build_gizmo.system())
             .add_system(position_gizmo.system())
-            .add_plugin(normalization::Ui3dNormalization);
+            .add_plugin(normalization::Ui3dNormalization)
+            .add_startup_system(initialize_attach_point.system())
+            .init_resource::<AttachPointAppearance>()
+            .add_system(display_attach_points.system());
         {
             render_graph::add_gizmo_graph(&mut app.world_mut());
         }
@@ -77,6 +80,7 @@ pub struct TransformGizmoBundle {
     visible: Visible,
     normalize: Normalize3d,
 }
+
 impl Default for TransformGizmoBundle {
     fn default() -> Self {
         TransformGizmoBundle {
@@ -219,4 +223,65 @@ fn build_gizmo(
         })
         .insert(GizmoPass)
         .remove::<MainPass>();
+}
+
+#[derive(Default)]
+struct AttachPointAppearance {
+    mesh: Option<Handle<Mesh>>,
+    material: Option<Handle<StandardMaterial>>,
+}
+
+fn initialize_attach_point(
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut attach_point_appearance: ResMut<AttachPointAppearance>,
+) {
+    *attach_point_appearance = AttachPointAppearance {
+        mesh: Some(meshes.add(Mesh::from(shape::Icosphere {
+            radius: 0.1,
+            ..Default::default()
+        }))),
+        material: Some(materials.add(StandardMaterial {
+            unlit: true,
+            base_color: Color::rgb(1.0, 0.4, 0.4),
+            ..Default::default()
+        })),
+    };
+}
+
+struct DisplayedAttachPoint;
+
+fn display_attach_points(
+    mut commands: Commands,
+    holdables: Query<&GlobalTransform, With<Holdable>>,
+    attach_points: Res<AttachPoints>,
+    mut displayed_points: Query<(&mut Transform, &mut Visible), With<DisplayedAttachPoint>>,
+    attach_point_appearance: Res<AttachPointAppearance>,
+) {
+    let mut display_points_iter = displayed_points.iter_mut();
+    for AttachPoint { points, entities } in attach_points.0.iter() {
+        if let Ok(transform) = holdables.get(entities.0) {
+            let center = transform.translation + transform.rotation.mul_vec3(points.0.into());
+            if let Some((mut displayed_transform, mut displayed_visible)) =
+                display_points_iter.next()
+            {
+                displayed_transform.translation = center;
+                displayed_visible.is_visible = true;
+            } else {
+                commands
+                    .spawn_bundle(PbrBundle {
+                        mesh: attach_point_appearance.mesh.clone().unwrap(),
+                        material: attach_point_appearance.material.clone().unwrap(),
+                        transform: Transform::from_translation(center),
+                        ..Default::default()
+                    })
+                    .insert(DisplayedAttachPoint)
+                    .insert(GizmoPass)
+                    .remove::<MainPass>();
+            }
+        }
+    }
+    for (_, mut displayed_visible) in display_points_iter {
+        displayed_visible.is_visible = false;
+    }
 }

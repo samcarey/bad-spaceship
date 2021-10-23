@@ -2,7 +2,11 @@ use bevy::{
     math::{Quat, Vec2, Vec3},
     prelude::{Entity, KeyCode, MouseButton, PluginGroup, SystemLabel},
 };
-use bevy_rapier3d::{physics::RapierPhysicsPlugin, render::RapierRenderPlugin};
+use bevy_rapier3d::{
+    na::{Const, OPoint},
+    physics::RapierPhysicsPlugin,
+    render::RapierRenderPlugin,
+};
 use character::CharacterPlugin;
 use config::ConfigPlugin;
 use map::MapPlugin;
@@ -48,7 +52,7 @@ pub struct Yaw(pub f32);
 pub struct CameraOrbitCenter;
 
 #[derive(Default)]
-pub struct FocusedInteractable(Option<Entity>);
+pub struct FocusedInteractable(pub Option<Entity>);
 
 #[derive(Default)]
 pub struct Holding(pub bool);
@@ -123,6 +127,14 @@ pub struct ManipulatingPart(pub bool);
 #[derive(Clone, Copy)]
 struct IgnoreContactsWith(Entity);
 
-struct ReleaseEvent {
-    primary_entity: Entity,
+struct ReleaseEvent;
+
+type ContactPoint = OPoint<f32, Const<3>>;
+
+pub struct AttachPoint {
+    pub points: (ContactPoint, ContactPoint),
+    pub entities: (Entity, Entity),
 }
+
+#[derive(Default)]
+pub struct AttachPoints(pub Vec<AttachPoint>);

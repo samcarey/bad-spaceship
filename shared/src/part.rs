@@ -1,8 +1,8 @@
 use crate::map::PLATFORM_WIDTH_M;
 use crate::utils::{self, QuatExt, TransformExt};
 use crate::{
-    Attachable, CameraOrbitCenter, Focused, FocusedInteractable, HoldPoint, Holding, Player,
-    ReleaseEvent,
+    AttachPoint, AttachPoints, Attachable, CameraOrbitCenter, Focused, FocusedInteractable,
+    HoldPoint, Holding, Player, ReleaseEvent,
 };
 use bevy::prelude::*;
 use bevy_rapier3d::na::Vector3;
@@ -31,7 +31,9 @@ impl Plugin for PartPlugin {
             .add_system(orient_held_part.system())
             .add_system(spawn_part.system())
             .add_system(update_attachable.system())
-            .add_system(attach.system());
+            .add_system(update_attach_points.system())
+            .add_system(attach.system())
+            .init_resource::<AttachPoints>();
     }
 }
 
@@ -338,50 +340,69 @@ fn orient_held_part(
     }
 }
 
-fn attach(
-    mut commands: Commands,
-    mut attach_events: EventReader<ReleaseEvent>,
+fn update_attach_points(
     holdables: Query<(), With<Holdable>>,
     narrow_phase: Res<NarrowPhase>,
+    mut attach_points: ResMut<AttachPoints>,
+    players: Query<(&Holding, &FocusedInteractable)>,
 ) {
-    for attach_event in attach_events.iter() {
-        for contact_pair in narrow_phase
-            .contacts_with(attach_event.primary_entity.handle())
-            .filter(|x| x.has_any_active_contact)
-        {
-            let ordered = contact_pair.collider1.entity() == attach_event.primary_entity;
-            let other_entity = if ordered {
-                contact_pair.collider2.entity()
-            } else {
-                contact_pair.collider1.entity()
-            };
-            if holdables.get(other_entity).is_ok() {
-                for manifold in &contact_pair.manifolds {
-                    for point in &manifold.points {
-                        // This can be used to prevent attached colliders from interacting, but I don't think it's necessary right now.
-                        // I originally added this because I thought the physics would be unstable otherwise, but it's actually OK.
-                        //
-                        // commands
-                        //     .entity(attach_event.primary_entity)
-                        //     .insert(IgnoreContactsWith(other_entity));
-                        // commands
-                        //     .entity(other_entity)
-                        //     .insert(IgnoreContactsWith(attach_event.primary_entity));
+    attach_points.0 = Vec::new();
 
-                        let points = if ordered {
-                            (point.local_p1, point.local_p2)
-                        } else {
-                            (point.local_p2, point.local_p1)
-                        };
+    if let Some((holding, interactable)) = players.iter().next() {
+        if holding.0 {
+            if let Some(interactable) = interactable.0 {
+                for contact_pair in narrow_phase
+                    .contacts_with(interactable.handle())
+                    .filter(|x| x.has_any_active_contact)
+                {
+                    let ordered = contact_pair.collider1.entity() == interactable;
+                    let other_entity = if ordered {
+                        contact_pair.collider2.entity()
+                    } else {
+                        contact_pair.collider1.entity()
+                    };
+                    if holdables.get(other_entity).is_ok() {
+                        for manifold in &contact_pair.manifolds {
+                            for point in &manifold.points {
+                                // This can be used to prevent attached colliders from interacting, but I don't think it's necessary right now.
+                                // I originally added this because I thought the physics would be unstable otherwise, but it's actually OK.
+                                //
+                                // commands
+                                //     .entity(attach_event.primary_entity)
+                                //     .insert(IgnoreContactsWith(other_entity));
+                                // commands
+                                //     .entity(other_entity)
+                                //     .insert(IgnoreContactsWith(attach_event.primary_entity));
 
-                        commands.spawn().insert(JointBuilderComponent::new(
-                            BallJoint::new(points.0, points.1),
-                            attach_event.primary_entity,
-                            other_entity,
-                        ));
+                                attach_points.0.push(AttachPoint {
+                                    entities: (interactable, other_entity),
+                                    points: if ordered {
+                                        (point.local_p1, point.local_p2)
+                                    } else {
+                                        (point.local_p2, point.local_p1)
+                                    },
+                                });
+                            }
+                        }
                     }
                 }
             }
+        }
+    }
+}
+
+fn attach(
+    mut commands: Commands,
+    mut attach_events: EventReader<ReleaseEvent>,
+    attach_points: Res<AttachPoints>,
+) {
+    if attach_events.iter().next().is_some() {
+        for AttachPoint { points, entities } in attach_points.0.iter() {
+            commands.spawn().insert(JointBuilderComponent::new(
+                BallJoint::new(points.0, points.1),
+                entities.0,
+                entities.1,
+            ));
         }
     }
 }
