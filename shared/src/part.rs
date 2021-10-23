@@ -2,7 +2,7 @@ use crate::map::PLATFORM_WIDTH_M;
 use crate::utils::{self, QuatExt, TransformExt};
 use crate::{
     AttachPoint, AttachPoints, Attachable, CameraOrbitCenter, Focused, FocusedInteractable,
-    HoldPoint, Holding, Player, ReleaseEvent,
+    HoldPoint, Holding, Player, ReleaseEvent, ToggleHoldingLabel, UpdateAttachPointsLabel,
 };
 use bevy::prelude::*;
 use bevy_rapier3d::na::Vector3;
@@ -31,8 +31,18 @@ impl Plugin for PartPlugin {
             .add_system(orient_held_part.system())
             .add_system(spawn_part.system())
             .add_system(update_attachable.system())
-            .add_system(update_attach_points.system())
-            .add_system(attach.system())
+            .add_system(
+                update_attach_points
+                    .system()
+                    .label(UpdateAttachPointsLabel)
+                    .before(ToggleHoldingLabel),
+            )
+            .add_system(
+                attach
+                    .system()
+                    .after(ToggleHoldingLabel)
+                    .after(UpdateAttachPointsLabel),
+            )
             .init_resource::<AttachPoints>();
     }
 }

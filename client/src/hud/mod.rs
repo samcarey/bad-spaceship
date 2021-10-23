@@ -1,6 +1,6 @@
 use bad_spaceship_shared::{
     part::{Holdable, TargetOrientation, TargetPosition},
-    AttachPoint, AttachPoints, HoldPoint,
+    AttachPoint, AttachPoints, HoldPoint, UpdateAttachPointsLabel,
 };
 use bevy::{prelude::*, render::render_graph::base::MainPass};
 use normalization::*;
@@ -19,7 +19,11 @@ impl Plugin for TransformGizmoPlugin {
             .add_plugin(normalization::Ui3dNormalization)
             .add_startup_system(initialize_attach_point.system())
             .init_resource::<AttachPointAppearance>()
-            .add_system(display_attach_points.system());
+            .add_system(
+                display_attach_points
+                    .system()
+                    .after(UpdateAttachPointsLabel),
+            );
         {
             render_graph::add_gizmo_graph(&mut app.world_mut());
         }

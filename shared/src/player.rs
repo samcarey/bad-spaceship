@@ -16,8 +16,8 @@ use crate::{
     utils::{ToVec3, DEG_TO_RADIANS},
     CameraOrbitCenter, Character, DirectionalInput, FocusedInteractable, GameStickDirectionalInput,
     HoldPoint, Holding, InputEvents, KeyboardDirectionalInput, LeftClicked, ManipulatingPart,
-    MouseMotionDelta, OrbitingCamera, PartRotation, Player, PlayerClick, ReleaseEvent, Yaw,
-    INITIAL_CAMERA_PITCH,
+    MouseMotionDelta, OrbitingCamera, PartRotation, Player, PlayerClick, ReleaseEvent,
+    ToggleHoldingLabel, Yaw, INITIAL_CAMERA_PITCH,
 };
 
 const MAX_CAMERA_PITCH_DEGREES: f32 = 89.;
@@ -34,7 +34,12 @@ impl Plugin for PlayerPlugin {
             .add_system_to_stage(CoreStage::PreUpdate, connection_system.system())
             .add_system(mouse_motion.system())
             .add_system(mouse_zoom.system().after(InputEvents))
-            .add_system(toggle_holding.system().after(InputEvents))
+            .add_system(
+                toggle_holding
+                    .system()
+                    .label(ToggleHoldingLabel)
+                    .after(InputEvents),
+            )
             .add_system(gamepad_system.system())
             .init_resource::<GamepadLobby>()
             .add_system(despawn.system())

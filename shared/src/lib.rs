@@ -138,3 +138,9 @@ pub struct AttachPoint {
 
 #[derive(Default)]
 pub struct AttachPoints(pub Vec<AttachPoint>);
+
+#[derive(SystemLabel, Clone, Hash, Debug, PartialEq, Eq)]
+struct ToggleHoldingLabel;
+
+#[derive(SystemLabel, Clone, Hash, Debug, PartialEq, Eq)]
+pub struct UpdateAttachPointsLabel;
