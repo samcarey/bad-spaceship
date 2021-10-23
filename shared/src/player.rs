@@ -16,8 +16,8 @@ use crate::{
     utils::{ToVec3, DEG_TO_RADIANS},
     CameraOrbitCenter, Character, DirectionalInput, FocusedInteractable, GameStickDirectionalInput,
     HoldPoint, Holding, InputEvents, KeyboardDirectionalInput, LeftClicked, ManipulatingPart,
-    MouseMotionDelta, OrbitingCamera, PartRotation, Player, PlayerClick, ReleaseEvent,
-    TouchingColliders, Yaw, INITIAL_CAMERA_PITCH,
+    MouseMotionDelta, OrbitingCamera, PartRotation, Player, PlayerClick, ReleaseEvent, Yaw,
+    INITIAL_CAMERA_PITCH,
 };
 
 const MAX_CAMERA_PITCH_DEGREES: f32 = 89.;
@@ -266,7 +266,6 @@ fn get_hold_point_entity(
 struct HeldBundle {
     target_position: TargetPosition,
     target_orientation: TargetOrientation,
-    touching: TouchingColliders,
 }
 
 impl HeldBundle {
@@ -274,7 +273,6 @@ impl HeldBundle {
         Self {
             target_position: TargetPosition::new(hold_point),
             target_orientation: TargetOrientation::new(rotation),
-            touching: TouchingColliders::default(),
         }
     }
 }
