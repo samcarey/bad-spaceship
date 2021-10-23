@@ -4,35 +4,45 @@
     "version": "2.0.0",
     "options": {
         "env": {
-            "CARGO_MANIFEST_DIR": "${workspaceFolder}"
+            "CARGO_MANIFEST_DIR": "${workspaceFolder}",
+            "CARGO_TARGET_DIR": "target",
         }
     },
     "tasks": [
         {
-            "label": "run (release)",
+            "label": "build-native-debug",
             "type": "shell",
-            "command": "cd client ; cargo make run --profile release",
+            "command": "cd client ; cargo build --features native"
+        },
+        {
+            "label": "run-native-release",
+            "type": "shell",
+            "command": "cd client ; cargo run --features native --release",
             "group": {
                 "kind": "build",
                 "isDefault": true
             }
         },
         {
-            "label": "build (release)",
+            "label": "build-wasm",
             "type": "shell",
-            "command": "cd client ; cargo make build-native --profile release",
-            "group": "build"
+            "command": "cd client ; cargo build --target wasm32-unknown-unknown --features web --release",
         },
         {
-            "label": "serve (release)",
+            "label": "build-web",
             "type": "shell",
-            "command": "cd client ; cargo make serve --profile release",
-            "group": "test"
+            "command": "cd client ; wasm-bindgen --out-dir target --out-name wasm --target web --no-typescript target/wasm32-unknown-unknown/release/bad-spaceship-client.wasm",
+            "dependsOn": [
+                "build-wasm"
+            ]
         },
         {
-            "label": "build (debug)",
+            "label": "run-web",
             "type": "shell",
-            "command": "cd client ; cargo make build-native"
-        },
+            "command": "cd client ; basic-http-server -x",
+            "dependsOn": [
+                "build-web"
+            ]
+        }
     ]
 }

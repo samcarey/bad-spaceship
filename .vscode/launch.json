@@ -5,7 +5,7 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "debug (windows)",
+      "name": "debug-windows",
       "type": "cppvsdbg",
       "request": "launch",
       "program": "${workspaceFolder}/client/target/debug/bad-spaceship-client",
@@ -13,7 +13,7 @@
       "stopAtEntry": false,
       "cwd": "${workspaceRoot}",
       "console": "externalTerminal",
-      "preLaunchTask": "build (debug)",
+      "preLaunchTask": "build-native-debug",
       "env": {
         "CARGO_MANIFEST_DIR": "${workspaceFolder}/client"
       },
