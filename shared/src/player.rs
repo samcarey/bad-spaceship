@@ -1,4 +1,4 @@
-use std::f32;
+use std::{f32, time::Duration};
 
 use bevy::{
     input::gamepad::{Gamepad, GamepadButton, GamepadEvent, GamepadEventType},
@@ -8,16 +8,18 @@ use bevy::{
     render::camera::Camera,
     utils::HashSet,
 };
+use bevy_easings::{Ease, EaseFunction};
 use bevy_rapier3d::prelude::ColliderShape;
 use serde::Deserialize;
 
 use crate::{
     part::{Holdable, TargetOrientation, TargetPosition},
     utils::{ToVec3, DEG_TO_RADIANS},
-    CameraOrbitCenter, Character, DirectionalInput, FocusedInteractable, GameStickDirectionalInput,
-    HoldPoint, Holding, InputEvents, KeyboardDirectionalInput, LeftClicked, ManipulatingPart,
-    MouseMotionDelta, OrbitingCamera, PartRotation, Player, PlayerClick, ReleaseEvent,
-    ToggleHoldingLabel, Yaw, INITIAL_CAMERA_PITCH,
+    BoundingRadius, CameraOrbitCenter, Character, DirectionalInput, FocusedInteractable,
+    GameStickDirectionalInput, HoldEvent, HoldPoint, Holding, InputEvents,
+    KeyboardDirectionalInput, LeftClicked, ManipulatingPart, MouseMotionDelta, OrbitingCamera,
+    OriginalPosition, PartRotation, Player, PlayerClick, ReleaseEvent, ToggleHoldingSystemLabel,
+    Yaw, INITIAL_CAMERA_PITCH,
 };
 
 const MAX_CAMERA_PITCH_DEGREES: f32 = 89.;
@@ -32,12 +34,14 @@ impl Plugin for PlayerPlugin {
         app.add_startup_system(spawn_camera.system())
             .add_system(spawn.system())
             .add_system_to_stage(CoreStage::PreUpdate, connection_system.system())
-            .add_system(mouse_motion.system())
+            // This has to run after `bevy_easings::plugin::ease_system::<Transform>`,
+            // which is unlabeled but runs on CoreStage::Update, so as not to conflict with `adjust_camera_on_hold`
+            .add_system_to_stage(CoreStage::PostUpdate, mouse_motion.system())
             .add_system(mouse_zoom.system().after(InputEvents))
             .add_system(
                 toggle_holding
                     .system()
-                    .label(ToggleHoldingLabel)
+                    .label(ToggleHoldingSystemLabel)
                     .after(InputEvents),
             )
             .add_system(gamepad_system.system())
@@ -47,7 +51,17 @@ impl Plugin for PlayerPlugin {
             .add_event::<PlayerClick>()
             .add_asset::<Config>()
             .add_system(apply_part_rotation.system())
-            .add_event::<ReleaseEvent>();
+            .add_event::<ReleaseEvent>()
+            .init_resource::<CameraOrbitOffset>()
+            .add_system_set(
+                SystemSet::new()
+                    .after(ToggleHoldingSystemLabel)
+                    .with_system(reset_camera_after_release.system())
+                    .with_system(adjust_camera_on_hold.system())
+                    .with_system(reset_hold_point_after_release.system())
+                    .with_system(adjust_hold_point_on_hold.system()),
+            )
+            .add_event::<HoldEvent>();
     }
 }
 
@@ -74,6 +88,7 @@ pub struct HoldPointBundle {
     pub transform: Transform,
     pub global_transform: GlobalTransform,
     hold_point: HoldPoint,
+    original_position: OriginalPosition,
 }
 
 fn spawn_camera(mut commands: Commands) {
@@ -133,6 +148,11 @@ fn despawn(players: Query<(&Transform, Entity, &Children), With<Player>>, mut co
     }
 }
 
+#[derive(Default)]
+struct CameraOrbitOffset {
+    min: Vec3,
+}
+
 fn attach_camera_orbit(
     mut commands: Commands,
     cameras: Query<Entity, With<Camera>>,
@@ -141,6 +161,7 @@ fn attach_camera_orbit(
         (With<Character>, Without<Children>),
     >,
     configs: ResMut<Assets<Config>>,
+    mut camera_orbit_offset: ResMut<CameraOrbitOffset>,
 ) {
     if let Some((_, config)) = configs.iter().next() {
         if let Some(camera) = cameras.iter().next() {
@@ -149,11 +170,11 @@ fn attach_camera_orbit(
                 // This is for the purpose of making it easier to see over obstructions.
                 // For now we generate this as a PbrComponent, which is overkill for an invisible point,
                 // so we'll want to simplify this later to something with only the necessary components.
-                let mut camera_orbit_center_transform = Transform::from_translation(
-                    config.camera_offset_character_size_ratio.to_vec3()
-                        * character_collider.compute_local_bounding_sphere().radius
-                        * 2.0,
-                );
+                camera_orbit_offset.min = config.camera_offset_character_size_ratio.to_vec3()
+                    * character_collider.compute_local_bounding_sphere().radius
+                    * 2.0;
+                let mut camera_orbit_center_transform =
+                    Transform::from_translation(camera_orbit_offset.min);
                 camera_orbit_center_transform.rotation =
                     Quat::from_rotation_x(INITIAL_CAMERA_PITCH);
                 let camera_orbit_center = commands
@@ -174,10 +195,12 @@ fn attach_camera_orbit(
                     .entity(camera_orbit_center)
                     .push_children(&[camera]);
 
+                let hold_point_transform = Transform::from_translation(Vec3::Z * 5.0);
                 let hold_point = commands
                     .spawn()
                     .insert_bundle(HoldPointBundle {
-                        transform: Transform::from_translation(Vec3::Z * 5.0),
+                        transform: hold_point_transform.clone(),
+                        original_position: OriginalPosition(hold_point_transform.translation),
                         ..Default::default()
                     })
                     .id();
@@ -298,6 +321,7 @@ fn toggle_holding(
     hold_points: Query<Entity, With<HoldPoint>>,
     holdables: Query<&GlobalTransform, With<Holdable>>,
     mut attach_events: EventWriter<ReleaseEvent>,
+    mut hold_events: EventWriter<HoldEvent>,
 ) {
     if clicks.iter().next().is_some() {
         if let Some((mut holding, interactable, player_children, manipulating_part)) =
@@ -313,9 +337,9 @@ fn toggle_holding(
                             commands
                                 .entity(current_interactable)
                                 .remove_bundle::<HeldBundle>();
-                            if manipulating_part.0 {
-                                attach_events.send(ReleaseEvent);
-                            }
+                            attach_events.send(ReleaseEvent {
+                                manipulating_part: manipulating_part.0,
+                            });
                         } else {
                             holding.0 = true;
                             commands
@@ -324,10 +348,79 @@ fn toggle_holding(
                                     hold_point_entity,
                                     original_transform.rotation,
                                 ));
+                            hold_events.send(HoldEvent {
+                                held: current_interactable,
+                            });
                         }
                     }
                 }
             }
+        }
+    }
+}
+
+fn adjust_camera_on_hold(
+    mut commands: Commands,
+    mut hold_events: EventReader<HoldEvent>,
+    camera_orbit_offset: Res<CameraOrbitOffset>,
+    camera_orbit_centers: Query<(Entity, &Transform), With<CameraOrbitCenter>>,
+    radiuses: Query<&BoundingRadius, With<Holdable>>,
+) {
+    if let Some(hold_event) = hold_events.iter().next() {
+        if let Ok(radius) = radiuses.get(hold_event.held) {
+            for (entity, transform) in camera_orbit_centers.iter() {
+                commands.entity(entity).insert(transform.ease_to(
+                    Transform::from_translation(camera_orbit_offset.min + Vec3::Y * radius.0),
+                    EaseFunction::QuadraticInOut,
+                    bevy_easings::EasingType::Once {
+                        duration: Duration::from_secs_f32(0.5),
+                    },
+                ));
+            }
+        }
+    }
+}
+
+fn reset_camera_after_release(
+    mut commands: Commands,
+    mut release_events: EventReader<ReleaseEvent>,
+    camera_orbit_offset: ResMut<CameraOrbitOffset>,
+    mut camera_orbit_centers: Query<(Entity, &mut Transform), With<CameraOrbitCenter>>,
+) {
+    if release_events.iter().next().is_some() {
+        for (entity, transform) in camera_orbit_centers.iter_mut() {
+            commands.entity(entity).insert(transform.ease_to(
+                Transform::from_translation(camera_orbit_offset.min.into()),
+                EaseFunction::QuadraticInOut,
+                bevy_easings::EasingType::Once {
+                    duration: Duration::from_secs_f32(0.5),
+                },
+            ));
+        }
+    }
+}
+
+fn adjust_hold_point_on_hold(
+    mut hold_events: EventReader<HoldEvent>,
+    mut hold_points: Query<(&mut Transform, &OriginalPosition), With<HoldPoint>>,
+    radiuses: Query<&BoundingRadius, With<Holdable>>,
+) {
+    if let Some(hold_event) = hold_events.iter().next() {
+        if let Ok(radius) = radiuses.get(hold_event.held) {
+            for (mut transform, original_position) in hold_points.iter_mut() {
+                transform.translation = original_position.0 + Vec3::Z * radius.0;
+            }
+        }
+    }
+}
+
+fn reset_hold_point_after_release(
+    mut release_events: EventReader<ReleaseEvent>,
+    mut hold_points: Query<(&mut Transform, &OriginalPosition), With<HoldPoint>>,
+) {
+    if release_events.iter().next().is_some() {
+        for (mut transform, original_position) in hold_points.iter_mut() {
+            transform.translation = original_position.0;
         }
     }
 }

@@ -1,8 +1,9 @@
 use crate::map::PLATFORM_WIDTH_M;
 use crate::utils::{self, QuatExt, TransformExt};
 use crate::{
-    AttachPoint, AttachPoints, Attachable, CameraOrbitCenter, Focused, FocusedInteractable,
-    HoldPoint, Holding, Player, ReleaseEvent, ToggleHoldingLabel, UpdateAttachPointsLabel,
+    AttachPoint, AttachPoints, Attachable, BoundingRadius, CameraOrbitCenter, Focused,
+    FocusedInteractable, HoldPoint, Holding, Player, ReleaseEvent, ToggleHoldingSystemLabel,
+    UpdateAttachPointsLabel,
 };
 use bevy::prelude::*;
 use bevy_rapier3d::na::Vector3;
@@ -35,12 +36,12 @@ impl Plugin for PartPlugin {
                 update_attach_points
                     .system()
                     .label(UpdateAttachPointsLabel)
-                    .before(ToggleHoldingLabel),
+                    .before(ToggleHoldingSystemLabel),
             )
             .add_system(
                 attach
                     .system()
-                    .after(ToggleHoldingLabel)
+                    .after(ToggleHoldingSystemLabel)
                     .after(UpdateAttachPointsLabel),
             )
             .init_resource::<AttachPoints>();
@@ -144,8 +145,10 @@ fn get_random_shape(rng: &mut ThreadRng) -> ColliderShape {
 fn spawn_part(mut commands: Commands, mut new_part_events: EventReader<NewPart>) {
     let mut rng = rand::thread_rng();
     for _ in new_part_events.iter() {
+        let shape = get_random_shape(&mut rng);
         commands
             .spawn()
+            .insert(BoundingRadius(shape.compute_local_bounding_sphere().radius))
             .insert_bundle(RigidBodyBundle {
                 body_type: bevy_rapier3d::prelude::RigidBodyType::Dynamic,
                 position: [
@@ -157,7 +160,7 @@ fn spawn_part(mut commands: Commands, mut new_part_events: EventReader<NewPart>)
                 ..Default::default()
             })
             .insert_bundle(ColliderBundle {
-                shape: get_random_shape(&mut rng),
+                shape,
                 mass_properties: ColliderMassProps::Density(2.0),
                 material: ColliderMaterial {
                     friction: 1.0,
@@ -406,13 +409,15 @@ fn attach(
     mut attach_events: EventReader<ReleaseEvent>,
     attach_points: Res<AttachPoints>,
 ) {
-    if attach_events.iter().next().is_some() {
-        for AttachPoint { points, entities } in attach_points.0.iter() {
-            commands.spawn().insert(JointBuilderComponent::new(
-                BallJoint::new(points.0, points.1),
-                entities.0,
-                entities.1,
-            ));
+    if let Some(release_event) = attach_events.iter().next() {
+        if release_event.manipulating_part {
+            for AttachPoint { points, entities } in attach_points.0.iter() {
+                commands.spawn().insert(JointBuilderComponent::new(
+                    BallJoint::new(points.0, points.1),
+                    entities.0,
+                    entities.1,
+                ));
+            }
         }
     }
 }

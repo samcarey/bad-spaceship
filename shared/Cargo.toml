@@ -13,6 +13,7 @@ ron = "0.6.4"
 rand = "0.8.4"
 include_dir = { version = "0.6.1" }
 anyhow = "1.0"
+bevy_easings = "0.4.1"
 
 [features]
 default = ["bevy/png"]

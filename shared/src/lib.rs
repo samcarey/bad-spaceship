@@ -2,6 +2,7 @@ use bevy::{
     math::{Quat, Vec2, Vec3},
     prelude::{Entity, KeyCode, MouseButton, PluginGroup, SystemLabel},
 };
+use bevy_easings::EasingsPlugin;
 use bevy_rapier3d::{
     na::{Const, OPoint},
     physics::RapierPhysicsPlugin,
@@ -27,7 +28,8 @@ impl PluginGroup for CommonPlugins {
         // Third-party plugins
         group
             .add(RapierPhysicsPlugin::<&IgnoreContactsWith>::default())
-            .add(RapierRenderPlugin);
+            .add(RapierRenderPlugin)
+            .add(EasingsPlugin);
 
         // Custom plugins
         group
@@ -127,7 +129,13 @@ pub struct ManipulatingPart(pub bool);
 #[derive(Clone, Copy)]
 struct IgnoreContactsWith(Entity);
 
-struct ReleaseEvent;
+struct ReleaseEvent {
+    manipulating_part: bool,
+}
+
+struct HoldEvent {
+    held: Entity,
+}
 
 type ContactPoint = OPoint<f32, Const<3>>;
 
@@ -140,7 +148,12 @@ pub struct AttachPoint {
 pub struct AttachPoints(pub Vec<AttachPoint>);
 
 #[derive(SystemLabel, Clone, Hash, Debug, PartialEq, Eq)]
-struct ToggleHoldingLabel;
+struct ToggleHoldingSystemLabel;
 
 #[derive(SystemLabel, Clone, Hash, Debug, PartialEq, Eq)]
 pub struct UpdateAttachPointsLabel;
+
+struct BoundingRadius(f32);
+
+#[derive(Default)]
+pub struct OriginalPosition(Vec3);
