@@ -8,7 +8,7 @@ use bevy::{
     render::camera::Camera,
     utils::HashSet,
 };
-use bevy_easings::{Ease, EaseFunction};
+use bevy_easings::{CustomComponentEase, EaseFunction, EasingComponent, Lerp};
 use bevy_rapier3d::prelude::ColliderShape;
 use serde::Deserialize;
 
@@ -34,9 +34,7 @@ impl Plugin for PlayerPlugin {
         app.add_startup_system(spawn_camera.system())
             .add_system(spawn.system())
             .add_system_to_stage(CoreStage::PreUpdate, connection_system.system())
-            // This has to run after `bevy_easings::plugin::ease_system::<Transform>`,
-            // which is unlabeled but runs on CoreStage::Update, so as not to conflict with `adjust_camera_on_hold`
-            .add_system_to_stage(CoreStage::PostUpdate, mouse_motion.system())
+            .add_system(mouse_motion.system().after(EaseLabel))
             .add_system(mouse_zoom.system().after(InputEvents))
             .add_system(
                 toggle_holding
@@ -61,7 +59,13 @@ impl Plugin for PlayerPlugin {
                     .with_system(reset_hold_point_after_release.system())
                     .with_system(adjust_hold_point_on_hold.system()),
             )
-            .add_event::<HoldEvent>();
+            .add_event::<HoldEvent>()
+            .add_system(
+                bevy_easings::custom_ease_system::<Translation>
+                    .system()
+                    .label(EaseLabel),
+            )
+            .add_system(ease_camera.system().label(EaseLabel));
     }
 }
 
@@ -81,6 +85,7 @@ pub struct CameraOrbitCenterBundle {
     pub transform: Transform,
     pub global_transform: GlobalTransform,
     camera_orbit_center: CameraOrbitCenter,
+    easing: Translation,
 }
 
 #[derive(Bundle, Default)]
@@ -220,9 +225,10 @@ fn mouse_motion(
     configs: ResMut<Assets<Config>>,
     keyboard_input: Res<Input<KeyCode>>,
 ) {
-    if !(keyboard_input.pressed(KeyCode::LShift) | keyboard_input.pressed(KeyCode::RShift)) {
-        if let Some((_, config)) = configs.iter().next() {
-            if let Some((mut orbiting_camera, mut yaw, mouse_delta)) = query.iter_mut().next() {
+    if let Some((_, config)) = configs.iter().next() {
+        if let Some((mut orbiting_camera, mut yaw, mouse_delta)) = query.iter_mut().next() {
+            if !(keyboard_input.pressed(KeyCode::LShift) | keyboard_input.pressed(KeyCode::RShift))
+            {
                 yaw.0 = (yaw.0 + mouse_delta.0.x * time.delta_seconds() * config.look_sensitivity)
                     % std::f32::consts::TAU;
 
@@ -230,12 +236,11 @@ fn mouse_motion(
                     + mouse_delta.0.y * time.delta_seconds() * config.look_sensitivity)
                     .max(MIN_CAMERA_PITCH)
                     .min(MAX_CAMERA_PITCH);
-
-                // By tilting the orbit center that the camera is attached to,
-                // the camera itself is swung to the correct position
-                if let Some(mut transform) = camera_orbit_center_transforms.iter_mut().next() {
-                    transform.rotation = Quat::from_rotation_x(orbiting_camera.pitch);
-                }
+            }
+            // By tilting the orbit center that the camera is attached to,
+            // the camera itself is swung to the correct position
+            if let Some(mut transform) = camera_orbit_center_transforms.iter_mut().next() {
+                transform.rotation = Quat::from_rotation_x(orbiting_camera.pitch);
             }
         }
     }
@@ -359,6 +364,20 @@ fn toggle_holding(
     }
 }
 
+#[derive(Default)]
+struct Translation(Vec3);
+
+impl Lerp for Translation {
+    type Scalar = f32;
+
+    fn lerp(&self, other: &Self, scalar: &Self::Scalar) -> Self {
+        Self(self.0.lerp(other.0, *scalar))
+    }
+}
+
+#[derive(SystemLabel, Clone, Hash, Debug, PartialEq, Eq)]
+struct EaseLabel;
+
 fn adjust_camera_on_hold(
     mut commands: Commands,
     mut hold_events: EventReader<HoldEvent>,
@@ -369,13 +388,15 @@ fn adjust_camera_on_hold(
     if let Some(hold_event) = hold_events.iter().next() {
         if let Ok(radius) = radiuses.get(hold_event.held) {
             for (entity, transform) in camera_orbit_centers.iter() {
-                commands.entity(entity).insert(transform.ease_to(
-                    Transform::from_translation(camera_orbit_offset.min + Vec3::Y * radius.0),
-                    EaseFunction::QuadraticInOut,
-                    bevy_easings::EasingType::Once {
-                        duration: Duration::from_secs_f32(0.5),
-                    },
-                ));
+                commands
+                    .entity(entity)
+                    .insert(Translation(transform.translation).ease_to(
+                        Translation(camera_orbit_offset.min + Vec3::Y * radius.0),
+                        EaseFunction::QuadraticInOut,
+                        bevy_easings::EasingType::Once {
+                            duration: Duration::from_secs_f32(0.5),
+                        },
+                    ));
             }
         }
     }
@@ -389,14 +410,27 @@ fn reset_camera_after_release(
 ) {
     if release_events.iter().next().is_some() {
         for (entity, transform) in camera_orbit_centers.iter_mut() {
-            commands.entity(entity).insert(transform.ease_to(
-                Transform::from_translation(camera_orbit_offset.min.into()),
-                EaseFunction::QuadraticInOut,
-                bevy_easings::EasingType::Once {
-                    duration: Duration::from_secs_f32(0.5),
-                },
-            ));
+            commands
+                .entity(entity)
+                .insert(Translation(transform.translation).ease_to(
+                    Translation(camera_orbit_offset.min),
+                    EaseFunction::QuadraticInOut,
+                    bevy_easings::EasingType::Once {
+                        duration: Duration::from_secs_f32(0.5),
+                    },
+                ));
         }
+    }
+}
+
+fn ease_camera(
+    mut cameras: Query<
+        (&mut Transform, &Translation),
+        (With<EasingComponent<Translation>>, With<CameraOrbitCenter>),
+    >,
+) {
+    for (mut transform, translation) in cameras.iter_mut() {
+        transform.translation = translation.0
     }
 }
 
