@@ -2,7 +2,7 @@
 members = ["client", "server", "shared"]
 
 # Recommended for rapier: https://rapier.rs/docs/user_guides/bevy_plugin/common_mistakes
-[profile.dev.package.bevy_rapier3d]
+[profile.dev.package."*"]
 opt-level = 3
 
 # Recommended for rapier: https://rapier.rs/docs/user_guides/bevy_plugin/common_mistakes
