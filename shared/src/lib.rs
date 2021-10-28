@@ -142,6 +142,7 @@ type ContactPoint = OPoint<f32, Const<3>>;
 pub struct AttachPoint {
     pub points: (ContactPoint, ContactPoint),
     pub entities: (Entity, Entity),
+    pub too_close: bool,
 }
 
 #[derive(Default)]

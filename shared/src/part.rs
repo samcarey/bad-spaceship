@@ -9,11 +9,11 @@ use bevy::prelude::*;
 use bevy_rapier3d::na::Vector3;
 use bevy_rapier3d::physics::{
     ColliderBundle, ColliderPositionSync, IntoEntity, IntoHandle, JointBuilderComponent,
-    RapierConfiguration, RigidBodyBundle,
+    JointHandleComponent, RapierConfiguration, RigidBodyBundle,
 };
 use bevy_rapier3d::prelude::{
     ActiveEvents, BallJoint, ColliderFlags, ColliderMassProps, ColliderMaterial, ColliderShape,
-    NarrowPhase, RigidBodyForces, RigidBodyMassProps, RigidBodyVelocity,
+    JointSet, NarrowPhase, RigidBodyForces, RigidBodyMassProps, RigidBodyVelocity,
 };
 use bevy_rapier3d::render::ColliderDebugRender;
 use rand::prelude::ThreadRng;
@@ -55,6 +55,7 @@ const MIN_PART_VOLUME: f32 = 1.0;
 const MAX_PART_VOLUME: f32 = 2.0;
 const POSITIONING_STIFFNESS: f32 = 30.0;
 const ORIENTING_STIFFNESS: f32 = 5.0;
+const MIN_JOINT_SPACING: f32 = MIN_PART_SIZE / 2.0;
 
 #[derive(Default)]
 struct Interactable;
@@ -358,23 +359,49 @@ fn update_attach_points(
     narrow_phase: Res<NarrowPhase>,
     mut attach_points: ResMut<AttachPoints>,
     players: Query<(&Holding, &FocusedInteractable)>,
+    joint_handles: Query<&JointHandleComponent>,
+    joint_set: ResMut<JointSet>,
 ) {
     attach_points.0 = Vec::new();
 
     if let Some((holding, interactable)) = players.iter().next() {
         if holding.0 {
-            if let Some(interactable) = interactable.0 {
+            if let Some(entity1) = interactable.0 {
                 for contact_pair in narrow_phase
-                    .contacts_with(interactable.handle())
+                    .contacts_with(entity1.handle())
                     .filter(|x| x.has_any_active_contact)
                 {
-                    let ordered = contact_pair.collider1.entity() == interactable;
-                    let other_entity = if ordered {
+                    let ordered = contact_pair.collider1.entity() == entity1;
+                    let entity2 = if ordered {
                         contact_pair.collider2.entity()
                     } else {
                         contact_pair.collider1.entity()
                     };
-                    if holdables.get(other_entity).is_ok() {
+
+                    if holdables.get(entity2).is_ok() {
+                        let mut existing_joints_relative_to_1 = Vec::new();
+                        for handle in joint_handles.iter() {
+                            if let Some(ordered) = if handle.entity1() == entity1
+                                && handle.entity2() == entity2
+                            {
+                                Some(true)
+                            } else if handle.entity1() == entity2 && handle.entity2() == entity1 {
+                                Some(false)
+                            } else {
+                                None
+                            } {
+                                if let Some(joint) = joint_set.get(handle.handle()) {
+                                    if let Some(ball_joint) = joint.params.as_ball_joint() {
+                                        existing_joints_relative_to_1.push(if ordered {
+                                            ball_joint.local_anchor1
+                                        } else {
+                                            ball_joint.local_anchor2
+                                        });
+                                    }
+                                }
+                            }
+                        }
+
                         for manifold in &contact_pair.manifolds {
                             for point in &manifold.points {
                                 // This can be used to prevent attached colliders from interacting, but I don't think it's necessary right now.
@@ -387,14 +414,22 @@ fn update_attach_points(
                                 //     .entity(other_entity)
                                 //     .insert(IgnoreContactsWith(attach_event.primary_entity));
 
-                                attach_points.0.push(AttachPoint {
-                                    entities: (interactable, other_entity),
-                                    points: if ordered {
-                                        (point.local_p1, point.local_p2)
-                                    } else {
-                                        (point.local_p2, point.local_p1)
-                                    },
-                                });
+                                let points = if ordered {
+                                    (point.local_p1, point.local_p2)
+                                } else {
+                                    (point.local_p2, point.local_p1)
+                                };
+
+                                let attach_point = AttachPoint {
+                                    entities: (entity1, entity2),
+                                    points,
+                                    too_close: existing_joints_relative_to_1
+                                        .iter()
+                                        .map(|p| (p - points.0).norm() as f32)
+                                        .any(|d| d < MIN_JOINT_SPACING),
+                                };
+
+                                attach_points.0.push(attach_point);
                             }
                         }
                     }
@@ -411,12 +446,19 @@ fn attach(
 ) {
     if let Some(release_event) = attach_events.iter().next() {
         if release_event.manipulating_part {
-            for AttachPoint { points, entities } in attach_points.0.iter() {
-                commands.spawn().insert(JointBuilderComponent::new(
-                    BallJoint::new(points.0, points.1),
-                    entities.0,
-                    entities.1,
-                ));
+            for AttachPoint {
+                points,
+                entities,
+                too_close,
+            } in attach_points.0.iter()
+            {
+                if !too_close {
+                    commands.spawn().insert(JointBuilderComponent::new(
+                        BallJoint::new(points.0, points.1),
+                        entities.0,
+                        entities.1,
+                    ));
+                }
             }
         }
     }

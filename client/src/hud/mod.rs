@@ -232,7 +232,8 @@ fn build_gizmo(
 #[derive(Default)]
 struct AttachPointAppearance {
     mesh: Option<Handle<Mesh>>,
-    material: Option<Handle<StandardMaterial>>,
+    valid_material: Option<Handle<StandardMaterial>>,
+    invalid_material: Option<Handle<StandardMaterial>>,
 }
 
 fn initialize_attach_point(
@@ -245,9 +246,14 @@ fn initialize_attach_point(
             radius: 0.1,
             ..Default::default()
         }))),
-        material: Some(materials.add(StandardMaterial {
+        valid_material: Some(materials.add(StandardMaterial {
             unlit: true,
             base_color: Color::rgb(1.0, 0.4, 0.4),
+            ..Default::default()
+        })),
+        invalid_material: Some(materials.add(StandardMaterial {
+            unlit: true,
+            base_color: Color::rgb(0.4, 0.4, 1.0),
             ..Default::default()
         })),
     };
@@ -259,23 +265,37 @@ fn display_attach_points(
     mut commands: Commands,
     holdables: Query<&GlobalTransform, With<Holdable>>,
     attach_points: Res<AttachPoints>,
-    mut displayed_points: Query<(&mut Transform, &mut Visible), With<DisplayedAttachPoint>>,
+    mut displayed_points: Query<
+        (&mut Transform, &mut Visible, &mut Handle<StandardMaterial>),
+        With<DisplayedAttachPoint>,
+    >,
     attach_point_appearance: Res<AttachPointAppearance>,
 ) {
     let mut display_points_iter = displayed_points.iter_mut();
-    for AttachPoint { points, entities } in attach_points.0.iter() {
+    for AttachPoint {
+        points,
+        entities,
+        too_close,
+    } in attach_points.0.iter()
+    {
         if let Ok(transform) = holdables.get(entities.0) {
             let center = transform.translation + transform.rotation.mul_vec3(points.0.into());
-            if let Some((mut displayed_transform, mut displayed_visible)) =
+            let material = if *too_close {
+                attach_point_appearance.invalid_material.clone().unwrap()
+            } else {
+                attach_point_appearance.valid_material.clone().unwrap()
+            };
+            if let Some((mut displayed_transform, mut displayed_visible, mut displayed_material)) =
                 display_points_iter.next()
             {
                 displayed_transform.translation = center;
                 displayed_visible.is_visible = true;
+                *displayed_material = material;
             } else {
                 commands
                     .spawn_bundle(PbrBundle {
                         mesh: attach_point_appearance.mesh.clone().unwrap(),
-                        material: attach_point_appearance.material.clone().unwrap(),
+                        material,
                         transform: Transform::from_translation(center),
                         ..Default::default()
                     })
@@ -285,7 +305,7 @@ fn display_attach_points(
             }
         }
     }
-    for (_, mut displayed_visible) in display_points_iter {
+    for (_, mut displayed_visible, _) in display_points_iter {
         displayed_visible.is_visible = false;
     }
 }
