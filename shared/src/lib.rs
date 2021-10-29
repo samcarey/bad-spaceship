@@ -139,14 +139,21 @@ struct HoldEvent {
 
 type ContactPoint = OPoint<f32, Const<3>>;
 
-pub struct AttachPoint {
+pub struct PotentialJoint {
     pub points: (ContactPoint, ContactPoint),
     pub entities: (Entity, Entity),
-    pub too_close: bool,
+}
+
+pub struct ExistingJoint {
+    pub points: (ContactPoint, ContactPoint),
+    pub entities: (Entity, Entity),
 }
 
 #[derive(Default)]
-pub struct AttachPoints(pub Vec<AttachPoint>);
+pub struct PotentialJoints(pub Vec<PotentialJoint>);
+
+#[derive(Default)]
+pub struct ExistingJoints(pub Vec<ExistingJoint>);
 
 #[derive(SystemLabel, Clone, Hash, Debug, PartialEq, Eq)]
 struct ToggleHoldingSystemLabel;

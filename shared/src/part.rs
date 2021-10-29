@@ -1,9 +1,9 @@
 use crate::map::PLATFORM_WIDTH_M;
 use crate::utils::{self, QuatExt, TransformExt};
 use crate::{
-    AttachPoint, AttachPoints, Attachable, BoundingRadius, CameraOrbitCenter, Focused,
-    FocusedInteractable, HoldPoint, Holding, Player, ReleaseEvent, ToggleHoldingSystemLabel,
-    UpdateAttachPointsLabel,
+    Attachable, BoundingRadius, CameraOrbitCenter, ExistingJoint, ExistingJoints, Focused,
+    FocusedInteractable, HoldPoint, Holding, Player, PotentialJoint, PotentialJoints, ReleaseEvent,
+    ToggleHoldingSystemLabel, UpdateAttachPointsLabel,
 };
 use bevy::prelude::*;
 use bevy_rapier3d::na::Vector3;
@@ -33,7 +33,7 @@ impl Plugin for PartPlugin {
             .add_system(spawn_part.system())
             .add_system(update_attachable.system())
             .add_system(
-                update_attach_points
+                update_focused_joints
                     .system()
                     .label(UpdateAttachPointsLabel)
                     .before(ToggleHoldingSystemLabel),
@@ -44,7 +44,8 @@ impl Plugin for PartPlugin {
                     .after(ToggleHoldingSystemLabel)
                     .after(UpdateAttachPointsLabel),
             )
-            .init_resource::<AttachPoints>();
+            .init_resource::<PotentialJoints>()
+            .init_resource::<ExistingJoints>();
     }
 }
 
@@ -354,15 +355,17 @@ fn orient_held_part(
     }
 }
 
-fn update_attach_points(
+fn update_focused_joints(
     holdables: Query<(), With<Holdable>>,
     narrow_phase: Res<NarrowPhase>,
-    mut attach_points: ResMut<AttachPoints>,
+    mut potential_joints: ResMut<PotentialJoints>,
+    mut existing_joints: ResMut<ExistingJoints>,
     players: Query<(&Holding, &FocusedInteractable)>,
     joint_handles: Query<&JointHandleComponent>,
     joint_set: ResMut<JointSet>,
 ) {
-    attach_points.0 = Vec::new();
+    potential_joints.0 = Vec::new();
+    existing_joints.0 = Vec::new();
 
     if let Some((holding, interactable)) = players.iter().next() {
         if holding.0 {
@@ -420,16 +423,21 @@ fn update_attach_points(
                                     (point.local_p2, point.local_p1)
                                 };
 
-                                let attach_point = AttachPoint {
-                                    entities: (entity1, entity2),
-                                    points,
-                                    too_close: existing_joints_relative_to_1
-                                        .iter()
-                                        .map(|p| (p - points.0).norm() as f32)
-                                        .any(|d| d < MIN_JOINT_SPACING),
-                                };
-
-                                attach_points.0.push(attach_point);
+                                if existing_joints_relative_to_1
+                                    .iter()
+                                    .map(|p| (p - points.0).norm() as f32)
+                                    .all(|d| d > MIN_JOINT_SPACING)
+                                {
+                                    potential_joints.0.push(PotentialJoint {
+                                        entities: (entity1, entity2),
+                                        points,
+                                    });
+                                } else {
+                                    existing_joints.0.push(ExistingJoint {
+                                        entities: (entity1, entity2),
+                                        points,
+                                    });
+                                }
                             }
                         }
                     }
@@ -442,23 +450,16 @@ fn update_attach_points(
 fn attach(
     mut commands: Commands,
     mut attach_events: EventReader<ReleaseEvent>,
-    attach_points: Res<AttachPoints>,
+    attach_points: Res<PotentialJoints>,
 ) {
     if let Some(release_event) = attach_events.iter().next() {
         if release_event.manipulating_part {
-            for AttachPoint {
-                points,
-                entities,
-                too_close,
-            } in attach_points.0.iter()
-            {
-                if !too_close {
-                    commands.spawn().insert(JointBuilderComponent::new(
-                        BallJoint::new(points.0, points.1),
-                        entities.0,
-                        entities.1,
-                    ));
-                }
+            for PotentialJoint { points, entities } in attach_points.0.iter() {
+                commands.spawn().insert(JointBuilderComponent::new(
+                    BallJoint::new(points.0, points.1),
+                    entities.0,
+                    entities.1,
+                ));
             }
         }
     }

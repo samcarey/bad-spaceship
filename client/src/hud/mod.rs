@@ -1,6 +1,7 @@
 use bad_spaceship_shared::{
     part::{Holdable, TargetOrientation, TargetPosition},
-    AttachPoint, AttachPoints, HoldPoint, UpdateAttachPointsLabel,
+    ExistingJoint, ExistingJoints, HoldPoint, PotentialJoint, PotentialJoints,
+    UpdateAttachPointsLabel,
 };
 use bevy::{prelude::*, render::render_graph::base::MainPass};
 use normalization::*;
@@ -20,7 +21,12 @@ impl Plugin for TransformGizmoPlugin {
             .add_startup_system(initialize_attach_point.system())
             .init_resource::<AttachPointAppearance>()
             .add_system(
-                display_attach_points
+                display_potential_joints
+                    .system()
+                    .after(UpdateAttachPointsLabel),
+            )
+            .add_system(
+                display_existing_joints
                     .system()
                     .after(UpdateAttachPointsLabel),
             );
@@ -259,53 +265,79 @@ fn initialize_attach_point(
     };
 }
 
-struct DisplayedAttachPoint;
+struct DisplayedPotentialJoint;
 
-fn display_attach_points(
+fn display_potential_joints(
     mut commands: Commands,
     holdables: Query<&GlobalTransform, With<Holdable>>,
-    attach_points: Res<AttachPoints>,
-    mut displayed_points: Query<
-        (&mut Transform, &mut Visible, &mut Handle<StandardMaterial>),
-        With<DisplayedAttachPoint>,
-    >,
-    attach_point_appearance: Res<AttachPointAppearance>,
+    joints: Res<PotentialJoints>,
+    mut displayed_joints: Query<(&mut Transform, &mut Visible), With<DisplayedPotentialJoint>>,
+    displayed_joint_appearance: Res<AttachPointAppearance>,
 ) {
-    let mut display_points_iter = displayed_points.iter_mut();
-    for AttachPoint {
-        points,
-        entities,
-        too_close,
-    } in attach_points.0.iter()
-    {
+    let mut display_points_iter = displayed_joints.iter_mut();
+    for PotentialJoint { points, entities } in joints.0.iter() {
         if let Ok(transform) = holdables.get(entities.0) {
             let center = transform.translation + transform.rotation.mul_vec3(points.0.into());
-            let material = if *too_close {
-                attach_point_appearance.invalid_material.clone().unwrap()
-            } else {
-                attach_point_appearance.valid_material.clone().unwrap()
-            };
-            if let Some((mut displayed_transform, mut displayed_visible, mut displayed_material)) =
+            let material = displayed_joint_appearance.valid_material.clone().unwrap();
+
+            if let Some((mut displayed_transform, mut displayed_visible)) =
                 display_points_iter.next()
             {
                 displayed_transform.translation = center;
                 displayed_visible.is_visible = true;
-                *displayed_material = material;
             } else {
                 commands
                     .spawn_bundle(PbrBundle {
-                        mesh: attach_point_appearance.mesh.clone().unwrap(),
+                        mesh: displayed_joint_appearance.mesh.clone().unwrap(),
                         material,
                         transform: Transform::from_translation(center),
                         ..Default::default()
                     })
-                    .insert(DisplayedAttachPoint)
+                    .insert(DisplayedPotentialJoint)
                     .insert(GizmoPass)
                     .remove::<MainPass>();
             }
         }
     }
-    for (_, mut displayed_visible, _) in display_points_iter {
+    for (_, mut displayed_visible) in display_points_iter {
+        displayed_visible.is_visible = false;
+    }
+}
+
+struct DisplayedExistingJoint;
+
+fn display_existing_joints(
+    mut commands: Commands,
+    holdables: Query<&GlobalTransform, With<Holdable>>,
+    joints: Res<ExistingJoints>,
+    mut displayed_joints: Query<(&mut Transform, &mut Visible), With<DisplayedExistingJoint>>,
+    displayed_joint_appearance: Res<AttachPointAppearance>,
+) {
+    let mut display_joints_iter = displayed_joints.iter_mut();
+    for ExistingJoint { points, entities } in joints.0.iter() {
+        if let Ok(transform) = holdables.get(entities.0) {
+            let center = transform.translation + transform.rotation.mul_vec3(points.0.into());
+            let material = displayed_joint_appearance.invalid_material.clone().unwrap();
+            if let Some((mut displayed_transform, mut displayed_visible)) =
+                display_joints_iter.next()
+            {
+                displayed_transform.translation = center;
+                displayed_visible.is_visible = true;
+            } else {
+                commands
+                    .spawn_bundle(PbrBundle {
+                        mesh: displayed_joint_appearance.mesh.clone().unwrap(),
+                        material,
+                        transform: Transform::from_translation(center),
+                        ..Default::default()
+                    })
+                    .insert(DisplayedExistingJoint)
+                    .insert(GizmoPass)
+                    .remove::<MainPass>();
+            }
+        }
+    }
+    for (_, mut displayed_visible) in display_joints_iter {
         displayed_visible.is_visible = false;
     }
 }
