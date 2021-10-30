@@ -364,8 +364,8 @@ fn update_active_joints(
     joint_handles: Query<&JointHandleComponent>,
     joint_set: ResMut<JointSet>,
 ) {
-    potential_joints.0 = Vec::new();
-    existing_joints.0 = Vec::new();
+    potential_joints.0.clear();
+    existing_joints.0.clear();
 
     if let Some((holding, interactable)) = players.iter().next() {
         if holding.0 {
