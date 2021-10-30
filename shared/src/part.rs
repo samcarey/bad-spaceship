@@ -407,16 +407,6 @@ fn update_focused_joints(
 
                         for manifold in &contact_pair.manifolds {
                             for point in &manifold.points {
-                                // This can be used to prevent attached colliders from interacting, but I don't think it's necessary right now.
-                                // I originally added this because I thought the physics would be unstable otherwise, but it's actually OK.
-                                //
-                                // commands
-                                //     .entity(attach_event.primary_entity)
-                                //     .insert(IgnoreContactsWith(other_entity));
-                                // commands
-                                //     .entity(other_entity)
-                                //     .insert(IgnoreContactsWith(attach_event.primary_entity));
-
                                 let points = if ordered {
                                     (point.local_p1, point.local_p2)
                                 } else {
