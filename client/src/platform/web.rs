@@ -178,6 +178,7 @@ pub struct KeyboardTracker {
     a: Arc<AtomicBool>,
     space: Arc<AtomicBool>,
     shift: Arc<AtomicBool>,
+    control: Arc<AtomicBool>,
 }
 
 impl KeyboardTracker {
@@ -198,6 +199,7 @@ impl KeyboardTracker {
             "a" => Some(&self.a),
             " " => Some(&self.space),
             "Shift" => Some(&self.shift),
+            "Control" => Some(&self.control),
             _ => None,
         }
     }
@@ -234,6 +236,7 @@ pub fn get_keyboard_input(
     keyboard_input.set(&keyboard_tracker.a, KeyCode::A);
     keyboard_input.set(&keyboard_tracker.space, KeyCode::Space);
     keyboard_input.set(&keyboard_tracker.shift, KeyCode::LShift);
+    keyboard_input.set(&keyboard_tracker.control, KeyCode::LControl);
 }
 
 pub fn listen<F>(event_type: &'static str, callback: F)
