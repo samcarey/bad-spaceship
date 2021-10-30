@@ -32,11 +32,11 @@ impl Plugin for PartPlugin {
             .add_system(orient_held_part.system())
             .add_system(spawn_part.system())
             .add_system(update_attachable.system())
-            .add_system(
-                update_focused_joints
-                    .system()
+            .add_system_set(
+                SystemSet::new()
                     .label(UpdateAttachPointsLabel)
-                    .before(ToggleHoldingSystemLabel),
+                    .before(ToggleHoldingSystemLabel)
+                    .with_system(update_active_joints.system()), // .with_system(update_existing_joints.system()),
             )
             .add_system(
                 attach
@@ -355,7 +355,7 @@ fn orient_held_part(
     }
 }
 
-fn update_focused_joints(
+fn update_active_joints(
     holdables: Query<(), With<Holdable>>,
     narrow_phase: Res<NarrowPhase>,
     mut potential_joints: ResMut<PotentialJoints>,
@@ -370,63 +370,48 @@ fn update_focused_joints(
     if let Some((holding, interactable)) = players.iter().next() {
         if holding.0 {
             if let Some(entity1) = interactable.0 {
-                for contact_pair in narrow_phase
-                    .contacts_with(entity1.handle())
-                    .filter(|x| x.has_any_active_contact)
-                {
-                    let ordered = contact_pair.collider1.entity() == entity1;
-                    let entity2 = if ordered {
+                for contact_pair in narrow_phase.contacts_with(entity1.handle()) {
+                    let entity2 = if contact_pair.collider1.entity() == entity1 {
                         contact_pair.collider2.entity()
                     } else {
                         contact_pair.collider1.entity()
                     };
 
                     if holdables.get(entity2).is_ok() {
-                        let mut existing_joints_relative_to_1 = Vec::new();
                         for handle in joint_handles.iter() {
-                            if let Some(ordered) = if handle.entity1() == entity1
-                                && handle.entity2() == entity2
+                            if handle.entity1() == entity1 && handle.entity2() == entity2
+                                || handle.entity1() == entity2 && handle.entity2() == entity1
                             {
-                                Some(true)
-                            } else if handle.entity1() == entity2 && handle.entity2() == entity1 {
-                                Some(false)
-                            } else {
-                                None
-                            } {
                                 if let Some(joint) = joint_set.get(handle.handle()) {
                                     if let Some(ball_joint) = joint.params.as_ball_joint() {
-                                        existing_joints_relative_to_1.push(if ordered {
-                                            ball_joint.local_anchor1
-                                        } else {
-                                            ball_joint.local_anchor2
+                                        existing_joints.0.push(ExistingJoint {
+                                            entities: (joint.body1.entity(), joint.body2.entity()),
+                                            points: (
+                                                ball_joint.local_anchor1,
+                                                ball_joint.local_anchor2,
+                                            ),
                                         });
                                     }
                                 }
                             }
                         }
-
-                        for manifold in &contact_pair.manifolds {
-                            for point in &manifold.points {
-                                let points = if ordered {
-                                    (point.local_p1, point.local_p2)
-                                } else {
-                                    (point.local_p2, point.local_p1)
-                                };
-
-                                if existing_joints_relative_to_1
-                                    .iter()
-                                    .map(|p| (p - points.0).norm() as f32)
-                                    .all(|d| d > MIN_JOINT_SPACING)
-                                {
-                                    potential_joints.0.push(PotentialJoint {
-                                        entities: (entity1, entity2),
-                                        points,
-                                    });
-                                } else {
-                                    existing_joints.0.push(ExistingJoint {
-                                        entities: (entity1, entity2),
-                                        points,
-                                    });
+                        if contact_pair.has_any_active_contact {
+                            for manifold in &contact_pair.manifolds {
+                                for point in &manifold.points {
+                                    if existing_joints
+                                        .0
+                                        .iter()
+                                        .map(|p| (p.points.0 - point.local_p1).norm() as f32)
+                                        .all(|d| d > MIN_JOINT_SPACING)
+                                    {
+                                        potential_joints.0.push(PotentialJoint {
+                                            entities: (
+                                                contact_pair.collider1.entity(),
+                                                contact_pair.collider2.entity(),
+                                            ),
+                                            points: (point.local_p1, point.local_p2),
+                                        });
+                                    }
                                 }
                             }
                         }
