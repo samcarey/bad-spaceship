@@ -1,6 +1,7 @@
 use bad_spaceship_shared::{
-    utils::TransformExt, CameraOrbitCenter, InputEvents, KeyboardDirectionalInput, LeftClicked,
-    ManipulatingPart, MouseMotionDelta, PartRotation, PlayerClick, WebKeyCode, WebMouseButton,
+    utils::TransformExt, CameraOrbitCenter, DeletingJoint, InputEvents, KeyboardDirectionalInput,
+    LeftClicked, ManipulatingPart, MouseMotionDelta, PartRotation, PlayerClick, WebKeyCode,
+    WebMouseButton,
 };
 use bevy::{input::mouse::MouseMotion, input::mouse::MouseWheel, prelude::*};
 
@@ -21,7 +22,8 @@ impl Plugin for InputPlugin {
             )
             .add_event::<PlayerClick>()
             .add_system(get_left_click.system())
-            .add_system(get_manipulating_part.system());
+            .add_system(get_manipulating_part.system())
+            .add_system(get_deleting_joint.system());
     }
 }
 
@@ -198,5 +200,21 @@ fn get_manipulating_part(
         };
         manipulating_part.0 = (*state.current() == AppState::InGame)
             && (input.pressed(KeyCode::LShift) | input.pressed(KeyCode::RShift));
+    }
+}
+
+fn get_deleting_joint(
+    native_keyboard_input: Res<Input<KeyCode>>,
+    web_keyboard_input: Res<Input<WebKeyCode>>,
+    mut players: Query<&mut DeletingJoint>,
+    state: Res<State<AppState>>,
+) {
+    if let Some(mut deleting_joint) = players.iter_mut().next() {
+        let input = MergedKeyboardInput {
+            native_keyboard_input: &native_keyboard_input,
+            web_keyboard_input: &web_keyboard_input,
+        };
+        deleting_joint.0 = (*state.current() == AppState::InGame)
+            && (input.pressed(KeyCode::LControl) | input.pressed(KeyCode::RControl));
     }
 }
