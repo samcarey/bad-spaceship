@@ -2,8 +2,8 @@ use crate::map::PLATFORM_WIDTH_M;
 use crate::player::get_hold_point_entity;
 use crate::utils::{self, QuatExt, TransformExt};
 use crate::{
-    AttachEvent, Attachable, BoundingRadius, CameraOrbitCenter, DeletingJoint, DisplayableJoint,
-    ExistingJoints, Focused, FocusedInteractable, HoldPoint, Holding, Player, PlayerClick,
+    AttachEvent, Attachable, BoundingRadius, CameraOrbitCenter, DisplayableJoint, ExistingJoints,
+    Focused, FocusedInteractable, HoldPoint, Holding, ManipulatingPart, Player, PlayerClick,
     PotentialJoints, PredeleteJoint, PredeleteJoints, ToggleHoldingSystemLabel,
     UpdateAttachPointsLabel,
 };
@@ -218,29 +218,41 @@ const MAX_INTERACT_ANGLE: f32 = MAX_INTERACT_ANGLE_DEGREES * utils::DEG_TO_RADIA
 
 fn update_focused(
     mut commands: Commands,
-    mut players: Query<(&mut FocusedInteractable, &Holding, &Children), With<Player>>,
+    mut players: Query<
+        (
+            &mut FocusedInteractable,
+            &Holding,
+            &Children,
+            &ManipulatingPart,
+        ),
+        With<Player>,
+    >,
     mut interactables: Query<(&mut Transform, Entity), With<Interactable>>,
     camera_orbit_centers: Query<&GlobalTransform, With<CameraOrbitCenter>>,
 ) {
     // Determine which iteractable entity each player is focused on (i.e. looking at, within range)
-    for (mut focused_interactable, holding, player_children) in players.iter_mut() {
+    for (mut focused_interactable, holding, player_children, manipulating_part) in
+        players.iter_mut()
+    {
         if !holding.0 {
             let mut newly_focused_interactable_option = None;
-            for player_child in player_children.iter() {
-                if let Ok(camera_orbit_center) = camera_orbit_centers.get(*player_child) {
-                    // Search for the most appropriate interactable that should be focused by the player
-                    let mut smallest_angle = MAX_INTERACT_ANGLE;
+            if !manipulating_part.0 {
+                for player_child in player_children.iter() {
+                    if let Ok(camera_orbit_center) = camera_orbit_centers.get(*player_child) {
+                        // Search for the most appropriate interactable that should be focused by the player
+                        let mut smallest_angle = MAX_INTERACT_ANGLE;
 
-                    for (interactable_transform, interactable) in interactables.iter_mut() {
-                        let vector_between =
-                            interactable_transform.translation - camera_orbit_center.translation;
-                        if vector_between.length_squared() < MAX_INTERACT_DISTANCE_SQUARED {
-                            let angle_from_look =
-                                camera_orbit_center.forward().angle_between(vector_between);
+                        for (interactable_transform, interactable) in interactables.iter_mut() {
+                            let vector_between = interactable_transform.translation
+                                - camera_orbit_center.translation;
+                            if vector_between.length_squared() < MAX_INTERACT_DISTANCE_SQUARED {
+                                let angle_from_look =
+                                    camera_orbit_center.forward().angle_between(vector_between);
 
-                            if angle_from_look < smallest_angle {
-                                smallest_angle = angle_from_look;
-                                newly_focused_interactable_option = Some(interactable);
+                                if angle_from_look < smallest_angle {
+                                    smallest_angle = angle_from_look;
+                                    newly_focused_interactable_option = Some(interactable);
+                                }
                             }
                         }
                     }
@@ -371,7 +383,7 @@ fn update_active_joints(
     mut potential_joints: ResMut<PotentialJoints>,
     mut existing_joints: ResMut<ExistingJoints>,
     mut predelete_joints: ResMut<PredeleteJoints>,
-    players: Query<(&Holding, &FocusedInteractable, &DeletingJoint, &Children)>,
+    players: Query<(&Holding, &FocusedInteractable, &ManipulatingPart, &Children)>,
     joint_handles: Query<(Entity, &JointHandleComponent)>,
     joint_set: ResMut<JointSet>,
     hold_points: QuerySet<(
@@ -386,7 +398,7 @@ fn update_active_joints(
     existing_joints.0.clear();
     predelete_joints.0.clear();
 
-    if let Some((holding, interactable, deleting, player_children)) = players.iter().next() {
+    if let Some((holding, interactable, manipulating, player_children)) = players.iter().next() {
         if holding.0 {
             if let Some(entity1) = interactable.0 {
                 for contact_pair in narrow_phase.contacts_with(entity1.handle()) {
@@ -437,7 +449,7 @@ fn update_active_joints(
                     }
                 }
             }
-        } else if deleting.0 {
+        } else if manipulating.0 {
             if let Some(entity) =
                 get_hold_point_entity(player_children, camera_orbit_centers, hold_points.q0())
             {

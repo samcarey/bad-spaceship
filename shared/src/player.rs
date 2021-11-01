@@ -15,7 +15,7 @@ use serde::Deserialize;
 use crate::{
     part::{Holdable, TargetOrientation, TargetPosition},
     utils::{ToVec3, DEG_TO_RADIANS},
-    AttachEvent, BoundingRadius, CameraOrbitCenter, Character, DeletingJoint, DirectionalInput,
+    AttachEvent, BoundingRadius, CameraOrbitCenter, Character, DirectionalInput,
     FocusedInteractable, GameStickDirectionalInput, HoldEvent, HoldPoint, Holding, InputEvents,
     KeyboardDirectionalInput, LeftClicked, ManipulatingPart, MouseMotionDelta, OrbitingCamera,
     OriginalPosition, PartRotation, Player, PlayerClick, ReleaseEvent, ToggleHoldingSystemLabel,
@@ -121,7 +121,6 @@ struct PlayerBundle {
     part_rotation: PartRotation,
     clicked: LeftClicked,
     manipulating_part: ManipulatingPart,
-    deleting_joint: DeletingJoint,
 }
 
 impl PlayerBundle {
@@ -222,14 +221,17 @@ fn attach_camera_orbit(
 
 fn mouse_motion(
     time: Res<Time>,
-    mut query: Query<(&mut OrbitingCamera, &mut Yaw, &MouseMotionDelta)>,
+    mut query: Query<(&mut OrbitingCamera, &mut Yaw, &MouseMotionDelta, &Holding)>,
     mut camera_orbit_center_transforms: Query<&mut Transform, With<CameraOrbitCenter>>,
     configs: ResMut<Assets<Config>>,
     keyboard_input: Res<Input<KeyCode>>,
 ) {
     if let Some((_, config)) = configs.iter().next() {
-        if let Some((mut orbiting_camera, mut yaw, mouse_delta)) = query.iter_mut().next() {
-            if !(keyboard_input.pressed(KeyCode::LShift) | keyboard_input.pressed(KeyCode::RShift))
+        if let Some((mut orbiting_camera, mut yaw, mouse_delta, holding)) = query.iter_mut().next()
+        {
+            if !(holding.0
+                && (keyboard_input.pressed(KeyCode::LShift)
+                    | keyboard_input.pressed(KeyCode::RShift)))
             {
                 yaw.0 = (yaw.0 + mouse_delta.0.x * time.delta_seconds() * config.look_sensitivity)
                     % std::f32::consts::TAU;
@@ -322,7 +324,6 @@ fn toggle_holding(
             &FocusedInteractable,
             &Children,
             &ManipulatingPart,
-            &DeletingJoint,
         ),
         With<Player>,
     >,
@@ -334,12 +335,9 @@ fn toggle_holding(
     mut hold_events: EventWriter<HoldEvent>,
 ) {
     if clicks.iter().next().is_some() {
-        if let Some((mut holding, interactable, player_children, manipulating_part, deleting)) =
+        if let Some((mut holding, interactable, player_children, manipulating_part)) =
             players.iter_mut().next()
         {
-            if deleting.0 {
-                return;
-            }
             if let Some(current_interactable) = interactable.0 {
                 if let Ok(original_transform) = holdables.get(current_interactable) {
                     if let Some(hold_point_entity) =
@@ -355,7 +353,7 @@ fn toggle_holding(
                                     .remove_bundle::<HeldBundle>();
                                 release_events.send(ReleaseEvent);
                             }
-                        } else {
+                        } else if !manipulating_part.0 {
                             holding.0 = true;
                             commands
                                 .entity(current_interactable)

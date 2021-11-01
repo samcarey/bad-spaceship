@@ -126,9 +126,6 @@ pub struct LeftClicked(pub bool);
 #[derive(Default)]
 pub struct ManipulatingPart(pub bool);
 
-#[derive(Default)]
-pub struct DeletingJoint(pub bool);
-
 #[derive(Clone, Copy)]
 struct IgnoreContactsWith(Entity);
 
