@@ -116,8 +116,8 @@ Move mouse to look.
 Click while aiming at block within range to  it pick up.
 Click again to drop it.
 Hold shift and move mouse or scroll to rotate a held block.
-Hold shift while held block is touching another to display potential joints (in yellow).
-Shift click to make potential joints real (displayed in blue).
+Hold block to touch another to display potential joints (in yellow).
+Shift-click to make potential joints real (displayed in blue).
 While not holding block, hold control to display deletion zone.
 Hold deletion zone over existing joint to highlight it in red.
 Click while joint is highlighted red to delete it.
