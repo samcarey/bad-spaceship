@@ -132,9 +132,9 @@ pub struct DeletingJoint(pub bool);
 #[derive(Clone, Copy)]
 struct IgnoreContactsWith(Entity);
 
-struct ReleaseEvent {
-    manipulating_part: bool,
-}
+struct AttachEvent;
+
+struct ReleaseEvent;
 
 struct HoldEvent {
     held: Entity,

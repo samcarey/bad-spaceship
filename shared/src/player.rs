@@ -15,7 +15,7 @@ use serde::Deserialize;
 use crate::{
     part::{Holdable, TargetOrientation, TargetPosition},
     utils::{ToVec3, DEG_TO_RADIANS},
-    BoundingRadius, CameraOrbitCenter, Character, DeletingJoint, DirectionalInput,
+    AttachEvent, BoundingRadius, CameraOrbitCenter, Character, DeletingJoint, DirectionalInput,
     FocusedInteractable, GameStickDirectionalInput, HoldEvent, HoldPoint, Holding, InputEvents,
     KeyboardDirectionalInput, LeftClicked, ManipulatingPart, MouseMotionDelta, OrbitingCamera,
     OriginalPosition, PartRotation, Player, PlayerClick, ReleaseEvent, ToggleHoldingSystemLabel,
@@ -49,6 +49,7 @@ impl Plugin for PlayerPlugin {
             .add_event::<PlayerClick>()
             .add_asset::<Config>()
             .add_system(apply_part_rotation.system())
+            .add_event::<AttachEvent>()
             .add_event::<ReleaseEvent>()
             .init_resource::<CameraOrbitOffset>()
             .add_system_set(
@@ -328,7 +329,8 @@ fn toggle_holding(
     camera_orbit_centers: Query<&Children>,
     hold_points: Query<(), With<HoldPoint>>,
     holdables: Query<&GlobalTransform, With<Holdable>>,
-    mut attach_events: EventWriter<ReleaseEvent>,
+    mut attach_events: EventWriter<AttachEvent>,
+    mut release_events: EventWriter<ReleaseEvent>,
     mut hold_events: EventWriter<HoldEvent>,
 ) {
     if clicks.iter().next().is_some() {
@@ -344,13 +346,15 @@ fn toggle_holding(
                         get_hold_point_entity(player_children, camera_orbit_centers, &hold_points)
                     {
                         if holding.0 {
-                            holding.0 = false;
-                            commands
-                                .entity(current_interactable)
-                                .remove_bundle::<HeldBundle>();
-                            attach_events.send(ReleaseEvent {
-                                manipulating_part: manipulating_part.0,
-                            });
+                            if manipulating_part.0 {
+                                attach_events.send(AttachEvent);
+                            } else {
+                                holding.0 = false;
+                                commands
+                                    .entity(current_interactable)
+                                    .remove_bundle::<HeldBundle>();
+                                release_events.send(ReleaseEvent);
+                            }
                         } else {
                             holding.0 = true;
                             commands

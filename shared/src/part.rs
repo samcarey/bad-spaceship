@@ -2,9 +2,9 @@ use crate::map::PLATFORM_WIDTH_M;
 use crate::player::get_hold_point_entity;
 use crate::utils::{self, QuatExt, TransformExt};
 use crate::{
-    Attachable, BoundingRadius, CameraOrbitCenter, DeletingJoint, DisplayableJoint, ExistingJoints,
-    Focused, FocusedInteractable, HoldPoint, Holding, Player, PlayerClick, PotentialJoints,
-    PredeleteJoint, PredeleteJoints, ReleaseEvent, ToggleHoldingSystemLabel,
+    AttachEvent, Attachable, BoundingRadius, CameraOrbitCenter, DeletingJoint, DisplayableJoint,
+    ExistingJoints, Focused, FocusedInteractable, HoldPoint, Holding, Player, PlayerClick,
+    PotentialJoints, PredeleteJoint, PredeleteJoints, ToggleHoldingSystemLabel,
     UpdateAttachPointsLabel,
 };
 use bevy::prelude::*;
@@ -470,18 +470,16 @@ fn update_active_joints(
 
 fn attach(
     mut commands: Commands,
-    mut attach_events: EventReader<ReleaseEvent>,
+    mut attach_events: EventReader<AttachEvent>,
     attach_points: Res<PotentialJoints>,
 ) {
-    if let Some(release_event) = attach_events.iter().next() {
-        if release_event.manipulating_part {
-            for DisplayableJoint { points, entities } in attach_points.0.iter() {
-                commands.spawn().insert(JointBuilderComponent::new(
-                    BallJoint::new(points.0, points.1),
-                    entities.0,
-                    entities.1,
-                ));
-            }
+    if attach_events.iter().next().is_some() {
+        for DisplayableJoint { points, entities } in attach_points.0.iter() {
+            commands.spawn().insert(JointBuilderComponent::new(
+                BallJoint::new(points.0, points.1),
+                entities.0,
+                entities.1,
+            ));
         }
     }
 }
