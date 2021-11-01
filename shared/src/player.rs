@@ -321,6 +321,7 @@ fn toggle_holding(
             &FocusedInteractable,
             &Children,
             &ManipulatingPart,
+            &DeletingJoint,
         ),
         With<Player>,
     >,
@@ -331,9 +332,12 @@ fn toggle_holding(
     mut hold_events: EventWriter<HoldEvent>,
 ) {
     if clicks.iter().next().is_some() {
-        if let Some((mut holding, interactable, player_children, manipulating_part)) =
+        if let Some((mut holding, interactable, player_children, manipulating_part, deleting)) =
             players.iter_mut().next()
         {
+            if deleting.0 {
+                return;
+            }
             if let Some(current_interactable) = interactable.0 {
                 if let Ok(original_transform) = holdables.get(current_interactable) {
                     if let Some(hold_point_entity) =
