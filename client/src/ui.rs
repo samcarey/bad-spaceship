@@ -25,6 +25,7 @@ impl Plugin for UiPlugin {
                     .with_system(capture_mouse_on_click.system()),
             )
             .add_system(update_ui_scale_factor.system())
+            .add_system(show_instructions.system())
             .add_system(show_bottom_panel.system());
     }
 }
@@ -105,6 +106,29 @@ fn show_bottom_panel(egui_ctx: ResMut<EguiContext>, diagnostics: Res<Diagnostics
                 ui.with_layout(Layout::right_to_left(), |ui| {
                     ui.colored_label(Color32::from_rgb(255, 0, 0), format!("{:.0} FPS", fps,));
                 });
+            });
+        });
+}
+
+const INSTRUCTIONS: &str = "Instructions:
+Press WSDA keys to move.
+Move mouse to look.
+Click while aiming at block within range to  it pick up.
+Click again to drop it.
+Hold shift and move mouse or scroll to rotate a held block.
+Hold shift while held block is touching another to display potential joints (in yellow).
+Shift click to make potential joints real (displayed in blue).
+While not holding block, hold control to display deletion zone.
+Hold deletion zone over existing joint to highlight it in red.
+Click while joint is highlighted red to delete it.
+";
+
+fn show_instructions(egui_ctx: ResMut<EguiContext>) {
+    egui::TopBottomPanel::top("top_panel")
+        .frame(Frame::default().multiply_with_opacity(0.0))
+        .show(egui_ctx.ctx(), |ui| {
+            ui.horizontal(|ui| {
+                ui.colored_label(Color32::from_rgb(255, 0, 0), INSTRUCTIONS);
             });
         });
 }
