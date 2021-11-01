@@ -111,6 +111,7 @@ fn show_bottom_panel(egui_ctx: ResMut<EguiContext>, diagnostics: Res<Diagnostics
 }
 
 const INSTRUCTIONS: &str = "Instructions:
+For best experience, open this in Google Chrome and use a mouse and keyboard.
 Press WSDA keys to move.
 Move mouse to look.
 Click while aiming at block within range to  it pick up.
