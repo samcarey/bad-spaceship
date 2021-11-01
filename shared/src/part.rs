@@ -1,9 +1,11 @@
 use crate::map::PLATFORM_WIDTH_M;
+use crate::player::get_hold_point_entity;
 use crate::utils::{self, QuatExt, TransformExt};
 use crate::{
-    Attachable, BoundingRadius, CameraOrbitCenter, ExistingJoint, ExistingJoints, Focused,
-    FocusedInteractable, HoldPoint, Holding, Player, PotentialJoint, PotentialJoints, ReleaseEvent,
-    ToggleHoldingSystemLabel, UpdateAttachPointsLabel,
+    Attachable, BoundingRadius, CameraOrbitCenter, DeletingJoint, DisplayableJoint, ExistingJoints,
+    Focused, FocusedInteractable, HoldPoint, Holding, Player, PlayerClick, PotentialJoints,
+    PredeleteJoint, PredeleteJoints, ReleaseEvent, ToggleHoldingSystemLabel,
+    UpdateAttachPointsLabel,
 };
 use bevy::prelude::*;
 use bevy_rapier3d::na::Vector3;
@@ -44,8 +46,15 @@ impl Plugin for PartPlugin {
                     .after(ToggleHoldingSystemLabel)
                     .after(UpdateAttachPointsLabel),
             )
+            .add_system(
+                delete_joints
+                    .system()
+                    .after(ToggleHoldingSystemLabel)
+                    .after(UpdateAttachPointsLabel),
+            )
             .init_resource::<PotentialJoints>()
-            .init_resource::<ExistingJoints>();
+            .init_resource::<ExistingJoints>()
+            .init_resource::<PredeleteJoints>();
     }
 }
 
@@ -57,6 +66,7 @@ const MAX_PART_VOLUME: f32 = 2.0;
 const POSITIONING_STIFFNESS: f32 = 30.0;
 const ORIENTING_STIFFNESS: f32 = 5.0;
 const MIN_JOINT_SPACING: f32 = MIN_PART_SIZE / 2.0;
+pub const DELETE_RADIUS: f32 = 1.0;
 
 #[derive(Default)]
 struct Interactable;
@@ -356,18 +366,27 @@ fn orient_held_part(
 }
 
 fn update_active_joints(
-    holdables: Query<(), With<Holdable>>,
+    holdables: Query<&GlobalTransform, With<Holdable>>,
     narrow_phase: Res<NarrowPhase>,
     mut potential_joints: ResMut<PotentialJoints>,
     mut existing_joints: ResMut<ExistingJoints>,
-    players: Query<(&Holding, &FocusedInteractable)>,
-    joint_handles: Query<&JointHandleComponent>,
+    mut predelete_joints: ResMut<PredeleteJoints>,
+    players: Query<(&Holding, &FocusedInteractable, &DeletingJoint, &Children)>,
+    joint_handles: Query<(Entity, &JointHandleComponent)>,
     joint_set: ResMut<JointSet>,
+    hold_points: QuerySet<(
+        Query<(), With<HoldPoint>>,
+        Query<&GlobalTransform, With<HoldPoint>>,
+    )>,
+    camera_orbit_centers: Query<&Children>,
 ) {
+    // TODO: this function could probably optimized a lot.
+
     potential_joints.0.clear();
     existing_joints.0.clear();
+    predelete_joints.0.clear();
 
-    if let Some((holding, interactable)) = players.iter().next() {
+    if let Some((holding, interactable, deleting, player_children)) = players.iter().next() {
         if holding.0 {
             if let Some(entity1) = interactable.0 {
                 for contact_pair in narrow_phase.contacts_with(entity1.handle()) {
@@ -378,13 +397,13 @@ fn update_active_joints(
                     };
 
                     if holdables.get(entity2).is_ok() {
-                        for handle in joint_handles.iter() {
+                        for (_, handle) in joint_handles.iter() {
                             if handle.entity1() == entity1 && handle.entity2() == entity2
                                 || handle.entity1() == entity2 && handle.entity2() == entity1
                             {
                                 if let Some(joint) = joint_set.get(handle.handle()) {
                                     if let Some(ball_joint) = joint.params.as_ball_joint() {
-                                        existing_joints.0.push(ExistingJoint {
+                                        existing_joints.0.push(DisplayableJoint {
                                             entities: (joint.body1.entity(), joint.body2.entity()),
                                             points: (
                                                 ball_joint.local_anchor1,
@@ -404,12 +423,39 @@ fn update_active_joints(
                                         .map(|p| (p.points.0 - point.local_p1).norm() as f32)
                                         .all(|d| d > MIN_JOINT_SPACING)
                                     {
-                                        potential_joints.0.push(PotentialJoint {
+                                        potential_joints.0.push(DisplayableJoint {
                                             entities: (
                                                 contact_pair.collider1.entity(),
                                                 contact_pair.collider2.entity(),
                                             ),
                                             points: (point.local_p1, point.local_p2),
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } else if deleting.0 {
+            if let Some(entity) =
+                get_hold_point_entity(player_children, camera_orbit_centers, hold_points.q0())
+            {
+                if let Ok(hold_point_position) = hold_points.q1().get(entity) {
+                    for (joint_entity, joint_handle) in joint_handles.iter() {
+                        if let Some(joint) = joint_set.get(joint_handle.handle()) {
+                            if let Ok(transform) = holdables.get(joint.body1.entity()) {
+                                if let Some(ball_joint) = joint.params.as_ball_joint() {
+                                    let center = transform.translation
+                                        + transform
+                                            .rotation
+                                            .mul_vec3(ball_joint.local_anchor1.into());
+                                    if (center - hold_point_position.translation).length()
+                                        < DELETE_RADIUS
+                                    {
+                                        predelete_joints.0.push(PredeleteJoint {
+                                            entity: joint_entity,
+                                            translation: center,
                                         });
                                     }
                                 }
@@ -429,13 +475,25 @@ fn attach(
 ) {
     if let Some(release_event) = attach_events.iter().next() {
         if release_event.manipulating_part {
-            for PotentialJoint { points, entities } in attach_points.0.iter() {
+            for DisplayableJoint { points, entities } in attach_points.0.iter() {
                 commands.spawn().insert(JointBuilderComponent::new(
                     BallJoint::new(points.0, points.1),
                     entities.0,
                     entities.1,
                 ));
             }
+        }
+    }
+}
+
+fn delete_joints(
+    mut commands: Commands,
+    predelete_joints: Res<PredeleteJoints>,
+    mut clicks: EventReader<PlayerClick>,
+) {
+    if clicks.iter().next().is_some() {
+        for PredeleteJoint { entity, .. } in predelete_joints.0.iter() {
+            commands.entity(*entity).despawn_recursive();
         }
     }
 }

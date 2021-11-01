@@ -15,8 +15,8 @@ use serde::Deserialize;
 use crate::{
     part::{Holdable, TargetOrientation, TargetPosition},
     utils::{ToVec3, DEG_TO_RADIANS},
-    BoundingRadius, CameraOrbitCenter, Character, DirectionalInput, FocusedInteractable,
-    GameStickDirectionalInput, HoldEvent, HoldPoint, Holding, InputEvents,
+    BoundingRadius, CameraOrbitCenter, Character, DeletingJoint, DirectionalInput,
+    FocusedInteractable, GameStickDirectionalInput, HoldEvent, HoldPoint, Holding, InputEvents,
     KeyboardDirectionalInput, LeftClicked, ManipulatingPart, MouseMotionDelta, OrbitingCamera,
     OriginalPosition, PartRotation, Player, PlayerClick, ReleaseEvent, ToggleHoldingSystemLabel,
     Yaw, INITIAL_CAMERA_PITCH,
@@ -120,6 +120,7 @@ struct PlayerBundle {
     part_rotation: PartRotation,
     clicked: LeftClicked,
     manipulating_part: ManipulatingPart,
+    deleting_joint: DeletingJoint,
 }
 
 impl PlayerBundle {
@@ -277,17 +278,18 @@ fn mouse_zoom(
     }
 }
 
-fn get_hold_point_entity(
+pub fn get_hold_point_entity(
     player_children: &Children,
     camera_orbit_centers: Query<&Children>,
-    hold_points: Query<Entity, With<HoldPoint>>,
+    hold_points: &Query<(), With<HoldPoint>>,
 ) -> Option<Entity> {
+    // TODO: eliminate need for this function
     let mut held_entity: Option<Entity> = None;
     if let Some(camera_orbit_center) = player_children.iter().next() {
         if let Ok(potential_hold_points) = camera_orbit_centers.get(*camera_orbit_center) {
             for potential_hold_point in potential_hold_points.iter() {
-                if let Ok(held_entity_component) = hold_points.get(*potential_hold_point) {
-                    held_entity = Some(held_entity_component);
+                if hold_points.get(*potential_hold_point).is_ok() {
+                    held_entity = Some(*potential_hold_point);
                 }
             }
         }
@@ -323,7 +325,7 @@ fn toggle_holding(
         With<Player>,
     >,
     camera_orbit_centers: Query<&Children>,
-    hold_points: Query<Entity, With<HoldPoint>>,
+    hold_points: Query<(), With<HoldPoint>>,
     holdables: Query<&GlobalTransform, With<Holdable>>,
     mut attach_events: EventWriter<ReleaseEvent>,
     mut hold_events: EventWriter<HoldEvent>,
@@ -335,7 +337,7 @@ fn toggle_holding(
             if let Some(current_interactable) = interactable.0 {
                 if let Ok(original_transform) = holdables.get(current_interactable) {
                     if let Some(hold_point_entity) =
-                        get_hold_point_entity(player_children, camera_orbit_centers, hold_points)
+                        get_hold_point_entity(player_children, camera_orbit_centers, &hold_points)
                     {
                         if holding.0 {
                             holding.0 = false;

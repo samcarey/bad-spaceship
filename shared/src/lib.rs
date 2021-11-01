@@ -126,6 +126,9 @@ pub struct LeftClicked(pub bool);
 #[derive(Default)]
 pub struct ManipulatingPart(pub bool);
 
+#[derive(Default)]
+pub struct DeletingJoint(pub bool);
+
 #[derive(Clone, Copy)]
 struct IgnoreContactsWith(Entity);
 
@@ -139,21 +142,24 @@ struct HoldEvent {
 
 type ContactPoint = OPoint<f32, Const<3>>;
 
-pub struct PotentialJoint {
-    pub points: (ContactPoint, ContactPoint),
-    pub entities: (Entity, Entity),
-}
-
-pub struct ExistingJoint {
+pub struct DisplayableJoint {
     pub points: (ContactPoint, ContactPoint),
     pub entities: (Entity, Entity),
 }
 
 #[derive(Default)]
-pub struct PotentialJoints(pub Vec<PotentialJoint>);
+pub struct PotentialJoints(pub Vec<DisplayableJoint>);
 
 #[derive(Default)]
-pub struct ExistingJoints(pub Vec<ExistingJoint>);
+pub struct ExistingJoints(pub Vec<DisplayableJoint>);
+
+pub struct PredeleteJoint {
+    pub entity: Entity,
+    pub translation: Vec3,
+}
+
+#[derive(Default)]
+pub struct PredeleteJoints(pub Vec<PredeleteJoint>);
 
 #[derive(SystemLabel, Clone, Hash, Debug, PartialEq, Eq)]
 struct ToggleHoldingSystemLabel;
