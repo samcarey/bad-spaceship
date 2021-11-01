@@ -391,26 +391,30 @@ fn add_hold_point_delete_zone_visualization(
     hold_points_without_visualization: Query<Entity, (With<HoldPoint>, Without<Visible>)>,
 ) {
     if let Some(entity) = hold_points_without_visualization.iter().next() {
-        commands.entity(entity).insert_bundle(PbrBundle {
-            visible: Visible {
-                is_visible: false,
-                is_transparent: true,
-            },
-            mesh: meshes.add(
-                shape::Icosphere {
-                    radius: DELETE_RADIUS,
+        commands
+            .entity(entity)
+            .insert_bundle(PbrBundle {
+                visible: Visible {
+                    is_visible: false,
+                    is_transparent: true,
+                },
+                mesh: meshes.add(
+                    shape::Icosphere {
+                        radius: DELETE_RADIUS,
+                        ..Default::default()
+                    }
+                    .into(),
+                ),
+                material: materials.add(StandardMaterial {
+                    base_color: Color::rgba(0.6, 0.5, 0.0, 0.25),
+                    roughness: 1.0,
+                    unlit: true,
                     ..Default::default()
-                }
-                .into(),
-            ),
-            material: materials.add(StandardMaterial {
-                base_color: Color::rgba(0.6, 0.5, 0.0, 0.25),
-                roughness: 1.0,
-                unlit: true,
+                }),
                 ..Default::default()
-            }),
-            ..Default::default()
-        });
+            })
+            .insert(GizmoPass)
+            .remove::<MainPass>();
     }
 }
 
