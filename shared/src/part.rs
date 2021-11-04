@@ -38,7 +38,8 @@ impl Plugin for PartPlugin {
                 SystemSet::new()
                     .label(UpdateAttachPointsLabel)
                     .before(ToggleHoldingSystemLabel)
-                    .with_system(update_active_joints.system()), // .with_system(update_existing_joints.system()),
+                    .with_system(update_active_joints.system())
+                    .with_system(update_predelete_joints.system()),
             )
             .add_system(
                 attach
@@ -382,23 +383,14 @@ fn update_active_joints(
     narrow_phase: Res<NarrowPhase>,
     mut potential_joints: ResMut<PotentialJoints>,
     mut existing_joints: ResMut<ExistingJoints>,
-    mut predelete_joints: ResMut<PredeleteJoints>,
-    players: Query<(&Holding, &FocusedInteractable, &ManipulatingPart, &Children)>,
+    players: Query<(&Holding, &FocusedInteractable)>,
     joint_handles: Query<(Entity, &JointHandleComponent)>,
     joint_set: ResMut<JointSet>,
-    hold_points: QuerySet<(
-        Query<(), With<HoldPoint>>,
-        Query<&GlobalTransform, With<HoldPoint>>,
-    )>,
-    camera_orbit_centers: Query<&Children>,
 ) {
-    // TODO: this function could probably optimized a lot.
-
     potential_joints.0.clear();
     existing_joints.0.clear();
-    predelete_joints.0.clear();
 
-    if let Some((holding, interactable, manipulating, player_children)) = players.iter().next() {
+    if let Some((holding, interactable)) = players.iter().next() {
         if holding.0 {
             if let Some(entity1) = interactable.0 {
                 for contact_pair in narrow_phase.contacts_with(entity1.handle()) {
@@ -449,7 +441,26 @@ fn update_active_joints(
                     }
                 }
             }
-        } else if manipulating.0 {
+        }
+    }
+}
+
+fn update_predelete_joints(
+    holdables: Query<&GlobalTransform, With<Holdable>>,
+    mut predelete_joints: ResMut<PredeleteJoints>,
+    players: Query<(&Holding, &ManipulatingPart, &Children)>,
+    joint_handles: Query<(Entity, &JointHandleComponent)>,
+    joint_set: ResMut<JointSet>,
+    hold_points: QuerySet<(
+        Query<(), With<HoldPoint>>,
+        Query<&GlobalTransform, With<HoldPoint>>,
+    )>,
+    camera_orbit_centers: Query<&Children>,
+) {
+    predelete_joints.0.clear();
+
+    if let Some((holding, manipulating, player_children)) = players.iter().next() {
+        if !holding.0 && manipulating.0 {
             if let Some(entity) =
                 get_hold_point_entity(player_children, camera_orbit_centers, hold_points.q0())
             {
