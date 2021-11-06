@@ -38,9 +38,10 @@ fn attacheable_add_highlight(
             base_color: color.clone(),
         });
 
-        // Make more turquiose
-        color.set_g((color.g() + 0.75).min(1.0));
-        color.set_b((color.b() + 0.75).min(1.0));
+        // Make turquiose
+        color.set_r(0.0);
+        color.set_g(1.0);
+        color.set_b(1.0);
     }
 }
 
@@ -62,9 +63,10 @@ fn focused_add_highlight(
             base_color: color.clone(),
         });
 
-        // Make more yellowish
-        color.set_g((color.g() + 0.75).min(1.0));
-        color.set_r((color.r() + 0.75).min(1.0));
+        // Make yellow
+        color.set_r(1.0);
+        color.set_g(1.0);
+        color.set_b(0.0);
     }
 }
 

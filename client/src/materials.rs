@@ -12,8 +12,8 @@ impl Plugin for MaterialsPlugin {
 
 struct AssignedMaterial;
 
-const COLOR_MIN: f32 = 0.1;
-const COLOR_MAX: f32 = 0.95;
+const COLOR_MIN: f32 = 0.2;
+const COLOR_MAX: f32 = 0.7;
 
 fn assign_parts(
     mut commands: Commands,
