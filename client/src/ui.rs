@@ -113,8 +113,9 @@ fn show_bottom_panel(egui_ctx: ResMut<EguiContext>, diagnostics: Res<Diagnostics
 const INSTRUCTIONS: &str = "Instructions:
 For best experience, open this in Google Chrome and use a mouse and keyboard.
 Press WSDA keys to move.
-Move mouse to look.
-Click while aiming at block within range to  it pick up.
+Move mouse to look around.
+Look at block within range to highlight it.
+Click while block is highlighted to pick it up.
 Click again to drop it.
 Hold shift and move mouse or scroll to rotate a held block.
 Hold block to touch another to display potential joints (in yellow).
