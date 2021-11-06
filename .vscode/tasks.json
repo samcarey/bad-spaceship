@@ -43,6 +43,21 @@
             "dependsOn": [
                 "build-web"
             ]
-        }
+        },
+        {
+            "label": "run-server-debug",
+            "type": "shell",
+            "command": "cd server ; cargo run"
+        },
+        {
+            "label": "run-server-release",
+            "type": "shell",
+            "command": "cd server ; cargo run --release"
+        },
+        {
+            "label": "build-server-debug",
+            "type": "shell",
+            "command": "cd server ; cargo build"
+        },
     ]
 }
