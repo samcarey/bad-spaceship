@@ -1,7 +1,7 @@
 use bad_spaceship_shared::{
     part::{Holdable, TargetOrientation, TargetPosition, DELETE_RADIUS},
     player::get_hold_point_entity,
-    DisplayableJoint, ExistingJoints, HoldPoint, Holding, ManipulatingPart, PotentialJoints,
+    DisplayableJoint, ExistingJoints, HoldPoint, Holding, Modifying, PotentialJoints,
     PredeleteJoint, PredeleteJoints, UpdateAttachPointsLabel,
 };
 use bevy::{prelude::*, render::render_graph::base::MainPass};
@@ -419,19 +419,19 @@ fn add_hold_point_delete_zone_visualization(
 }
 
 fn delete_zone_visibility(
-    players: Query<(&Holding, &ManipulatingPart, &Children)>,
+    players: Query<(&Holding, &Modifying, &Children)>,
     mut hold_points: QuerySet<(
         Query<(), With<HoldPoint>>,
         Query<&mut Visible, With<HoldPoint>>,
     )>,
     camera_orbit_centers: Query<&Children>,
 ) {
-    if let Some((holding, manipulating_part, player_children)) = players.iter().next() {
+    if let Some((holding, modifying, player_children)) = players.iter().next() {
         if let Some(entity) =
             get_hold_point_entity(player_children, camera_orbit_centers, hold_points.q0())
         {
             if let Ok(mut visible) = hold_points.q1_mut().get_mut(entity) {
-                visible.is_visible = manipulating_part.0 && !holding.0;
+                visible.is_visible = modifying.0 && !holding.0;
             }
         }
     }

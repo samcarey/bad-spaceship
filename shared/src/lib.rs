@@ -124,7 +124,7 @@ pub struct Attachable;
 pub struct LeftClicked(pub bool);
 
 #[derive(Default)]
-pub struct ManipulatingPart(pub bool);
+pub struct Modifying(pub bool);
 
 #[derive(Clone, Copy)]
 struct IgnoreContactsWith(Entity);

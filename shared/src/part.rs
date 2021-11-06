@@ -3,7 +3,7 @@ use crate::player::get_hold_point_entity;
 use crate::utils::{self, QuatExt, TransformExt};
 use crate::{
     AttachEvent, Attachable, BoundingRadius, CameraOrbitCenter, DisplayableJoint, ExistingJoints,
-    Focused, FocusedInteractable, HoldPoint, Holding, ManipulatingPart, Player, PlayerClick,
+    Focused, FocusedInteractable, HoldPoint, Holding, Modifying, Player, PlayerClick,
     PotentialJoints, PredeleteJoint, PredeleteJoints, ToggleHoldingSystemLabel,
     UpdateAttachPointsLabel,
 };
@@ -219,25 +219,15 @@ const MAX_INTERACT_ANGLE: f32 = MAX_INTERACT_ANGLE_DEGREES * utils::DEG_TO_RADIA
 
 fn update_focused(
     mut commands: Commands,
-    mut players: Query<
-        (
-            &mut FocusedInteractable,
-            &Holding,
-            &Children,
-            &ManipulatingPart,
-        ),
-        With<Player>,
-    >,
+    mut players: Query<(&mut FocusedInteractable, &Holding, &Children, &Modifying), With<Player>>,
     mut interactables: Query<(&mut Transform, Entity), With<Interactable>>,
     camera_orbit_centers: Query<&GlobalTransform, With<CameraOrbitCenter>>,
 ) {
     // Determine which iteractable entity each player is focused on (i.e. looking at, within range)
-    for (mut focused_interactable, holding, player_children, manipulating_part) in
-        players.iter_mut()
-    {
+    for (mut focused_interactable, holding, player_children, modifying) in players.iter_mut() {
         if !holding.0 {
             let mut newly_focused_interactable_option = None;
-            if !manipulating_part.0 {
+            if !modifying.0 {
                 for player_child in player_children.iter() {
                     if let Ok(camera_orbit_center) = camera_orbit_centers.get(*player_child) {
                         // Search for the most appropriate interactable that should be focused by the player
@@ -448,7 +438,7 @@ fn update_active_joints(
 fn update_predelete_joints(
     holdables: Query<&GlobalTransform, With<Holdable>>,
     mut predelete_joints: ResMut<PredeleteJoints>,
-    players: Query<(&Holding, &ManipulatingPart, &Children)>,
+    players: Query<(&Holding, &Modifying, &Children)>,
     joint_handles: Query<(Entity, &JointHandleComponent)>,
     joint_set: ResMut<JointSet>,
     hold_points: QuerySet<(
@@ -459,8 +449,8 @@ fn update_predelete_joints(
 ) {
     predelete_joints.0.clear();
 
-    if let Some((holding, manipulating, player_children)) = players.iter().next() {
-        if !holding.0 && manipulating.0 {
+    if let Some((holding, modifying, player_children)) = players.iter().next() {
+        if !holding.0 && modifying.0 {
             if let Some(entity) =
                 get_hold_point_entity(player_children, camera_orbit_centers, hold_points.q0())
             {

@@ -1,6 +1,6 @@
 use bad_spaceship_shared::{
     utils::TransformExt, CameraOrbitCenter, InputEvents, KeyboardDirectionalInput, LeftClicked,
-    ManipulatingPart, MouseMotionDelta, PartRotation, PlayerClick, WebKeyCode, WebMouseButton,
+    Modifying, MouseMotionDelta, PartRotation, PlayerClick, WebKeyCode, WebMouseButton,
 };
 use bevy::{input::mouse::MouseMotion, input::mouse::MouseWheel, prelude::*};
 
@@ -21,7 +21,7 @@ impl Plugin for InputPlugin {
             )
             .add_event::<PlayerClick>()
             .add_system(get_left_click.system())
-            .add_system(get_manipulating_part.system());
+            .add_system(get_modifying.system());
     }
 }
 
@@ -185,18 +185,18 @@ fn get_left_click(
     }
 }
 
-fn get_manipulating_part(
+fn get_modifying(
     native_keyboard_input: Res<Input<KeyCode>>,
     web_keyboard_input: Res<Input<WebKeyCode>>,
-    mut players: Query<&mut ManipulatingPart>,
+    mut players: Query<&mut Modifying>,
     state: Res<State<AppState>>,
 ) {
-    if let Some(mut manipulating_part) = players.iter_mut().next() {
+    if let Some(mut modifying) = players.iter_mut().next() {
         let input = MergedKeyboardInput {
             native_keyboard_input: &native_keyboard_input,
             web_keyboard_input: &web_keyboard_input,
         };
-        manipulating_part.0 = (*state.current() == AppState::InGame)
+        modifying.0 = (*state.current() == AppState::InGame)
             && (input.pressed(KeyCode::LShift) | input.pressed(KeyCode::RShift));
     }
 }

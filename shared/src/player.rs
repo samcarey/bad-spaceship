@@ -17,7 +17,7 @@ use crate::{
     utils::{ToVec3, DEG_TO_RADIANS},
     AttachEvent, BoundingRadius, CameraOrbitCenter, Character, DirectionalInput,
     FocusedInteractable, GameStickDirectionalInput, HoldEvent, HoldPoint, Holding, InputEvents,
-    KeyboardDirectionalInput, LeftClicked, ManipulatingPart, MouseMotionDelta, OrbitingCamera,
+    KeyboardDirectionalInput, LeftClicked, Modifying, MouseMotionDelta, OrbitingCamera,
     OriginalPosition, PartRotation, Player, PlayerClick, ReleaseEvent, ToggleHoldingSystemLabel,
     Yaw, INITIAL_CAMERA_PITCH,
 };
@@ -120,7 +120,7 @@ struct PlayerBundle {
     mouse_motion_delta: MouseMotionDelta,
     part_rotation: PartRotation,
     clicked: LeftClicked,
-    manipulating_part: ManipulatingPart,
+    modifying: Modifying,
 }
 
 impl PlayerBundle {
@@ -318,15 +318,7 @@ impl HeldBundle {
 fn toggle_holding(
     mut clicks: EventReader<PlayerClick>,
     mut commands: Commands,
-    mut players: Query<
-        (
-            &mut Holding,
-            &FocusedInteractable,
-            &Children,
-            &ManipulatingPart,
-        ),
-        With<Player>,
-    >,
+    mut players: Query<(&mut Holding, &FocusedInteractable, &Children, &Modifying), With<Player>>,
     camera_orbit_centers: Query<&Children>,
     hold_points: Query<(), With<HoldPoint>>,
     holdables: Query<&GlobalTransform, With<Holdable>>,
@@ -335,7 +327,7 @@ fn toggle_holding(
     mut hold_events: EventWriter<HoldEvent>,
 ) {
     if clicks.iter().next().is_some() {
-        if let Some((mut holding, interactable, player_children, manipulating_part)) =
+        if let Some((mut holding, interactable, player_children, modifying)) =
             players.iter_mut().next()
         {
             if let Some(current_interactable) = interactable.0 {
@@ -344,7 +336,7 @@ fn toggle_holding(
                         get_hold_point_entity(player_children, camera_orbit_centers, &hold_points)
                     {
                         if holding.0 {
-                            if manipulating_part.0 {
+                            if modifying.0 {
                                 attach_events.send(AttachEvent);
                             } else {
                                 holding.0 = false;
@@ -353,7 +345,7 @@ fn toggle_holding(
                                     .remove_bundle::<HeldBundle>();
                                 release_events.send(ReleaseEvent);
                             }
-                        } else if !manipulating_part.0 {
+                        } else if !modifying.0 {
                             holding.0 = true;
                             commands
                                 .entity(current_interactable)
