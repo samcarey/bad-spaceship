@@ -4,7 +4,12 @@
   // List of extensions which should be recommended for users of this workspace.
   "recommendations": [
     "matklad.rust-analyzer",
-    "a5huynh.vscode-ron"
+    "a5huynh.vscode-ron",
+    "ms-vscode.cpptools",
+    "serayuzgur.crates",
+    "tamasfe.even-better-toml",
+    "donjayamanne.githistory",
+    "eamodio.gitlens"
   ],
   // List of extensions recommended by VS Code that should not be recommended for users of this workspace.
   "unwantedRecommendations": []
