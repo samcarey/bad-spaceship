@@ -24,6 +24,15 @@
             }
         },
         {
+            "label": "run-native-debug",
+            "type": "shell",
+            "command": "cd client ; cargo run --features native",
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            }
+        },
+        {
             "label": "build-wasm",
             "type": "shell",
             "command": "cd client ; cargo build --target wasm32-unknown-unknown --features web --release",
