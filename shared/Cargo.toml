@@ -11,7 +11,7 @@ bevy_rapier3d = "0.11.0"
 serde = { version = "1.0.126", features = ["derive"] }
 ron = "0.7.0"
 rand = "0.8.4"
-include_dir = { version = "0.6.1" }
+include_dir = { version = "0.7" }
 anyhow = "1.0"
 bevy_easings = "0.4.1"
 
