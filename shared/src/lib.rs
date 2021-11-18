@@ -1,12 +1,11 @@
 use bevy::{
     math::{Quat, Vec2, Vec3},
-    prelude::{Entity, KeyCode, MouseButton, PluginGroup, SystemLabel},
+    prelude::{Bundle, Entity, KeyCode, MouseButton, PluginGroup, SystemLabel},
 };
 use bevy_easings::EasingsPlugin;
 use bevy_rapier3d::{
     na::{Const, OPoint},
     physics::RapierPhysicsPlugin,
-    render::RapierRenderPlugin,
 };
 use character::CharacterPlugin;
 use config::ConfigPlugin;
@@ -28,7 +27,6 @@ impl PluginGroup for CommonPlugins {
         // Third-party plugins
         group
             .add(RapierPhysicsPlugin::<&IgnoreContactsWith>::default())
-            .add(RapierRenderPlugin)
             .add(EasingsPlugin);
 
         // Custom plugins
@@ -53,6 +51,8 @@ pub struct Yaw(pub f32);
 #[derive(Default)]
 pub struct CameraOrbitCenter;
 
+pub struct PlayerCameraOrbitCenter(pub Entity);
+
 #[derive(Default)]
 pub struct FocusedInteractable(pub Option<Entity>);
 
@@ -60,31 +60,16 @@ pub struct FocusedInteractable(pub Option<Entity>);
 pub struct Holding(pub bool);
 
 #[derive(Default)]
-struct Player;
+pub struct Player;
 
-pub struct OrbitingCamera {
-    pub pitch: f32,
-    pub entity: Option<Entity>,
-}
+pub struct OrbitingCamera(pub Entity);
 
 const INITIAL_CAMERA_PITCH_DEGREES: f32 = 30.;
 pub const INITIAL_CAMERA_PITCH: f32 = INITIAL_CAMERA_PITCH_DEGREES * utils::DEG_TO_RADIANS;
 
-impl Default for OrbitingCamera {
+impl Default for LookPitch {
     fn default() -> Self {
-        OrbitingCamera {
-            pitch: INITIAL_CAMERA_PITCH,
-            entity: None,
-        }
-    }
-}
-
-impl OrbitingCamera {
-    fn new(camera_entity: Entity) -> Self {
-        OrbitingCamera {
-            entity: Some(camera_entity),
-            ..Default::default()
-        }
+        Self(INITIAL_CAMERA_PITCH)
     }
 }
 
@@ -162,9 +147,31 @@ pub struct PredeleteJoints(pub Vec<PredeleteJoint>);
 struct ToggleHoldingSystemLabel;
 
 #[derive(SystemLabel, Clone, Hash, Debug, PartialEq, Eq)]
-pub struct UpdateAttachPointsLabel;
+pub struct UpdateJointsLabel;
 
 struct BoundingRadius(f32);
 
 #[derive(Default)]
 pub struct OriginalPosition(Vec3);
+
+pub struct Grass;
+
+#[derive(Default)]
+pub struct Click(bool);
+
+#[derive(Default)]
+pub struct MouseWheelDelta(pub f32);
+
+#[derive(Bundle, Default)]
+pub struct PlayerInput {
+    directional_input: DirectionalInput,
+    click: Click,
+    modifying: Modifying,
+    mouse_motion: MouseMotionDelta,
+    mouse_wheel: MouseWheelDelta,
+}
+
+#[derive(SystemLabel, Clone, Hash, Debug, PartialEq, Eq)]
+pub struct MouseWheelLabel;
+
+pub struct LookPitch(f32);

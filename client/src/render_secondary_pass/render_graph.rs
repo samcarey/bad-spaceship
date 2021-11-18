@@ -10,10 +10,10 @@ use bevy::{
     },
 };
 #[derive(Default)]
-pub struct GizmoPass;
+pub struct SecondaryPass;
 
 pub mod node {
-    pub const GIZMO_PASS: &str = "gizmo_pass";
+    pub const SECONDARY_PASS: &str = "secondary_pass";
 }
 
 pub fn add_gizmo_graph(world: &mut World) {
@@ -23,7 +23,7 @@ pub fn add_gizmo_graph(world: &mut World) {
         .unwrap();
     let msaa = world.get_resource::<Msaa>().unwrap();
 
-    let mut gizmo_pass_node = render_graph::PassNode::<&GizmoPass>::new(PassDescriptor {
+    let mut gizmo_pass_node = render_graph::PassNode::<&SecondaryPass>::new(PassDescriptor {
         color_attachments: vec![msaa.color_attachment_descriptor(
             TextureAttachment::Input("color_attachment".to_string()),
             TextureAttachment::Input("color_resolve_target".to_string()),
@@ -44,13 +44,13 @@ pub fn add_gizmo_graph(world: &mut World) {
     });
     gizmo_pass_node.add_camera(base::camera::CAMERA_3D);
 
-    graph.add_node(node::GIZMO_PASS, gizmo_pass_node);
+    graph.add_node(node::SECONDARY_PASS, gizmo_pass_node);
 
     graph
         .add_slot_edge(
             base::node::PRIMARY_SWAP_CHAIN,
             render_graph::WindowSwapChainNode::OUT_TEXTURE,
-            node::GIZMO_PASS,
+            node::SECONDARY_PASS,
             if msaa.samples > 1 {
                 "color_resolve_target"
             } else {
@@ -63,7 +63,7 @@ pub fn add_gizmo_graph(world: &mut World) {
         .add_slot_edge(
             base::node::MAIN_DEPTH_TEXTURE,
             render_graph::WindowTextureNode::OUT_TEXTURE,
-            node::GIZMO_PASS,
+            node::SECONDARY_PASS,
             "depth",
         )
         .unwrap();
@@ -73,7 +73,7 @@ pub fn add_gizmo_graph(world: &mut World) {
             .add_slot_edge(
                 base::node::MAIN_SAMPLED_COLOR_ATTACHMENT,
                 render_graph::WindowSwapChainNode::OUT_TEXTURE,
-                node::GIZMO_PASS,
+                node::SECONDARY_PASS,
                 "color_attachment",
             )
             .unwrap();
@@ -81,6 +81,6 @@ pub fn add_gizmo_graph(world: &mut World) {
 
     // ensure gizmo pass runs after main pass
     graph
-        .add_node_edge(base::node::MAIN_PASS, node::GIZMO_PASS)
+        .add_node_edge(base::node::MAIN_PASS, node::SECONDARY_PASS)
         .unwrap();
 }

@@ -1,6 +1,7 @@
 [package]
 name = "bad-spaceship-shared"
 version = "0.1.0"
+authors = ["Sam Carey <sam@samcarey.com>"]
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -13,7 +14,7 @@ ron = "0.7.0"
 rand = "0.8.4"
 include_dir = { version = "0.7" }
 anyhow = "1.0"
-bevy_easings = "0.4.1"
+bevy_easings = { version = "0.4.1", default-features = false }
 
 [features]
 default = ["bevy/png"]

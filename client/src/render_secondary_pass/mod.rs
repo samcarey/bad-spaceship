@@ -2,29 +2,29 @@ use bad_spaceship_shared::{
     part::{Holdable, TargetOrientation, TargetPosition, DELETE_RADIUS},
     player::get_hold_point_entity,
     DisplayableJoint, ExistingJoints, HoldPoint, Holding, Modifying, PotentialJoints,
-    PredeleteJoint, PredeleteJoints, UpdateAttachPointsLabel,
+    PredeleteJoint, PredeleteJoints, UpdateJointsLabel,
 };
 use bevy::{prelude::*, render::render_graph::base::MainPass};
 use normalization::*;
-use render_graph::GizmoPass;
+use render_graph::SecondaryPass;
 
 mod cone;
 mod normalization;
 mod render_graph;
 mod truncated_torus;
 
-pub struct TransformGizmoPlugin;
-impl Plugin for TransformGizmoPlugin {
+pub struct RenderSecondaryPassPlugin;
+impl Plugin for RenderSecondaryPassPlugin {
     fn build(&self, app: &mut AppBuilder) {
         app.add_startup_system(build_gizmo.system())
             .add_system(position_gizmo.system())
             .add_plugin(normalization::Ui3dNormalization)
-            .add_startup_system(initialize_attach_point.system())
-            .init_resource::<AttachPointAppearance>()
+            .add_startup_system(initialize_joint_appearance.system())
+            .init_resource::<JointAppearance>()
             .add_system(add_hold_point_delete_zone_visualization.system())
             .add_system_set(
                 SystemSet::new()
-                    .after(UpdateAttachPointsLabel)
+                    .after(UpdateJointsLabel)
                     .with_system(display_potential_joints.system())
                     .with_system(display_existing_joints.system())
                     .with_system(display_predelete_joints.system())
@@ -38,7 +38,6 @@ impl Plugin for TransformGizmoPlugin {
 
 fn position_gizmo(
     helds: Query<(&TargetOrientation, &TargetPosition)>,
-
     mut transforms: QuerySet<(
         Query<(&mut Transform, &mut Visible, &Children), With<GizmoComponent>>,
         Query<&GlobalTransform, With<HoldPoint>>,
@@ -169,7 +168,7 @@ fn build_gizmo(
                     )),
                     ..Default::default()
                 })
-                .insert(GizmoPass)
+                .insert(SecondaryPass)
                 .remove::<MainPass>();
             parent
                 .spawn_bundle(PbrBundle {
@@ -181,7 +180,7 @@ fn build_gizmo(
                     )),
                     ..Default::default()
                 })
-                .insert(GizmoPass)
+                .insert(SecondaryPass)
                 .remove::<MainPass>();
             parent
                 .spawn_bundle(PbrBundle {
@@ -193,7 +192,7 @@ fn build_gizmo(
                     )),
                     ..Default::default()
                 })
-                .insert(GizmoPass)
+                .insert(SecondaryPass)
                 .remove::<MainPass>();
 
             // Translation Handles
@@ -207,7 +206,7 @@ fn build_gizmo(
                     )),
                     ..Default::default()
                 })
-                .insert(GizmoPass)
+                .insert(SecondaryPass)
                 .remove::<MainPass>();
             parent
                 .spawn_bundle(PbrBundle {
@@ -216,7 +215,7 @@ fn build_gizmo(
                     transform: Transform::from_translation(Vec3::new(0.0, axis_length, 0.0)),
                     ..Default::default()
                 })
-                .insert(GizmoPass)
+                .insert(SecondaryPass)
                 .remove::<MainPass>();
             parent
                 .spawn_bundle(PbrBundle {
@@ -228,27 +227,27 @@ fn build_gizmo(
                     )),
                     ..Default::default()
                 })
-                .insert(GizmoPass)
+                .insert(SecondaryPass)
                 .remove::<MainPass>();
         })
-        .insert(GizmoPass)
+        .insert(SecondaryPass)
         .remove::<MainPass>();
 }
 
 #[derive(Default)]
-struct AttachPointAppearance {
+struct JointAppearance {
     mesh: Option<Handle<Mesh>>,
     valid_material: Option<Handle<StandardMaterial>>,
     invalid_material: Option<Handle<StandardMaterial>>,
     predelete_material: Option<Handle<StandardMaterial>>,
 }
 
-fn initialize_attach_point(
+fn initialize_joint_appearance(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    mut attach_point_appearance: ResMut<AttachPointAppearance>,
+    mut joint_appearance: ResMut<JointAppearance>,
 ) {
-    *attach_point_appearance = AttachPointAppearance {
+    *joint_appearance = JointAppearance {
         mesh: Some(meshes.add(Mesh::from(shape::Icosphere {
             radius: 0.1,
             ..Default::default()
@@ -278,7 +277,7 @@ fn display_potential_joints(
     holdables: Query<&GlobalTransform, With<Holdable>>,
     joints: Res<PotentialJoints>,
     mut displayed_joints: Query<(&mut Transform, &mut Visible), With<DisplayedPotentialJoint>>,
-    displayed_joint_appearance: Res<AttachPointAppearance>,
+    displayed_joint_appearance: Res<JointAppearance>,
 ) {
     let mut display_points_iter = displayed_joints.iter_mut();
     for DisplayableJoint { points, entities } in joints.0.iter() {
@@ -300,7 +299,7 @@ fn display_potential_joints(
                         ..Default::default()
                     })
                     .insert(DisplayedPotentialJoint)
-                    .insert(GizmoPass)
+                    .insert(SecondaryPass)
                     .remove::<MainPass>();
             }
         }
@@ -317,7 +316,7 @@ fn display_existing_joints(
     holdables: Query<&GlobalTransform, With<Holdable>>,
     joints: Res<ExistingJoints>,
     mut displayed_joints: Query<(&mut Transform, &mut Visible), With<DisplayedExistingJoint>>,
-    displayed_joint_appearance: Res<AttachPointAppearance>,
+    displayed_joint_appearance: Res<JointAppearance>,
 ) {
     let mut display_joints_iter = displayed_joints.iter_mut();
     for DisplayableJoint { points, entities } in joints.0.iter() {
@@ -338,7 +337,7 @@ fn display_existing_joints(
                         ..Default::default()
                     })
                     .insert(DisplayedExistingJoint)
-                    .insert(GizmoPass)
+                    .insert(SecondaryPass)
                     .remove::<MainPass>();
             }
         }
@@ -354,7 +353,7 @@ fn display_predelete_joints(
     mut commands: Commands,
     joints: Res<PredeleteJoints>,
     mut displayed_joints: Query<(&mut Transform, &mut Visible), With<DisplayedPredeleteJoint>>,
-    displayed_joint_appearance: Res<AttachPointAppearance>,
+    displayed_joint_appearance: Res<JointAppearance>,
 ) {
     let mut display_joints_iter = displayed_joints.iter_mut();
     for PredeleteJoint { translation, .. } in joints.0.iter() {
@@ -375,7 +374,7 @@ fn display_predelete_joints(
                     ..Default::default()
                 })
                 .insert(DisplayedPredeleteJoint)
-                .insert(GizmoPass)
+                .insert(SecondaryPass)
                 .remove::<MainPass>();
         }
     }
@@ -413,7 +412,7 @@ fn add_hold_point_delete_zone_visualization(
                 }),
                 ..Default::default()
             })
-            .insert(GizmoPass)
+            .insert(SecondaryPass)
             .remove::<MainPass>();
     }
 }

@@ -1,5 +1,6 @@
 .DS_STORE
 .cargo/config.toml
 */settings.json
+*/launch.json
 target
 Cargo.lock

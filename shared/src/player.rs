@@ -1,25 +1,18 @@
 use std::{f32, time::Duration};
 
-use bevy::{
-    input::gamepad::{Gamepad, GamepadButton, GamepadEvent, GamepadEventType},
-    input::mouse::{MouseScrollUnit, MouseWheel},
-    prelude::*,
-    reflect::TypeUuid,
-    render::camera::Camera,
-    utils::HashSet,
-};
+use bevy::{prelude::*, reflect::TypeUuid};
 use bevy_easings::{CustomComponentEase, EaseFunction, EasingComponent, Lerp};
 use bevy_rapier3d::prelude::ColliderShape;
 use serde::Deserialize;
 
 use crate::{
     part::{Holdable, TargetOrientation, TargetPosition},
-    utils::{ToVec3, DEG_TO_RADIANS},
-    AttachEvent, BoundingRadius, CameraOrbitCenter, Character, DirectionalInput,
-    FocusedInteractable, GameStickDirectionalInput, HoldEvent, HoldPoint, Holding, InputEvents,
-    KeyboardDirectionalInput, LeftClicked, Modifying, MouseMotionDelta, OrbitingCamera,
-    OriginalPosition, PartRotation, Player, PlayerClick, ReleaseEvent, ToggleHoldingSystemLabel,
-    Yaw, INITIAL_CAMERA_PITCH,
+    utils::{ToVec3, TransformExt, DEG_TO_RADIANS},
+    AttachEvent, BoundingRadius, CameraOrbitCenter, Character, FocusedInteractable,
+    GameStickDirectionalInput, HoldEvent, HoldPoint, Holding, InputEvents,
+    KeyboardDirectionalInput, LeftClicked, LookPitch, Modifying, MouseMotionDelta, MouseWheelDelta,
+    MouseWheelLabel, OriginalPosition, PartRotation, Player, PlayerCameraOrbitCenter, PlayerClick,
+    PlayerInput, ReleaseEvent, ToggleHoldingSystemLabel, Yaw, INITIAL_CAMERA_PITCH,
 };
 
 const MAX_CAMERA_PITCH_DEGREES: f32 = 89.;
@@ -33,17 +26,13 @@ impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut AppBuilder) {
         app.add_startup_system(spawn_camera.system())
             .add_system(spawn.system())
-            .add_system_to_stage(CoreStage::PreUpdate, connection_system.system())
             .add_system(mouse_motion.system().after(EaseLabel))
-            .add_system(mouse_zoom.system().after(InputEvents))
             .add_system(
                 toggle_holding
                     .system()
                     .label(ToggleHoldingSystemLabel)
                     .after(InputEvents),
             )
-            .add_system(gamepad_system.system())
-            .init_resource::<GamepadLobby>()
             .add_system(despawn.system())
             .add_system(attach_camera_orbit.system())
             .add_event::<PlayerClick>()
@@ -66,18 +55,19 @@ impl Plugin for PlayerPlugin {
                     .system()
                     .label(EaseLabel),
             )
-            .add_system(ease_camera.system().label(EaseLabel));
+            .add_system(ease_camera.system().label(EaseLabel))
+            .add_system(set_part_rotation.system().after(MouseWheelLabel));
     }
 }
 
 #[derive(Deserialize, Copy, Clone, TypeUuid)]
 #[uuid = "39cadc56-aa9c-4543-8640-a018b74b5050"]
 pub struct Config {
-    zoom_sensitivity: f32,
+    pub zoom_sensitivity: f32,
     look_sensitivity: f32,
 
-    min_camera_distance: f32,
-    max_camera_distance: f32,
+    pub min_camera_distance: f32,
+    pub max_camera_distance: f32,
     camera_offset_character_size_ratio: (f32, f32, f32),
 }
 
@@ -110,37 +100,21 @@ fn spawn_camera(mut commands: Commands) {
 #[derive(Bundle, Default)]
 struct PlayerBundle {
     player: Player,
-    orbiting_camera: OrbitingCamera,
     yaw: Yaw,
+    look_pitch: LookPitch,
     keyboard_directional_input: KeyboardDirectionalInput,
     gamestick_directional_input: GameStickDirectionalInput,
-    directional_input: DirectionalInput,
     focused_interactable: FocusedInteractable,
     holding: Holding,
-    mouse_motion_delta: MouseMotionDelta,
     part_rotation: PartRotation,
     clicked: LeftClicked,
-    modifying: Modifying,
 }
 
-impl PlayerBundle {
-    fn new(camera_entity: Entity) -> Self {
-        Self {
-            orbiting_camera: OrbitingCamera::new(camera_entity),
-            ..Default::default()
-        }
-    }
-}
-
-fn spawn(
-    mut commands: Commands,
-    cameras: Query<Entity, With<Camera>>,
-    players: Query<(), With<Player>>,
-) {
+fn spawn(mut commands: Commands, players: Query<(), With<Player>>) {
     if players.iter().next().is_none() {
-        if let Some(camera_entity) = cameras.iter().next() {
-            commands.spawn_bundle(PlayerBundle::new(camera_entity));
-        }
+        commands
+            .spawn_bundle(PlayerBundle::default())
+            .insert_bundle(PlayerInput::default());
     }
 }
 
@@ -161,7 +135,6 @@ struct CameraOrbitOffset {
 
 fn attach_camera_orbit(
     mut commands: Commands,
-    cameras: Query<Entity, With<Camera>>,
     characters_without_players: Query<
         (Entity, &ColliderShape),
         (With<Character>, Without<Children>),
@@ -170,73 +143,71 @@ fn attach_camera_orbit(
     mut camera_orbit_offset: ResMut<CameraOrbitOffset>,
 ) {
     if let Some((_, config)) = configs.iter().next() {
-        if let Some(camera) = cameras.iter().next() {
-            for (character_entity, character_collider) in characters_without_players.iter() {
-                // This is simply a point that hovers above the character that the camera orbits around.
-                // This is for the purpose of making it easier to see over obstructions.
-                // For now we generate this as a PbrComponent, which is overkill for an invisible point,
-                // so we'll want to simplify this later to something with only the necessary components.
-                camera_orbit_offset.min = config.camera_offset_character_size_ratio.to_vec3()
-                    * character_collider.compute_local_bounding_sphere().radius
-                    * 2.0;
-                let mut camera_orbit_center_transform =
-                    Transform::from_translation(camera_orbit_offset.min);
-                camera_orbit_center_transform.rotation =
-                    Quat::from_rotation_x(INITIAL_CAMERA_PITCH);
-                let camera_orbit_center = commands
-                    .spawn()
-                    .insert_bundle(CameraOrbitCenterBundle {
-                        transform: camera_orbit_center_transform,
-                        ..Default::default()
-                    })
-                    .id();
+        for (character_entity, character_collider) in characters_without_players.iter() {
+            // This is simply a point that hovers above the character that the camera orbits around.
+            // This is for the purpose of making it easier to see over obstructions.
+            camera_orbit_offset.min = config.camera_offset_character_size_ratio.to_vec3()
+                * character_collider.compute_local_bounding_sphere().radius
+                * 2.0;
+            let mut camera_orbit_center_transform =
+                Transform::from_translation(camera_orbit_offset.min);
+            camera_orbit_center_transform.rotation = Quat::from_rotation_x(INITIAL_CAMERA_PITCH);
+            let camera_orbit_center = commands
+                .spawn()
+                .insert_bundle(CameraOrbitCenterBundle {
+                    transform: camera_orbit_center_transform,
+                    ..Default::default()
+                })
+                .id();
 
-                // Mount the camera center to the player
-                commands
-                    .entity(character_entity)
-                    .push_children(&[camera_orbit_center]);
+            // Mount the camera center to the player
+            commands
+                .entity(character_entity)
+                .push_children(&[camera_orbit_center])
+                .insert(PlayerCameraOrbitCenter(camera_orbit_center));
 
-                // Mount the camera to the camera orbit center
-                commands
-                    .entity(camera_orbit_center)
-                    .push_children(&[camera]);
+            // Mount the camera to the camera orbit center
+            // commands
+            //     .entity(camera_orbit_center)
+            //     .push_children(&[camera]);
 
-                let hold_point_transform = Transform::from_translation(Vec3::Z * 5.0);
-                let hold_point = commands
-                    .spawn()
-                    .insert_bundle(HoldPointBundle {
-                        transform: hold_point_transform.clone(),
-                        original_position: OriginalPosition(hold_point_transform.translation),
-                        ..Default::default()
-                    })
-                    .id();
+            let hold_point_transform = Transform::from_translation(Vec3::Z * 5.0);
+            let hold_point = commands
+                .spawn()
+                .insert_bundle(HoldPointBundle {
+                    transform: hold_point_transform.clone(),
+                    original_position: OriginalPosition(hold_point_transform.translation),
+                    ..Default::default()
+                })
+                .id();
 
-                commands
-                    .entity(camera_orbit_center)
-                    .push_children(&[hold_point]);
-            }
+            commands
+                .entity(camera_orbit_center)
+                .push_children(&[hold_point]);
         }
     }
 }
 
 fn mouse_motion(
     time: Res<Time>,
-    mut query: Query<(&mut OrbitingCamera, &mut Yaw, &MouseMotionDelta, &Holding)>,
+    mut query: Query<(
+        &mut Yaw,
+        &mut LookPitch,
+        &MouseMotionDelta,
+        &Holding,
+        &Modifying,
+    )>,
     mut camera_orbit_center_transforms: Query<&mut Transform, With<CameraOrbitCenter>>,
     configs: ResMut<Assets<Config>>,
-    keyboard_input: Res<Input<KeyCode>>,
 ) {
     if let Some((_, config)) = configs.iter().next() {
-        if let Some((mut orbiting_camera, mut yaw, mouse_delta, holding)) = query.iter_mut().next()
+        if let Some((mut yaw, mut pitch, mouse_delta, holding, modifying)) = query.iter_mut().next()
         {
-            if !(holding.0
-                && (keyboard_input.pressed(KeyCode::LShift)
-                    | keyboard_input.pressed(KeyCode::RShift)))
-            {
+            if !(holding.0 && modifying.0) {
                 yaw.0 = (yaw.0 + mouse_delta.0.x * time.delta_seconds() * config.look_sensitivity)
                     % std::f32::consts::TAU;
 
-                orbiting_camera.pitch = (orbiting_camera.pitch
+                pitch.0 = (pitch.0
                     + mouse_delta.0.y * time.delta_seconds() * config.look_sensitivity)
                     .max(MIN_CAMERA_PITCH)
                     .min(MAX_CAMERA_PITCH);
@@ -244,38 +215,7 @@ fn mouse_motion(
             // By tilting the orbit center that the camera is attached to,
             // the camera itself is swung to the correct position
             if let Some(mut transform) = camera_orbit_center_transforms.iter_mut().next() {
-                transform.rotation = Quat::from_rotation_x(orbiting_camera.pitch);
-            }
-        }
-    }
-}
-
-fn mouse_zoom(
-    time: Res<Time>,
-    mut mouse_wheel_events: EventReader<MouseWheel>,
-    mut query: Query<&mut OrbitingCamera>,
-    mut camera_transforms: Query<&mut Transform, With<Camera>>,
-    configs: ResMut<Assets<Config>>,
-    keyboard_input: Res<Input<KeyCode>>,
-) {
-    if !(keyboard_input.pressed(KeyCode::LShift) | keyboard_input.pressed(KeyCode::RShift)) {
-        if let Some(mouse_wheel) = mouse_wheel_events.iter().last() {
-            if let Some((_, config)) = configs.iter().next() {
-                if let Some(orbiting_camera) = query.iter_mut().next() {
-                    let scroll = match mouse_wheel.unit {
-                        MouseScrollUnit::Line => mouse_wheel.y,
-                        MouseScrollUnit::Pixel => mouse_wheel.y / 108.0,
-                    };
-                    // Set the camera translation relative to the camera orbit center
-                    let mut camera_transform = camera_transforms
-                        .get_mut(orbiting_camera.entity.unwrap())
-                        .unwrap();
-                    camera_transform.translation = -Vec3::Z
-                        * (-camera_transform.translation.z
-                            - scroll * time.delta_seconds() * config.zoom_sensitivity)
-                            .max(config.min_camera_distance)
-                            .min(config.max_camera_distance);
-                }
+                transform.rotation = Quat::from_rotation_x(pitch.0);
             }
         }
     }
@@ -459,72 +399,40 @@ fn reset_hold_point_after_release(
     }
 }
 
-#[derive(Default)]
-struct GamepadLobby {
-    gamepads: HashSet<Gamepad>,
-}
-
-fn connection_system(
-    mut lobby: ResMut<GamepadLobby>,
-    mut gamepad_event: EventReader<GamepadEvent>,
+fn set_part_rotation(
+    mut players: Query<(&mut PartRotation, &Children, &Modifying, &MouseWheelDelta)>,
+    camera_orbit_centers: Query<&GlobalTransform, With<CameraOrbitCenter>>,
+    mouse_deltas: Query<&MouseMotionDelta>,
 ) {
-    for event in gamepad_event.iter() {
-        match &event {
-            GamepadEvent(gamepad, GamepadEventType::Connected) => {
-                lobby.gamepads.insert(*gamepad);
-                println!("{:?} Connected", gamepad);
+    if let Some((mut rotation, player_children, modifying, mouse_wheel_delta)) =
+        players.iter_mut().next()
+    {
+        rotation.0 = Quat::default();
+        if modifying.0 {
+            for child in player_children.iter() {
+                if let Ok(camera_orbit_center) = camera_orbit_centers.get(*child) {
+                    rotation.0 = Quat::from_axis_angle(
+                        camera_orbit_center.forward(),
+                        mouse_wheel_delta.0 / 10.,
+                    ) * rotation.0;
+                    for mouse_delta in mouse_deltas.iter() {
+                        if mouse_delta.0 != Vec2::ZERO {
+                            let rotation_input = camera_orbit_center.rotation.mul_vec3(Vec3::new(
+                                -mouse_delta.0.x,
+                                -mouse_delta.0.y,
+                                0.0,
+                            ));
+                            let rotation_axis = rotation_input
+                                .cross(camera_orbit_center.forward())
+                                .normalize();
+                            rotation.0 = Quat::from_axis_angle(
+                                rotation_axis,
+                                rotation_input.length() / 100.,
+                            ) * rotation.0;
+                        }
+                    }
+                }
             }
-            GamepadEvent(gamepad, GamepadEventType::Disconnected) => {
-                lobby.gamepads.remove(gamepad);
-                println!("{:?} Disconnected", gamepad);
-            }
-            _ => (),
-        }
-    }
-}
-
-fn gamepad_system(
-    lobby: Res<GamepadLobby>,
-    button_inputs: Res<Input<GamepadButton>>,
-    axes: Res<Axis<GamepadAxis>>,
-    mut query: Query<&mut GameStickDirectionalInput>,
-) {
-    for mut gamepad_directional_input in query.iter_mut() {
-        // Initialize gamepad direction to zero every frame then overwrite below if we have gamepad inputs
-        gamepad_directional_input.0 = Vec3::ZERO;
-
-        // confirm that the controller is connected
-        for gamepad in lobby.gamepads.iter().cloned() {
-            // Left stick controls movement
-            //  NOTE: Gamepad Stick X axis => left/right => movement x-component
-            //                      Y axis => forward/backward => movement z-component
-            let left_stick_x = axes
-                .get(GamepadAxis(gamepad, GamepadAxisType::LeftStickX))
-                .unwrap();
-            if left_stick_x.abs() > 0.01 {
-                //println!("{:?} LeftStickX value is {}", gamepad, left_stick_x);
-                gamepad_directional_input.0.x = left_stick_x;
-            }
-            let left_stick_y = axes
-                .get(GamepadAxis(gamepad, GamepadAxisType::LeftStickY))
-                .unwrap();
-            if left_stick_y.abs() > 0.01 {
-                //println!("{:?} LeftStickY value is {}", gamepad, left_stick_y);
-                gamepad_directional_input.0.z = left_stick_y;
-            }
-
-            // "South" button [PS4 "X"] designates "jump"
-            //  NOTE: Jump => movement y-component
-            if button_inputs.just_pressed(GamepadButton(gamepad, GamepadButtonType::South)) {
-                //println!("{:?} just pressed South", gamepad);
-                gamepad_directional_input.0.y += 1.0;
-            }
-        }
-
-        // Check here to see if any keypresses were registered.
-        // If so, then normalize the vector components.
-        if gamepad_directional_input.0 != Vec3::ZERO {
-            gamepad_directional_input.0.normalize();
         }
     }
 }

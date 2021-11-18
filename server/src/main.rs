@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use bad_spaceship_shared::{character, player};
+use bad_spaceship_shared::{character, player, CommonPlugins};
 use bevy::{
     app::ScheduleRunnerSettings,
     asset::{AssetPlugin, AssetServerSettings},
@@ -17,6 +17,7 @@ fn main() {
         .insert_resource(AssetServerSettings {
             asset_folder: "../client/assets".to_string(),
         })
+        .add_plugins(CommonPlugins)
         .add_startup_system(load_configs.system())
         .run();
 }

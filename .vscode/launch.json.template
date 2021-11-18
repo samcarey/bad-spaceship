@@ -19,32 +19,42 @@
       },
     },
     {
-      "name": "debug (windows, server)",
+      "name": "debug-server-windows",
       "type": "cppvsdbg",
       "request": "launch",
       "program": "${workspaceFolder}/server/target/debug/bad-spaceship-server",
-      "args": [
-        "--server"
-      ],
+      "args": [],
       "stopAtEntry": false,
       "cwd": "${workspaceRoot}",
       "console": "externalTerminal",
-      "preLaunchTask": "build (debug)",
+      "preLaunchTask": "build-server-debug",
       "env": {
-        "CARGO_MANIFEST_DIR": "${workspaceFolder}"
+        "CARGO_MANIFEST_DIR": "${workspaceFolder}/server"
       },
     },
-    {
-      "name": "debug (unix)",
-      "type": "lldb",
-      "request": "launch",
-      "program": "${workspaceFolder}/client/target/debug/bad-spaceship-client",
-      "args": [],
-      "cwd": "${workspaceFolder}",
-      "preLaunchTask": "build (debug)",
-      "env": {
-        "CARGO_MANIFEST_DIR": "${workspaceFolder}"
-      },
-    }
+    // {
+    //   "name": "debug-unix",
+    //   "type": "lldb",
+    //   "request": "launch",
+    //   "program": "${workspaceFolder}/client/target/debug/bad-spaceship-client",
+    //   "args": [],
+    //   "cwd": "${workspaceFolder}",
+    //   "preLaunchTask": "build (debug)",
+    //   "env": {
+    //     "CARGO_MANIFEST_DIR": "${workspaceFolder}/client"
+    //   },
+    // },
+    // {
+    //   "name": "debug-server-unix",
+    //   "type": "lldb",
+    //   "request": "launch",
+    //   "program": "${workspaceFolder}/server/target/debug/bad-spaceship-server",
+    //   "args": [],
+    //   "cwd": "${workspaceFolder}",
+    //   "preLaunchTask": "build (debug)",
+    //   "env": {
+    //     "CARGO_MANIFEST_DIR": "${workspaceFolder}/server"
+    //   },
+    // }
   ]
 }

@@ -12,7 +12,8 @@
         {
             "label": "build-native-debug",
             "type": "shell",
-            "command": "cd client ; cargo build --features native"
+            "command": "cd client ; cargo build --features native",
+            "problemMatcher": []
         },
         {
             "label": "run-native-release",
@@ -21,7 +22,18 @@
             "group": {
                 "kind": "build",
                 "isDefault": true
-            }
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "run-native-debug",
+            "type": "shell",
+            "command": "cd client ; cargo run --features native",
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher": []
         },
         {
             "label": "run-native-debug",
@@ -36,6 +48,7 @@
             "label": "build-wasm",
             "type": "shell",
             "command": "cd client ; cargo build --target wasm32-unknown-unknown --features web --release",
+            "problemMatcher": []
         },
         {
             "label": "build-web",
@@ -43,7 +56,8 @@
             "command": "cd client ; wasm-bindgen --out-dir target --out-name wasm --target web --no-typescript target/wasm32-unknown-unknown/release/bad-spaceship-client.wasm",
             "dependsOn": [
                 "build-wasm"
-            ]
+            ],
+            "problemMatcher": []
         },
         {
             "label": "run-web",
@@ -51,22 +65,26 @@
             "command": "cd client ; basic-http-server -x",
             "dependsOn": [
                 "build-web"
-            ]
+            ],
+            "problemMatcher": []
         },
         {
             "label": "run-server-debug",
             "type": "shell",
-            "command": "cd server ; cargo run"
+            "command": "cd server ; cargo run",
+            "problemMatcher": []
         },
         {
             "label": "run-server-release",
             "type": "shell",
-            "command": "cd server ; cargo run --release"
+            "command": "cd server ; cargo run --release",
+            "problemMatcher": []
         },
         {
             "label": "build-server-debug",
             "type": "shell",
-            "command": "cd server ; cargo build"
-        },
+            "command": "cd server ; cargo build",
+            "problemMatcher": []
+        }
     ]
 }

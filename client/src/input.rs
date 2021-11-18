@@ -1,8 +1,15 @@
 use bad_spaceship_shared::{
-    utils::TransformExt, CameraOrbitCenter, InputEvents, KeyboardDirectionalInput, LeftClicked,
-    Modifying, MouseMotionDelta, PartRotation, PlayerClick, WebKeyCode, WebMouseButton,
+    player, GameStickDirectionalInput, InputEvents, KeyboardDirectionalInput, LeftClicked,
+    Modifying, MouseMotionDelta, MouseWheelDelta, MouseWheelLabel, OrbitingCamera, PlayerClick,
+    WebKeyCode, WebMouseButton,
 };
-use bevy::{input::mouse::MouseMotion, input::mouse::MouseWheel, prelude::*};
+use bevy::{
+    input::mouse::MouseMotion,
+    input::mouse::{MouseScrollUnit, MouseWheel},
+    prelude::*,
+    render::camera::Camera,
+    utils::HashSet,
+};
 
 use crate::AppState;
 
@@ -10,8 +17,7 @@ pub struct InputPlugin;
 
 impl Plugin for InputPlugin {
     fn build(&self, app: &mut bevy::prelude::AppBuilder) {
-        app.add_system(get_part_rotation.system())
-            .add_system(process_keyboard_input.system().label(InputEvents))
+        app.add_system(process_keyboard_input.system().label(InputEvents))
             .init_resource::<Input<WebKeyCode>>()
             .init_resource::<Input<WebMouseButton>>()
             .add_system(get_look.system().label(InputEvents))
@@ -21,7 +27,17 @@ impl Plugin for InputPlugin {
             )
             .add_event::<PlayerClick>()
             .add_system(get_left_click.system())
-            .add_system(get_modifying.system());
+            .add_system(get_modifying.system())
+            .add_system_to_stage(CoreStage::PreUpdate, connection_system.system())
+            .add_system(gamepad_system.system())
+            .init_resource::<GamepadLobby>()
+            .add_system(
+                mouse_wheel
+                    .system()
+                    .label(MouseWheelLabel)
+                    .after(InputEvents),
+            )
+            .add_system(zoom_camera.system().after(MouseWheelLabel));
     }
 }
 
@@ -95,51 +111,6 @@ fn process_keyboard_input(
     }
 }
 
-fn get_part_rotation(
-    native_keyboard_input: Res<Input<KeyCode>>,
-    web_keyboard_input: Res<Input<WebKeyCode>>,
-    mut mouse_wheel_events: EventReader<MouseWheel>,
-    mut players: Query<(&mut PartRotation, &Children)>,
-    camera_orbit_centers: Query<&GlobalTransform, With<CameraOrbitCenter>>,
-    mouse_deltas: Query<&MouseMotionDelta>,
-) {
-    if let Some((mut rotation, player_children)) = players.iter_mut().next() {
-        rotation.0 = Quat::default();
-        let input = MergedKeyboardInput {
-            native_keyboard_input: &native_keyboard_input,
-            web_keyboard_input: &web_keyboard_input,
-        };
-        if input.pressed(KeyCode::LShift) | input.pressed(KeyCode::RShift) {
-            for child in player_children.iter() {
-                if let Ok(camera_orbit_center) = camera_orbit_centers.get(*child) {
-                    for mouse_wheel in mouse_wheel_events.iter() {
-                        rotation.0 = Quat::from_axis_angle(
-                            camera_orbit_center.forward(),
-                            mouse_wheel.y / 10.,
-                        ) * rotation.0;
-                    }
-                    for mouse_delta in mouse_deltas.iter() {
-                        if mouse_delta.0 != Vec2::ZERO {
-                            let rotation_input = camera_orbit_center.rotation.mul_vec3(Vec3::new(
-                                -mouse_delta.0.x,
-                                -mouse_delta.0.y,
-                                0.0,
-                            ));
-                            let rotation_axis = rotation_input
-                                .cross(camera_orbit_center.forward())
-                                .normalize();
-                            rotation.0 = Quat::from_axis_angle(
-                                rotation_axis,
-                                rotation_input.length() / 100.,
-                            ) * rotation.0;
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
 pub fn get_look(
     mut mouse_motion_events: EventReader<MouseMotion>,
     mut mouse_deltas: Query<&mut MouseMotionDelta>,
@@ -198,5 +169,111 @@ fn get_modifying(
         };
         modifying.0 = (*state.current() == AppState::InGame)
             && (input.pressed(KeyCode::LShift) | input.pressed(KeyCode::RShift));
+    }
+}
+
+#[derive(Default)]
+struct GamepadLobby {
+    gamepads: HashSet<Gamepad>,
+}
+
+fn connection_system(
+    mut lobby: ResMut<GamepadLobby>,
+    mut gamepad_event: EventReader<GamepadEvent>,
+) {
+    for event in gamepad_event.iter() {
+        match &event {
+            GamepadEvent(gamepad, GamepadEventType::Connected) => {
+                lobby.gamepads.insert(*gamepad);
+                println!("{:?} Connected", gamepad);
+            }
+            GamepadEvent(gamepad, GamepadEventType::Disconnected) => {
+                lobby.gamepads.remove(gamepad);
+                println!("{:?} Disconnected", gamepad);
+            }
+            _ => (),
+        }
+    }
+}
+
+fn gamepad_system(
+    lobby: Res<GamepadLobby>,
+    button_inputs: Res<Input<GamepadButton>>,
+    axes: Res<Axis<GamepadAxis>>,
+    mut query: Query<&mut GameStickDirectionalInput>,
+) {
+    for mut gamepad_directional_input in query.iter_mut() {
+        // Initialize gamepad direction to zero every frame then overwrite below if we have gamepad inputs
+        gamepad_directional_input.0 = Vec3::ZERO;
+
+        // confirm that the controller is connected
+        for gamepad in lobby.gamepads.iter().cloned() {
+            // Left stick controls movement
+            //  NOTE: Gamepad Stick X axis => left/right => movement x-component
+            //                      Y axis => forward/backward => movement z-component
+            let left_stick_x = axes
+                .get(GamepadAxis(gamepad, GamepadAxisType::LeftStickX))
+                .unwrap();
+            if left_stick_x.abs() > 0.01 {
+                //println!("{:?} LeftStickX value is {}", gamepad, left_stick_x);
+                gamepad_directional_input.0.x = left_stick_x;
+            }
+            let left_stick_y = axes
+                .get(GamepadAxis(gamepad, GamepadAxisType::LeftStickY))
+                .unwrap();
+            if left_stick_y.abs() > 0.01 {
+                //println!("{:?} LeftStickY value is {}", gamepad, left_stick_y);
+                gamepad_directional_input.0.z = left_stick_y;
+            }
+
+            // "South" button [PS4 "X"] designates "jump"
+            //  NOTE: Jump => movement y-component
+            if button_inputs.just_pressed(GamepadButton(gamepad, GamepadButtonType::South)) {
+                //println!("{:?} just pressed South", gamepad);
+                gamepad_directional_input.0.y += 1.0;
+            }
+        }
+
+        // Check here to see if any keypresses were registered.
+        // If so, then normalize the vector components.
+        if gamepad_directional_input.0 != Vec3::ZERO {
+            gamepad_directional_input.0.normalize();
+        }
+    }
+}
+
+fn mouse_wheel(
+    mut mouse_wheel_events: EventReader<MouseWheel>,
+    mut players: Query<&mut MouseWheelDelta>,
+) {
+    if let Some(mut mouse_wheel_delta) = players.iter_mut().next() {
+        mouse_wheel_delta.0 = 0.0;
+        if let Some(mouse_wheel) = mouse_wheel_events.iter().last() {
+            mouse_wheel_delta.0 = match mouse_wheel.unit {
+                MouseScrollUnit::Line => mouse_wheel.y,
+                MouseScrollUnit::Pixel => mouse_wheel.y / 108.0,
+            };
+        }
+    }
+}
+
+fn zoom_camera(
+    time: Res<Time>,
+    mut players: Query<(&mut OrbitingCamera, &mut MouseWheelDelta, &Modifying)>,
+    mut camera_transforms: Query<&mut Transform, With<Camera>>,
+    configs: ResMut<Assets<player::Config>>,
+) {
+    if let Some((_, config)) = configs.iter().next() {
+        if let Some((orbiting_camera, scroll, modifying)) = players.iter_mut().next() {
+            if !modifying.0 {
+                // Set the camera translation relative to the camera orbit center
+                let mut camera_transform = camera_transforms.get_mut(orbiting_camera.0).unwrap();
+                camera_transform.translation = -Vec3::Z
+                    * (-camera_transform.translation.z
+                        - scroll.0 * time.delta_seconds() * config.zoom_sensitivity)
+                        .max(config.min_camera_distance)
+                        .min(config.max_camera_distance);
+            }
+        }
     }
 }

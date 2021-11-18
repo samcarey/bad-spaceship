@@ -7,7 +7,6 @@ use bevy_rapier3d::{
         ActiveEvents, ColliderShape, NarrowPhase, RigidBodyMassProps, RigidBodyMassPropsFlags,
         RigidBodyPosition, RigidBodyVelocity,
     },
-    render::ColliderDebugRender,
 };
 
 use serde::Deserialize;
@@ -44,7 +43,6 @@ pub struct Config {
 #[derive(Default, Bundle)]
 struct CharacterBundle {
     character: Character,
-    collider_debug_render: ColliderDebugRender,
     collider_position_sync: ColliderPositionSync,
 }
 

@@ -1,23 +1,27 @@
-use bad_spaceship_shared::{character, CommonPlugins};
+use bad_spaceship_shared::{
+    character, CommonPlugins, OrbitingCamera, Player, PlayerCameraOrbitCenter,
+};
 pub mod highlight;
 use bad_spaceship_shared::player;
 use bevy::pbr::AmbientLight;
 use bevy::prelude::*;
+use bevy::render::camera::Camera;
 use bevy::render::pass::ClearColor;
 
+use bevy_rapier3d::render::RapierRenderPlugin;
 #[cfg(target_arch = "wasm32")]
 use bevy_web_fullscreen::FullViewportPlugin;
 use highlight::HighlightPlugin;
-use hud::TransformGizmoPlugin;
 use input::InputPlugin;
-use materials::MaterialsPlugin;
 use platform::PlatformPlugin;
+use render_main_pass::RenderMainPassPlugin;
+use render_secondary_pass::RenderSecondaryPassPlugin;
 use ui::UiPlugin;
 
-mod hud;
 mod input;
-mod materials;
 mod platform;
+mod render_main_pass;
+mod render_secondary_pass;
 mod ui;
 
 #[bevy_main]
@@ -45,10 +49,13 @@ fn main() {
         .insert_resource(ClearColor(Color::rgb(0.99, 0.99, 0.95)))
         .add_plugin(PlatformPlugin)
         .add_plugin(HighlightPlugin)
-        .add_plugin(MaterialsPlugin)
-        .add_plugin(TransformGizmoPlugin)
+        .add_plugin(RenderMainPassPlugin)
+        .add_plugin(RenderSecondaryPassPlugin)
         .add_plugins(CommonPlugins)
-        .add_startup_system(load_configs.system());
+        .add_startup_system(load_configs.system())
+        .add_system(add_camera_to_player.system());
+
+    app.add_plugin(RapierRenderPlugin);
 
     #[cfg(target_arch = "wasm32")]
     app.add_plugin(FullViewportPlugin);
@@ -82,4 +89,21 @@ fn load_configs(
     // *handles = Some(asset_server.load_folder("config").unwrap());
 
     asset_server.watch_for_changes().unwrap();
+}
+
+fn add_camera_to_player(
+    mut commands: Commands,
+    cameras: Query<Entity, With<Camera>>,
+    players: Query<(Entity, &PlayerCameraOrbitCenter), (With<Player>, Without<OrbitingCamera>)>,
+) {
+    if let Some(camera_entity) = cameras.iter().next() {
+        if let Some((player, camera_orbit_center)) = players.iter().next() {
+            commands
+                .entity(player)
+                .insert(OrbitingCamera(camera_entity));
+            commands
+                .entity(camera_orbit_center.0)
+                .push_children(&[camera_entity]);
+        }
+    }
 }

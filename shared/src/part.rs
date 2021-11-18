@@ -4,8 +4,7 @@ use crate::utils::{self, QuatExt, TransformExt};
 use crate::{
     AttachEvent, Attachable, BoundingRadius, CameraOrbitCenter, DisplayableJoint, ExistingJoints,
     Focused, FocusedInteractable, HoldPoint, Holding, Modifying, Player, PlayerClick,
-    PotentialJoints, PredeleteJoint, PredeleteJoints, ToggleHoldingSystemLabel,
-    UpdateAttachPointsLabel,
+    PotentialJoints, PredeleteJoint, PredeleteJoints, ToggleHoldingSystemLabel, UpdateJointsLabel,
 };
 use bevy::prelude::*;
 use bevy_rapier3d::na::Vector3;
@@ -17,7 +16,6 @@ use bevy_rapier3d::prelude::{
     ActiveEvents, BallJoint, ColliderFlags, ColliderMassProps, ColliderMaterial, ColliderShape,
     JointSet, NarrowPhase, RigidBodyForces, RigidBodyMassProps, RigidBodyVelocity,
 };
-use bevy_rapier3d::render::ColliderDebugRender;
 use rand::prelude::ThreadRng;
 use rand::Rng;
 use std::f32;
@@ -36,7 +34,7 @@ impl Plugin for PartPlugin {
             .add_system(update_attachable.system())
             .add_system_set(
                 SystemSet::new()
-                    .label(UpdateAttachPointsLabel)
+                    .label(UpdateJointsLabel)
                     .before(ToggleHoldingSystemLabel)
                     .with_system(update_active_joints.system())
                     .with_system(update_predelete_joints.system()),
@@ -45,13 +43,13 @@ impl Plugin for PartPlugin {
                 attach
                     .system()
                     .after(ToggleHoldingSystemLabel)
-                    .after(UpdateAttachPointsLabel),
+                    .after(UpdateJointsLabel),
             )
             .add_system(
                 delete_joints
                     .system()
                     .after(ToggleHoldingSystemLabel)
-                    .after(UpdateAttachPointsLabel),
+                    .after(UpdateJointsLabel),
             )
             .init_resource::<PotentialJoints>()
             .init_resource::<ExistingJoints>()
@@ -135,7 +133,6 @@ struct PartBundle {
     interactable: Interactable,
     holdable: Holdable,
     gets_replaced: GetsReplaced,
-    collider_debug_render: ColliderDebugRender,
     collider_position_sync: ColliderPositionSync,
 }
 
@@ -186,10 +183,7 @@ fn spawn_part(mut commands: Commands, mut new_part_events: EventReader<NewPart>)
                 },
                 ..Default::default()
             })
-            .insert_bundle(PartBundle {
-                collider_debug_render: ColliderDebugRender::with_id(1),
-                ..Default::default()
-            });
+            .insert_bundle(PartBundle::default());
     }
 }
 

@@ -1,5 +1,4 @@
 use bevy::prelude::*;
-use bevy::render::mesh::{Indices, VertexAttributeValues};
 use bevy_rapier3d::na::Point3;
 use bevy_rapier3d::physics::ColliderPositionSync;
 use bevy_rapier3d::prelude::RigidBodyMassProps;
@@ -7,95 +6,20 @@ use bevy_rapier3d::{
     physics::{ColliderBundle, RigidBodyBundle},
     prelude::ColliderShape,
 };
+
+use crate::Grass;
 pub struct MapPlugin;
 
 impl Plugin for MapPlugin {
     fn build(&self, app: &mut AppBuilder) {
-        app.add_startup_system(add_lighting.system())
-            .add_startup_system(spawn_map.system());
+        app.add_startup_system(spawn_map.system());
     }
 }
 
 pub const PLATFORM_WIDTH_M: f32 = 50.0; // meters
 pub const PLATFORM_THICKNESS_M: f32 = 3.0; // meters
 
-fn add_lighting(mut commands: Commands) {
-    commands.spawn().insert_bundle(LightBundle {
-        transform: Transform::from_translation(Vec3::new(0.0, 8.0, 0.0)), // meters
-        ..Default::default()
-    });
-}
-
-fn compute_mesh(shape: &ColliderShape) -> Mesh {
-    let mut mesh = Mesh::new(bevy::render::pipeline::PrimitiveTopology::TriangleList);
-    let trimesh = shape.as_trimesh().unwrap();
-    mesh.set_attribute(
-        Mesh::ATTRIBUTE_POSITION,
-        VertexAttributeValues::from(
-            trimesh
-                .vertices()
-                .iter()
-                .map(|vertex| [vertex.x, vertex.y, vertex.z])
-                .collect::<Vec<_>>(),
-        ),
-    );
-    // Compute vertex normals by averaging the normals
-    // of every triangle they appear in.
-    // NOTE: This is a bit shonky, but good enough for visualisation.
-    let verts = trimesh.vertices();
-    let mut normals: Vec<Vec3> = vec![Vec3::ZERO; trimesh.vertices().len()];
-    for triangle in trimesh.indices().iter() {
-        let ab = verts[triangle[1] as usize] - verts[triangle[0] as usize];
-        let ac = verts[triangle[2] as usize] - verts[triangle[0] as usize];
-        let normal = ab.cross(&ac);
-        // Contribute this normal to each vertex in the triangle.
-        for i in 0..3 {
-            normals[triangle[i] as usize] += Vec3::new(normal.x, normal.y, normal.z);
-        }
-    }
-    let normals: Vec<[f32; 3]> = normals
-        .iter()
-        .map(|normal| {
-            let normal = normal.normalize();
-            [normal.x, normal.y, normal.z]
-        })
-        .collect();
-    mesh.set_attribute(Mesh::ATTRIBUTE_NORMAL, VertexAttributeValues::from(normals));
-    // There's nothing particularly meaningful we can do
-    // for this one without knowing anything about the overall topology.
-
-    mesh.set_attribute(
-        Mesh::ATTRIBUTE_UV_0,
-        VertexAttributeValues::from(
-            trimesh
-                .vertices()
-                .iter()
-                .map(|&vertex| {
-                    [
-                        vertex.x / PLATFORM_WIDTH_M + 0.5,
-                        vertex.z / PLATFORM_WIDTH_M + 0.5,
-                    ]
-                })
-                .collect::<Vec<_>>(),
-        ),
-    );
-    mesh.set_indices(Some(Indices::U32(
-        trimesh
-            .indices()
-            .iter()
-            .flat_map(|triangle| triangle.iter())
-            .cloned()
-            .collect(),
-    )));
-    mesh
-}
-
-fn spawn_map(
-    mut commands: Commands,
-    asset_server: Res<AssetServer>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    mut meshes: ResMut<Assets<Mesh>>,
-) {
+fn spawn_map(mut commands: Commands) {
     // Create a bowl with a cosine cross-section
     let mut vertices: Vec<Point3<f32>> = Vec::new();
     let mut indices: Vec<[u32; 3]> = Vec::new();
@@ -146,15 +70,6 @@ fn spawn_map(
         .spawn()
         .insert_bundle(rigid_body)
         .insert_bundle(collider)
-        .insert_bundle(PbrBundle {
-            mesh: meshes.add(compute_mesh(&trimesh)),
-            material: materials.add(StandardMaterial {
-                base_color_texture: Some(asset_server.load("textures/grass.png")),
-                roughness: 1.0,
-                ..Default::default()
-            }),
-            transform: Transform::from_scale(Vec3::ONE),
-            ..Default::default()
-        })
+        .insert(Grass)
         .insert(ColliderPositionSync::Discrete);
 }
