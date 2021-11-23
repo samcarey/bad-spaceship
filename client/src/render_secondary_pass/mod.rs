@@ -11,7 +11,6 @@ use render_graph::SecondaryPass;
 mod cone;
 mod normalization;
 mod render_graph;
-mod truncated_torus;
 
 pub struct RenderSecondaryPassPlugin;
 impl Plugin for RenderSecondaryPassPlugin {
