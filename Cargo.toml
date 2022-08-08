@@ -1,5 +1,6 @@
 [workspace]
 members = ["client", "server", "shared"]
+resolver = "2"
 
 # Recommended for rapier: https://rapier.rs/docs/user_guides/bevy_plugin/common_mistakes
 [profile.dev.package."*"]

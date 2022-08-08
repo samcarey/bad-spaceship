@@ -1,18 +1,12 @@
 use bevy::prelude::*;
-use bevy_rapier3d::na::Point3;
-use bevy_rapier3d::physics::ColliderPositionSync;
-use bevy_rapier3d::prelude::RigidBodyMassProps;
-use bevy_rapier3d::{
-    physics::{ColliderBundle, RigidBodyBundle},
-    prelude::ColliderShape,
-};
+use bevy_rapier3d::prelude::{ActiveCollisionTypes, Collider, RigidBody};
 
 use crate::Grass;
 pub struct MapPlugin;
 
 impl Plugin for MapPlugin {
-    fn build(&self, app: &mut AppBuilder) {
-        app.add_startup_system(spawn_map.system());
+    fn build(&self, app: &mut App) {
+        app.add_startup_system(spawn_map);
     }
 }
 
@@ -21,7 +15,7 @@ pub const PLATFORM_THICKNESS_M: f32 = 3.0; // meters
 
 fn spawn_map(mut commands: Commands) {
     // Create a bowl with a cosine cross-section
-    let mut vertices: Vec<Point3<f32>> = Vec::new();
+    let mut vertices: Vec<Vec3> = Vec::new();
     let mut indices: Vec<[u32; 3]> = Vec::new();
     let segments = 16;
     let bowl_size = Vec3::new(PLATFORM_WIDTH_M, PLATFORM_THICKNESS_M, PLATFORM_WIDTH_M);
@@ -51,25 +45,13 @@ fn spawn_map(mut commands: Commands) {
         }
     }
 
-    let rigid_body = RigidBodyBundle {
-        body_type: bevy_rapier3d::prelude::RigidBodyType::Static,
-        mass_properties: RigidBodyMassProps {
-            effective_inv_mass: 1.0,
-            ..Default::default()
-        },
-        position: [0.0, 0.0, 0.0].into(),
-        ..Default::default()
-    };
-    let trimesh = ColliderShape::trimesh(vertices, indices);
-    let collider = ColliderBundle {
-        shape: trimesh.clone(),
-        ..Default::default()
-    };
-
     commands
         .spawn()
-        .insert_bundle(rigid_body)
-        .insert_bundle(collider)
-        .insert(Grass)
-        .insert(ColliderPositionSync::Discrete);
+        .insert(RigidBody::Fixed)
+        .insert_bundle(TransformBundle::from_transform(Transform::from_xyz(
+            0.0, 0.0, 0.0,
+        )))
+        .insert(Collider::trimesh(vertices, indices))
+        .insert(ActiveCollisionTypes::default())
+        .insert(Grass);
 }

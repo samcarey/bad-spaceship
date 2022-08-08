@@ -14,19 +14,16 @@ shadow!(build);
 pub struct UiPlugin;
 
 impl Plugin for UiPlugin {
-    fn build(&self, app: &mut AppBuilder) {
+    fn build(&self, app: &mut App) {
         app.add_plugin(EguiPlugin)
             .add_plugin(FrameTimeDiagnosticsPlugin)
+            .add_system_set(SystemSet::on_update(AppState::InGameMenu).with_system(show_menu))
             .add_system_set(
-                SystemSet::on_update(AppState::InGameMenu).with_system(show_menu.system()),
+                SystemSet::on_update(AppState::Initial).with_system(capture_mouse_on_click),
             )
-            .add_system_set(
-                SystemSet::on_update(AppState::Initial)
-                    .with_system(capture_mouse_on_click.system()),
-            )
-            .add_system(update_ui_scale_factor.system())
-            .add_system(show_instructions.system())
-            .add_system(show_bottom_panel.system());
+            .add_system(update_ui_scale_factor)
+            .add_system(show_instructions)
+            .add_system(show_bottom_panel);
     }
 }
 
@@ -63,12 +60,21 @@ fn update_ui_scale_factor(
     egui_settings.scale_factor = 1.0 * custom_scale_factor.0;
 }
 
-fn show_menu(egui_ctx: ResMut<EguiContext>, mut state: ResMut<State<AppState>>) {
-    egui::Window::new("Bad Spaceship")
-        .anchor(Align2::CENTER_CENTER, [0., 0.])
+#[cfg(not(target_arch = "wasm32"))]
+fn align_menu(window: egui::Window) -> egui::Window {
+    window.anchor(Align2::CENTER_TOP, [0., 150.])
+}
+
+#[cfg(target_arch = "wasm32")]
+fn align_menu(window: egui::Window) -> egui::Window {
+    window.anchor(Align2::CENTER_CENTER, [0., -70.])
+}
+
+fn show_menu(mut egui_ctx: ResMut<EguiContext>, mut state: ResMut<State<AppState>>) {
+    align_menu(egui::Window::new("Bad Spaceship"))
         .collapsible(false)
         .resizable(false)
-        .show(egui_ctx.ctx(), |ui| {
+        .show(egui_ctx.ctx_mut(), |ui| {
             ui.with_layout(Layout::top_down_justified(Align::Center), |ui| {
                 if ui.button("Options").clicked() {
                     bevy::log::info!("Options selected");
@@ -84,7 +90,7 @@ fn show_menu(egui_ctx: ResMut<EguiContext>, mut state: ResMut<State<AppState>>) 
         });
 }
 
-fn show_bottom_panel(egui_ctx: ResMut<EguiContext>, diagnostics: Res<Diagnostics>) {
+fn show_bottom_panel(mut egui_ctx: ResMut<EguiContext>, diagnostics: Res<Diagnostics>) {
     let mut fps = 0.0;
     if let Some(fps_diagnostic) = diagnostics.get(FrameTimeDiagnosticsPlugin::FPS) {
         if let Some(fps_avg) = fps_diagnostic.average() {
@@ -93,7 +99,7 @@ fn show_bottom_panel(egui_ctx: ResMut<EguiContext>, diagnostics: Res<Diagnostics
     }
     egui::TopBottomPanel::bottom("bottom_panel")
         .frame(Frame::default().multiply_with_opacity(0.0))
-        .show(egui_ctx.ctx(), |ui| {
+        .show(egui_ctx.ctx_mut(), |ui| {
             ui.horizontal(|ui| {
                 ui.colored_label(
                     Color32::from_rgb(255, 0, 0),
@@ -125,10 +131,10 @@ Hold deletion zone over existing joint to highlight it in red.
 Click while joint is highlighted red to delete it.
 ";
 
-fn show_instructions(egui_ctx: ResMut<EguiContext>) {
+fn show_instructions(mut egui_ctx: ResMut<EguiContext>) {
     egui::TopBottomPanel::top("top_panel")
         .frame(Frame::default().multiply_with_opacity(0.0))
-        .show(egui_ctx.ctx(), |ui| {
+        .show(egui_ctx.ctx_mut(), |ui| {
             ui.horizontal(|ui| {
                 ui.colored_label(Color32::from_rgb(255, 0, 0), INSTRUCTIONS);
             });

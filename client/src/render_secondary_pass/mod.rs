@@ -4,49 +4,53 @@ use bad_spaceship_shared::{
     DisplayableJoint, ExistingJoints, HoldPoint, Holding, Modifying, PotentialJoints,
     PredeleteJoint, PredeleteJoints, UpdateJointsLabel,
 };
-use bevy::{prelude::*, render::render_graph::base::MainPass};
+use bevy::{pbr::NotShadowCaster, prelude::*};
 use normalization::*;
-use render_graph::SecondaryPass;
+
+use self::gizmo_material::GizmoMaterial;
+
+mod gizmo_material;
 
 mod cone;
 mod normalization;
-mod render_graph;
 
 pub struct RenderSecondaryPassPlugin;
 impl Plugin for RenderSecondaryPassPlugin {
-    fn build(&self, app: &mut AppBuilder) {
-        app.add_startup_system(build_gizmo.system())
-            .add_system(position_gizmo.system())
-            .add_plugin(normalization::Ui3dNormalization)
-            .add_startup_system(initialize_joint_appearance.system())
+    fn build(&self, app: &mut App) {
+        let mut shaders = app.world.get_resource_mut::<Assets<Shader>>().unwrap();
+        shaders.set_untracked(
+            gizmo_material::GIZMO_SHADER_HANDLE,
+            Shader::from_wgsl(include_str!("../../assets/gizmo_material.wgsl")),
+        );
+
+        app.add_startup_system(build_gizmo)
+            .add_system(position_gizmo)
+            .add_plugin(Ui3dNormalization)
+            .add_startup_system(initialize_joint_appearance)
             .init_resource::<JointAppearance>()
-            .add_system(add_hold_point_delete_zone_visualization.system())
+            .add_system(add_hold_point_delete_zone_visualization)
             .add_system_set(
                 SystemSet::new()
                     .after(UpdateJointsLabel)
-                    .with_system(display_potential_joints.system())
-                    .with_system(display_existing_joints.system())
-                    .with_system(display_predelete_joints.system())
-                    .with_system(delete_zone_visibility.system()),
-            );
-        {
-            render_graph::add_gizmo_graph(&mut app.world_mut());
-        }
+                    .with_system(display_potential_joints)
+                    .with_system(display_existing_joints)
+                    .with_system(display_predelete_joints)
+                    .with_system(delete_zone_visibility),
+            )
+            .add_plugin(MaterialPlugin::<GizmoMaterial>::default());
     }
 }
 
 fn position_gizmo(
     helds: Query<(&TargetOrientation, &TargetPosition)>,
-    mut transforms: QuerySet<(
-        Query<(&mut Transform, &mut Visible, &Children), With<GizmoComponent>>,
-        Query<&GlobalTransform, With<HoldPoint>>,
-        Query<&mut Visible>,
-    )>,
+    hold_points: Query<&GlobalTransform, (With<HoldPoint>, Without<GizmoHub>)>,
+    mut gizmo_hubs: Query<(&mut Transform, &mut Visibility, &Children), With<GizmoHub>>,
+    mut gizmo_pieces: Query<&mut Visibility, (With<GizmoPiece>, Without<GizmoHub>)>,
 ) {
     let mut translation = None;
     let mut rotation = None;
     if let Some((target_orientation, target_position)) = helds.iter().next() {
-        translation = match transforms.q1().get(target_position.hold_point_entity) {
+        translation = match hold_points.get(target_position.hold_point_entity) {
             Ok(transform) => Some(transform.translation),
             Err(_) => None,
         };
@@ -56,9 +60,7 @@ fn position_gizmo(
     let mut childs = Vec::new();
     let mut should_be_visible = false;
 
-    if let Some((mut gizmo_transform, mut visible, children)) =
-        transforms.q0_mut().iter_mut().next()
-    {
+    if let Some((mut gizmo_transform, mut visible, children)) = gizmo_hubs.iter_mut().next() {
         if let Some(translation) = translation {
             if let Some(rotation) = rotation {
                 gizmo_transform.translation = translation;
@@ -72,29 +74,33 @@ fn position_gizmo(
     }
 
     for child in childs {
-        if let Ok(mut visible) = transforms.q2_mut().get_mut(child) {
+        if let Ok(mut visible) = gizmo_pieces.get_mut(child) {
             visible.is_visible = should_be_visible;
         }
     }
 }
 
-struct GizmoComponent;
+#[derive(Component)]
+struct GizmoHub;
+
+#[derive(Component)]
+struct GizmoPiece;
 
 #[derive(Bundle)]
 pub struct TransformGizmoBundle {
-    gc: GizmoComponent,
+    gc: GizmoHub,
     transform: Transform,
     global_transform: GlobalTransform,
-    visible: Visible,
+    visible: Visibility,
     normalize: Normalize3d,
 }
 
 impl Default for TransformGizmoBundle {
     fn default() -> Self {
         TransformGizmoBundle {
-            gc: GizmoComponent,
+            gc: GizmoHub,
             transform: Transform::from_translation(Vec3::splat(f32::MIN)),
-            visible: Visible {
+            visible: Visibility {
                 is_visible: false,
                 ..Default::default()
             },
@@ -108,7 +114,7 @@ impl Default for TransformGizmoBundle {
 fn build_gizmo(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut materials: ResMut<Assets<GizmoMaterial>>,
 ) {
     let axis_length = 1.5;
     // Define gizmo meshes
@@ -123,42 +129,19 @@ fn build_gizmo(
         ..Default::default()
     }));
     // Define gizmo materials
-    let gizmo_material_x = materials.add(StandardMaterial {
-        unlit: true,
-        base_color: Color::rgb(1.0, 0.4, 0.4),
-        ..Default::default()
-    });
-    let gizmo_material_y = materials.add(StandardMaterial {
-        unlit: true,
-        base_color: Color::rgb(0.4, 1.0, 0.4),
-        ..Default::default()
-    });
-    let gizmo_material_z = materials.add(StandardMaterial {
-        unlit: true,
-        base_color: Color::rgb(0.4, 0.5, 1.0),
-        ..Default::default()
-    });
-    let gizmo_material_x_selectable = materials.add(StandardMaterial {
-        unlit: true,
-        base_color: Color::rgb(1.0, 0.7, 0.7),
-        ..Default::default()
-    });
-    let gizmo_material_y_selectable = materials.add(StandardMaterial {
-        unlit: true,
-        base_color: Color::rgb(0.7, 1.0, 0.7),
-        ..Default::default()
-    });
-    let gizmo_material_z_selectable = materials.add(StandardMaterial {
-        unlit: true,
-        base_color: Color::rgb(0.7, 0.7, 1.0),
-        ..Default::default()
-    });
+    let (s, l, a) = (0.8, 0.5, 0.8);
+    let gizmo_material_x = materials.add(GizmoMaterial::from(Color::hsla(0.0, s, l, a)));
+    let gizmo_material_y = materials.add(GizmoMaterial::from(Color::hsla(120.0, s, l, a)));
+    let gizmo_material_z = materials.add(GizmoMaterial::from(Color::hsla(240.0, s, l, a)));
+    let gizmo_material_x_selectable = materials.add(GizmoMaterial::from(Color::hsl(0.0, s, l)));
+    let gizmo_material_y_selectable = materials.add(GizmoMaterial::from(Color::hsl(120.0, s, l)));
+    let gizmo_material_z_selectable = materials.add(GizmoMaterial::from(Color::hsl(240.0, s, l)));
     commands
         .spawn_bundle(TransformGizmoBundle::default())
         .with_children(|parent| {
             // Translation Axes
             parent
-                .spawn_bundle(PbrBundle {
+                .spawn_bundle(MaterialMeshBundle {
                     mesh: arrow_tail_mesh.clone(),
                     material: gizmo_material_x.clone(),
                     transform: Transform::from_matrix(Mat4::from_rotation_translation(
@@ -167,10 +150,10 @@ fn build_gizmo(
                     )),
                     ..Default::default()
                 })
-                .insert(SecondaryPass)
-                .remove::<MainPass>();
+                .insert(GizmoPiece)
+                .insert(NotShadowCaster);
             parent
-                .spawn_bundle(PbrBundle {
+                .spawn_bundle(MaterialMeshBundle {
                     mesh: arrow_tail_mesh.clone(),
                     material: gizmo_material_y.clone(),
                     transform: Transform::from_matrix(Mat4::from_rotation_translation(
@@ -179,10 +162,10 @@ fn build_gizmo(
                     )),
                     ..Default::default()
                 })
-                .insert(SecondaryPass)
-                .remove::<MainPass>();
+                .insert(GizmoPiece)
+                .insert(NotShadowCaster);
             parent
-                .spawn_bundle(PbrBundle {
+                .spawn_bundle(MaterialMeshBundle {
                     mesh: arrow_tail_mesh,
                     material: gizmo_material_z.clone(),
                     transform: Transform::from_matrix(Mat4::from_rotation_translation(
@@ -191,12 +174,11 @@ fn build_gizmo(
                     )),
                     ..Default::default()
                 })
-                .insert(SecondaryPass)
-                .remove::<MainPass>();
+                .insert(GizmoPiece)
+                .insert(NotShadowCaster);
 
-            // Translation Handles
             parent
-                .spawn_bundle(PbrBundle {
+                .spawn_bundle(MaterialMeshBundle {
                     mesh: cone_mesh.clone(),
                     material: gizmo_material_x_selectable.clone(),
                     transform: Transform::from_matrix(Mat4::from_rotation_translation(
@@ -205,19 +187,19 @@ fn build_gizmo(
                     )),
                     ..Default::default()
                 })
-                .insert(SecondaryPass)
-                .remove::<MainPass>();
+                .insert(GizmoPiece)
+                .insert(NotShadowCaster);
             parent
-                .spawn_bundle(PbrBundle {
+                .spawn_bundle(MaterialMeshBundle {
                     mesh: cone_mesh.clone(),
                     material: gizmo_material_y_selectable.clone(),
                     transform: Transform::from_translation(Vec3::new(0.0, axis_length, 0.0)),
                     ..Default::default()
                 })
-                .insert(SecondaryPass)
-                .remove::<MainPass>();
+                .insert(GizmoPiece)
+                .insert(NotShadowCaster);
             parent
-                .spawn_bundle(PbrBundle {
+                .spawn_bundle(MaterialMeshBundle {
                     mesh: cone_mesh.clone(),
                     material: gizmo_material_z_selectable.clone(),
                     transform: Transform::from_matrix(Mat4::from_rotation_translation(
@@ -226,56 +208,44 @@ fn build_gizmo(
                     )),
                     ..Default::default()
                 })
-                .insert(SecondaryPass)
-                .remove::<MainPass>();
-        })
-        .insert(SecondaryPass)
-        .remove::<MainPass>();
+                .insert(GizmoPiece)
+                .insert(NotShadowCaster);
+        });
 }
 
 #[derive(Default)]
 struct JointAppearance {
     mesh: Option<Handle<Mesh>>,
-    valid_material: Option<Handle<StandardMaterial>>,
-    invalid_material: Option<Handle<StandardMaterial>>,
-    predelete_material: Option<Handle<StandardMaterial>>,
+    valid_material: Option<Handle<GizmoMaterial>>,
+    invalid_material: Option<Handle<GizmoMaterial>>,
+    predelete_material: Option<Handle<GizmoMaterial>>,
 }
 
 fn initialize_joint_appearance(
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut materials: ResMut<Assets<GizmoMaterial>>,
     mut joint_appearance: ResMut<JointAppearance>,
 ) {
+    let (s, l, a) = (1.0, 0.5, 0.75);
     *joint_appearance = JointAppearance {
         mesh: Some(meshes.add(Mesh::from(shape::Icosphere {
             radius: 0.1,
             ..Default::default()
         }))),
-        valid_material: Some(materials.add(StandardMaterial {
-            unlit: true,
-            base_color: Color::rgb(1.0, 1.0, 0.2),
-            ..Default::default()
-        })),
-        invalid_material: Some(materials.add(StandardMaterial {
-            unlit: true,
-            base_color: Color::rgb(0.4, 0.4, 1.0),
-            ..Default::default()
-        })),
-        predelete_material: Some(materials.add(StandardMaterial {
-            unlit: true,
-            base_color: Color::rgb(1.0, 0.4, 0.4),
-            ..Default::default()
-        })),
+        valid_material: Some(materials.add(GizmoMaterial::from(Color::hsla(260.0, s, l, a)))),
+        invalid_material: Some(materials.add(GizmoMaterial::from(Color::hsla(20.0, s, l, a)))),
+        predelete_material: Some(materials.add(GizmoMaterial::from(Color::hsla(20.0, s, l, a)))),
     };
 }
 
+#[derive(Component)]
 struct DisplayedPotentialJoint;
 
 fn display_potential_joints(
     mut commands: Commands,
     holdables: Query<&GlobalTransform, With<Holdable>>,
     joints: Res<PotentialJoints>,
-    mut displayed_joints: Query<(&mut Transform, &mut Visible), With<DisplayedPotentialJoint>>,
+    mut displayed_joints: Query<(&mut Transform, &mut Visibility), With<DisplayedPotentialJoint>>,
     displayed_joint_appearance: Res<JointAppearance>,
 ) {
     let mut display_points_iter = displayed_joints.iter_mut();
@@ -291,15 +261,14 @@ fn display_potential_joints(
                 displayed_visible.is_visible = true;
             } else {
                 commands
-                    .spawn_bundle(PbrBundle {
+                    .spawn_bundle(MaterialMeshBundle {
                         mesh: displayed_joint_appearance.mesh.clone().unwrap(),
                         material,
                         transform: Transform::from_translation(center),
                         ..Default::default()
                     })
                     .insert(DisplayedPotentialJoint)
-                    .insert(SecondaryPass)
-                    .remove::<MainPass>();
+                    .insert(NotShadowCaster);
             }
         }
     }
@@ -308,13 +277,14 @@ fn display_potential_joints(
     }
 }
 
+#[derive(Component)]
 struct DisplayedExistingJoint;
 
 fn display_existing_joints(
     mut commands: Commands,
     holdables: Query<&GlobalTransform, With<Holdable>>,
     joints: Res<ExistingJoints>,
-    mut displayed_joints: Query<(&mut Transform, &mut Visible), With<DisplayedExistingJoint>>,
+    mut displayed_joints: Query<(&mut Transform, &mut Visibility), With<DisplayedExistingJoint>>,
     displayed_joint_appearance: Res<JointAppearance>,
 ) {
     let mut display_joints_iter = displayed_joints.iter_mut();
@@ -329,15 +299,14 @@ fn display_existing_joints(
                 displayed_visible.is_visible = true;
             } else {
                 commands
-                    .spawn_bundle(PbrBundle {
+                    .spawn_bundle(MaterialMeshBundle {
                         mesh: displayed_joint_appearance.mesh.clone().unwrap(),
                         material,
                         transform: Transform::from_translation(center),
                         ..Default::default()
                     })
                     .insert(DisplayedExistingJoint)
-                    .insert(SecondaryPass)
-                    .remove::<MainPass>();
+                    .insert(NotShadowCaster);
             }
         }
     }
@@ -346,12 +315,13 @@ fn display_existing_joints(
     }
 }
 
+#[derive(Component)]
 struct DisplayedPredeleteJoint;
 
 fn display_predelete_joints(
     mut commands: Commands,
     joints: Res<PredeleteJoints>,
-    mut displayed_joints: Query<(&mut Transform, &mut Visible), With<DisplayedPredeleteJoint>>,
+    mut displayed_joints: Query<(&mut Transform, &mut Visibility), With<DisplayedPredeleteJoint>>,
     displayed_joint_appearance: Res<JointAppearance>,
 ) {
     let mut display_joints_iter = displayed_joints.iter_mut();
@@ -366,15 +336,14 @@ fn display_predelete_joints(
             displayed_visible.is_visible = true;
         } else {
             commands
-                .spawn_bundle(PbrBundle {
+                .spawn_bundle(MaterialMeshBundle {
                     mesh: displayed_joint_appearance.mesh.clone().unwrap(),
                     material,
                     transform: Transform::from_translation(center),
                     ..Default::default()
                 })
                 .insert(DisplayedPredeleteJoint)
-                .insert(SecondaryPass)
-                .remove::<MainPass>();
+                .insert(NotShadowCaster);
         }
     }
     for (_, mut displayed_visible) in display_joints_iter {
@@ -386,16 +355,13 @@ fn add_hold_point_delete_zone_visualization(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    hold_points_without_visualization: Query<Entity, (With<HoldPoint>, Without<Visible>)>,
+    hold_points_without_visualization: Query<Entity, (With<HoldPoint>, Without<Visibility>)>,
 ) {
     if let Some(entity) = hold_points_without_visualization.iter().next() {
         commands
             .entity(entity)
-            .insert_bundle(PbrBundle {
-                visible: Visible {
-                    is_visible: false,
-                    is_transparent: true,
-                },
+            .insert_bundle(MaterialMeshBundle {
+                visibility: Visibility { is_visible: false },
                 mesh: meshes.add(
                     shape::Icosphere {
                         radius: DELETE_RADIUS,
@@ -404,31 +370,32 @@ fn add_hold_point_delete_zone_visualization(
                     .into(),
                 ),
                 material: materials.add(StandardMaterial {
-                    base_color: Color::rgba(0.6, 0.5, 0.0, 0.25),
-                    roughness: 1.0,
+                    base_color: Color::hsla(20.0, 1.0, 0.3, 0.25),
+                    alpha_mode: AlphaMode::Blend,
                     unlit: true,
                     ..Default::default()
                 }),
                 ..Default::default()
             })
-            .insert(SecondaryPass)
-            .remove::<MainPass>();
+            .insert(NotShadowCaster);
     }
 }
 
 fn delete_zone_visibility(
     players: Query<(&Holding, &Modifying, &Children)>,
-    mut hold_points: QuerySet<(
-        Query<(), With<HoldPoint>>,
-        Query<&mut Visible, With<HoldPoint>>,
-    )>,
+    hold_points0: Query<(), With<HoldPoint>>,
+    mut hold_points1: Query<&mut Visibility, With<HoldPoint>>,
+    // mut hold_points: QuerySet<(
+    //     QueryState<(), With<HoldPoint>>,
+    //     QueryState<&mut Visibility, With<HoldPoint>>,
+    // )>,
     camera_orbit_centers: Query<&Children>,
 ) {
     if let Some((holding, modifying, player_children)) = players.iter().next() {
         if let Some(entity) =
-            get_hold_point_entity(player_children, camera_orbit_centers, hold_points.q0())
+            get_hold_point_entity(player_children, camera_orbit_centers, &hold_points0)
         {
-            if let Ok(mut visible) = hold_points.q1_mut().get_mut(entity) {
+            if let Ok(mut visible) = hold_points1.get_mut(entity) {
                 visible.is_visible = modifying.0 && !holding.0;
             }
         }

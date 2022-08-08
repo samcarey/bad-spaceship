@@ -4,13 +4,11 @@ use bevy::prelude::*;
 pub struct PlatformPlugin;
 
 impl Plugin for PlatformPlugin {
-    fn build(&self, app: &mut AppBuilder) {
-        app.add_startup_system(show_cursor.system())
-            .add_system_set(
-                SystemSet::on_enter(AppState::InGameMenu).with_system(show_cursor.system()),
-            )
-            .add_system_set(SystemSet::on_enter(AppState::InGame).with_system(hide_cursor.system()))
-            .add_system(toggle_menu_on_key.system());
+    fn build(&self, app: &mut App) {
+        app.add_startup_system(show_cursor)
+            .add_system_set(SystemSet::on_enter(AppState::InGameMenu).with_system(show_cursor))
+            .add_system_set(SystemSet::on_enter(AppState::InGame).with_system(hide_cursor))
+            .add_system(toggle_menu_on_key);
     }
 }
 

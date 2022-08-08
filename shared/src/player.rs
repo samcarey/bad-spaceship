@@ -2,12 +2,12 @@ use std::{f32, time::Duration};
 
 use bevy::{prelude::*, reflect::TypeUuid};
 use bevy_easings::{CustomComponentEase, EaseFunction, EasingComponent, Lerp};
-use bevy_rapier3d::prelude::ColliderShape;
+use bevy_rapier3d::prelude::Collider;
 use serde::Deserialize;
 
 use crate::{
     part::{Holdable, TargetOrientation, TargetPosition},
-    utils::{ToVec3, TransformExt, DEG_TO_RADIANS},
+    utils::{ToVec3, DEG_TO_RADIANS},
     AttachEvent, BoundingRadius, CameraOrbitCenter, Character, FocusedInteractable,
     GameStickDirectionalInput, HoldEvent, HoldPoint, Holding, InputEvents,
     KeyboardDirectionalInput, LeftClicked, LookPitch, Modifying, MouseMotionDelta, MouseWheelDelta,
@@ -23,40 +23,35 @@ const MAX_CAMERA_PITCH: f32 = MAX_CAMERA_PITCH_DEGREES * DEG_TO_RADIANS;
 pub struct PlayerPlugin;
 
 impl Plugin for PlayerPlugin {
-    fn build(&self, app: &mut AppBuilder) {
-        app.add_startup_system(spawn_camera.system())
-            .add_system(spawn.system())
-            .add_system(mouse_motion.system().after(EaseLabel))
+    fn build(&self, app: &mut App) {
+        app.add_startup_system(spawn_camera)
+            .add_system(spawn)
+            .add_system(mouse_motion.after(EaseLabel))
             .add_system(
                 toggle_holding
-                    .system()
                     .label(ToggleHoldingSystemLabel)
                     .after(InputEvents),
             )
-            .add_system(despawn.system())
-            .add_system(attach_camera_orbit.system())
+            .add_system(despawn)
+            .add_system(attach_camera_orbit.label(AttachCameraOrbitSystem))
             .add_event::<PlayerClick>()
             .add_asset::<Config>()
-            .add_system(apply_part_rotation.system())
+            .add_system(apply_part_rotation)
             .add_event::<AttachEvent>()
             .add_event::<ReleaseEvent>()
             .init_resource::<CameraOrbitOffset>()
             .add_system_set(
                 SystemSet::new()
                     .after(ToggleHoldingSystemLabel)
-                    .with_system(reset_camera_after_release.system())
-                    .with_system(adjust_camera_on_hold.system())
-                    .with_system(reset_hold_point_after_release.system())
-                    .with_system(adjust_hold_point_on_hold.system()),
+                    .with_system(reset_camera_after_release)
+                    .with_system(adjust_camera_on_hold)
+                    .with_system(reset_hold_point_after_release.after(AttachCameraOrbitSystem))
+                    .with_system(adjust_hold_point_on_hold),
             )
             .add_event::<HoldEvent>()
-            .add_system(
-                bevy_easings::custom_ease_system::<Translation>
-                    .system()
-                    .label(EaseLabel),
-            )
-            .add_system(ease_camera.system().label(EaseLabel))
-            .add_system(set_part_rotation.system().after(MouseWheelLabel));
+            .add_system(bevy_easings::custom_ease_system::<Translation>.label(EaseLabel))
+            .add_system(ease_camera.label(EaseLabel))
+            .add_system(set_part_rotation.after(MouseWheelLabel));
     }
 }
 
@@ -87,9 +82,15 @@ pub struct HoldPointBundle {
     original_position: OriginalPosition,
 }
 
+const BEVY_YAW_PITCH_ROLL_ANGLES: EulerRot = EulerRot::YXZ;
+
 fn spawn_camera(mut commands: Commands) {
-    let mut camera_transform =
-        Transform::from_rotation(Quat::from_rotation_ypr(std::f32::consts::PI, 0.0, 0.0));
+    let mut camera_transform = Transform::from_rotation(Quat::from_euler(
+        BEVY_YAW_PITCH_ROLL_ANGLES,
+        std::f32::consts::PI,
+        0.0,
+        0.0,
+    ));
     camera_transform.translation = -Vec3::Z * 20.0;
     commands.spawn_bundle(PerspectiveCameraBundle {
         transform: camera_transform,
@@ -133,21 +134,29 @@ struct CameraOrbitOffset {
     min: Vec3,
 }
 
+#[derive(SystemLabel, Clone, Hash, Debug, PartialEq, Eq)]
+struct AttachCameraOrbitSystem;
+
 fn attach_camera_orbit(
     mut commands: Commands,
     characters_without_players: Query<
-        (Entity, &ColliderShape),
+        (Entity, &GlobalTransform, &Collider),
         (With<Character>, Without<Children>),
     >,
     configs: ResMut<Assets<Config>>,
     mut camera_orbit_offset: ResMut<CameraOrbitOffset>,
 ) {
     if let Some((_, config)) = configs.iter().next() {
-        for (character_entity, character_collider) in characters_without_players.iter() {
+        for (character_entity, character_global_transform, character_collider) in
+            characters_without_players.iter()
+        {
             // This is simply a point that hovers above the character that the camera orbits around.
             // This is for the purpose of making it easier to see over obstructions.
             camera_orbit_offset.min = config.camera_offset_character_size_ratio.to_vec3()
-                * character_collider.compute_local_bounding_sphere().radius
+                * character_collider
+                    .raw
+                    .compute_local_bounding_sphere()
+                    .radius
                 * 2.0;
             let mut camera_orbit_center_transform =
                 Transform::from_translation(camera_orbit_offset.min);
@@ -172,10 +181,14 @@ fn attach_camera_orbit(
             //     .push_children(&[camera]);
 
             let hold_point_transform = Transform::from_translation(Vec3::Z * 5.0);
+            let mut hold_point_global_transform = character_global_transform.clone();
+            hold_point_global_transform.translation += camera_orbit_center_transform.translation;
+            hold_point_global_transform.translation += hold_point_transform.translation;
             let hold_point = commands
                 .spawn()
                 .insert_bundle(HoldPointBundle {
                     transform: hold_point_transform.clone(),
+                    global_transform: hold_point_global_transform,
                     original_position: OriginalPosition(hold_point_transform.translation),
                     ..Default::default()
                 })
@@ -304,7 +317,7 @@ fn toggle_holding(
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Component)]
 struct Translation(Vec3);
 
 impl Lerp for Translation {
@@ -412,7 +425,7 @@ fn set_part_rotation(
             for child in player_children.iter() {
                 if let Ok(camera_orbit_center) = camera_orbit_centers.get(*child) {
                     rotation.0 = Quat::from_axis_angle(
-                        camera_orbit_center.forward(),
+                        camera_orbit_center.back(),
                         mouse_wheel_delta.0 / 10.,
                     ) * rotation.0;
                     for mouse_delta in mouse_deltas.iter() {
@@ -422,9 +435,8 @@ fn set_part_rotation(
                                 -mouse_delta.0.y,
                                 0.0,
                             ));
-                            let rotation_axis = rotation_input
-                                .cross(camera_orbit_center.forward())
-                                .normalize();
+                            let rotation_axis =
+                                rotation_input.cross(camera_orbit_center.back()).normalize();
                             rotation.0 = Quat::from_axis_angle(
                                 rotation_axis,
                                 rotation_input.length() / 100.,

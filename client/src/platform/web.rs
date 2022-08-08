@@ -4,21 +4,21 @@ use bevy::{
     input::mouse::{MouseMotion, MouseScrollUnit, MouseWheel},
     prelude::*,
 };
-use bevy_webgl2::renderer::JsCast;
 use gloo::events::EventListener;
 use std::sync::{
     atomic::{AtomicBool, AtomicI32, Ordering::SeqCst},
     Arc,
 };
+use wasm_bindgen::JsCast;
 use web_sys::{Document, Element, Event, HtmlElement, KeyboardEvent, MouseEvent, WheelEvent};
 
 pub struct PlatformPlugin;
 
 impl Plugin for PlatformPlugin {
-    fn build(&self, app: &mut AppBuilder) {
+    fn build(&self, app: &mut App) {
         app.insert_resource(PointerLockTracker::new())
-            .add_system_set(SystemSet::on_enter(AppState::InGame).with_system(hide_cursor.system()))
-            .add_system(toggle_menu_on_pointer_lock.system())
+            .add_system_set(SystemSet::on_enter(AppState::InGame).with_system(hide_cursor))
+            .add_system(toggle_menu_on_pointer_lock)
             .insert_resource(MouseMovementTracker::new())
             .insert_resource(MouseClickTracker::new())
             .insert_resource(KeyboardTracker::new())
@@ -26,10 +26,10 @@ impl Plugin for PlatformPlugin {
             .add_system_set(
                 SystemSet::new()
                     .before(InputEvents)
-                    .with_system(get_wheel.system())
-                    .with_system(get_keyboard_input.system())
-                    .with_system(process_mouse_clicks.system())
-                    .with_system(get_mouse_motion.system()),
+                    .with_system(get_wheel)
+                    .with_system(get_keyboard_input)
+                    .with_system(process_mouse_clicks)
+                    .with_system(get_mouse_motion),
             );
     }
 }

@@ -10,7 +10,7 @@ use crate::{character, player};
 pub struct ConfigPlugin;
 
 impl Plugin for ConfigPlugin {
-    fn build(&self, app: &mut AppBuilder) {
+    fn build(&self, app: &mut App) {
         app.init_asset_loader::<ConfigAssetLoader>();
     }
 }

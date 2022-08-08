@@ -1,12 +1,10 @@
 use bevy::{
+    ecs::component::Component,
     math::{Quat, Vec2, Vec3},
     prelude::{Bundle, Entity, KeyCode, MouseButton, PluginGroup, SystemLabel},
 };
 use bevy_easings::EasingsPlugin;
-use bevy_rapier3d::{
-    na::{Const, OPoint},
-    physics::RapierPhysicsPlugin,
-};
+use bevy_rapier3d::plugin::RapierPhysicsPlugin;
 use character::CharacterPlugin;
 use config::ConfigPlugin;
 use map::MapPlugin;
@@ -39,29 +37,31 @@ impl PluginGroup for CommonPlugins {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Component)]
 pub struct KeyboardDirectionalInput(pub Vec3);
 
-#[derive(Default)]
+#[derive(Default, Component)]
 pub struct GameStickDirectionalInput(pub Vec3);
 
-#[derive(Default)]
+#[derive(Default, Component)]
 pub struct Yaw(pub f32);
 
-#[derive(Default)]
+#[derive(Default, Component)]
 pub struct CameraOrbitCenter;
 
+#[derive(Component)]
 pub struct PlayerCameraOrbitCenter(pub Entity);
 
-#[derive(Default)]
+#[derive(Default, Component)]
 pub struct FocusedInteractable(pub Option<Entity>);
 
-#[derive(Default)]
+#[derive(Default, Component)]
 pub struct Holding(pub bool);
 
-#[derive(Default)]
+#[derive(Default, Component)]
 pub struct Player;
 
+#[derive(Component)]
 pub struct OrbitingCamera(pub Entity);
 
 const INITIAL_CAMERA_PITCH_DEGREES: f32 = 30.;
@@ -73,25 +73,25 @@ impl Default for LookPitch {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Component)]
 pub struct HoldPoint;
 
-#[derive(Default)]
+#[derive(Default, Component)]
 pub struct MouseMotionDelta(pub Vec2);
 
 #[derive(SystemLabel, Clone, Hash, Debug, PartialEq, Eq)]
 pub struct PlayerClick;
 
-#[derive(Default)]
+#[derive(Default, Component)]
 pub struct Character;
 
-#[derive(Default)]
+#[derive(Default, Component)]
 struct DirectionalInput(Vec3);
 
 #[derive(SystemLabel, Hash, Debug, PartialEq, Eq, Clone)]
 pub struct InputEvents;
 
-#[derive(Default)]
+#[derive(Default, Component)]
 pub struct PartRotation(pub Quat);
 #[derive(Debug, Hash, Ord, PartialOrd, PartialEq, Eq, Clone, Copy)]
 #[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
@@ -101,17 +101,19 @@ pub struct WebKeyCode(pub KeyCode);
 #[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
 pub struct WebMouseButton(pub MouseButton);
 
+#[derive(Component)]
 pub struct Focused;
 
+#[derive(Component)]
 pub struct Attachable;
 
-#[derive(Default)]
+#[derive(Default, Component)]
 pub struct LeftClicked(pub bool);
 
-#[derive(Default)]
+#[derive(Default, Component)]
 pub struct Modifying(pub bool);
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Component)]
 struct IgnoreContactsWith(Entity);
 
 struct AttachEvent;
@@ -122,10 +124,8 @@ struct HoldEvent {
     held: Entity,
 }
 
-type ContactPoint = OPoint<f32, Const<3>>;
-
 pub struct DisplayableJoint {
-    pub points: (ContactPoint, ContactPoint),
+    pub points: (Vec3, Vec3),
     pub entities: (Entity, Entity),
 }
 
@@ -149,17 +149,19 @@ struct ToggleHoldingSystemLabel;
 #[derive(SystemLabel, Clone, Hash, Debug, PartialEq, Eq)]
 pub struct UpdateJointsLabel;
 
+#[derive(Component)]
 struct BoundingRadius(f32);
 
-#[derive(Default)]
+#[derive(Default, Component)]
 pub struct OriginalPosition(Vec3);
 
+#[derive(Component)]
 pub struct Grass;
 
-#[derive(Default)]
+#[derive(Default, Component)]
 pub struct Click(bool);
 
-#[derive(Default)]
+#[derive(Default, Component)]
 pub struct MouseWheelDelta(pub f32);
 
 #[derive(Bundle, Default)]
@@ -174,4 +176,5 @@ pub struct PlayerInput {
 #[derive(SystemLabel, Clone, Hash, Debug, PartialEq, Eq)]
 pub struct MouseWheelLabel;
 
+#[derive(Component)]
 pub struct LookPitch(f32);

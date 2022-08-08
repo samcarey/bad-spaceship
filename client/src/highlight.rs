@@ -4,18 +4,20 @@ use bevy::prelude::*;
 pub struct HighlightPlugin;
 
 impl Plugin for HighlightPlugin {
-    fn build(&self, app: &mut AppBuilder) {
-        app.add_system(focused_add_highlight.system())
-            .add_system(attachable_remove_highlight.system())
-            .add_system(attacheable_add_highlight.system())
-            .add_system(focused_remove_highlight.system());
+    fn build(&self, app: &mut App) {
+        app.add_system(focused_add_highlight)
+            .add_system(attachable_remove_highlight)
+            .add_system(attacheable_add_highlight)
+            .add_system(focused_remove_highlight);
     }
 }
 
+#[derive(Component)]
 struct AttachableHighlight {
     base_color: Color,
 }
 
+#[derive(Component)]
 struct FocusedHighlight {
     base_color: Color,
 }

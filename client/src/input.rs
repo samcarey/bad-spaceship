@@ -16,28 +16,23 @@ use crate::AppState;
 pub struct InputPlugin;
 
 impl Plugin for InputPlugin {
-    fn build(&self, app: &mut bevy::prelude::AppBuilder) {
-        app.add_system(process_keyboard_input.system().label(InputEvents))
+    fn build(&self, app: &mut bevy::prelude::App) {
+        app.add_system(process_keyboard_input.label(InputEvents))
             .init_resource::<Input<WebKeyCode>>()
             .init_resource::<Input<WebMouseButton>>()
-            .add_system(get_look.system().label(InputEvents))
+            .add_system(get_look.label(InputEvents))
             .add_system_set(
                 SystemSet::on_update(AppState::InGame)
-                    .with_system(process_mouse_clicks.system().label(InputEvents)),
+                    .with_system(process_mouse_clicks.label(InputEvents)),
             )
             .add_event::<PlayerClick>()
-            .add_system(get_left_click.system())
-            .add_system(get_modifying.system())
-            .add_system_to_stage(CoreStage::PreUpdate, connection_system.system())
-            .add_system(gamepad_system.system())
+            .add_system(get_left_click)
+            .add_system(get_modifying)
+            .add_system_to_stage(CoreStage::PreUpdate, connection_system)
+            .add_system(gamepad_system)
             .init_resource::<GamepadLobby>()
-            .add_system(
-                mouse_wheel
-                    .system()
-                    .label(MouseWheelLabel)
-                    .after(InputEvents),
-            )
-            .add_system(zoom_camera.system().after(MouseWheelLabel));
+            .add_system(mouse_wheel.label(MouseWheelLabel).after(InputEvents))
+            .add_system(zoom_camera.after(MouseWheelLabel));
     }
 }
 
@@ -236,9 +231,7 @@ fn gamepad_system(
 
         // Check here to see if any keypresses were registered.
         // If so, then normalize the vector components.
-        if gamepad_directional_input.0 != Vec3::ZERO {
-            gamepad_directional_input.0.normalize();
-        }
+        gamepad_directional_input.0 = gamepad_directional_input.0.normalize_or_zero();
     }
 }
 

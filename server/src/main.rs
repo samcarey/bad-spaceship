@@ -8,7 +8,7 @@ use bevy::{
 };
 
 fn main() {
-    App::build()
+    App::new()
         .insert_resource(ScheduleRunnerSettings::run_loop(Duration::from_secs_f64(
             1.0 / 60.,
         )))
@@ -16,9 +16,10 @@ fn main() {
         .add_plugin(AssetPlugin)
         .insert_resource(AssetServerSettings {
             asset_folder: "../client/assets".to_string(),
+            ..Default::default()
         })
         .add_plugins(CommonPlugins)
-        .add_startup_system(load_configs.system())
+        .add_startup_system(load_configs)
         .run();
 }
 

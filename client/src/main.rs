@@ -6,9 +6,7 @@ use bad_spaceship_shared::player;
 use bevy::pbr::AmbientLight;
 use bevy::prelude::*;
 use bevy::render::camera::Camera;
-use bevy::render::pass::ClearColor;
 
-use bevy_rapier3d::render::RapierRenderPlugin;
 #[cfg(target_arch = "wasm32")]
 use bevy_web_fullscreen::FullViewportPlugin;
 use highlight::HighlightPlugin;
@@ -26,7 +24,7 @@ mod ui;
 
 #[bevy_main]
 fn main() {
-    let mut app = App::build();
+    let mut app = App::new();
 
     app.insert_resource(AmbientLight {
         color: Color::WHITE,
@@ -38,12 +36,8 @@ fn main() {
         ..Default::default()
     });
 
-    #[cfg(target_arch = "wasm32")]
-    app.add_plugins(bevy_webgl2::DefaultPlugins);
-    #[cfg(not(target_arch = "wasm32"))]
-    app.add_plugins(DefaultPlugins);
-
-    app.add_state(AppState::Initial)
+    app.add_plugins(DefaultPlugins)
+        .add_state(AppState::Initial)
         .add_plugin(UiPlugin)
         .add_plugin(InputPlugin)
         .insert_resource(ClearColor(Color::rgb(0.99, 0.99, 0.95)))
@@ -52,10 +46,8 @@ fn main() {
         .add_plugin(RenderMainPassPlugin)
         .add_plugin(RenderSecondaryPassPlugin)
         .add_plugins(CommonPlugins)
-        .add_startup_system(load_configs.system())
-        .add_system(add_camera_to_player.system());
-
-    app.add_plugin(RapierRenderPlugin);
+        .add_startup_system(load_configs)
+        .add_system(add_camera_to_player);
 
     #[cfg(target_arch = "wasm32")]
     app.add_plugin(FullViewportPlugin);

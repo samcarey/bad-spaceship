@@ -1,21 +1,18 @@
 use crate::map::PLATFORM_WIDTH_M;
 use crate::player::get_hold_point_entity;
-use crate::utils::{self, QuatExt, TransformExt};
+use crate::utils::{self, QuatExt, Vec3Ext};
 use crate::{
     AttachEvent, Attachable, BoundingRadius, CameraOrbitCenter, DisplayableJoint, ExistingJoints,
     Focused, FocusedInteractable, HoldPoint, Holding, Modifying, Player, PlayerClick,
     PotentialJoints, PredeleteJoint, PredeleteJoints, ToggleHoldingSystemLabel, UpdateJointsLabel,
 };
 use bevy::prelude::*;
-use bevy_rapier3d::na::Vector3;
-use bevy_rapier3d::physics::{
-    ColliderBundle, ColliderPositionSync, IntoEntity, IntoHandle, JointBuilderComponent,
-    JointHandleComponent, RapierConfiguration, RigidBodyBundle,
-};
+use bevy_rapier3d::plugin::{RapierConfiguration, RapierContext};
 use bevy_rapier3d::prelude::{
-    ActiveEvents, BallJoint, ColliderFlags, ColliderMassProps, ColliderMaterial, ColliderShape,
-    JointSet, NarrowPhase, RigidBodyForces, RigidBodyMassProps, RigidBodyVelocity,
+    ActiveEvents, Collider, ColliderMassProperties, ExternalForce, Friction, ImpulseJoint,
+    MassProperties, Restitution, RigidBody, SphericalJointBuilder, Velocity,
 };
+use bevy_rapier3d::rapier::prelude::ColliderShape;
 use rand::prelude::ThreadRng;
 use rand::Rng;
 use std::f32;
@@ -23,31 +20,30 @@ use std::f32;
 pub struct PartPlugin;
 
 impl Plugin for PartPlugin {
-    fn build(&self, app: &mut AppBuilder) {
-        app.add_startup_system(spawn_initial_parts.system())
-            .add_system(replace_fallen_parts.system())
-            .add_system(update_focused.system())
-            .add_system(position_held_part.system())
+    fn build(&self, app: &mut App) {
+        app.add_startup_system(spawn_initial_parts)
+            .add_system(replace_fallen_parts)
+            .add_system(update_focused)
+            .add_system(position_held_part.after(zero_part_external_forces))
             .add_event::<NewPart>()
-            .add_system(orient_held_part.system())
-            .add_system(spawn_part.system())
-            .add_system(update_attachable.system())
+            .add_system(orient_held_part.after(zero_part_external_forces))
+            .add_system(spawn_part)
+            .add_system(update_attachable)
+            .add_system(zero_part_external_forces)
             .add_system_set(
                 SystemSet::new()
                     .label(UpdateJointsLabel)
                     .before(ToggleHoldingSystemLabel)
-                    .with_system(update_active_joints.system())
-                    .with_system(update_predelete_joints.system()),
+                    .with_system(update_active_joints)
+                    .with_system(update_predelete_joints),
             )
             .add_system(
                 attach
-                    .system()
                     .after(ToggleHoldingSystemLabel)
                     .after(UpdateJointsLabel),
             )
             .add_system(
                 delete_joints
-                    .system()
                     .after(ToggleHoldingSystemLabel)
                     .after(UpdateJointsLabel),
             )
@@ -67,13 +63,13 @@ const ORIENTING_STIFFNESS: f32 = 5.0;
 const MIN_JOINT_SPACING: f32 = MIN_PART_SIZE / 2.0;
 pub const DELETE_RADIUS: f32 = 1.0;
 
-#[derive(Default)]
+#[derive(Default, Component)]
 struct Interactable;
 
-#[derive(Default)]
+#[derive(Default, Component)]
 pub struct Holdable;
 
-#[derive(Default)]
+#[derive(Default, Component)]
 struct GetsReplaced;
 
 struct CriticallyDampedHarmonicOscillator {
@@ -89,15 +85,12 @@ impl CriticallyDampedHarmonicOscillator {
         }
     }
 
-    pub fn calculate_acceleration(
-        &self,
-        displacement: &Vector3<f32>,
-        velocity: &Vector3<f32>,
-    ) -> Vector3<f32> {
-        displacement * self.stiffness - velocity * self.damping
+    pub fn calculate_acceleration(&self, displacement: &Vec3, velocity: &Vec3) -> Vec3 {
+        *displacement * self.stiffness - *velocity * self.damping
     }
 }
 
+#[derive(Component)]
 pub struct TargetPosition {
     pub hold_point_entity: Entity,
     oscillator: CriticallyDampedHarmonicOscillator,
@@ -112,6 +105,7 @@ impl TargetPosition {
     }
 }
 
+#[derive(Component)]
 pub struct TargetOrientation {
     pub quat: Quat,
     oscillator: CriticallyDampedHarmonicOscillator,
@@ -133,7 +127,9 @@ struct PartBundle {
     interactable: Interactable,
     holdable: Holdable,
     gets_replaced: GetsReplaced,
-    collider_position_sync: ColliderPositionSync,
+    mass_properties: MassProperties,
+    velocity: Velocity,
+    external_force: ExternalForce,
 }
 
 struct NewPart;
@@ -159,30 +155,17 @@ fn spawn_part(mut commands: Commands, mut new_part_events: EventReader<NewPart>)
         commands
             .spawn()
             .insert(BoundingRadius(shape.compute_local_bounding_sphere().radius))
-            .insert_bundle(RigidBodyBundle {
-                body_type: bevy_rapier3d::prelude::RigidBodyType::Dynamic,
-                position: [
-                    rng.gen_range(-SPAWN_ZONE_HALF_WIDTH..=SPAWN_ZONE_HALF_WIDTH),
-                    rng.gen_range(5.0..=15.0),
-                    rng.gen_range(-SPAWN_ZONE_HALF_WIDTH..=SPAWN_ZONE_HALF_WIDTH),
-                ]
-                .into(),
-                ..Default::default()
-            })
-            .insert_bundle(ColliderBundle {
-                shape,
-                mass_properties: ColliderMassProps::Density(2.0),
-                material: ColliderMaterial {
-                    friction: 1.0,
-                    restitution: 0.1,
-                    ..Default::default()
-                },
-                flags: ColliderFlags {
-                    active_events: ActiveEvents::CONTACT_EVENTS,
-                    ..Default::default()
-                },
-                ..Default::default()
-            })
+            .insert(RigidBody::Dynamic)
+            .insert_bundle(TransformBundle::from(Transform::from_xyz(
+                rng.gen_range(-SPAWN_ZONE_HALF_WIDTH..=SPAWN_ZONE_HALF_WIDTH),
+                rng.gen_range(5.0..=15.0),
+                rng.gen_range(-SPAWN_ZONE_HALF_WIDTH..=SPAWN_ZONE_HALF_WIDTH),
+            )))
+            .insert(Collider::from(shape))
+            .insert(ColliderMassProperties::Density(2.0))
+            .insert(Friction::coefficient(1.0))
+            .insert(Restitution::coefficient(0.1))
+            .insert(ActiveEvents::COLLISION_EVENTS)
             .insert_bundle(PartBundle::default());
     }
 }
@@ -232,7 +215,7 @@ fn update_focused(
                                 - camera_orbit_center.translation;
                             if vector_between.length_squared() < MAX_INTERACT_DISTANCE_SQUARED {
                                 let angle_from_look =
-                                    camera_orbit_center.forward().angle_between(vector_between);
+                                    camera_orbit_center.back().angle_between(vector_between);
 
                                 if angle_from_look < smallest_angle {
                                     smallest_angle = angle_from_look;
@@ -279,17 +262,17 @@ fn update_attachable(
     holdables: Query<(), With<Holdable>>,
     attachables: Query<Entity, (With<Holdable>, With<Attachable>)>,
     not_attachables: Query<Entity, (With<Holdable>, Without<Attachable>)>,
-    narrow_phase: Res<NarrowPhase>,
+    rapier_context: Res<RapierContext>,
 ) {
     if let Some(held) = helds.iter().next() {
-        let contacted = narrow_phase
-            .contacts_with(held.handle())
-            .filter(|x| x.has_any_active_contact)
+        let contacted = rapier_context
+            .contacts_with(held)
+            .filter(|x| x.has_any_active_contacts())
             .map(|contact_pair| {
-                if contact_pair.collider1.entity() == held {
-                    contact_pair.collider2.entity()
+                if contact_pair.collider1() == held {
+                    contact_pair.collider2()
                 } else {
-                    contact_pair.collider1.entity()
+                    contact_pair.collider1()
                 }
             })
             .filter(|&contacted| holdables.get(contacted).is_ok())
@@ -316,13 +299,14 @@ fn position_held_part(
     mut parts: Query<(
         &Transform,
         &TargetPosition,
-        &RigidBodyMassProps,
-        &RigidBodyVelocity,
-        &mut RigidBodyForces,
+        &MassProperties,
+        &Velocity,
+        &mut ExternalForce,
     )>,
     physics_config: Res<RapierConfiguration>,
 ) {
-    for (part_transform, target_position, mass_properties, velocity, mut forces) in parts.iter_mut()
+    for (part_transform, target_position, mass_properties, velocity, mut ext_forces) in
+        parts.iter_mut()
     {
         if let Ok(hold_point_position) = hold_points.get(target_position.hold_point_entity) {
             let vector_between = hold_point_position.translation - part_transform.translation;
@@ -330,10 +314,17 @@ fn position_held_part(
                 .oscillator
                 .calculate_acceleration(&vector_between.into(), &velocity.linvel);
 
-            let gravity_cancelation_force = -mass_properties.mass() * physics_config.gravity;
-            let positioning_force = positioning_acceleration * mass_properties.mass();
-            forces.force += positioning_force + gravity_cancelation_force;
+            let gravity_cancelation_force = -mass_properties.mass * physics_config.gravity;
+            let positioning_force = positioning_acceleration * mass_properties.mass;
+            ext_forces.force = positioning_force + gravity_cancelation_force;
         }
+    }
+}
+
+fn zero_part_external_forces(mut parts: Query<&mut ExternalForce, With<Holdable>>) {
+    for mut forces in parts.iter_mut() {
+        forces.force = Vec3::ZERO;
+        forces.torque = Vec3::ZERO;
     }
 }
 
@@ -341,12 +332,12 @@ fn orient_held_part(
     mut parts: Query<(
         &Transform,
         &TargetOrientation,
-        &RigidBodyVelocity,
-        &mut RigidBodyForces,
-        &RigidBodyMassProps,
+        &Velocity,
+        &mut ExternalForce,
+        &MassProperties,
     )>,
 ) {
-    for (part_transform, target_orientation, velocity, mut forces, mass_properties) in
+    for (part_transform, target_orientation, velocity, mut ext_forces, mass_properties) in
         parts.iter_mut()
     {
         let rotation_between =
@@ -354,71 +345,70 @@ fn orient_held_part(
         let angular_acceleration = target_orientation
             .oscillator
             .calculate_acceleration(&rotation_between, &velocity.angvel);
-        let inertia_sqrt = mass_properties
-            .effective_world_inv_inertia_sqrt
-            .inverse_unchecked();
-        let torque = inertia_sqrt * (inertia_sqrt * angular_acceleration);
-        forces.torque += torque;
+        let inertia_sqrt = mass_properties.principal_inertia_local_frame;
+        // let torque = inertia_sqrt * (inertia_sqrt * angular_acceleration);
+        let torque = inertia_sqrt * angular_acceleration;
+        ext_forces.torque = torque;
     }
 }
 
 fn update_active_joints(
-    holdables: Query<&GlobalTransform, With<Holdable>>,
-    narrow_phase: Res<NarrowPhase>,
+    holdables: Query<Option<&Children>, (With<GlobalTransform>, With<Holdable>)>, //remove transform??
+    rapier_context: Res<RapierContext>,
     mut potential_joints: ResMut<PotentialJoints>,
     mut existing_joints: ResMut<ExistingJoints>,
     players: Query<(&Holding, &FocusedInteractable)>,
-    joint_handles: Query<(Entity, &JointHandleComponent)>,
-    joint_set: ResMut<JointSet>,
+    joints: Query<(&Parent, &ImpulseJoint)>,
 ) {
     potential_joints.0.clear();
     existing_joints.0.clear();
 
     if let Some((holding, interactable)) = players.iter().next() {
         if holding.0 {
-            if let Some(entity1) = interactable.0 {
-                for contact_pair in narrow_phase.contacts_with(entity1.handle()) {
-                    let entity2 = if contact_pair.collider1.entity() == entity1 {
-                        contact_pair.collider2.entity()
+            if let Some(held_entity) = interactable.0 {
+                for contact_pair in rapier_context.contacts_with(held_entity) {
+                    let attachable_entity = if contact_pair.collider1() == held_entity {
+                        contact_pair.collider2()
                     } else {
-                        contact_pair.collider1.entity()
+                        contact_pair.collider1()
                     };
 
-                    if holdables.get(entity2).is_ok() {
-                        for (_, handle) in joint_handles.iter() {
-                            if handle.entity1() == entity1 && handle.entity2() == entity2
-                                || handle.entity1() == entity2 && handle.entity2() == entity1
-                            {
-                                if let Some(joint) = joint_set.get(handle.handle()) {
-                                    if let Some(ball_joint) = joint.params.as_ball_joint() {
-                                        existing_joints.0.push(DisplayableJoint {
-                                            entities: (joint.body1.entity(), joint.body2.entity()),
-                                            points: (
-                                                ball_joint.local_anchor1,
-                                                ball_joint.local_anchor2,
-                                            ),
-                                        });
-                                    }
-                                }
-                            }
+                    for (parent, joint) in joints.iter() {
+                        if parent.0 == held_entity && joint.parent == attachable_entity {
+                            existing_joints.0.push(DisplayableJoint {
+                                entities: (held_entity, attachable_entity),
+                                points: (
+                                    joint.data.raw.local_frame2.translation.vector.into(),
+                                    joint.data.raw.local_frame1.translation.vector.into(), // todo: or just local anchor?
+                                ),
+                            });
+                        } else if parent.0 == attachable_entity && joint.parent == held_entity {
+                            existing_joints.0.push(DisplayableJoint {
+                                entities: (attachable_entity, held_entity),
+                                points: (
+                                    joint.data.raw.local_frame2.translation.vector.into(),
+                                    joint.data.raw.local_frame1.translation.vector.into(), // todo: or just local anchor?
+                                ),
+                            });
                         }
-                        if contact_pair.has_any_active_contact {
-                            for manifold in &contact_pair.manifolds {
-                                for point in &manifold.points {
-                                    if existing_joints
-                                        .0
-                                        .iter()
-                                        .map(|p| (p.points.0 - point.local_p1).norm() as f32)
-                                        .all(|d| d > MIN_JOINT_SPACING)
-                                    {
-                                        potential_joints.0.push(DisplayableJoint {
-                                            entities: (
-                                                contact_pair.collider1.entity(),
-                                                contact_pair.collider2.entity(),
-                                            ),
-                                            points: (point.local_p1, point.local_p2),
-                                        });
-                                    }
+                    }
+
+                    if contact_pair.has_any_active_contacts() {
+                        for manifold in contact_pair.manifolds() {
+                            for contact in manifold.points() {
+                                if existing_joints
+                                    .0
+                                    .iter()
+                                    .map(|p| (p.points.0 - contact.local_p1()).norm())
+                                    .all(|d| d > MIN_JOINT_SPACING)
+                                {
+                                    potential_joints.0.push(DisplayableJoint {
+                                        entities: (
+                                            contact_pair.collider1(),
+                                            contact_pair.collider2(),
+                                        ),
+                                        points: (contact.local_p1(), contact.local_p2()),
+                                    });
                                 }
                             }
                         }
@@ -433,12 +423,9 @@ fn update_predelete_joints(
     holdables: Query<&GlobalTransform, With<Holdable>>,
     mut predelete_joints: ResMut<PredeleteJoints>,
     players: Query<(&Holding, &Modifying, &Children)>,
-    joint_handles: Query<(Entity, &JointHandleComponent)>,
-    joint_set: ResMut<JointSet>,
-    hold_points: QuerySet<(
-        Query<(), With<HoldPoint>>,
-        Query<&GlobalTransform, With<HoldPoint>>,
-    )>,
+    joints: Query<(Entity, &ImpulseJoint, &Parent)>,
+    hold_points0: Query<(), With<HoldPoint>>,
+    hold_points1: Query<&GlobalTransform, With<HoldPoint>>,
     camera_orbit_centers: Query<&Children>,
 ) {
     predelete_joints.0.clear();
@@ -446,26 +433,20 @@ fn update_predelete_joints(
     if let Some((holding, modifying, player_children)) = players.iter().next() {
         if !holding.0 && modifying.0 {
             if let Some(entity) =
-                get_hold_point_entity(player_children, camera_orbit_centers, hold_points.q0())
+                get_hold_point_entity(player_children, camera_orbit_centers, &hold_points0)
             {
-                if let Ok(hold_point_position) = hold_points.q1().get(entity) {
-                    for (joint_entity, joint_handle) in joint_handles.iter() {
-                        if let Some(joint) = joint_set.get(joint_handle.handle()) {
-                            if let Ok(transform) = holdables.get(joint.body1.entity()) {
-                                if let Some(ball_joint) = joint.params.as_ball_joint() {
-                                    let center = transform.translation
-                                        + transform
-                                            .rotation
-                                            .mul_vec3(ball_joint.local_anchor1.into());
-                                    if (center - hold_point_position.translation).length()
-                                        < DELETE_RADIUS
-                                    {
-                                        predelete_joints.0.push(PredeleteJoint {
-                                            entity: joint_entity,
-                                            translation: center,
-                                        });
-                                    }
-                                }
+                if let Ok(hold_point_position) = hold_points1.get(entity) {
+                    for (joint_entity, joint, joint_parent) in joints.iter() {
+                        if let Ok(transform) = holdables.get(joint_parent.0) {
+                            let center = transform.translation
+                                + transform.rotation.mul_vec3(
+                                    joint.data.raw.local_frame2.translation.vector.into(),
+                                );
+                            if (center - hold_point_position.translation).length() < DELETE_RADIUS {
+                                predelete_joints.0.push(PredeleteJoint {
+                                    entity: joint_entity,
+                                    translation: center,
+                                });
                             }
                         }
                     }
@@ -482,11 +463,14 @@ fn attach(
 ) {
     if attach_events.iter().next().is_some() {
         for DisplayableJoint { points, entities } in attach_points.0.iter() {
-            commands.spawn().insert(JointBuilderComponent::new(
-                BallJoint::new(points.0, points.1),
-                entities.0,
-                entities.1,
-            ));
+            let joint = SphericalJointBuilder::new()
+                .local_anchor1(points.1)
+                .local_anchor2(points.0);
+            commands.entity(entities.0).with_children(|children| {
+                children
+                    .spawn()
+                    .insert(ImpulseJoint::new(entities.1, joint));
+            });
         }
     }
 }
