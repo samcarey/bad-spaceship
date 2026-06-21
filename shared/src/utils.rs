@@ -1,6 +1,6 @@
 use bevy::{
     math::{Quat, Vec3},
-    prelude::{Entity, GlobalTransform, Transform},
+    prelude::{Entity, Transform},
 };
 use bevy_rapier3d::na::{Quaternion, Unit, UnitQuaternion};
 use std::f32::consts::PI;
@@ -34,20 +34,6 @@ pub trait TransformExt {
 }
 
 impl TransformExt for Transform {
-    fn forward(&self) -> Vec3 {
-        self.local_z()
-    }
-
-    fn right(&self) -> Vec3 {
-        -self.local_x()
-    }
-
-    fn up(&self) -> Vec3 {
-        self.local_y()
-    }
-}
-
-impl TransformExt for GlobalTransform {
     fn forward(&self) -> Vec3 {
         self.local_z()
     }

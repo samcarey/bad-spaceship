@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Bad Spaceship is a 3D game built on the **Bevy 0.7** engine (ECS), with
+Bad Spaceship is a 3D game built on the **Bevy 0.8** engine (ECS), with
 `bevy_rapier3d` for physics and `bevy_egui` for UI. It is a Cargo workspace with
 three crates that compiles both to a **native** binary and to a **WASM** web
 build playable in the browser.
@@ -15,13 +15,20 @@ This is a 2022-era project pinned for reproducible builds — do not "upgrade" y
 way out of build errors:
 
 - **Rust is pinned to 1.66.0** via `rust-toolchain.toml` (auto-selected by rustup).
-  Newer toolchains reject `wasm-bindgen` 0.2.79, which Bevy 0.7 / wgpu 0.12 require.
+  Bevy 0.8 / wgpu 0.13 build fine on 1.66, but several *transitive* deps have since
+  published releases that raise their MSRV above 1.66 (e.g. `flate2` ≥1.1, `fdeflate`
+  ≥0.3.6, `uuid` ≥1.12 which drags in `getrandom` 0.3 → `wit-bindgen` needing Rust 1.85,
+  and `indexmap` 2.x which uses edition 2024). The committed `Cargo.lock` pins all of
+  these *back* to 1.66-compatible versions. Do not `cargo update` the whole graph — it
+  will pull those newer releases and break the pinned toolchain.
 - **`Cargo.lock` is committed** and holds an MSRV-compatible dependency set (including
-  the Bevy-0.7 commit of the `bevy_web_fullscreen` git dependency). Always build with
-  `--locked`; do not run `cargo update` unless you intend to re-pin the whole graph.
-- The web build needs a **version-matched `wasm-bindgen` CLI (exactly 0.2.79)**. Use the
-  prebuilt binary from the rustwasm GitHub release, not `cargo install` (building the CLI
-  from source hits the same dependency bitrot).
+  the Bevy-0.8 commit of the `bevy_web_fullscreen` git dependency). Always build with
+  `--locked`; when a deliberate re-pin is needed, bump direct deps with targeted
+  `cargo update -p <crate> --precise <ver>` rather than a blanket update.
+- The web build needs a **version-matched `wasm-bindgen` CLI (exactly 0.2.83)**, matching
+  the `wasm-bindgen` crate that Bevy 0.8 / wgpu 0.13 require. Use the prebuilt binary from
+  the rustwasm GitHub release, not `cargo install` (building the CLI from source hits the
+  same dependency bitrot).
 
 ## Build & run
 

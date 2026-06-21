@@ -10,7 +10,7 @@ use bevy::prelude::*;
 use bevy_rapier3d::plugin::{RapierConfiguration, RapierContext};
 use bevy_rapier3d::prelude::{
     ActiveEvents, Collider, ColliderMassProperties, ExternalForce, Friction, ImpulseJoint,
-    MassProperties, Restitution, RigidBody, SphericalJointBuilder, Velocity,
+    ReadMassProperties, Restitution, RigidBody, SphericalJointBuilder, Velocity,
 };
 use bevy_rapier3d::rapier::prelude::ColliderShape;
 use rand::prelude::ThreadRng;
@@ -127,7 +127,7 @@ struct PartBundle {
     interactable: Interactable,
     holdable: Holdable,
     gets_replaced: GetsReplaced,
-    mass_properties: MassProperties,
+    mass_properties: ReadMassProperties,
     velocity: Velocity,
     external_force: ExternalForce,
 }
@@ -212,7 +212,7 @@ fn update_focused(
 
                         for (interactable_transform, interactable) in interactables.iter_mut() {
                             let vector_between = interactable_transform.translation
-                                - camera_orbit_center.translation;
+                                - camera_orbit_center.translation();
                             if vector_between.length_squared() < MAX_INTERACT_DISTANCE_SQUARED {
                                 let angle_from_look =
                                     camera_orbit_center.back().angle_between(vector_between);
@@ -299,7 +299,7 @@ fn position_held_part(
     mut parts: Query<(
         &Transform,
         &TargetPosition,
-        &MassProperties,
+        &ReadMassProperties,
         &Velocity,
         &mut ExternalForce,
     )>,
@@ -309,13 +309,13 @@ fn position_held_part(
         parts.iter_mut()
     {
         if let Ok(hold_point_position) = hold_points.get(target_position.hold_point_entity) {
-            let vector_between = hold_point_position.translation - part_transform.translation;
+            let vector_between = hold_point_position.translation() - part_transform.translation;
             let positioning_acceleration = target_position
                 .oscillator
                 .calculate_acceleration(&vector_between.into(), &velocity.linvel);
 
-            let gravity_cancelation_force = -mass_properties.mass * physics_config.gravity;
-            let positioning_force = positioning_acceleration * mass_properties.mass;
+            let gravity_cancelation_force = -mass_properties.0.mass * physics_config.gravity;
+            let positioning_force = positioning_acceleration * mass_properties.0.mass;
             ext_forces.force = positioning_force + gravity_cancelation_force;
         }
     }
@@ -334,7 +334,7 @@ fn orient_held_part(
         &TargetOrientation,
         &Velocity,
         &mut ExternalForce,
-        &MassProperties,
+        &ReadMassProperties,
     )>,
 ) {
     for (part_transform, target_orientation, velocity, mut ext_forces, mass_properties) in
@@ -345,7 +345,7 @@ fn orient_held_part(
         let angular_acceleration = target_orientation
             .oscillator
             .calculate_acceleration(&rotation_between, &velocity.angvel);
-        let inertia_sqrt = mass_properties.principal_inertia_local_frame;
+        let inertia_sqrt = mass_properties.0.principal_inertia_local_frame;
         // let torque = inertia_sqrt * (inertia_sqrt * angular_acceleration);
         let torque = inertia_sqrt * angular_acceleration;
         ext_forces.torque = torque;
@@ -374,7 +374,7 @@ fn update_active_joints(
                     };
 
                     for (parent, joint) in joints.iter() {
-                        if parent.0 == held_entity && joint.parent == attachable_entity {
+                        if parent.get() == held_entity && joint.parent == attachable_entity {
                             existing_joints.0.push(DisplayableJoint {
                                 entities: (held_entity, attachable_entity),
                                 points: (
@@ -382,7 +382,7 @@ fn update_active_joints(
                                     joint.data.raw.local_frame1.translation.vector.into(), // todo: or just local anchor?
                                 ),
                             });
-                        } else if parent.0 == attachable_entity && joint.parent == held_entity {
+                        } else if parent.get() == attachable_entity && joint.parent == held_entity {
                             existing_joints.0.push(DisplayableJoint {
                                 entities: (attachable_entity, held_entity),
                                 points: (
@@ -437,12 +437,14 @@ fn update_predelete_joints(
             {
                 if let Ok(hold_point_position) = hold_points1.get(entity) {
                     for (joint_entity, joint, joint_parent) in joints.iter() {
-                        if let Ok(transform) = holdables.get(joint_parent.0) {
+                        if let Ok(transform) = holdables.get(joint_parent.get()) {
+                            let transform = transform.compute_transform();
                             let center = transform.translation
                                 + transform.rotation.mul_vec3(
                                     joint.data.raw.local_frame2.translation.vector.into(),
                                 );
-                            if (center - hold_point_position.translation).length() < DELETE_RADIUS {
+                            if (center - hold_point_position.translation()).length() < DELETE_RADIUS
+                            {
                                 predelete_joints.0.push(PredeleteJoint {
                                     entity: joint_entity,
                                     translation: center,
