@@ -157,8 +157,13 @@
     }
 
     async function run() {
-      const manifest = await loadManifest();
-      const responses = await Promise.all(RESOURCES.map((u) => fetch(u)));
+      // Kick off the manifest and the heavy downloads together so the WASM
+      // binary starts streaming immediately rather than waiting a round-trip
+      // for the tiny manifest.
+      const [manifest, ...responses] = await Promise.all([
+        loadManifest(),
+        ...RESOURCES.map((u) => fetch(u)),
+      ]);
       responses.forEach((r, i) => {
         if (!r.ok) throw new Error(`${RESOURCES[i]} → HTTP ${r.status}`);
       });
@@ -179,10 +184,11 @@
       let loaded = 0;
 
       const render = () => {
-        if (known && total > 0) {
+        const determinate = known && total > 0;
+        barInner.classList.toggle('indeterminate', !determinate);
+        if (determinate) {
           const frac = Math.min(loaded / total, 1);
           const pct = Math.floor(frac * 100);
-          barInner.classList.remove('indeterminate');
           barInner.style.width = pct + '%';
           statusEl.textContent =
             `Loading… ${pct}%  (${fmtBytes(Math.min(loaded, total))} / ${fmtBytes(total)})`;
@@ -195,21 +201,26 @@
             etaEl.textContent = 'estimating…';
           }
         } else {
-          barInner.classList.add('indeterminate');
           statusEl.textContent = `Loading… ${fmtBytes(loaded)}`;
           etaEl.textContent = '';
         }
+      };
+
+      // Coalesce per-chunk progress into at most one DOM update per frame so a
+      // burst of small chunks doesn't thrash layout.
+      let renderQueued = false;
+      const scheduleRender = () => {
+        if (renderQueued) return;
+        renderQueued = true;
+        requestAnimationFrame(() => {
+          renderQueued = false;
+          render();
+        });
       };
       render();
 
       const blobs = await Promise.all(
         responses.map(async (r) => {
-          if (!r.body) {
-            const ab = await r.arrayBuffer();
-            loaded += ab.byteLength;
-            render();
-            return new Blob([ab]);
-          }
           const reader = r.body.getReader();
           const chunks = [];
           for (;;) {
@@ -217,7 +228,7 @@
             if (done) break;
             chunks.push(value);
             loaded += value.byteLength;
-            render();
+            scheduleRender();
           }
           return new Blob(chunks);
         })
