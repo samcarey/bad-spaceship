@@ -91,6 +91,20 @@ gated on `#[cfg(target_arch = "wasm32")]`.
 `client/build.rs` uses `shadow-rs` and `git rev-parse HEAD` to inject a
 `SHORT_GIT_HASH` shown in-game, so the build needs git history available.
 
+## Pull request workflow
+
+Whenever the user asks to open a pull request, do all of the following before
+ending the turn (in order):
+
+1. **Document lessons learned** — capture anything non-obvious discovered while
+   doing the work (gotchas, dead ends, decisions) in the PR description and/or the
+   relevant docs so it isn't lost.
+2. **Run a `/simplify` pass** over the changes and apply the cleanups.
+3. **Rebase on `main`** (`git fetch` + `git rebase origin/main`), resolving any
+   conflicts, before pushing.
+4. **Monitor the PR until it is fully ready to merge** — subscribe to PR activity,
+   keep CI green, and address review feedback until the PR is mergeable.
+
 ## Deployment
 
 `.github/workflows/pages.yml` builds the web client and publishes it to GitHub
