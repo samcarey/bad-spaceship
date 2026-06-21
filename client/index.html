@@ -1,17 +1,27 @@
+<!DOCTYPE html>
 <html>
 
 <head>
   <meta name="viewport" charset="utf-8"
     content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0" />
-  <link rel="stylesheet" type="text/css" media="all" href="css/reset.css" />
   <style>
+    /* Full-viewport reset so FullViewportPlugin's
+       document.documentElement.clientHeight reads the whole browser view. */
+    html,
     body {
-      margin: 0px;
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
       display: flex;
       overflow: hidden;
     }
 
     canvas {
+      display: block;
       touch-action: none;
     }
   </style>
