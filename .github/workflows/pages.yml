@@ -1,0 +1,93 @@
+name: Deploy web build to GitHub Pages
+
+# Mirrors the original GitLab `pages` CI job: builds the WASM client and
+# publishes the playable web build. Runs on every push to master.
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+# Permissions required by the GitHub Pages deployment action.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Allow only one concurrent deployment, without cancelling in-progress runs.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  # Toolchain is also pinned in rust-toolchain.toml; kept here for clarity.
+  RUST_TOOLCHAIN: "1.66.0"
+  # Must match the `wasm-bindgen` crate version in Cargo.lock.
+  WASM_BINDGEN_VERSION: "0.2.79"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # build.rs / shadow-rs read git metadata for the in-game build hash.
+          fetch-depth: 0
+
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --no-self-update
+          rustup target add wasm32-unknown-unknown --toolchain "$RUST_TOOLCHAIN"
+          rustup override set "$RUST_TOOLCHAIN"
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install wasm-bindgen-cli (prebuilt, version-matched)
+        run: |
+          set -euo pipefail
+          url="https://github.com/rustwasm/wasm-bindgen/releases/download/${WASM_BINDGEN_VERSION}/wasm-bindgen-${WASM_BINDGEN_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          curl -fsSL "$url" -o /tmp/wasm-bindgen.tar.gz
+          tar -xzf /tmp/wasm-bindgen.tar.gz -C /tmp
+          sudo install -m755 "/tmp/wasm-bindgen-${WASM_BINDGEN_VERSION}-x86_64-unknown-linux-musl/wasm-bindgen" /usr/local/bin/wasm-bindgen
+          wasm-bindgen --version
+
+      - name: Build WASM client (release)
+        run: >-
+          cargo build --locked --manifest-path client/Cargo.toml
+          --target wasm32-unknown-unknown --features web --release
+
+      - name: Assemble site
+        run: |
+          set -euo pipefail
+          rm -rf _site
+          mkdir -p _site/target
+          # Generate JS bindings straight into the published target/ directory
+          # (client/index.html loads `./target/wasm.js`).
+          wasm-bindgen --out-dir _site/target --out-name wasm --target web --no-typescript \
+            target/wasm32-unknown-unknown/release/bad-spaceship-client.wasm
+          cp client/index.html _site/
+          cp -r client/assets _site/assets
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+        with:
+          # Enable Pages via the API on first run so no manual settings change
+          # is needed (requires the workflow's `pages: write` permission).
+          enablement: true
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

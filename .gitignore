@@ -3,4 +3,6 @@
 */settings.json
 */launch.json
 target
-Cargo.lock
+
+# Cargo.lock is committed: this app pins an exact, reproducible dependency
+# set (required to build the 2022-era Bevy 0.7 / wasm-bindgen 0.2.79 stack).
