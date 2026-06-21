@@ -1,6 +1,6 @@
 use std::{f32, time::Duration};
 
-use bevy::{prelude::*, reflect::TypeUuid};
+use bevy::{math::Vec3A, prelude::*, reflect::TypeUuid};
 use bevy_easings::{CustomComponentEase, EaseFunction, EasingComponent, Lerp};
 use bevy_rapier3d::prelude::Collider;
 use serde::Deserialize;
@@ -92,7 +92,7 @@ fn spawn_camera(mut commands: Commands) {
         0.0,
     ));
     camera_transform.translation = -Vec3::Z * 20.0;
-    commands.spawn_bundle(PerspectiveCameraBundle {
+    commands.spawn_bundle(Camera3dBundle {
         transform: camera_transform,
         ..Default::default()
     });
@@ -182,8 +182,9 @@ fn attach_camera_orbit(
 
             let hold_point_transform = Transform::from_translation(Vec3::Z * 5.0);
             let mut hold_point_global_transform = character_global_transform.clone();
-            hold_point_global_transform.translation += camera_orbit_center_transform.translation;
-            hold_point_global_transform.translation += hold_point_transform.translation;
+            *hold_point_global_transform.translation_mut() += Vec3A::from(
+                camera_orbit_center_transform.translation + hold_point_transform.translation,
+            );
             let hold_point = commands
                 .spawn()
                 .insert_bundle(HoldPointBundle {
@@ -304,7 +305,7 @@ fn toggle_holding(
                                 .entity(current_interactable)
                                 .insert_bundle(HeldBundle::new(
                                     hold_point_entity,
-                                    original_transform.rotation,
+                                    original_transform.compute_transform().rotation,
                                 ));
                             hold_events.send(HoldEvent {
                                 held: current_interactable,
@@ -424,6 +425,7 @@ fn set_part_rotation(
         if modifying.0 {
             for child in player_children.iter() {
                 if let Ok(camera_orbit_center) = camera_orbit_centers.get(*child) {
+                    let camera_orbit_center = camera_orbit_center.compute_transform();
                     rotation.0 = Quat::from_axis_angle(
                         camera_orbit_center.back(),
                         mouse_wheel_delta.0 / 10.,

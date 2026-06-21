@@ -51,7 +51,7 @@ fn position_gizmo(
     let mut rotation = None;
     if let Some((target_orientation, target_position)) = helds.iter().next() {
         translation = match hold_points.get(target_position.hold_point_entity) {
-            Ok(transform) => Some(transform.translation),
+            Ok(transform) => Some(transform.translation()),
             Err(_) => None,
         };
         rotation = Some(target_orientation.quat);
@@ -251,6 +251,7 @@ fn display_potential_joints(
     let mut display_points_iter = displayed_joints.iter_mut();
     for DisplayableJoint { points, entities } in joints.0.iter() {
         if let Ok(transform) = holdables.get(entities.0) {
+            let transform = transform.compute_transform();
             let center = transform.translation + transform.rotation.mul_vec3(points.0.into());
             let material = displayed_joint_appearance.valid_material.clone().unwrap();
 
@@ -290,6 +291,7 @@ fn display_existing_joints(
     let mut display_joints_iter = displayed_joints.iter_mut();
     for DisplayableJoint { points, entities } in joints.0.iter() {
         if let Ok(transform) = holdables.get(entities.0) {
+            let transform = transform.compute_transform();
             let center = transform.translation + transform.rotation.mul_vec3(points.0.into());
             let material = displayed_joint_appearance.invalid_material.clone().unwrap();
             if let Some((mut displayed_transform, mut displayed_visible)) =

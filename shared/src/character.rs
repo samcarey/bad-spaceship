@@ -3,7 +3,10 @@ use bevy::reflect::TypeUuid;
 use bevy_rapier3d::{
     na::{UnitQuaternion, Vector3},
     plugin::RapierContext,
-    prelude::{ActiveCollisionTypes, Collider, LockedAxes, MassProperties, RigidBody, Velocity},
+    prelude::{
+        ActiveCollisionTypes, AdditionalMassProperties, Collider, LockedAxes, MassProperties,
+        RigidBody, Velocity,
+    },
 };
 
 use serde::Deserialize;
@@ -65,10 +68,10 @@ fn spawn(
                 // .insert(ActiveEvents::COLLISION_EVENTS)
                 .insert(ActiveCollisionTypes::default() | ActiveCollisionTypes::STATIC_STATIC)
                 .insert_bundle(CharacterBundle::default())
-                .insert(MassProperties {
+                .insert(AdditionalMassProperties::MassProperties(MassProperties {
                     mass: 1.0,
                     ..Default::default()
-                });
+                }));
         }
     }
 }

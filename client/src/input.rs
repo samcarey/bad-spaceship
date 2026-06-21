@@ -177,14 +177,14 @@ fn connection_system(
     mut gamepad_event: EventReader<GamepadEvent>,
 ) {
     for event in gamepad_event.iter() {
-        match &event {
-            GamepadEvent(gamepad, GamepadEventType::Connected) => {
-                lobby.gamepads.insert(*gamepad);
-                println!("{:?} Connected", gamepad);
+        match event.event_type {
+            GamepadEventType::Connected => {
+                lobby.gamepads.insert(event.gamepad);
+                println!("{:?} Connected", event.gamepad);
             }
-            GamepadEvent(gamepad, GamepadEventType::Disconnected) => {
-                lobby.gamepads.remove(gamepad);
-                println!("{:?} Disconnected", gamepad);
+            GamepadEventType::Disconnected => {
+                lobby.gamepads.remove(&event.gamepad);
+                println!("{:?} Disconnected", event.gamepad);
             }
             _ => (),
         }
@@ -207,14 +207,20 @@ fn gamepad_system(
             //  NOTE: Gamepad Stick X axis => left/right => movement x-component
             //                      Y axis => forward/backward => movement z-component
             let left_stick_x = axes
-                .get(GamepadAxis(gamepad, GamepadAxisType::LeftStickX))
+                .get(GamepadAxis {
+                    gamepad,
+                    axis_type: GamepadAxisType::LeftStickX,
+                })
                 .unwrap();
             if left_stick_x.abs() > 0.01 {
                 //println!("{:?} LeftStickX value is {}", gamepad, left_stick_x);
                 gamepad_directional_input.0.x = left_stick_x;
             }
             let left_stick_y = axes
-                .get(GamepadAxis(gamepad, GamepadAxisType::LeftStickY))
+                .get(GamepadAxis {
+                    gamepad,
+                    axis_type: GamepadAxisType::LeftStickY,
+                })
                 .unwrap();
             if left_stick_y.abs() > 0.01 {
                 //println!("{:?} LeftStickY value is {}", gamepad, left_stick_y);
@@ -223,7 +229,10 @@ fn gamepad_system(
 
             // "South" button [PS4 "X"] designates "jump"
             //  NOTE: Jump => movement y-component
-            if button_inputs.just_pressed(GamepadButton(gamepad, GamepadButtonType::South)) {
+            if button_inputs.just_pressed(GamepadButton {
+                gamepad,
+                button_type: GamepadButtonType::South,
+            }) {
                 //println!("{:?} just pressed South", gamepad);
                 gamepad_directional_input.0.y += 1.0;
             }

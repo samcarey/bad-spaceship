@@ -8,8 +8,8 @@ edition = "2021"
 
 [dependencies]
 bad-spaceship-shared = { path = "../shared" }
-bevy = { version = "0.7", default-features = false }
-bevy_rapier3d = "0.14"
+bevy = { version = "0.8", default-features = false }
+bevy_rapier3d = "0.16"
 
 [features]
 default = ["bevy_rapier3d/simd-stable", "bevy_rapier3d/parallel"]
