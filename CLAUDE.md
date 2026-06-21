@@ -100,8 +100,8 @@ ending the turn (in order):
    doing the work (gotchas, dead ends, decisions) in the PR description and/or the
    relevant docs so it isn't lost.
 2. **Run a `/simplify` pass** over the changes and apply the cleanups.
-3. **Rebase on `main`** (`git fetch` + `git rebase origin/main`), resolving any
-   conflicts, before pushing.
+3. **Rebase on `master`** (the default branch; `git fetch` + `git rebase
+   origin/master`), resolving any conflicts, before pushing.
 4. **Monitor the PR until it is fully ready to merge** — subscribe to PR activity,
    keep CI green, and address review feedback until the PR is mergeable.
 
