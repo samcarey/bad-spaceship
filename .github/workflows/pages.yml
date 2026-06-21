@@ -68,6 +68,20 @@ jobs:
             target/wasm32-unknown-unknown/release/bad-spaceship-client.wasm
           cp client/index.html _site/
           cp -r client/assets _site/assets
+          # Emit the loader manifest with *uncompressed* byte sizes so the
+          # loading bar reports an honest percentage/ETA even when the assets
+          # are served gzip/br-compressed (Content-Length would be the
+          # compressed size). Keep the URLs in sync with index.html's RESOURCES.
+          wasm_bytes=$(stat -c%s _site/target/wasm_bg.wasm)
+          grass_bytes=$(stat -c%s _site/assets/textures/grass.png)
+          cat > _site/loader-manifest.json <<EOF
+          {
+            "resources": [
+              { "url": "./target/wasm_bg.wasm", "bytes": $wasm_bytes },
+              { "url": "./assets/textures/grass.png", "bytes": $grass_bytes }
+            ]
+          }
+          EOF
 
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v5
