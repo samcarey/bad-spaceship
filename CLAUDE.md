@@ -56,13 +56,22 @@ server run, so game logic stays identical across renderers and platforms.
   exposed as the `CommonPlugins` plugin group (`shared/src/lib.rs`): third-party
   `RapierPhysicsPlugin` + `EasingsPlugin`, plus the custom `Character`, `Config`,
   `Map`, `Part`, and `Player` plugins. Game tuning lives in RON files under
-  `client/assets/config/` loaded via Bevy's `AssetServer` into `config::Config` types.
+  `client/assets/config/` (`character.ron`, `player.ron`), deserialized by the
+  `ConfigPlugin`'s custom RON `AssetLoader` (`shared/src/config.rs`) into per-domain
+  `character::Config` / `player::Config` types. Both binaries keep the asset `Handle`s
+  alive in a `load_configs` startup system (dropping a handle unloads the asset) and
+  call `watch_for_changes()` for hot-reload.
+
+  Note: asset paths in the `load_configs` systems are written with **Windows-style
+  backslashes** (e.g. `"config\\character.ron"`); preserve that style when editing
+  those calls rather than "fixing" them to forward slashes.
 
 - **`client/`** (`bad-spaceship-client`, bin) — the playable game (`#[bevy_main]` in
   `client/src/main.rs`). Adds `DefaultPlugins` + `CommonPlugins` and the
   rendering/UI/input layers: `UiPlugin`, `InputPlugin`, `HighlightPlugin`,
   `RenderMainPassPlugin`, and `RenderSecondaryPassPlugin` (a second camera pass for
-  gizmo/cone overlays). A Bevy `AppState` state machine drives game flow.
+  gizmo/cone overlays). A Bevy `AppState` state machine (`Initial` → `InGame` ↔
+  `InGameMenu`, in `client/src/main.rs`) gates input handling and cursor/pointer-lock.
 
 - **`server/`** (`bad-spaceship-server`, bin) — headless host: `MinimalPlugins` +
   `AssetPlugin` + `CommonPlugins`, no rendering, fixed 60 Hz loop. Loads assets from
@@ -81,6 +90,20 @@ gated on `#[cfg(target_arch = "wasm32")]`.
 
 `client/build.rs` uses `shadow-rs` and `git rev-parse HEAD` to inject a
 `SHORT_GIT_HASH` shown in-game, so the build needs git history available.
+
+## Pull request workflow
+
+Whenever the user asks to open a pull request, do all of the following before
+ending the turn (in order):
+
+1. **Document lessons learned** — capture anything non-obvious discovered while
+   doing the work (gotchas, dead ends, decisions) in the PR description and/or the
+   relevant docs so it isn't lost.
+2. **Run a `/simplify` pass** over the changes and apply the cleanups.
+3. **Rebase on `master`** (the default branch; `git fetch` + `git rebase
+   origin/master`), resolving any conflicts, before pushing.
+4. **Monitor the PR until it is fully ready to merge** — subscribe to PR activity,
+   keep CI green, and address review feedback until the PR is mergeable.
 
 ## Deployment
 
