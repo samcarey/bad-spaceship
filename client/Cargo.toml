@@ -20,6 +20,7 @@ bevy_web_fullscreen = { git = "https://github.com/samcarey/bevy_web_fullscreen.g
 bevy_egui = "0.15"
 bad-spaceship-shared = { path = "../shared" }
 shadow-rs = { version = "0.11", default-features = false }
+chrono = "0.4"
 rand = "0.8"
 wasm-bindgen = "=0.2.83"
 
