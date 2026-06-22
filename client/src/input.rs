@@ -4,6 +4,7 @@ use bad_spaceship_shared::{
     WebKeyCode, WebMouseButton,
 };
 use bevy::{
+    input::gamepad::{GamepadConnection, GamepadConnectionEvent},
     input::mouse::MouseMotion,
     input::mouse::{MouseScrollUnit, MouseWheel},
     prelude::*,
@@ -17,21 +18,22 @@ pub struct InputPlugin;
 
 impl Plugin for InputPlugin {
     fn build(&self, app: &mut bevy::prelude::App) {
-        app.add_system(process_keyboard_input.label(InputEvents))
+        app.add_system(process_keyboard_input.in_set(InputEvents))
             .init_resource::<Input<WebKeyCode>>()
             .init_resource::<Input<WebMouseButton>>()
-            .add_system(get_look.label(InputEvents))
-            .add_system_set(
-                SystemSet::on_update(AppState::InGame)
-                    .with_system(process_mouse_clicks.label(InputEvents)),
+            .add_system(get_look.in_set(InputEvents))
+            .add_system(
+                process_mouse_clicks
+                    .in_set(InputEvents)
+                    .in_set(OnUpdate(AppState::InGame)),
             )
             .add_event::<PlayerClick>()
             .add_system(get_left_click)
             .add_system(get_modifying)
-            .add_system_to_stage(CoreStage::PreUpdate, connection_system)
+            .add_system(connection_system.in_base_set(CoreSet::PreUpdate))
             .add_system(gamepad_system)
             .init_resource::<GamepadLobby>()
-            .add_system(mouse_wheel.label(MouseWheelLabel).after(InputEvents))
+            .add_system(mouse_wheel.in_set(MouseWheelLabel).after(InputEvents))
             .add_system(zoom_camera.after(MouseWheelLabel));
     }
 }
@@ -67,7 +69,7 @@ fn process_keyboard_input(
     // Initialize to zero every time - if a key is pressed then it will overwrite in the section below.
     let mut direction = Vec3::ZERO;
 
-    if *state.current() == AppState::InGame {
+    if state.0 == AppState::InGame {
         // "W" keypress indicates forward movement
         if input.pressed(KeyCode::W) {
             direction.z += 1.;
@@ -111,7 +113,7 @@ pub fn get_look(
     mut mouse_deltas: Query<&mut MouseMotionDelta>,
     state: Res<bevy::prelude::State<AppState>>,
 ) {
-    let motion = match state.current() {
+    let motion = match state.0 {
         AppState::InGame => match mouse_motion_events.iter().last() {
             Some(event) => event.delta,
             None => Vec2::ZERO,
@@ -129,7 +131,7 @@ pub fn process_mouse_clicks(
     mut player_clicks: EventWriter<PlayerClick>,
     state: Res<State<AppState>>,
 ) {
-    if *state.current() == AppState::InGame {
+    if state.0 == AppState::InGame {
         if native_mouse_button_input.just_pressed(MouseButton::Left)
             || web_mouse_button_input.pressed(WebMouseButton(MouseButton::Left))
         {
@@ -145,7 +147,7 @@ fn get_left_click(
     mut clicked_query: Query<&mut LeftClicked>,
 ) {
     if let Some(mut clicked) = clicked_query.iter_mut().next() {
-        clicked.0 = (*state.current() == AppState::InGame)
+        clicked.0 = (state.0 == AppState::InGame)
             && (native_mouse_button_input.just_pressed(MouseButton::Left)
                 || web_mouse_button_input.pressed(WebMouseButton(MouseButton::Left)));
     }
@@ -162,7 +164,7 @@ fn get_modifying(
             native_keyboard_input: &native_keyboard_input,
             web_keyboard_input: &web_keyboard_input,
         };
-        modifying.0 = (*state.current() == AppState::InGame)
+        modifying.0 = (state.0 == AppState::InGame)
             && (input.pressed(KeyCode::LShift) | input.pressed(KeyCode::RShift));
     }
 }
@@ -174,19 +176,20 @@ struct GamepadLobby {
 
 fn connection_system(
     mut lobby: ResMut<GamepadLobby>,
-    mut gamepad_event: EventReader<GamepadEvent>,
+    mut gamepad_events: EventReader<GamepadConnectionEvent>,
 ) {
-    for event in gamepad_event.iter() {
-        match event.event_type {
-            GamepadEventType::Connected(_) => {
+    // Bevy 0.10 split the monolithic GamepadEvent/GamepadEventType into typed
+    // events; connections now arrive as GamepadConnectionEvent.
+    for event in gamepad_events.iter() {
+        match &event.connection {
+            GamepadConnection::Connected(_) => {
                 lobby.gamepads.insert(event.gamepad);
                 println!("{:?} Connected", event.gamepad);
             }
-            GamepadEventType::Disconnected => {
+            GamepadConnection::Disconnected => {
                 lobby.gamepads.remove(&event.gamepad);
                 println!("{:?} Disconnected", event.gamepad);
             }
-            _ => (),
         }
     }
 }

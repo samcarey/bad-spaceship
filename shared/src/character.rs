@@ -20,7 +20,7 @@ pub struct CharacterPlugin;
 impl Plugin for CharacterPlugin {
     fn build(&self, app: &mut App) {
         app.add_system(touching_ground)
-            .add_system(combine_directional_inputs.label(CombineInputs))
+            .add_system(combine_directional_inputs.in_set(CombineInputs))
             .add_system(
                 walk_based_on_input
                     .after(CombineInputs)
@@ -31,7 +31,7 @@ impl Plugin for CharacterPlugin {
                     .after(CombineInputs)
                     .after(touching_ground),
             )
-            .add_system_to_stage(CoreStage::PostUpdate, rotate_character_based_on_input)
+            .add_system(rotate_character_based_on_input.in_base_set(CoreSet::PostUpdate))
             .add_system(spawn)
             .add_asset::<Config>();
     }
@@ -76,7 +76,7 @@ fn spawn(
     }
 }
 
-#[derive(SystemLabel, Clone, Hash, Debug, PartialEq, Eq)]
+#[derive(SystemSet, Clone, Hash, Debug, PartialEq, Eq)]
 struct CombineInputs;
 
 fn combine_directional_inputs(

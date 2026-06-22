@@ -4,30 +4,30 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Bad Spaceship is a 3D game built on the **Bevy 0.9** engine (ECS), with
+Bad Spaceship is a 3D game built on the **Bevy 0.10** engine (ECS), with
 `bevy_rapier3d` for physics and `bevy_egui` for UI. It is a Cargo workspace with
 three crates that compiles both to a **native** binary and to a **WASM** web
 build playable in the browser.
 
 ## Toolchain & reproducibility (read first)
 
-This is a 2022-era project pinned for reproducible builds — do not "upgrade" your
+This is a 2023-era project pinned for reproducible builds — do not "upgrade" your
 way out of build errors:
 
-- **Rust is pinned to 1.66.0** via `rust-toolchain.toml` (auto-selected by rustup).
-  Bevy 0.9 / wgpu 0.14 build fine on 1.66, but several *transitive* deps have since
-  published releases that raise their MSRV above 1.66 (e.g. `flate2` ≥1.1, `fdeflate`
-  ≥0.3.6, `uuid` ≥1.12 and `ahash` ≥0.8.12 which drag in `getrandom` 0.3 → `wit-bindgen`
-  needing Rust 1.85, `indexmap` 2.x which uses edition 2024, and `webbrowser` ≥0.8.9 which
-  drags in `home` ≥0.5.12, also edition 2024). The committed `Cargo.lock` pins all of these
-  *back* to 1.66-compatible versions (notably `ahash` 0.8.11 and `webbrowser` 0.8.2 for the
-  Bevy 0.9 set). Do not `cargo update` the whole graph — it will pull those newer releases
-  and break the pinned toolchain.
+- **Rust is pinned to 1.75.0** via `rust-toolchain.toml` (auto-selected by rustup).
+  Bevy 0.10 / wgpu 0.15 build fine on it, but many *transitive* deps have since
+  published releases that raise their MSRV (crates that moved to edition 2024, or
+  pulled in `getrandom` 0.3 / `wit-bindgen` needing Rust 1.85). The committed
+  `Cargo.lock` pins the graph *back* to a compatible set — notably `indexmap` 2.5,
+  `ahash` 0.8.11, `uuid` 1.11, `jobserver` 0.1.31, `spade` 2.12, `home` 0.5.9, `url`
+  2.5.0 (drops the `idna`/ICU4X stack). The oldest such pins that still build (e.g.
+  `spade`) need the relaxed private-in-public rule from Rust 1.74, hence 1.75. Do not
+  `cargo update` the whole graph — it will pull newer releases and break the toolchain.
 - **`Cargo.lock` is committed** and holds an MSRV-compatible dependency set. Always build
   with `--locked`; when a deliberate re-pin is needed, bump direct deps with targeted
   `cargo update -p <crate> --precise <ver>` rather than a blanket update.
-- The web build needs a **version-matched `wasm-bindgen` CLI (exactly 0.2.83)**, matching
-  the `wasm-bindgen` crate that Bevy 0.9 / wgpu 0.14 require. Use the prebuilt binary from
+- The web build needs a **version-matched `wasm-bindgen` CLI (exactly 0.2.84)**, matching
+  the `wasm-bindgen` crate that Bevy 0.10 / wgpu 0.15 require. Use the prebuilt binary from
   the rustwasm GitHub release, not `cargo install` (building the CLI from source hits the
   same dependency bitrot).
 

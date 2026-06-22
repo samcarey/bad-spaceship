@@ -6,7 +6,7 @@ use bevy::{
 };
 use bevy_egui::{
     egui::{self, Align, Align2, Color32, Frame, Layout},
-    EguiContext, EguiPlugin, EguiSettings,
+    EguiContexts, EguiPlugin, EguiSettings,
 };
 use chrono::{DateTime, FixedOffset, Utc};
 use once_cell::sync::Lazy;
@@ -19,10 +19,8 @@ impl Plugin for UiPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugin(EguiPlugin)
             .add_plugin(FrameTimeDiagnosticsPlugin)
-            .add_system_set(SystemSet::on_update(AppState::InGameMenu).with_system(show_menu))
-            .add_system_set(
-                SystemSet::on_update(AppState::Initial).with_system(capture_mouse_on_click),
-            )
+            .add_system(show_menu.in_set(OnUpdate(AppState::InGameMenu)))
+            .add_system(capture_mouse_on_click.in_set(OnUpdate(AppState::Initial)))
             .add_system(update_ui_scale_factor)
             .add_system(show_instructions)
             .add_system(show_bottom_panel);
@@ -72,11 +70,11 @@ fn align_menu(window: egui::Window) -> egui::Window {
     window.anchor(Align2::CENTER_CENTER, [0., -70.])
 }
 
-fn show_menu(mut egui_ctx: ResMut<EguiContext>, mut state: ResMut<State<AppState>>) {
+fn show_menu(mut contexts: EguiContexts, mut next_state: ResMut<NextState<AppState>>) {
     align_menu(egui::Window::new("Bad Spaceship"))
         .collapsible(false)
         .resizable(false)
-        .show(egui_ctx.ctx_mut(), |ui| {
+        .show(contexts.ctx_mut(), |ui| {
             ui.with_layout(Layout::top_down_justified(Align::Center), |ui| {
                 if ui.button("Options").clicked() {
                     bevy::log::info!("Options selected");
@@ -86,7 +84,7 @@ fn show_menu(mut egui_ctx: ResMut<EguiContext>, mut state: ResMut<State<AppState
                 }
                 if ui.button("Resume").clicked() {
                     bevy::log::info!("Resume selected");
-                    state.set(AppState::InGame).unwrap();
+                    next_state.set(AppState::InGame);
                 }
             });
         });
@@ -124,7 +122,7 @@ fn commit_age() -> String {
     "0s".to_string()
 }
 
-fn show_bottom_panel(mut egui_ctx: ResMut<EguiContext>, diagnostics: Res<Diagnostics>) {
+fn show_bottom_panel(mut contexts: EguiContexts, diagnostics: Res<Diagnostics>) {
     let mut fps = 0.0;
     if let Some(fps_diagnostic) = diagnostics.get(FrameTimeDiagnosticsPlugin::FPS) {
         if let Some(fps_avg) = fps_diagnostic.average() {
@@ -133,7 +131,7 @@ fn show_bottom_panel(mut egui_ctx: ResMut<EguiContext>, diagnostics: Res<Diagnos
     }
     egui::TopBottomPanel::bottom("bottom_panel")
         .frame(Frame::default().multiply_with_opacity(0.0))
-        .show(egui_ctx.ctx_mut(), |ui| {
+        .show(contexts.ctx_mut(), |ui| {
             ui.horizontal(|ui| {
                 ui.colored_label(
                     Color32::from_rgb(255, 0, 0),
@@ -166,10 +164,10 @@ Hold deletion zone over existing joint to highlight it in red.
 Click while joint is highlighted red to delete it.
 ";
 
-fn show_instructions(mut egui_ctx: ResMut<EguiContext>) {
+fn show_instructions(mut contexts: EguiContexts) {
     egui::TopBottomPanel::top("top_panel")
         .frame(Frame::default().multiply_with_opacity(0.0))
-        .show(egui_ctx.ctx_mut(), |ui| {
+        .show(contexts.ctx_mut(), |ui| {
             ui.horizontal(|ui| {
                 ui.colored_label(Color32::from_rgb(255, 0, 0), INSTRUCTIONS);
             });
@@ -178,11 +176,12 @@ fn show_instructions(mut egui_ctx: ResMut<EguiContext>) {
 
 fn capture_mouse_on_click(
     mut mouse_button_input_events: EventReader<MouseButtonInput>,
-    mut state: ResMut<State<AppState>>,
+    state: Res<State<AppState>>,
+    mut next_state: ResMut<NextState<AppState>>,
 ) {
     for _ev in mouse_button_input_events.iter() {
-        if *state.current() != AppState::InGame {
-            state.overwrite_set(AppState::InGame).unwrap();
+        if state.0 != AppState::InGame {
+            next_state.set(AppState::InGame);
         }
     }
 }

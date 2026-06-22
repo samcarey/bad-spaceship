@@ -8,29 +8,31 @@ build = "build.rs"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-bevy = { version = "0.9", default-features = false }
-bevy_rapier3d = "0.19"
+bevy = { version = "0.10", default-features = false }
+bevy_rapier3d = "0.21"
 serde = { version = "1.0", features = ["derive"] }
 nalgebra = "0.31"
 log = "0.4"
-winit = { version = "0.27" }
 gloo = { version = "0.7", optional = true }
 web-sys = { version = "0.3.40", optional = true }
-bevy_web_fullscreen = { version = "0.2.1", optional = true }
-bevy_egui = "0.17"
+# Disable bevy_egui's clipboard/hyperlink extras (the menu uses neither); this
+# drops the arboard→image and webbrowser→home native dep chains. Keep fonts.
+bevy_egui = { version = "0.20", default-features = false, features = ["default_fonts"] }
 bad-spaceship-shared = { path = "../shared" }
 shadow-rs = { version = "0.11", default-features = false }
 chrono = "0.4"
 rand = "0.8"
-wasm-bindgen = "=0.2.83"
+wasm-bindgen = "=0.2.84"
 
 once_cell = "1.8"
 
 [features]
+# Bevy 0.10 dropped the umbrella `render` feature; pull the renderer in via
+# bevy_pbr (3D/lighting) + bevy_core_pipeline, plus glTF and winit.
 default = [
     "bevy/bevy_gltf",
     "bevy/bevy_winit",
-    "bevy/render",
+    "bevy/bevy_pbr",
     "bevy/bevy_core_pipeline",
 ]
 
@@ -38,9 +40,15 @@ native = [
     "bevy_rapier3d/simd-stable",
     "bevy_rapier3d/parallel",
     "bevy/bevy_gilrs",
+    # winit needs a windowing backend on Linux (was implied by the old `render`
+    # umbrella feature, dropped in 0.10).
+    "bevy/x11",
+    # Hot-reload of RON config assets (watch_for_changes); native-only so the
+    # wasm build doesn't pull in the `notify` filesystem watcher.
+    "bevy/filesystem_watcher",
 ]
 
-web = ["web-sys", "gloo", "bevy_web_fullscreen"]
+web = ["web-sys", "gloo"]
 
 [build-dependencies]
 shadow-rs = { version = "0.8", default-features = false }

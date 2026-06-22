@@ -2,10 +2,10 @@ use bevy::{
     app::PluginGroupBuilder,
     ecs::component::Component,
     math::{Quat, Vec2, Vec3},
-    prelude::{Bundle, Entity, KeyCode, MouseButton, PluginGroup, Resource, SystemLabel},
+    prelude::{Bundle, Entity, KeyCode, MouseButton, PluginGroup, Resource, SystemSet},
 };
 use bevy_easings::EasingsPlugin;
-use bevy_rapier3d::plugin::RapierPhysicsPlugin;
+use bevy_rapier3d::plugin::{NoUserData, RapierPhysicsPlugin};
 use character::CharacterPlugin;
 use config::ConfigPlugin;
 use map::MapPlugin;
@@ -25,7 +25,7 @@ impl PluginGroup for CommonPlugins {
     fn build(self) -> PluginGroupBuilder {
         PluginGroupBuilder::start::<Self>()
             // Third-party plugins
-            .add(RapierPhysicsPlugin::<&IgnoreContactsWith>::default())
+            .add(RapierPhysicsPlugin::<NoUserData>::default())
             .add(EasingsPlugin)
             // Custom plugins
             .add(CharacterPlugin)
@@ -78,7 +78,7 @@ pub struct HoldPoint;
 #[derive(Default, Component)]
 pub struct MouseMotionDelta(pub Vec2);
 
-#[derive(SystemLabel, Clone, Hash, Debug, PartialEq, Eq)]
+#[derive(Clone, Hash, Debug, PartialEq, Eq)]
 pub struct PlayerClick;
 
 #[derive(Default, Component)]
@@ -87,7 +87,7 @@ pub struct Character;
 #[derive(Default, Component)]
 struct DirectionalInput(Vec3);
 
-#[derive(SystemLabel, Hash, Debug, PartialEq, Eq, Clone)]
+#[derive(SystemSet, Hash, Debug, PartialEq, Eq, Clone)]
 pub struct InputEvents;
 
 #[derive(Default, Component)]
@@ -111,9 +111,6 @@ pub struct LeftClicked(pub bool);
 
 #[derive(Default, Component)]
 pub struct Modifying(pub bool);
-
-#[derive(Clone, Copy, Component)]
-struct IgnoreContactsWith(Entity);
 
 struct AttachEvent;
 
@@ -142,10 +139,10 @@ pub struct PredeleteJoint {
 #[derive(Default, Resource)]
 pub struct PredeleteJoints(pub Vec<PredeleteJoint>);
 
-#[derive(SystemLabel, Clone, Hash, Debug, PartialEq, Eq)]
+#[derive(SystemSet, Clone, Hash, Debug, PartialEq, Eq)]
 struct ToggleHoldingSystemLabel;
 
-#[derive(SystemLabel, Clone, Hash, Debug, PartialEq, Eq)]
+#[derive(SystemSet, Clone, Hash, Debug, PartialEq, Eq)]
 pub struct UpdateJointsLabel;
 
 #[derive(Component)]
@@ -172,7 +169,7 @@ pub struct PlayerInput {
     mouse_wheel: MouseWheelDelta,
 }
 
-#[derive(SystemLabel, Clone, Hash, Debug, PartialEq, Eq)]
+#[derive(SystemSet, Clone, Hash, Debug, PartialEq, Eq)]
 pub struct MouseWheelLabel;
 
 #[derive(Component)]

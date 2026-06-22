@@ -30,12 +30,10 @@ impl Plugin for PartPlugin {
             .add_system(spawn_part)
             .add_system(update_attachable)
             .add_system(zero_part_external_forces)
-            .add_system_set(
-                SystemSet::new()
-                    .label(UpdateJointsLabel)
-                    .before(ToggleHoldingSystemLabel)
-                    .with_system(update_active_joints)
-                    .with_system(update_predelete_joints),
+            .add_systems(
+                (update_active_joints, update_predelete_joints)
+                    .in_set(UpdateJointsLabel)
+                    .before(ToggleHoldingSystemLabel),
             )
             .add_system(
                 attach

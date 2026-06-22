@@ -1,5 +1,6 @@
 use bad_spaceship_shared::{map::PLATFORM_WIDTH_M, part::Holdable, Character, Grass};
 use bevy::{
+    pbr::CascadeShadowConfigBuilder,
     prelude::*,
     render::mesh::{Indices, VertexAttributeValues},
 };
@@ -18,22 +19,20 @@ impl Plugin for RenderMainPassPlugin {
 }
 
 fn add_lighting(mut commands: Commands) {
-    const HALF_SIZE: f32 = PLATFORM_WIDTH_M;
     commands.spawn(DirectionalLightBundle {
         directional_light: DirectionalLight {
             illuminance: 10_000.0,
             shadows_enabled: true,
-            shadow_projection: OrthographicProjection {
-                left: -HALF_SIZE,
-                right: HALF_SIZE,
-                bottom: -HALF_SIZE,
-                top: HALF_SIZE,
-                near: -HALF_SIZE,
-                far: HALF_SIZE,
-                ..Default::default()
-            },
             ..Default::default()
         },
+        // Bevy 0.10 replaced DirectionalLight's manual `shadow_projection` with
+        // cascaded shadow maps; a single cascade spanning the platform suffices.
+        cascade_shadow_config: CascadeShadowConfigBuilder {
+            num_cascades: 1,
+            maximum_distance: PLATFORM_WIDTH_M * 2.0,
+            ..Default::default()
+        }
+        .into(),
         transform: Transform {
             translation: Vec3::new(0.0, -2.0, 0.0),
             rotation: Quat::from_rotation_x(-std::f32::consts::FRAC_PI_4),
@@ -107,10 +106,13 @@ fn assign_characters(
             .insert(PbrBundle {
                 transform: transform.clone(),
                 global_transform: global_transform.clone(),
-                mesh: meshes.add(Mesh::from(shape::Icosphere {
-                    radius: collider_shape.as_ball().unwrap().radius(),
-                    subdivisions: 5,
-                })),
+                mesh: meshes.add(
+                    Mesh::try_from(shape::Icosphere {
+                        radius: collider_shape.as_ball().unwrap().radius(),
+                        subdivisions: 5,
+                    })
+                    .unwrap(),
+                ),
                 material: materials.add(StandardMaterial {
                     base_color: Color::rgb(0.8, 0.8, 0.8),
                     ..Default::default()

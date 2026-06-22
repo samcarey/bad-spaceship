@@ -17,19 +17,20 @@ pub struct PlatformPlugin;
 impl Plugin for PlatformPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(PointerLockTracker::new())
-            .add_system_set(SystemSet::on_enter(AppState::InGame).with_system(hide_cursor))
+            .add_system(hide_cursor.in_schedule(OnEnter(AppState::InGame)))
             .add_system(toggle_menu_on_pointer_lock)
             .insert_resource(MouseMovementTracker::new())
             .insert_resource(MouseClickTracker::new())
             .insert_resource(KeyboardTracker::new())
             .insert_resource(WheelTracker::new())
-            .add_system_set(
-                SystemSet::new()
-                    .before(InputEvents)
-                    .with_system(get_wheel)
-                    .with_system(get_keyboard_input)
-                    .with_system(process_mouse_clicks)
-                    .with_system(get_mouse_motion),
+            .add_systems(
+                (
+                    get_wheel,
+                    get_keyboard_input,
+                    process_mouse_clicks,
+                    get_mouse_motion,
+                )
+                    .before(InputEvents),
             );
     }
 }
@@ -69,15 +70,16 @@ fn hide_cursor() {
 
 fn toggle_menu_on_pointer_lock(
     lock_state: Res<PointerLockTracker>,
-    mut state: ResMut<State<AppState>>,
+    state: Res<State<AppState>>,
+    mut next_state: ResMut<NextState<AppState>>,
 ) {
     if lock_state.get() {
-        if *state.current() == AppState::InGameMenu {
-            state.set(AppState::InGame).unwrap();
+        if state.0 == AppState::InGameMenu {
+            next_state.set(AppState::InGame);
         }
     } else {
-        if *state.current() == AppState::InGame {
-            state.set(AppState::InGameMenu).unwrap();
+        if state.0 == AppState::InGame {
+            next_state.set(AppState::InGameMenu);
         }
     }
 }

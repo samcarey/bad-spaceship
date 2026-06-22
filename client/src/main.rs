@@ -7,8 +7,6 @@ use bevy::pbr::AmbientLight;
 use bevy::prelude::*;
 use bevy::render::camera::Camera;
 
-#[cfg(target_arch = "wasm32")]
-use bevy_web_fullscreen::FullViewportPlugin;
 use highlight::HighlightPlugin;
 use input::InputPlugin;
 use platform::PlatformPlugin;
@@ -34,20 +32,23 @@ fn main() {
     app.add_plugins(
         DefaultPlugins
             .set(WindowPlugin {
-                window: WindowDescriptor {
+                primary_window: Some(Window {
                     title: "Bad Spaceship".to_string(),
-                    ..Default::default()
-                },
-                ..Default::default()
+                    // Resize the WASM canvas to fill its parent (the browser
+                    // viewport); replaces the old `bevy_web_fullscreen` plugin.
+                    fit_canvas_to_parent: true,
+                    ..default()
+                }),
+                ..default()
             })
             // Hot-reload config RON assets (previously done via
             // AssetServer::watch_for_changes, removed in Bevy 0.9).
             .set(AssetPlugin {
                 watch_for_changes: true,
-                ..Default::default()
+                ..default()
             }),
     )
-        .add_state(AppState::Initial)
+        .add_state::<AppState>()
         .add_plugin(UiPlugin)
         .add_plugin(InputPlugin)
         .insert_resource(ClearColor(Color::rgb(0.99, 0.99, 0.95)))
@@ -59,20 +60,16 @@ fn main() {
         .add_startup_system(load_configs)
         .add_system(add_camera_to_player);
 
-    #[cfg(target_arch = "wasm32")]
-    app.add_plugin(FullViewportPlugin);
-
     app.run();
 }
 
-#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+#[derive(States, Default, Debug, Clone, Copy, Eq, PartialEq, Hash)]
 pub enum AppState {
+    #[default]
     Initial,
     InGame,
     InGameMenu,
 }
-
-pub const APP_STATE: &str = "app_state";
 
 fn load_configs(
     asset_server: Res<AssetServer>,
