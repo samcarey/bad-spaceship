@@ -135,7 +135,7 @@ fn touching_ground(
         touching_ground.0 = false;
         // There's a function called "any_active_contact" that used to work for this,
         // but doesn't anymore, so I'm just doing it manually until I figure what is wrong.
-        for contact in rapier_context.contacts_with(entity) {
+        for contact in rapier_context.contact_pairs_with(entity) {
             if let Some((_, contact)) = contact.find_deepest_contact() {
                 if contact.dist() < 0.002 {
                     touching_ground.0 = true;

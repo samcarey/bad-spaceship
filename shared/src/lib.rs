@@ -92,7 +92,9 @@ pub struct InputEvents;
 
 #[derive(Default, Component)]
 pub struct PartRotation(pub Quat);
-#[derive(Debug, Hash, Ord, PartialOrd, PartialEq, Eq, Clone, Copy)]
+// Bevy 0.13 rewrote `KeyCode` as a physical-key enum that no longer derives
+// `Ord`/`PartialOrd`; this newtype only needs `Hash`/`Eq` to key a `ButtonInput`.
+#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
 #[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
 pub struct WebKeyCode(pub KeyCode);
 

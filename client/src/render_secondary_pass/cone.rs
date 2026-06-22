@@ -1,4 +1,7 @@
-use bevy::{prelude::*, render::mesh::Indices};
+use bevy::{
+    prelude::*,
+    render::{mesh::Indices, render_asset::RenderAssetUsages},
+};
 /// A cone) shape.
 #[derive(Debug, Clone, Copy)]
 pub struct Cone {
@@ -75,8 +78,11 @@ impl From<Cone> for Mesh {
             indices.push(left as u32);
         }
 
-        let mut mesh = Mesh::new(bevy::render::render_resource::PrimitiveTopology::TriangleList);
-        mesh.set_indices(Some(Indices::U32(indices)));
+        let mut mesh = Mesh::new(
+            bevy::render::render_resource::PrimitiveTopology::TriangleList,
+            RenderAssetUsages::default(),
+        );
+        mesh.insert_indices(Indices::U32(indices));
         mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
         mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
         mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);

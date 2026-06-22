@@ -4,39 +4,41 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Bad Spaceship is a 3D game built on the **Bevy 0.12** engine (ECS), with
+Bad Spaceship is a 3D game built on the **Bevy 0.13** engine (ECS), with
 `bevy_rapier3d` for physics and `bevy_egui` for UI. It is a Cargo workspace with
 three crates that compiles both to a **native** binary and to a **WASM** web
 build playable in the browser.
 
 ## Toolchain & reproducibility (read first)
 
-This is a 2023-era project pinned for reproducible builds — do not "upgrade" your
-way out of build errors:
+This is a pinned-for-reproducibility project — do not "upgrade" your way out of
+build errors (the deliberate Bevy bumps are the exception, done branch-by-branch):
 
-- **Rust is pinned to 1.75.0** via `rust-toolchain.toml` (auto-selected by rustup).
-  Bevy 0.12 / wgpu 0.17 build fine on it, but many *transitive* deps have since
-  published releases that raise their MSRV (crates that moved to edition 2024, or
-  pulled in `getrandom` 0.3 / `wit-bindgen` needing Rust 1.85). The committed
-  `Cargo.lock` pins the graph *back* to a compatible set — notably `indexmap` 2.5,
-  `ahash` 0.8.11, `uuid` 1.11, `jobserver` 0.1.31, `spade` 2.12, `home` 0.5.9, `url`
-  2.5.0 (drops the `idna`/ICU4X stack), plus (added with the 0.12 bump) `blake3` 1.5.5
-  + `constant_time_eq` 0.3.1 (0.4 needs `edition2024`) and `file-id` 0.2.1 (0.2.3 needs
-  rustc 1.77, pulled via the `file_watcher` → `notify-debouncer-full` chain). The oldest
-  such pins that still build (e.g. `spade`) need the relaxed private-in-public rule from
-  Rust 1.74, hence 1.75. Do not `cargo update` the whole graph — it will pull newer
-  releases and break the toolchain. To hunt MSRV/edition offenders fast: `cargo tree`
-  surfaces `edition2024` parse errors, and `cargo metadata` filtered on `rust_version >
-  1.75` finds high-MSRV crates without a full compile.
+- **Rust is pinned to 1.76.0** via `rust-toolchain.toml` (auto-selected by rustup).
+  Bevy 0.13's MSRV is exactly 1.76.0, so that is the floor. Many *transitive* deps
+  have since published releases that raise their MSRV (crates that moved to edition
+  2024, or pulled in `getrandom` 0.3 / `async-lock` 3.4 needing Rust 1.85). The
+  committed `Cargo.lock` pins the graph *back* to a compatible set — notably
+  `indexmap` 2.5, `ahash` 0.8.11, `uuid` 1.11, `jobserver` 0.1.31, `spade` 2.12,
+  `home` 0.5.9, `url` 2.5.0 (drops the `idna`/ICU4X stack), `blake3` 1.5.5 +
+  `constant_time_eq` 0.3.1 (0.4 needs `edition2024`), `file-id` 0.2.1 (0.2.3 needs
+  rustc 1.77, pulled via the `file_watcher` → `notify-debouncer-full` chain), and
+  (added with the 0.13 bump) `async-lock` 3.3.0 (3.4 needs rustc 1.85, pulled via
+  bevy's `async-executor`/`async-fs` chain). Do not `cargo update` the whole graph —
+  it will pull newer releases and break the toolchain. To hunt MSRV/edition offenders
+  fast: `cargo tree` surfaces `edition2024` parse errors, `cargo metadata` filtered on
+  `rust_version > 1.76` finds high-MSRV crates, and `cargo build` itself now prints a
+  precise "requires rustc 1.XX" error naming the offending crate + a `cargo update -p
+  … --precise …` hint to pin it back.
 - **`Cargo.lock` is committed** and holds an MSRV-compatible dependency set. Always build
   with `--locked`; when a deliberate re-pin is needed, bump direct deps with targeted
   `cargo update -p <crate> --precise <ver>` rather than a blanket update.
 - The web build targets the **WebGL2 backend** via the `bevy/webgl2` feature (in the
-  client's `web` feature): Bevy 0.12's wgpu 0.17 otherwise compiles the WebGPU backend
+  client's `web` feature): Bevy 0.13's wgpu 0.19 otherwise compiles the WebGPU backend
   on wasm, which needs `--cfg=web_sys_unstable_apis` and a WebGPU-capable browser. WebGL2
   is the broad-support renderer the 0.10/wgpu 0.15 build already used on Pages.
-- The web build needs a **version-matched `wasm-bindgen` CLI (exactly 0.2.89)**, matching
-  the `wasm-bindgen` crate pinned in the client (kept compatible with Bevy 0.12 / wgpu 0.17).
+- The web build needs a **version-matched `wasm-bindgen` CLI (exactly 0.2.92)**, matching
+  the `wasm-bindgen` crate pinned in the client (kept compatible with Bevy 0.13 / wgpu 0.19).
   Use the prebuilt binary from
   the rustwasm GitHub release, not `cargo install` (building the CLI from source hits the
   same dependency bitrot).
@@ -101,8 +103,10 @@ mac 'hostname; nproc; df -h /'
 
 - 6 CPUs, ~23 GB RAM, ~45 GB free disk; outbound internet works (can fetch crates/toolchains).
 - Preinstalled: `git`, `docker`, `python3`. **Not** present: `rustc`/`cargo`/`rustup`,
-  `node`, Homebrew. Install the pinned **Rust 1.75.0** toolchain (see *Toolchain &
-  reproducibility*) before building.
+  `node`, Homebrew. Install the pinned **Rust 1.76.0** toolchain (see *Toolchain &
+  reproducibility*) before building. Note: `rustup override set` from a prior session
+  can shadow `rust-toolchain.toml` for `/root/bs` — `rustup override unset` in the repo
+  if `rustc --version` doesn't match the pin.
 - Treat the container filesystem as **disposable** — clone fresh and don't rely on
   long-term state surviving a host/VM restart.
 
@@ -156,9 +160,11 @@ server run, so game logic stays identical across renderers and platforms.
 `client/src/platform/mod.rs` `#[cfg]`-switches between `native.rs` and `web.rs`,
 both exposing a `PlatformPlugin`. The **web** implementation wires browser input
 directly through DOM event listeners (`web-sys` / `gloo`) — pointer lock, mouse
-motion, wheel, and keyboard — rather than relying on `winit`. On wasm the client
-also adds `bevy_web_fullscreen::FullViewportPlugin`. Most platform-specific code is
-gated on `#[cfg(target_arch = "wasm32")]`.
+motion, wheel, and keyboard — rather than relying on `winit`. Most platform-specific
+code is gated on `#[cfg(target_arch = "wasm32")]`. The WASM canvas is sized to the
+viewport via CSS (`canvas { width/height: 100% }` in `index.html`): Bevy 0.13 removed
+`Window::fit_canvas_to_parent` (which had itself replaced the old
+`bevy_web_fullscreen` plugin), and the recommended replacement is plain CSS.
 
 ### Build metadata
 

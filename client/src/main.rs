@@ -26,7 +26,9 @@ fn main() {
 
     app.insert_resource(AmbientLight {
         color: Color::WHITE,
-        brightness: 1.0 / 6.0,
+        // Bevy 0.13's lighting overhaul moved to physical units: AmbientLight
+        // brightness is now lux (default 80.0) rather than the old 0..1 factor.
+        brightness: 80.0,
     });
 
     app.add_plugins(
@@ -34,9 +36,9 @@ fn main() {
             .set(WindowPlugin {
                 primary_window: Some(Window {
                     title: "Bad Spaceship".to_string(),
-                    // Resize the WASM canvas to fill its parent (the browser
-                    // viewport); replaces the old `bevy_web_fullscreen` plugin.
-                    fit_canvas_to_parent: true,
+                    // Bevy 0.13 removed `Window::fit_canvas_to_parent`; the WASM
+                    // canvas is now sized to the viewport via CSS in index.html
+                    // (`canvas { width/height: 100% }`).
                     ..default()
                 }),
                 ..default()
@@ -49,7 +51,7 @@ fn main() {
                 ..default()
             }),
     )
-        .add_state::<AppState>()
+        .init_state::<AppState>()
         .add_plugins((
             UiPlugin,
             InputPlugin,

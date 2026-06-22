@@ -34,16 +34,16 @@ impl Plugin for InputPlugin {
                     zoom_camera.after(MouseWheelLabel),
                 ),
             )
-            .init_resource::<Input<WebKeyCode>>()
-            .init_resource::<Input<WebMouseButton>>()
+            .init_resource::<ButtonInput<WebKeyCode>>()
+            .init_resource::<ButtonInput<WebMouseButton>>()
             .add_event::<PlayerClick>()
             .init_resource::<GamepadLobby>();
     }
 }
 
 struct MergedKeyboardInput<'a> {
-    native_keyboard_input: &'a Res<'a, Input<KeyCode>>,
-    web_keyboard_input: &'a Res<'a, Input<WebKeyCode>>,
+    native_keyboard_input: &'a Res<'a, ButtonInput<KeyCode>>,
+    web_keyboard_input: &'a Res<'a, ButtonInput<WebKeyCode>>,
 }
 
 impl<'a> MergedKeyboardInput<'a> {
@@ -54,8 +54,8 @@ impl<'a> MergedKeyboardInput<'a> {
 }
 
 fn process_keyboard_input(
-    keyboard_input: Res<Input<KeyCode>>,
-    web_keyboard_input: Res<Input<WebKeyCode>>,
+    keyboard_input: Res<ButtonInput<KeyCode>>,
+    web_keyboard_input: Res<ButtonInput<WebKeyCode>>,
     mut query: Query<&mut KeyboardDirectionalInput>,
     state: Res<State<AppState>>,
 ) {
@@ -74,22 +74,22 @@ fn process_keyboard_input(
 
     if *state.get() == AppState::InGame {
         // "W" keypress indicates forward movement
-        if input.pressed(KeyCode::W) {
+        if input.pressed(KeyCode::KeyW) {
             direction.z += 1.;
         }
 
         // "S" keypress indicates forward movement
-        if input.pressed(KeyCode::S) {
+        if input.pressed(KeyCode::KeyS) {
             direction.z -= 1.;
         }
 
         // "D" keypress indicates forward movement
-        if input.pressed(KeyCode::D) {
+        if input.pressed(KeyCode::KeyD) {
             direction.x += 1.;
         }
 
         // "A" keypress indicates forward movement
-        if input.pressed(KeyCode::A) {
+        if input.pressed(KeyCode::KeyA) {
             direction.x -= 1.;
         }
 
@@ -129,8 +129,8 @@ pub fn get_look(
 }
 
 pub fn process_mouse_clicks(
-    native_mouse_button_input: Res<Input<MouseButton>>,
-    web_mouse_button_input: Res<Input<WebMouseButton>>,
+    native_mouse_button_input: Res<ButtonInput<MouseButton>>,
+    web_mouse_button_input: Res<ButtonInput<WebMouseButton>>,
     mut player_clicks: EventWriter<PlayerClick>,
     state: Res<State<AppState>>,
 ) {
@@ -144,8 +144,8 @@ pub fn process_mouse_clicks(
 }
 
 fn get_left_click(
-    native_mouse_button_input: Res<Input<MouseButton>>,
-    web_mouse_button_input: Res<Input<WebMouseButton>>,
+    native_mouse_button_input: Res<ButtonInput<MouseButton>>,
+    web_mouse_button_input: Res<ButtonInput<WebMouseButton>>,
     state: Res<State<AppState>>,
     mut clicked_query: Query<&mut LeftClicked>,
 ) {
@@ -157,8 +157,8 @@ fn get_left_click(
 }
 
 fn get_modifying(
-    native_keyboard_input: Res<Input<KeyCode>>,
-    web_keyboard_input: Res<Input<WebKeyCode>>,
+    native_keyboard_input: Res<ButtonInput<KeyCode>>,
+    web_keyboard_input: Res<ButtonInput<WebKeyCode>>,
     mut players: Query<&mut Modifying>,
     state: Res<State<AppState>>,
 ) {
@@ -199,7 +199,7 @@ fn connection_system(
 
 fn gamepad_system(
     lobby: Res<GamepadLobby>,
-    button_inputs: Res<Input<GamepadButton>>,
+    button_inputs: Res<ButtonInput<GamepadButton>>,
     axes: Res<Axis<GamepadAxis>>,
     mut query: Query<&mut GameStickDirectionalInput>,
 ) {

@@ -43,12 +43,12 @@ const MIN_SCALE_FACTOR: f64 = 0.5;
 const MAX_SCALE_FACTOR: f64 = 10.0;
 
 fn update_ui_scale_factor(
-    key_input: Res<Input<KeyCode>>,
+    key_input: Res<ButtonInput<KeyCode>>,
     mut egui_settings: ResMut<EguiSettings>,
     mut custom_scale_factor: Local<CustomScaleFactor>,
 ) {
     if key_input.pressed(KeyCode::ControlLeft) || key_input.pressed(KeyCode::ControlRight) {
-        if let Some(adjustment) = if key_input.just_pressed(KeyCode::Equals) {
+        if let Some(adjustment) = if key_input.just_pressed(KeyCode::Equal) {
             Some(1.1)
         } else if key_input.just_pressed(KeyCode::Minus) {
             Some(1. / 1.1)
@@ -61,7 +61,9 @@ fn update_ui_scale_factor(
             println!("Custom scale factor set to {}", custom_scale_factor.0);
         }
     }
-    egui_settings.scale_factor = 1.0 * custom_scale_factor.0;
+    // bevy_egui 0.25's `EguiSettings::scale_factor` is now `f32` (was `f64`),
+    // matching Bevy 0.13's switch to `f32` window scale factors.
+    egui_settings.scale_factor = custom_scale_factor.0 as f32;
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -128,7 +130,8 @@ fn commit_age() -> String {
 
 fn show_bottom_panel(mut contexts: EguiContexts, diagnostics: Res<DiagnosticsStore>) {
     let mut fps = 0.0;
-    if let Some(fps_diagnostic) = diagnostics.get(FrameTimeDiagnosticsPlugin::FPS) {
+    // Bevy 0.13 replaced `DiagnosticId` with `DiagnosticPath`; `get` takes `&path`.
+    if let Some(fps_diagnostic) = diagnostics.get(&FrameTimeDiagnosticsPlugin::FPS) {
         if let Some(fps_avg) = fps_diagnostic.average() {
             fps = fps_avg;
         }

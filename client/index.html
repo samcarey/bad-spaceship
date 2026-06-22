@@ -19,9 +19,13 @@
       overflow: hidden;
     }
 
+    /* Bevy 0.13 removed `Window::fit_canvas_to_parent`; size the canvas to fill
+       the viewport via CSS instead (the renderer tracks the canvas's CSS size). */
     canvas {
       display: block;
       touch-action: none;
+      width: 100% !important;
+      height: 100% !important;
     }
 
     /* Lightweight loading overlay shown instantly while the heavy WASM game

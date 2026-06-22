@@ -8,7 +8,9 @@ struct GizmoMaterial {
     color: vec4<f32>,
 };
 
-@group(1) @binding(0)
+// Bevy 0.13 moved custom material bind groups from @group(1) to @group(2)
+// (group 1 is now the view-independent mesh binding).
+@group(2) @binding(0)
 var<uniform> material: GizmoMaterial;
 
 struct Vertex {
