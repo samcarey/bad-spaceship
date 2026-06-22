@@ -60,7 +60,14 @@ impl QuatExt for Quat {
     }
 
     fn to_rotation_vector(&self) -> Vec3 {
-        let (axis, angle) = self.to_axis_angle();
+        // A quaternion and its negation represent the same orientation, but
+        // `to_axis_angle` on a `w < 0` quaternion returns an angle > π. Feeding
+        // that to the held-part orientation controller drives it the "long way
+        // around" — a part that should hold its pickup orientation instead spins
+        // a near-full turn. Flip to the `w >= 0` representative so the rotation
+        // vector is always the shortest path (angle in [0, π]).
+        let q = if self.w < 0.0 { -*self } else { *self };
+        let (axis, angle) = q.to_axis_angle();
         axis * angle
     }
 
