@@ -3,7 +3,7 @@ use bevy::reflect::TypePath;
 use bevy::transform::TransformSystem;
 use bevy_rapier3d::{
     na::{UnitQuaternion, Vector3},
-    plugin::ReadDefaultRapierContext,
+    plugin::ReadRapierContext,
     prelude::{
         ActiveCollisionTypes, AdditionalMassProperties, Collider, LockedAxes, MassProperties,
         RigidBody, Velocity,
@@ -130,10 +130,14 @@ struct TouchingGround(bool);
 
 fn touching_ground(
     mut query: Query<(Entity, &mut TouchingGround)>,
-    // bevy_rapier 0.28 made `RapierContext` a component; `ReadDefaultRapierContext`
-    // is the system param that reads the single default physics world.
-    rapier_context: ReadDefaultRapierContext,
+    // bevy_rapier 0.30 split `RapierContext` into several components; the
+    // `ReadRapierContext` system param reads the single default physics world and
+    // its `single()` returns a bundled `RapierContext` view (now fallible).
+    read_rapier_context: ReadRapierContext,
 ) {
+    let Ok(rapier_context) = read_rapier_context.single() else {
+        return;
+    };
     for (entity, mut touching_ground) in query.iter_mut() {
         touching_ground.0 = false;
         // There's a function called "any_active_contact" that used to work for this,

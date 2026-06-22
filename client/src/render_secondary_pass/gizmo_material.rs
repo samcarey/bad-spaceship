@@ -1,12 +1,15 @@
 use bevy::{
+    asset::weak_handle,
     prelude::*,
     reflect::TypePath,
     render::render_resource::{AsBindGroup, ShaderRef},
 };
 
-// Bevy 0.12 dropped the UUID-based `HandleUntyped`; internal assets now use a
-// typed weak handle seeded from a u128.
-pub const GIZMO_SHADER_HANDLE: Handle<Shader> = Handle::weak_from_u128(13953800272683943019);
+// Bevy 0.16 deprecated `Handle::weak_from_u128` in favour of the `weak_handle!`
+// macro (a UUID string). This is the same id the u128 seed produced, written as
+// a UUID, so the registered shader handle is unchanged.
+pub const GIZMO_SHADER_HANDLE: Handle<Shader> =
+    weak_handle!("00000000-0000-0000-c1a5-db6ae813446b");
 
 // Bevy 0.12's asset rework replaced `TypeUuid` with the `Asset` derive (which,
 // like `Material`, still requires `TypePath`).

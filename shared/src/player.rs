@@ -137,12 +137,22 @@ fn spawn(mut commands: Commands, players: Query<(), With<Player>>) {
     }
 }
 
-fn despawn(players: Query<(&Transform, Entity, &Children), With<Player>>, mut commands: Commands) {
-    for (player_transform, player_entity, player_children) in players.iter() {
+fn despawn(
+    players: Query<(&Transform, Entity), With<Player>>,
+    cameras: Query<Entity, With<Camera>>,
+    mut commands: Commands,
+) {
+    for (player_transform, player_entity) in players.iter() {
         if player_transform.translation.y < -30.0 {
-            let camera_orbit_center = player_children.iter().next().unwrap();
+            // The single, app-lifetime camera is parented under the player's
+            // orbit hierarchy. Bevy 0.16 made `despawn()` recursive, so detach
+            // the camera first (clear its `ChildOf`) to keep it alive — it gets
+            // re-parented to the next player by `add_camera_to_player`. Despawning
+            // the player then clears the whole orbit-center/hold-point subtree.
+            if let Some(camera) = cameras.iter().next() {
+                commands.entity(camera).remove::<ChildOf>();
+            }
             commands.entity(player_entity).despawn();
-            commands.entity(*camera_orbit_center).despawn();
         }
     }
 }
@@ -261,11 +271,13 @@ pub fn get_hold_point_entity(
 ) -> Option<Entity> {
     // TODO: eliminate need for this function
     let mut held_entity: Option<Entity> = None;
+    // Bevy 0.16's `Children::iter()` (a `RelationshipTarget` method) yields
+    // `Entity` by value now, not `&Entity`, so these no longer need dereferencing.
     if let Some(camera_orbit_center) = player_children.iter().next() {
-        if let Ok(potential_hold_points) = camera_orbit_centers.get(*camera_orbit_center) {
+        if let Ok(potential_hold_points) = camera_orbit_centers.get(camera_orbit_center) {
             for potential_hold_point in potential_hold_points.iter() {
-                if hold_points.get(*potential_hold_point).is_ok() {
-                    held_entity = Some(*potential_hold_point);
+                if hold_points.get(potential_hold_point).is_ok() {
+                    held_entity = Some(potential_hold_point);
                 }
             }
         }
@@ -310,13 +322,13 @@ fn toggle_holding(
                     {
                         if holding.0 {
                             if modifying.0 {
-                                attach_events.send(AttachEvent);
+                                attach_events.write(AttachEvent);
                             } else {
                                 holding.0 = false;
                                 commands
                                     .entity(current_interactable)
                                     .remove::<HeldBundle>();
-                                release_events.send(ReleaseEvent);
+                                release_events.write(ReleaseEvent);
                             }
                         } else if !modifying.0 {
                             holding.0 = true;
@@ -326,7 +338,7 @@ fn toggle_holding(
                                     hold_point_entity,
                                     original_transform.compute_transform().rotation,
                                 ));
-                            hold_events.send(HoldEvent {
+                            hold_events.write(HoldEvent {
                                 held: current_interactable,
                             });
                         }
@@ -443,7 +455,7 @@ fn set_part_rotation(
         rotation.0 = Quat::default();
         if modifying.0 {
             for child in player_children.iter() {
-                if let Ok(camera_orbit_center) = camera_orbit_centers.get(*child) {
+                if let Ok(camera_orbit_center) = camera_orbit_centers.get(child) {
                     let camera_orbit_center = camera_orbit_center.compute_transform();
                     rotation.0 = Quat::from_axis_angle(
                         // `Transform::back` returns a direction type (`Dir3`

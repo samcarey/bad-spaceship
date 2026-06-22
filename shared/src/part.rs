@@ -7,7 +7,7 @@ use crate::{
     PotentialJoints, PredeleteJoint, PredeleteJoints, ToggleHoldingSystemLabel, UpdateJointsLabel,
 };
 use bevy::prelude::*;
-use bevy_rapier3d::plugin::{RapierConfiguration, ReadDefaultRapierContext};
+use bevy_rapier3d::plugin::{RapierConfiguration, ReadRapierContext};
 use bevy_rapier3d::prelude::{
     ActiveEvents, Collider, ColliderMassProperties, ExternalForce, Friction, ImpulseJoint,
     ReadMassProperties, Restitution, RigidBody, SphericalJointBuilder, Velocity,
@@ -171,7 +171,7 @@ fn spawn_part(mut commands: Commands, mut new_part_events: EventReader<NewPart>)
 
 fn spawn_initial_parts(mut new_part_events: EventWriter<NewPart>) {
     for _ in 0..NUM_PARTS {
-        new_part_events.send(NewPart);
+        new_part_events.write(NewPart);
     }
 }
 
@@ -183,7 +183,7 @@ fn replace_fallen_parts(
     for (transform, entity) in parts.iter() {
         if transform.translation.y < -10.0 {
             commands.entity(entity).despawn();
-            new_part_events.send(NewPart);
+            new_part_events.write(NewPart);
         }
     }
 }
@@ -205,7 +205,7 @@ fn update_focused(
             let mut newly_focused_interactable_option = None;
             if !modifying.0 {
                 for player_child in player_children.iter() {
-                    if let Ok(camera_orbit_center) = camera_orbit_centers.get(*player_child) {
+                    if let Ok(camera_orbit_center) = camera_orbit_centers.get(player_child) {
                         // Search for the most appropriate interactable that should be focused by the player
                         let mut smallest_angle = MAX_INTERACT_ANGLE;
 
@@ -261,18 +261,21 @@ fn update_attachable(
     holdables: Query<(), With<Holdable>>,
     attachables: Query<Entity, (With<Holdable>, With<Attachable>)>,
     not_attachables: Query<Entity, (With<Holdable>, Without<Attachable>)>,
-    rapier_context: ReadDefaultRapierContext,
+    read_rapier_context: ReadRapierContext,
 ) {
     if let Some(held) = helds.iter().next() {
+        let Ok(rapier_context) = read_rapier_context.single() else {
+            return;
+        };
         let contacted = rapier_context
             .contact_pairs_with(held)
             .filter(|x| x.has_any_active_contact())
-            .map(|contact_pair| {
-                if contact_pair.collider1() == held {
-                    contact_pair.collider2()
-                } else {
-                    contact_pair.collider1()
-                }
+            // bevy_rapier 0.30's `ContactPairView::collider{1,2}` now return
+            // `Option<Entity>` (a collider may have no backing entity); take the
+            // other collider in the pair, skipping any without an entity.
+            .filter_map(|contact_pair| {
+                let (c1, c2) = (contact_pair.collider1()?, contact_pair.collider2()?);
+                Some(if c1 == held { c2 } else { c1 })
             })
             .filter(|&contacted| holdables.get(contacted).is_ok())
             .collect::<Vec<_>>();
@@ -306,7 +309,11 @@ fn position_held_part(
     // entity; with a single default world this query resolves to one item.
     rapier_config: Query<&RapierConfiguration>,
 ) {
-    let gravity = rapier_config.single().gravity;
+    // Bevy 0.16 made `Query::single` fallible (returns `Result`).
+    let Ok(rapier_config) = rapier_config.single() else {
+        return;
+    };
+    let gravity = rapier_config.gravity;
     for (part_transform, target_position, mass_properties, velocity, mut ext_forces) in
         parts.iter_mut()
     {
@@ -358,11 +365,13 @@ fn orient_held_part(
 
 fn update_active_joints(
     holdables: Query<Option<&Children>, (With<GlobalTransform>, With<Holdable>)>, //remove transform??
-    rapier_context: ReadDefaultRapierContext,
+    read_rapier_context: ReadRapierContext,
     mut potential_joints: ResMut<PotentialJoints>,
     mut existing_joints: ResMut<ExistingJoints>,
     players: Query<(&Holding, &FocusedInteractable)>,
-    joints: Query<(&Parent, &ImpulseJoint)>,
+    // Bevy 0.16's relationships rework renamed the `Parent` component to `ChildOf`
+    // (its parent accessor is `.parent()` rather than the old `.get()`).
+    joints: Query<(&ChildOf, &ImpulseJoint)>,
 ) {
     potential_joints.0.clear();
     existing_joints.0.clear();
@@ -370,18 +379,28 @@ fn update_active_joints(
     if let Some((holding, interactable)) = players.iter().next() {
         if holding.0 {
             if let Some(held_entity) = interactable.0 {
+                let Ok(rapier_context) = read_rapier_context.single() else {
+                    return;
+                };
                 for contact_pair in rapier_context.contact_pairs_with(held_entity) {
-                    let attachable_entity = if contact_pair.collider1() == held_entity {
-                        contact_pair.collider2()
+                    // bevy_rapier 0.30's `collider{1,2}` now return `Option<Entity>`;
+                    // skip any pair whose colliders lack a backing entity.
+                    let (Some(collider1), Some(collider2)) =
+                        (contact_pair.collider1(), contact_pair.collider2())
+                    else {
+                        continue;
+                    };
+                    let attachable_entity = if collider1 == held_entity {
+                        collider2
                     } else {
-                        contact_pair.collider1()
+                        collider1
                     };
 
                     for (parent, joint) in joints.iter() {
                         // rapier 0.27's `ImpulseJoint::data` is a `TypedJoint` enum;
                         // reach the underlying `GenericJoint` once via `AsRef`.
                         let frame = &joint.data.as_ref().raw;
-                        if parent.get() == held_entity && joint.parent == attachable_entity {
+                        if parent.parent() == held_entity && joint.parent == attachable_entity {
                             existing_joints.0.push(DisplayableJoint {
                                 entities: (held_entity, attachable_entity),
                                 points: (
@@ -389,7 +408,7 @@ fn update_active_joints(
                                     frame.local_frame1.translation.vector.into(), // todo: or just local anchor?
                                 ),
                             });
-                        } else if parent.get() == attachable_entity && joint.parent == held_entity {
+                        } else if parent.parent() == attachable_entity && joint.parent == held_entity {
                             existing_joints.0.push(DisplayableJoint {
                                 entities: (attachable_entity, held_entity),
                                 points: (
@@ -410,10 +429,7 @@ fn update_active_joints(
                                     .all(|d| d > MIN_JOINT_SPACING)
                                 {
                                     potential_joints.0.push(DisplayableJoint {
-                                        entities: (
-                                            contact_pair.collider1(),
-                                            contact_pair.collider2(),
-                                        ),
+                                        entities: (collider1, collider2),
                                         points: (contact.local_p1(), contact.local_p2()),
                                     });
                                 }
@@ -430,7 +446,7 @@ fn update_predelete_joints(
     holdables: Query<&GlobalTransform, With<Holdable>>,
     mut predelete_joints: ResMut<PredeleteJoints>,
     players: Query<(&Holding, &Modifying, &Children)>,
-    joints: Query<(Entity, &ImpulseJoint, &Parent)>,
+    joints: Query<(Entity, &ImpulseJoint, &ChildOf)>,
     hold_points0: Query<(), With<HoldPoint>>,
     hold_points1: Query<&GlobalTransform, With<HoldPoint>>,
     camera_orbit_centers: Query<&Children>,
@@ -444,7 +460,7 @@ fn update_predelete_joints(
             {
                 if let Ok(hold_point_position) = hold_points1.get(entity) {
                     for (joint_entity, joint, joint_parent) in joints.iter() {
-                        if let Ok(transform) = holdables.get(joint_parent.get()) {
+                        if let Ok(transform) = holdables.get(joint_parent.parent()) {
                             let transform = transform.compute_transform();
                             let center = transform.translation
                                 + transform.rotation.mul_vec3(
@@ -491,7 +507,9 @@ fn delete_joints(
 ) {
     if clicks.read().next().is_some() {
         for PredeleteJoint { entity, .. } in predelete_joints.0.iter() {
-            commands.entity(*entity).despawn_recursive();
+            // Bevy 0.16 made `despawn()` recursive by default (the old
+            // `despawn_recursive()` is gone).
+            commands.entity(*entity).despawn();
         }
     }
 }

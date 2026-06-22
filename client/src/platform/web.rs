@@ -343,6 +343,6 @@ impl WheelTracker {
 
 fn get_wheel(wheel_tracker: ResMut<WheelTracker>, mut mouse_wheel_events: EventWriter<MouseWheel>) {
     if let Some(event) = wheel_tracker.get() {
-        mouse_wheel_events.send(event);
+        mouse_wheel_events.write(event);
     }
 }

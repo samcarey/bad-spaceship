@@ -6,7 +6,7 @@ use bevy::{
 };
 use bevy_egui::{
     egui::{self, Align, Align2, Color32, Frame, Layout},
-    EguiContexts, EguiPlugin, EguiSettings,
+    EguiContexts, EguiContextSettings, EguiPlugin,
 };
 use chrono::{DateTime, FixedOffset, Utc};
 use once_cell::sync::Lazy;
@@ -17,7 +17,16 @@ pub struct UiPlugin;
 
 impl Plugin for UiPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins((EguiPlugin, FrameTimeDiagnosticsPlugin))
+        // bevy_egui 0.34 made `EguiPlugin` carry a required multipass flag. This
+        // UI is plain immediate-mode egui drawn from `Update` systems, so keep the
+        // legacy single-pass mode (multipass is opt-in for advanced egui features
+        // we don't use).
+        app.add_plugins((
+            EguiPlugin {
+                enable_multipass_for_primary_context: false,
+            },
+            FrameTimeDiagnosticsPlugin::default(),
+        ))
             .add_systems(
                 Update,
                 (
@@ -44,9 +53,10 @@ const MAX_SCALE_FACTOR: f64 = 10.0;
 
 fn update_ui_scale_factor(
     key_input: Res<ButtonInput<KeyCode>>,
-    // bevy_egui 0.30 made `EguiSettings` a component (one per egui context, i.e.
-    // the primary window) rather than a resource.
-    mut egui_settings: Query<&mut EguiSettings>,
+    // bevy_egui 0.30 made egui settings a component (one per egui context, i.e.
+    // the primary window) rather than a resource; 0.34 renamed it from
+    // `EguiSettings` to `EguiContextSettings`.
+    mut egui_settings: Query<&mut EguiContextSettings>,
     mut custom_scale_factor: Local<CustomScaleFactor>,
 ) {
     if key_input.pressed(KeyCode::ControlLeft) || key_input.pressed(KeyCode::ControlRight) {

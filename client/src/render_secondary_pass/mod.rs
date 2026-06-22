@@ -86,7 +86,8 @@ fn position_gizmo(
         }
         set_visible(&mut visible, should_be_visible);
 
-        childs = children.iter().cloned().collect();
+        // Bevy 0.16's `Children::iter()` yields owned `Entity` values now.
+        childs = children.iter().collect();
     }
 
     for child in childs {

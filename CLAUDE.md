@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Bad Spaceship is a 3D game built on the **Bevy 0.15** engine (ECS), with
+Bad Spaceship is a 3D game built on the **Bevy 0.16** engine (ECS), with
 `bevy_rapier3d` for physics and `bevy_egui` for UI. It is a Cargo workspace with
 three crates that compiles both to a **native** binary and to a **WASM** web
 build playable in the browser.
@@ -14,50 +14,41 @@ build playable in the browser.
 This is a pinned-for-reproducibility project — do not "upgrade" your way out of
 build errors (the deliberate Bevy bumps are the exception, done branch-by-branch):
 
-- **Rust is pinned to 1.82.0** via `rust-toolchain.toml` (auto-selected by rustup).
-  Bevy 0.15's MSRV is exactly 1.82.0, so that is the floor (it was 1.79.0 under Bevy
-  0.14). Many *transitive* deps publish releases that raise their MSRV — either by
-  moving to **edition 2024** (which needs a Cargo ≥ 1.85 nightly to even *parse*, so no
-  amount of toolchain bumping short of 1.85 helps) or by bumping `rust-version` past
-  1.82. The committed `Cargo.lock` pins the graph *back* to a 1.82-compatible set.
-  Two flavours of pin:
-  - *edition2024 parse blockers* — `indexmap` 2.13.0 (2.14 went edition2024),
-    `proc-macro-crate` 3.2.0 (3.5 pulls `toml_edit` 0.25 → `toml_datetime` 1.1.1,
-    edition2024), `image` 0.25.5 (0.25.6+ pulls `moxcms` → `pxfm`, edition2024),
-    `blake3` 1.5.5 + `constant_time_eq` 0.3.1 (newer `blake3` needs `cpufeatures` 0.3,
-    edition2024; pinning `blake3` drags both back), `stackfuture` 0.3.0 (0.3.1 went
-    edition2024; pulled by `bevy_asset`), and `wayland-protocols` 0.32.12 (only 0.32.13
-    went edition2024 — the rest of the `wayland-*` family is fine at its current
-    versions now, so pin just this one).
-  - *rustc-MSRV (>1.82) blockers* — `gilrs` 0.11.1 (0.11.2 needs rustc 1.84; native
-    gamepad dep), `async-lock` 3.4.1 (3.4.2 needs rustc 1.85), plus `ahash` 0.8.11
-    (0.8.12 pulls **`getrandom` 0.3**, which fails to compile for
-    `wasm32-unknown-unknown` — it needs an explicit `wasm_js` cfg the old build never
-    set; pinning keeps the wasm graph on `getrandom` 0.2).
-  Note the 1.82 floor *relaxed* several pins the 0.14 build needed (`rayon` 1.11/1.13
-  wanted 1.80, `spade` 2.15 wanted 1.82, `uuid` — those resolve forward freely now).
-  Do not `cargo update` the whole graph — it will pull newer releases and break the
-  toolchain. To hunt offenders fast: `cargo build` prints a precise "requires rustc
-  1.XX" error naming the crate + a `cargo update -p … --precise …` hint. For the
-  edition2024 ones, `cargo metadata --filter-platform <target>` (run for
-  `wasm32-unknown-unknown` **and** the native target) parses only the deps that
-  *actually* build for that platform — the unfiltered `cargo metadata`/`cargo tree`
-  flag **all** targets, including Android-only deps (`jni`/`android-activity`) and the
-  unused-on-our-targets `wayland-protocols`, that never compile for native-Linux or
-  wasm. The crates.io versions API exposes a per-version `edition`/`rust_version`
-  field, handy for finding the newest pre-edition2024 / pre-MSRV-bump release to pin to.
+- **Rust is pinned to 1.85.0** via `rust-toolchain.toml` (auto-selected by rustup).
+  Bevy 0.16's MSRV is exactly 1.85.0, so that is the floor (it was 1.82.0 under Bevy
+  0.15). 1.85 is the first stable to ship **edition 2024**, so the whole *class* of
+  "edition2024 parse-blocker" pins the 0.15 build needed (`indexmap` 2.13,
+  `proc-macro-crate` 3.2, `image` 0.25.5, `blake3`/`constant_time_eq`, `stackfuture`,
+  `wayland-protocols`) **dissolved** on this bump — the graph resolves those forward
+  freely now. What remains are deps that raise `rust-version` *past* 1.85; the
+  committed `Cargo.lock` pins those *back* to their newest 1.85-compatible release:
+  - `image` 0.25.9 (0.25.10 needs rustc 1.88; pulled by `bevy_image`),
+  - `wayland-protocols` 0.32.12 (0.32.13 needs rustc 1.86; Linux-windowing dep,
+    doesn't actually compile for our native-Linux/wasm targets but is in the graph),
+  - `built` 0.8.0 (0.8.1 needs rustc 1.87; build-dep of `shadow-rs`),
+  - `wasip2` 1.0.1 (1.0.4 needs rustc 1.87; wasi-0.2 shim in the wasm graph).
+  The old `>1.82` pins are gone: `gilrs`/`async-lock` resolve forward now, and
+  **`ahash` 0.8.12 / `getrandom` 0.3 is no longer a problem** — on wasm the runtime
+  still resolves `getrandom` 0.2 (the `getrandom` 0.4 in the graph is host-only, pulled
+  by `uuid` under the `bevy_reflect_derive` *proc-macro*, so it never compiles for
+  `wasm32-unknown-unknown`). Do not `cargo update` the whole graph blindly. To hunt
+  offenders fast: a fresh `cargo generate-lockfile` prints "requires Rust 1.XX" notes
+  naming each crate; pin back with `cargo update -p <crate>@<bad> --precise <good>`.
+  `cargo metadata --filter-platform <target>` (run for `wasm32-unknown-unknown` **and**
+  the native target) parses only the deps that build for that platform; the crates.io
+  per-version `rust_version` field gives the newest pre-MSRV-bump release to pin to.
 - **`Cargo.lock` is committed** and holds an MSRV-compatible dependency set. Always build
   with `--locked`; when a deliberate re-pin is needed, bump direct deps with targeted
   `cargo update -p <crate> --precise <ver>` rather than a blanket update.
 - The web build targets the **WebGL2 backend** via the `bevy/webgl2` feature (in the
-  client's `web` feature): Bevy 0.15's wgpu 23 otherwise compiles the WebGPU backend
+  client's `web` feature): Bevy 0.16's wgpu 24 otherwise compiles the WebGPU backend
   on wasm, which needs `--cfg=web_sys_unstable_apis` and a WebGPU-capable browser. WebGL2
   is the broad-support renderer the build has used on Pages all along.
-- The web build needs a **version-matched `wasm-bindgen` CLI (exactly 0.2.97)**, matching
-  the `wasm-bindgen` crate pinned in the client. Note 0.2.97 is *not* wgpu 23's floor
-  (0.2.95) — `bevy_egui` 0.31 pulls `web-sys` 0.3.74, which hard-pins
-  `wasm-bindgen = "=0.2.97"`, so the whole graph is dragged up to 0.2.97 (and the CLI
-  must match). Use the prebuilt binary from the rustwasm GitHub release, not
+- The web build needs a **version-matched `wasm-bindgen` CLI (exactly 0.2.125)**, matching
+  the `wasm-bindgen` crate the graph resolves (bevy 0.16 / wgpu 24's `web-sys` 0.3.102
+  drags the whole graph to 0.2.125; the client pins `wasm-bindgen = "=0.2.125"` to keep
+  it stable). The CLI version must match the crate exactly or `wasm-bindgen` refuses the
+  module (schema mismatch). Use the prebuilt binary from the rustwasm GitHub release, not
   `cargo install` (building the CLI from source hits the same dependency bitrot). The
   Pages CI also hardcodes `RUST_TOOLCHAIN` and `WASM_BINDGEN_VERSION` in
   `.github/workflows/pages.yml` (it `rustup override set`s the toolchain, shadowing
@@ -123,8 +114,10 @@ mac 'hostname; nproc; df -h /'
 
 - 6 CPUs, ~23 GB RAM, ~45 GB free disk; outbound internet works (can fetch crates/toolchains).
 - Preinstalled: `git`, `docker`, `python3`. **Not** present: `rustc`/`cargo`/`rustup`,
-  `node`, Homebrew. Install the pinned **Rust 1.82.0** toolchain (see *Toolchain &
-  reproducibility*) before building. Note: `rustup override set` from a prior session
+  `node`, Homebrew. Install the pinned **Rust 1.85.0** toolchain (see *Toolchain &
+  reproducibility*) before building. A stale `wasm-bindgen` CLI from a prior session may
+  also linger in `/usr/local/bin` — force-reinstall the version-matched one (the schema
+  check rejects a mismatched module). Note: `rustup override set` from a prior session
   can shadow `rust-toolchain.toml` for `/root/bs` — `rustup override unset` in the repo
   if `rustc --version` doesn't match the pin.
 - Treat the container filesystem as **disposable** — clone fresh and don't rely on
@@ -298,6 +291,69 @@ components** replacing prefab bundles, which touched almost every spawn:
   The fix was renaming the project's atomic-ext `set` → `store_val`
   (`client/src/platform/web.rs`). If a bare method call on a std type suddenly
   "expects `Box<dyn Reflect>`", this is why — rename, don't de-glob the prelude.
+
+### Bevy 0.16 migration gotchas
+
+The 0.15 → 0.16 bump (third-party deps: `bevy_rapier3d` 0.28 → 0.30, `bevy_egui`
+0.31 → 0.34, `bevy_easings` 0.15 → 0.16). The headline change is the **relationships
+system** (`Parent`/`Children` became a generic relationship) plus a sweep of APIs
+becoming fallible. Mostly compile-time and mechanical, but several are subtle:
+
+- **`Parent` → `ChildOf`, and `Children::iter()` yields `Entity` by value.** The
+  parent accessor is `child_of.parent()` (was `parent.get()`). `Children::iter()` is now
+  a `RelationshipTarget` method returning owned `Entity`, *not* `&Entity` — so drop the
+  `*` derefs at every iteration site (`get(*child)` → `get(child)`) and drop `.cloned()`
+  when collecting (`children.iter().collect()`). `Children` still `Deref`s to `[Entity]`,
+  but the trait `iter()` wins method resolution. (`shared/src/{part,player}.rs`,
+  `client/src/render_secondary_pass/mod.rs`.)
+- **`despawn()` is now recursive; `despawn_recursive()` is gone.** A bare `despawn()`
+  clears the whole subtree. This bit the player-death path: the app-lifetime camera is
+  parented under the player's orbit hierarchy, so recursively despawning the player would
+  take the camera down with it (→ "No camera present in scene" panic). Fix: clear the
+  camera's `ChildOf` first (`commands.entity(camera).remove::<ChildOf>()`), *then*
+  `despawn()` the player — the camera survives and is re-parented to the next player by
+  `add_camera_to_player` (`shared/src/player.rs`). To keep *other* children, the sanctioned
+  pattern is `entity.remove::<Children>().despawn()`.
+- **`Query::single`/`single_mut` return `Result` now.** Wrap with `let Ok(x) = q.single()
+  else { return; };` (or `?` in a fallible system). Hits the window cursor systems
+  (`native.rs`) and the rapier config/context reads.
+- **`EventWriter::send` → `write`, but `Events::send` (the resource method) stays `send`.**
+  Only the `EventWriter` system-param method was renamed (`send`/`send_batch`/`send_default`
+  → `write`/…). The web platform writes directly into `ResMut<Events<MouseMotion>>` — that
+  one keeps `.send()` (`client/src/platform/web.rs`).
+- **Every light gained a mixed-lighting field.** `AmbientLight` got
+  `affects_lightmapped_meshes`; `DirectionalLight`/`Point`/`Spot` got
+  `affects_lightmapped_mesh_diffuse` (all default `true`). We use no lightmaps, so
+  `..default()` covers it. The `brightness: 600` lux value is unchanged. (Default
+  directional-shadow cascade settings also changed — verify shadows visually.)
+- **`bevy::log` is gated behind the `bevy_log` feature.** With `default-features = false`
+  it vanishes (the `bevy::log::info!` calls in the pause menu fail to resolve); re-add
+  `"bevy/bevy_log"` to the client's `default` feature list. (It was implicitly present
+  under 0.15.)
+- **`Handle::weak_from_u128` is deprecated → `weak_handle!("<uuid>")`.** Imported as
+  `bevy::asset::weak_handle` (same path style as the project's existing
+  `bevy::asset::load_internal_asset`). The UUID `00000000-0000-0000-c1a5-db6ae813446b`
+  is the old `13953800272683943019` seed expressed as a UUID, so the registered shader
+  handle is byte-for-byte unchanged (`client/src/render_secondary_pass/gizmo_material.rs`).
+- **bevy_egui 0.34: `EguiPlugin` carries a required flag, `EguiSettings` was renamed.**
+  `EguiPlugin` is now `EguiPlugin { enable_multipass_for_primary_context: false }` — keep
+  `false` since the UI is plain immediate-mode egui drawn from `Update` (multipass is
+  opt-in for advanced egui features we don't use). `EguiSettings` → `EguiContextSettings`
+  (still a per-context component with `scale_factor`). `EguiContexts::ctx_mut()` is
+  unchanged (`client/src/ui.rs`).
+- **`FrameTimeDiagnosticsPlugin` is a struct with fields now** — add it as
+  `FrameTimeDiagnosticsPlugin::default()` (the `FPS`/`FRAME_TIME` `DiagnosticPath`
+  consts are unchanged).
+- **rapier 0.30 split `RapierContext` into component pieces.** `ReadDefaultRapierContext`
+  is gone; use the `ReadRapierContext` system param and call `.single()` (now fallible) to
+  get a bundled `RapierContext<'_>` view that still exposes `contact_pairs_with(...)`.
+  `ContactPairView::collider1/2` now return **`Option<Entity>`** (a collider may lack a
+  backing entity) — unwrap/skip with `filter_map` + `?` or a `let (Some(c1), Some(c2)) =
+  … else { continue; }`. `Collider::trimesh(...)` is fallible too (returns
+  `Result<_, TriMeshBuilderError>`). `RapierConfiguration` is still a component
+  (`Query<&RapierConfiguration>`, `.gravity` intact); the contact-manifold/`ContactView`
+  methods (`has_any_active_contact`, `find_deepest_contact`, `manifolds`, `points`,
+  `local_p1/2`, `dist`) are unchanged. (`shared/src/{character,part,map}.rs`.)
 
 ## Pull request workflow
 

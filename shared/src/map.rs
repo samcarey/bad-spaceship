@@ -51,7 +51,9 @@ fn spawn_map(mut commands: Commands) {
         // Bevy 0.15: `Transform` now requires `GlobalTransform`, so inserting the
         // bare component replaces the old `TransformBundle`.
         .insert(Transform::from_xyz(0.0, 0.0, 0.0))
-        .insert(Collider::trimesh(vertices, indices))
+        // bevy_rapier 0.30's `Collider::trimesh` is now fallible; the bowl mesh is
+        // always valid (non-empty, matching index count), so unwrap it.
+        .insert(Collider::trimesh(vertices, indices).expect("valid bowl trimesh"))
         .insert(ActiveCollisionTypes::default())
         .insert(Grass);
 }
