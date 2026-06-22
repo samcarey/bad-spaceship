@@ -157,7 +157,7 @@ trait SetWebMouseButton {
     fn set_state(&mut self, atomic_bool: &Arc<AtomicBool>, key: MouseButton);
 }
 
-impl SetWebMouseButton for Input<WebMouseButton> {
+impl SetWebMouseButton for ButtonInput<WebMouseButton> {
     fn set_state(&mut self, atomic_key: &Arc<AtomicBool>, button: MouseButton) {
         if atomic_key.get() {
             self.press(WebMouseButton(button));
@@ -170,7 +170,7 @@ impl SetWebMouseButton for Input<WebMouseButton> {
 
 pub fn process_mouse_clicks(
     mouse_button_tracker: Res<MouseClickTracker>,
-    mut web_mouse_button_input: ResMut<Input<WebMouseButton>>,
+    mut web_mouse_button_input: ResMut<ButtonInput<WebMouseButton>>,
 ) {
     web_mouse_button_input.set_state(&mouse_button_tracker.just_pressed, MouseButton::Left);
 }
@@ -221,7 +221,7 @@ trait SetWebKey {
     fn set_state(&mut self, atomic_key: &Arc<AtomicBool>, key: KeyCode);
 }
 
-impl SetWebKey for Input<WebKeyCode> {
+impl SetWebKey for ButtonInput<WebKeyCode> {
     fn set_state(&mut self, atomic_key: &Arc<AtomicBool>, key: KeyCode) {
         if atomic_key.get() {
             self.press(WebKeyCode(key));
@@ -233,12 +233,12 @@ impl SetWebKey for Input<WebKeyCode> {
 
 pub fn get_keyboard_input(
     keyboard_tracker: Res<KeyboardTracker>,
-    mut keyboard_input: ResMut<Input<WebKeyCode>>,
+    mut keyboard_input: ResMut<ButtonInput<WebKeyCode>>,
 ) {
-    keyboard_input.set_state(&keyboard_tracker.w, KeyCode::W);
-    keyboard_input.set_state(&keyboard_tracker.s, KeyCode::S);
-    keyboard_input.set_state(&keyboard_tracker.d, KeyCode::D);
-    keyboard_input.set_state(&keyboard_tracker.a, KeyCode::A);
+    keyboard_input.set_state(&keyboard_tracker.w, KeyCode::KeyW);
+    keyboard_input.set_state(&keyboard_tracker.s, KeyCode::KeyS);
+    keyboard_input.set_state(&keyboard_tracker.d, KeyCode::KeyD);
+    keyboard_input.set_state(&keyboard_tracker.a, KeyCode::KeyA);
     keyboard_input.set_state(&keyboard_tracker.space, KeyCode::Space);
     keyboard_input.set_state(&keyboard_tracker.shift, KeyCode::ShiftLeft);
     keyboard_input.set_state(&keyboard_tracker.control, KeyCode::ControlLeft);

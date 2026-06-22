@@ -2,7 +2,10 @@ use bad_spaceship_shared::{map::PLATFORM_WIDTH_M, part::Holdable, Character, Gra
 use bevy::{
     pbr::CascadeShadowConfigBuilder,
     prelude::*,
-    render::mesh::{Indices, VertexAttributeValues},
+    render::{
+        mesh::{Indices, VertexAttributeValues},
+        render_asset::RenderAssetUsages,
+    },
 };
 use bevy_rapier3d::prelude::Collider;
 use rand::Rng;
@@ -63,14 +66,9 @@ fn assign_parts(
             .insert(PbrBundle {
                 transform: transform.clone(),
                 global_transform: global_transform.clone(),
-                mesh: meshes.add(Mesh::from(shape::Box {
-                    max_x: dims[0],
-                    min_x: -dims[0],
-                    max_y: dims[1],
-                    min_y: -dims[1],
-                    max_z: dims[2],
-                    min_z: -dims[2],
-                })),
+                // Bevy 0.13 deprecated `shape::*` in favour of `bevy_math`
+                // primitives; the collider half-extents map to a full-size cuboid.
+                mesh: meshes.add(Cuboid::new(dims[0] * 2.0, dims[1] * 2.0, dims[2] * 2.0)),
                 material: materials.add(StandardMaterial {
                     base_color: Color::rgba(
                         rng.gen_range(COLOR_MIN..=COLOR_MAX),
@@ -105,11 +103,10 @@ fn assign_characters(
                 transform: transform.clone(),
                 global_transform: global_transform.clone(),
                 mesh: meshes.add(
-                    Mesh::try_from(shape::Icosphere {
-                        radius: collider_shape.as_ball().unwrap().radius(),
-                        subdivisions: 5,
-                    })
-                    .unwrap(),
+                    Sphere::new(collider_shape.as_ball().unwrap().radius())
+                        .mesh()
+                        .ico(5)
+                        .unwrap(),
                 ),
                 material: materials.add(StandardMaterial {
                     base_color: Color::rgb(0.8, 0.8, 0.8),
@@ -150,7 +147,10 @@ fn assign_grass(
 }
 
 fn compute_mesh(shape: &Collider) -> Mesh {
-    let mut mesh = Mesh::new(bevy::render::render_resource::PrimitiveTopology::TriangleList);
+    let mut mesh = Mesh::new(
+        bevy::render::render_resource::PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    );
     let trimesh = shape.as_trimesh().unwrap();
     mesh.insert_attribute(
         Mesh::ATTRIBUTE_POSITION,
@@ -200,13 +200,13 @@ fn compute_mesh(shape: &Collider) -> Mesh {
                 .collect::<Vec<_>>(),
         ),
     );
-    mesh.set_indices(Some(Indices::U32(
+    mesh.insert_indices(Indices::U32(
         trimesh
             .indices()
             .iter()
             .flat_map(|triangle| triangle.iter())
             .cloned()
             .collect(),
-    )));
+    ));
     mesh
 }

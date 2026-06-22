@@ -26,7 +26,7 @@ fn hide_cursor(mut windows: Query<&mut Window, With<PrimaryWindow>>) {
 }
 
 fn toggle_menu_on_key(
-    input: Res<Input<KeyCode>>,
+    input: Res<ButtonInput<KeyCode>>,
     state: Res<State<AppState>>,
     mut next_state: ResMut<NextState<AppState>>,
 ) {

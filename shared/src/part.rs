@@ -264,7 +264,7 @@ fn update_attachable(
 ) {
     if let Some(held) = helds.iter().next() {
         let contacted = rapier_context
-            .contacts_with(held)
+            .contact_pairs_with(held)
             .filter(|x| x.has_any_active_contacts())
             .map(|contact_pair| {
                 if contact_pair.collider1() == held {
@@ -366,7 +366,7 @@ fn update_active_joints(
     if let Some((holding, interactable)) = players.iter().next() {
         if holding.0 {
             if let Some(held_entity) = interactable.0 {
-                for contact_pair in rapier_context.contacts_with(held_entity) {
+                for contact_pair in rapier_context.contact_pairs_with(held_entity) {
                     let attachable_entity = if contact_pair.collider1() == held_entity {
                         contact_pair.collider2()
                     } else {

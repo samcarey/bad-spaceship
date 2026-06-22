@@ -1,8 +1,8 @@
-# Pinned toolchain for reproducible builds of this Bevy 0.12 (2023-era) project.
-# Bevy 0.12 / wgpu 0.17 build with the version-matched `wasm-bindgen` 0.2.89. Several
-# transitive deps are pinned back in Cargo.lock to pre-edition-2024 releases (see
-# CLAUDE.md); the oldest such releases that still build (e.g. `spade`) need the
-# relaxed private-in-public rule from Rust 1.74, so the toolchain is held at 1.75.0.
+# Pinned toolchain for reproducible builds of this Bevy 0.13 (2024-era) project.
+# Bevy 0.13 / wgpu 0.19 build with the version-matched `wasm-bindgen` 0.2.92.
+# Bevy 0.13's MSRV is Rust 1.76.0, so the toolchain is held at 1.76.0; several
+# transitive deps are still pinned back in Cargo.lock to pre-edition-2024 releases
+# (see CLAUDE.md) so they keep building on it.
 [toolchain]
-channel = "1.75.0"
+channel = "1.76.0"
 targets = ["wasm32-unknown-unknown"]

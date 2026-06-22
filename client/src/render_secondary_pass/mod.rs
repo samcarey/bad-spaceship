@@ -138,11 +138,9 @@ fn build_gizmo(
 ) {
     let axis_length = 1.5;
     // Define gizmo meshes
-    let arrow_tail_mesh = meshes.add(Mesh::from(shape::Capsule {
-        radius: 0.015,
-        depth: axis_length,
-        ..Default::default()
-    }));
+    // Bevy 0.13 deprecated `shape::*`; `Capsule3d::new(radius, length)` takes the
+    // cylinder length directly (the old `depth`).
+    let arrow_tail_mesh = meshes.add(Capsule3d::new(0.015, axis_length));
     let cone_mesh = meshes.add(Mesh::from(cone::Cone {
         height: 0.3,
         radius: 0.1,
@@ -248,15 +246,7 @@ fn initialize_joint_appearance(
 ) {
     let (s, l, a) = (1.0, 0.5, 0.75);
     *joint_appearance = JointAppearance {
-        mesh: Some(
-            meshes.add(
-                Mesh::try_from(shape::Icosphere {
-                    radius: 0.1,
-                    ..Default::default()
-                })
-                .unwrap(),
-            ),
-        ),
+        mesh: Some(meshes.add(Sphere::new(0.1).mesh().ico(5).unwrap())),
         valid_material: Some(materials.add(GizmoMaterial::from(Color::hsla(260.0, s, l, a)))),
         invalid_material: Some(materials.add(GizmoMaterial::from(Color::hsla(20.0, s, l, a)))),
         predelete_material: Some(materials.add(GizmoMaterial::from(Color::hsla(20.0, s, l, a)))),
@@ -389,13 +379,7 @@ fn add_hold_point_delete_zone_visualization(
             .entity(entity)
             .insert(MaterialMeshBundle {
                 visibility: Visibility::Hidden,
-                mesh: meshes.add(
-                    Mesh::try_from(shape::Icosphere {
-                        radius: DELETE_RADIUS,
-                        ..Default::default()
-                    })
-                    .unwrap(),
-                ),
+                mesh: meshes.add(Sphere::new(DELETE_RADIUS).mesh().ico(5).unwrap()),
                 material: materials.add(StandardMaterial {
                     base_color: Color::hsla(20.0, 1.0, 0.3, 0.25),
                     alpha_mode: AlphaMode::Blend,

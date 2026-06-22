@@ -20,9 +20,9 @@ concurrency:
 
 env:
   # Toolchain is also pinned in rust-toolchain.toml; kept here for clarity.
-  RUST_TOOLCHAIN: "1.75.0"
+  RUST_TOOLCHAIN: "1.76.0"
   # Must match the `wasm-bindgen` crate version in Cargo.lock.
-  WASM_BINDGEN_VERSION: "0.2.89"
+  WASM_BINDGEN_VERSION: "0.2.92"
 
 jobs:
   build:
