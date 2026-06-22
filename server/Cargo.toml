@@ -8,15 +8,16 @@ edition = "2021"
 
 [dependencies]
 bad-spaceship-shared = { path = "../shared" }
-bevy = { version = "0.13", default-features = false }
-bevy_rapier3d = "0.25"
+bevy = { version = "0.14", default-features = false }
+bevy_rapier3d = "0.27"
 
 [features]
 default = [
     "bevy_rapier3d/simd-stable",
     "bevy_rapier3d/parallel",
-    # Hot-reload of RON config assets (watch_for_changes). Bevy 0.13 requires the
-    # `multi-threaded` feature to be on for the file watcher to function.
+    # Hot-reload of RON config assets (watch_for_changes). Bevy 0.14 requires the
+    # `multi_threaded` feature to be on for the file watcher to function (renamed
+    # from 0.13's hyphenated `multi-threaded`).
     "bevy/file_watcher",
-    "bevy/multi-threaded",
+    "bevy/multi_threaded",
 ]

@@ -20,7 +20,8 @@ concurrency:
 
 env:
   # Toolchain is also pinned in rust-toolchain.toml; kept here for clarity.
-  RUST_TOOLCHAIN: "1.76.0"
+  # Bevy 0.14's MSRV is 1.79.0 (was 1.76.0 under Bevy 0.13).
+  RUST_TOOLCHAIN: "1.79.0"
   # Must match the `wasm-bindgen` crate version in Cargo.lock.
   WASM_BINDGEN_VERSION: "0.2.92"
 

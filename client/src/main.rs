@@ -63,7 +63,7 @@ fn main() {
             RenderSecondaryPassPlugin,
             CommonPlugins,
         ))
-        .insert_resource(ClearColor(Color::rgb(0.99, 0.99, 0.95)))
+        .insert_resource(ClearColor(Color::srgb(0.99, 0.99, 0.95)))
         .add_systems(Startup, load_configs)
         .add_systems(Update, add_camera_to_player);
 
