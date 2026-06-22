@@ -167,7 +167,7 @@ fn get_modifying(
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Resource)]
 struct GamepadLobby {
     gamepads: HashSet<Gamepad>,
 }
@@ -178,7 +178,7 @@ fn connection_system(
 ) {
     for event in gamepad_event.iter() {
         match event.event_type {
-            GamepadEventType::Connected => {
+            GamepadEventType::Connected(_) => {
                 lobby.gamepads.insert(event.gamepad);
                 println!("{:?} Connected", event.gamepad);
             }

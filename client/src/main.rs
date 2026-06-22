@@ -31,12 +31,22 @@ fn main() {
         brightness: 1.0 / 6.0,
     });
 
-    app.insert_resource(WindowDescriptor {
-        title: "Bad Spaceship".to_string(),
-        ..Default::default()
-    });
-
-    app.add_plugins(DefaultPlugins)
+    app.add_plugins(
+        DefaultPlugins
+            .set(WindowPlugin {
+                window: WindowDescriptor {
+                    title: "Bad Spaceship".to_string(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            // Hot-reload config RON assets (previously done via
+            // AssetServer::watch_for_changes, removed in Bevy 0.9).
+            .set(AssetPlugin {
+                watch_for_changes: true,
+                ..Default::default()
+            }),
+    )
         .add_state(AppState::Initial)
         .add_plugin(UiPlugin)
         .add_plugin(InputPlugin)
@@ -79,8 +89,6 @@ fn load_configs(
     // TODO: Fix this
     // Theoretically this should work instead of the above, but it doesn't...
     // *handles = Some(asset_server.load_folder("config").unwrap());
-
-    asset_server.watch_for_changes().unwrap();
 }
 
 fn add_camera_to_player(

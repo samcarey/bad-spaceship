@@ -19,7 +19,7 @@ impl Plugin for RenderMainPassPlugin {
 
 fn add_lighting(mut commands: Commands) {
     const HALF_SIZE: f32 = PLATFORM_WIDTH_M;
-    commands.spawn().insert_bundle(DirectionalLightBundle {
+    commands.spawn(DirectionalLightBundle {
         directional_light: DirectionalLight {
             illuminance: 10_000.0,
             shadows_enabled: true,
@@ -63,7 +63,7 @@ fn assign_parts(
         let dims = collider_shape.as_cuboid().unwrap().half_extents();
         commands
             .entity(entity)
-            .insert_bundle(PbrBundle {
+            .insert(PbrBundle {
                 transform: transform.clone(),
                 global_transform: global_transform.clone(),
                 mesh: meshes.add(Mesh::from(shape::Box {
@@ -104,7 +104,7 @@ fn assign_characters(
     for (entity, collider_shape, transform, global_transform) in unassigned.iter() {
         commands
             .entity(entity)
-            .insert_bundle(PbrBundle {
+            .insert(PbrBundle {
                 transform: transform.clone(),
                 global_transform: global_transform.clone(),
                 mesh: meshes.add(Mesh::from(shape::Icosphere {
@@ -134,7 +134,7 @@ fn assign_grass(
     for (entity, collider_shape, transform, global_transform) in unassigned.iter() {
         commands
             .entity(entity)
-            .insert_bundle(PbrBundle {
+            .insert(PbrBundle {
                 transform: transform.clone(),
                 global_transform: global_transform.clone(),
                 mesh: meshes.add(compute_mesh(&collider_shape)),

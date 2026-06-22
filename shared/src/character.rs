@@ -62,12 +62,12 @@ fn spawn(
             commands
                 .entity(player_entity)
                 .insert(RigidBody::Dynamic)
-                .insert_bundle(TransformBundle::from(Transform::from_xyz(0.0, 10.0, 0.0)))
+                .insert(TransformBundle::from(Transform::from_xyz(0.0, 10.0, 0.0)))
                 .insert(LockedAxes::ROTATION_LOCKED)
                 .insert(Collider::ball(config.size / 2.0))
                 // .insert(ActiveEvents::COLLISION_EVENTS)
                 .insert(ActiveCollisionTypes::default() | ActiveCollisionTypes::STATIC_STATIC)
-                .insert_bundle(CharacterBundle::default())
+                .insert(CharacterBundle::default())
                 .insert(AdditionalMassProperties::MassProperties(MassProperties {
                     mass: 1.0,
                     ..Default::default()

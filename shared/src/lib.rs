@@ -1,7 +1,8 @@
 use bevy::{
+    app::PluginGroupBuilder,
     ecs::component::Component,
     math::{Quat, Vec2, Vec3},
-    prelude::{Bundle, Entity, KeyCode, MouseButton, PluginGroup, SystemLabel},
+    prelude::{Bundle, Entity, KeyCode, MouseButton, PluginGroup, Resource, SystemLabel},
 };
 use bevy_easings::EasingsPlugin;
 use bevy_rapier3d::plugin::RapierPhysicsPlugin;
@@ -21,19 +22,17 @@ pub mod utils;
 pub struct CommonPlugins;
 
 impl PluginGroup for CommonPlugins {
-    fn build(&mut self, group: &mut bevy::app::PluginGroupBuilder) {
-        // Third-party plugins
-        group
+    fn build(self) -> PluginGroupBuilder {
+        PluginGroupBuilder::start::<Self>()
+            // Third-party plugins
             .add(RapierPhysicsPlugin::<&IgnoreContactsWith>::default())
-            .add(EasingsPlugin);
-
-        // Custom plugins
-        group
+            .add(EasingsPlugin)
+            // Custom plugins
             .add(CharacterPlugin)
             .add(ConfigPlugin)
             .add(MapPlugin)
             .add(PartPlugin)
-            .add(PlayerPlugin);
+            .add(PlayerPlugin)
     }
 }
 
@@ -129,10 +128,10 @@ pub struct DisplayableJoint {
     pub entities: (Entity, Entity),
 }
 
-#[derive(Default)]
+#[derive(Default, Resource)]
 pub struct PotentialJoints(pub Vec<DisplayableJoint>);
 
-#[derive(Default)]
+#[derive(Default, Resource)]
 pub struct ExistingJoints(pub Vec<DisplayableJoint>);
 
 pub struct PredeleteJoint {
@@ -140,7 +139,7 @@ pub struct PredeleteJoint {
     pub translation: Vec3,
 }
 
-#[derive(Default)]
+#[derive(Default, Resource)]
 pub struct PredeleteJoints(pub Vec<PredeleteJoint>);
 
 #[derive(SystemLabel, Clone, Hash, Debug, PartialEq, Eq)]

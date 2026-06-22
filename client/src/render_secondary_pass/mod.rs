@@ -137,11 +137,11 @@ fn build_gizmo(
     let gizmo_material_y_selectable = materials.add(GizmoMaterial::from(Color::hsl(120.0, s, l)));
     let gizmo_material_z_selectable = materials.add(GizmoMaterial::from(Color::hsl(240.0, s, l)));
     commands
-        .spawn_bundle(TransformGizmoBundle::default())
+        .spawn(TransformGizmoBundle::default())
         .with_children(|parent| {
             // Translation Axes
             parent
-                .spawn_bundle(MaterialMeshBundle {
+                .spawn(MaterialMeshBundle {
                     mesh: arrow_tail_mesh.clone(),
                     material: gizmo_material_x.clone(),
                     transform: Transform::from_matrix(Mat4::from_rotation_translation(
@@ -153,7 +153,7 @@ fn build_gizmo(
                 .insert(GizmoPiece)
                 .insert(NotShadowCaster);
             parent
-                .spawn_bundle(MaterialMeshBundle {
+                .spawn(MaterialMeshBundle {
                     mesh: arrow_tail_mesh.clone(),
                     material: gizmo_material_y.clone(),
                     transform: Transform::from_matrix(Mat4::from_rotation_translation(
@@ -165,7 +165,7 @@ fn build_gizmo(
                 .insert(GizmoPiece)
                 .insert(NotShadowCaster);
             parent
-                .spawn_bundle(MaterialMeshBundle {
+                .spawn(MaterialMeshBundle {
                     mesh: arrow_tail_mesh,
                     material: gizmo_material_z.clone(),
                     transform: Transform::from_matrix(Mat4::from_rotation_translation(
@@ -178,7 +178,7 @@ fn build_gizmo(
                 .insert(NotShadowCaster);
 
             parent
-                .spawn_bundle(MaterialMeshBundle {
+                .spawn(MaterialMeshBundle {
                     mesh: cone_mesh.clone(),
                     material: gizmo_material_x_selectable.clone(),
                     transform: Transform::from_matrix(Mat4::from_rotation_translation(
@@ -190,7 +190,7 @@ fn build_gizmo(
                 .insert(GizmoPiece)
                 .insert(NotShadowCaster);
             parent
-                .spawn_bundle(MaterialMeshBundle {
+                .spawn(MaterialMeshBundle {
                     mesh: cone_mesh.clone(),
                     material: gizmo_material_y_selectable.clone(),
                     transform: Transform::from_translation(Vec3::new(0.0, axis_length, 0.0)),
@@ -199,7 +199,7 @@ fn build_gizmo(
                 .insert(GizmoPiece)
                 .insert(NotShadowCaster);
             parent
-                .spawn_bundle(MaterialMeshBundle {
+                .spawn(MaterialMeshBundle {
                     mesh: cone_mesh.clone(),
                     material: gizmo_material_z_selectable.clone(),
                     transform: Transform::from_matrix(Mat4::from_rotation_translation(
@@ -213,7 +213,7 @@ fn build_gizmo(
         });
 }
 
-#[derive(Default)]
+#[derive(Default, Resource)]
 struct JointAppearance {
     mesh: Option<Handle<Mesh>>,
     valid_material: Option<Handle<GizmoMaterial>>,
@@ -262,7 +262,7 @@ fn display_potential_joints(
                 displayed_visible.is_visible = true;
             } else {
                 commands
-                    .spawn_bundle(MaterialMeshBundle {
+                    .spawn(MaterialMeshBundle {
                         mesh: displayed_joint_appearance.mesh.clone().unwrap(),
                         material,
                         transform: Transform::from_translation(center),
@@ -301,7 +301,7 @@ fn display_existing_joints(
                 displayed_visible.is_visible = true;
             } else {
                 commands
-                    .spawn_bundle(MaterialMeshBundle {
+                    .spawn(MaterialMeshBundle {
                         mesh: displayed_joint_appearance.mesh.clone().unwrap(),
                         material,
                         transform: Transform::from_translation(center),
@@ -338,7 +338,7 @@ fn display_predelete_joints(
             displayed_visible.is_visible = true;
         } else {
             commands
-                .spawn_bundle(MaterialMeshBundle {
+                .spawn(MaterialMeshBundle {
                     mesh: displayed_joint_appearance.mesh.clone().unwrap(),
                     material,
                     transform: Transform::from_translation(center),
@@ -362,7 +362,7 @@ fn add_hold_point_delete_zone_visualization(
     if let Some(entity) = hold_points_without_visualization.iter().next() {
         commands
             .entity(entity)
-            .insert_bundle(MaterialMeshBundle {
+            .insert(MaterialMeshBundle {
                 visibility: Visibility { is_visible: false },
                 mesh: meshes.add(
                     shape::Icosphere {

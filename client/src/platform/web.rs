@@ -34,7 +34,7 @@ impl Plugin for PlatformPlugin {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Resource)]
 struct PointerLockTracker {
     lock: Arc<AtomicBool>,
 }
@@ -82,7 +82,7 @@ fn toggle_menu_on_pointer_lock(
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Resource)]
 pub struct MouseMovementTracker {
     delta_x: Arc<AtomicI32>,
     delta_y: Arc<AtomicI32>,
@@ -124,7 +124,7 @@ fn get_mouse_motion(
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Resource)]
 pub struct MouseClickTracker {
     just_pressed: Arc<AtomicBool>,
     x: Arc<AtomicI32>,
@@ -149,11 +149,11 @@ impl MouseClickTracker {
 }
 
 trait SetWebMouseButton {
-    fn set(&mut self, atomic_bool: &Arc<AtomicBool>, key: MouseButton);
+    fn set_state(&mut self, atomic_bool: &Arc<AtomicBool>, key: MouseButton);
 }
 
 impl SetWebMouseButton for Input<WebMouseButton> {
-    fn set(&mut self, atomic_key: &Arc<AtomicBool>, button: MouseButton) {
+    fn set_state(&mut self, atomic_key: &Arc<AtomicBool>, button: MouseButton) {
         if atomic_key.get() {
             self.press(WebMouseButton(button));
             atomic_key.set(false);
@@ -167,10 +167,10 @@ pub fn process_mouse_clicks(
     mouse_button_tracker: Res<MouseClickTracker>,
     mut web_mouse_button_input: ResMut<Input<WebMouseButton>>,
 ) {
-    web_mouse_button_input.set(&mouse_button_tracker.just_pressed, MouseButton::Left);
+    web_mouse_button_input.set_state(&mouse_button_tracker.just_pressed, MouseButton::Left);
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Resource)]
 pub struct KeyboardTracker {
     w: Arc<AtomicBool>,
     s: Arc<AtomicBool>,
@@ -213,11 +213,11 @@ impl KeyboardTracker {
 }
 
 trait SetWebKey {
-    fn set(&mut self, atomic_key: &Arc<AtomicBool>, key: KeyCode);
+    fn set_state(&mut self, atomic_key: &Arc<AtomicBool>, key: KeyCode);
 }
 
 impl SetWebKey for Input<WebKeyCode> {
-    fn set(&mut self, atomic_key: &Arc<AtomicBool>, key: KeyCode) {
+    fn set_state(&mut self, atomic_key: &Arc<AtomicBool>, key: KeyCode) {
         if atomic_key.get() {
             self.press(WebKeyCode(key));
         } else {
@@ -230,13 +230,13 @@ pub fn get_keyboard_input(
     keyboard_tracker: Res<KeyboardTracker>,
     mut keyboard_input: ResMut<Input<WebKeyCode>>,
 ) {
-    keyboard_input.set(&keyboard_tracker.w, KeyCode::W);
-    keyboard_input.set(&keyboard_tracker.s, KeyCode::S);
-    keyboard_input.set(&keyboard_tracker.d, KeyCode::D);
-    keyboard_input.set(&keyboard_tracker.a, KeyCode::A);
-    keyboard_input.set(&keyboard_tracker.space, KeyCode::Space);
-    keyboard_input.set(&keyboard_tracker.shift, KeyCode::LShift);
-    keyboard_input.set(&keyboard_tracker.control, KeyCode::LControl);
+    keyboard_input.set_state(&keyboard_tracker.w, KeyCode::W);
+    keyboard_input.set_state(&keyboard_tracker.s, KeyCode::S);
+    keyboard_input.set_state(&keyboard_tracker.d, KeyCode::D);
+    keyboard_input.set_state(&keyboard_tracker.a, KeyCode::A);
+    keyboard_input.set_state(&keyboard_tracker.space, KeyCode::Space);
+    keyboard_input.set_state(&keyboard_tracker.shift, KeyCode::LShift);
+    keyboard_input.set_state(&keyboard_tracker.control, KeyCode::LControl);
 }
 
 pub fn listen<F>(event_type: &'static str, callback: F)
@@ -292,7 +292,7 @@ impl AtomicI32Ext for AtomicI32 {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Resource)]
 pub struct WheelTracker {
     delta_y: Arc<AtomicI32>,
     delta_mode: Arc<AtomicI32>,

@@ -8,16 +8,16 @@ build = "build.rs"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-bevy = { version = "0.8", default-features = false }
-bevy_rapier3d = "0.16"
+bevy = { version = "0.9", default-features = false }
+bevy_rapier3d = "0.19"
 serde = { version = "1.0", features = ["derive"] }
 nalgebra = "0.31"
 log = "0.4"
-winit = { version = "0.26" }
+winit = { version = "0.27" }
 gloo = { version = "0.7", optional = true }
 web-sys = { version = "0.3.40", optional = true }
-bevy_web_fullscreen = { git = "https://github.com/samcarey/bevy_web_fullscreen.git", branch = "master", optional = true }
-bevy_egui = "0.15"
+bevy_web_fullscreen = { version = "0.2.1", optional = true }
+bevy_egui = "0.17"
 bad-spaceship-shared = { path = "../shared" }
 shadow-rs = { version = "0.11", default-features = false }
 chrono = "0.4"
