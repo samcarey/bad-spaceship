@@ -1,5 +1,8 @@
-#import bevy_pbr::mesh_view_bindings
-#import bevy_pbr::mesh_bindings
+// Bevy 0.11's naga_oil-based importer needs explicit item imports; the old
+// whole-module `#import bevy_pbr::mesh_view_bindings` no longer brings `view`
+// and `mesh` into scope unqualified.
+#import bevy_pbr::mesh_view_bindings  view
+#import bevy_pbr::mesh_bindings        mesh
 
 struct GizmoMaterial {
     color: vec4<f32>,

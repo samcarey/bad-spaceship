@@ -2,24 +2,25 @@ use std::time::Duration;
 
 use bad_spaceship_shared::{character, player, CommonPlugins};
 use bevy::{
-    app::ScheduleRunnerSettings,
-    asset::AssetPlugin,
+    app::ScheduleRunnerPlugin,
+    asset::{AssetPlugin, ChangeWatcher},
     prelude::*,
 };
 
 fn main() {
     App::new()
-        .insert_resource(ScheduleRunnerSettings::run_loop(Duration::from_secs_f64(
-            1.0 / 60.,
+        // Bevy 0.11 merged ScheduleRunnerSettings into ScheduleRunnerPlugin;
+        // override the one MinimalPlugins adds to keep the fixed 60 Hz loop.
+        .add_plugins(MinimalPlugins.set(ScheduleRunnerPlugin::run_loop(
+            Duration::from_secs_f64(1.0 / 60.),
         )))
-        .add_plugins(MinimalPlugins)
         // AssetServerSettings was folded into AssetPlugin in Bevy 0.9.
-        .add_plugin(AssetPlugin {
+        .add_plugins(AssetPlugin {
             asset_folder: "../client/assets".to_string(),
-            watch_for_changes: true,
+            watch_for_changes: ChangeWatcher::with_delay(Duration::from_millis(200)),
         })
         .add_plugins(CommonPlugins)
-        .add_startup_system(load_configs)
+        .add_systems(Startup, load_configs)
         .run();
 }
 

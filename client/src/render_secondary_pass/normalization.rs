@@ -3,10 +3,9 @@ use bevy::{prelude::*, render::camera::Camera, transform::TransformSystem};
 pub struct Ui3dNormalization;
 impl Plugin for Ui3dNormalization {
     fn build(&self, app: &mut App) {
-        app.add_system(
-            normalize
-                .in_base_set(CoreSet::PostUpdate)
-                .before(TransformSystem::TransformPropagate),
+        app.add_systems(
+            PostUpdate,
+            normalize.before(TransformSystem::TransformPropagate),
         );
     }
 }

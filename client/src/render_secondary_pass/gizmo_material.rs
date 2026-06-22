@@ -1,13 +1,14 @@
 use bevy::{
     prelude::*,
-    reflect::TypeUuid,
+    reflect::{TypePath, TypeUuid},
     render::render_resource::{AsBindGroup, ShaderRef},
 };
 
 pub const GIZMO_SHADER_HANDLE: HandleUntyped =
     HandleUntyped::weak_from_u64(Shader::TYPE_UUID, 13953800272683943019);
 
-#[derive(Debug, Clone, Default, AsBindGroup, TypeUuid)]
+// Bevy 0.11's `Material`/`Asset` bound now also requires `TypePath`.
+#[derive(Debug, Clone, Default, AsBindGroup, TypeUuid, TypePath)]
 #[uuid = "0cf245a7-ce7a-4473-821c-111e6f359193"]
 pub struct GizmoMaterial {
     #[uniform(0)]

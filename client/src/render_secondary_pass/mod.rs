@@ -20,25 +20,30 @@ impl Plugin for RenderSecondaryPassPlugin {
         let mut shaders = app.world.get_resource_mut::<Assets<Shader>>().unwrap();
         shaders.set_untracked(
             gizmo_material::GIZMO_SHADER_HANDLE,
-            Shader::from_wgsl(include_str!("../../assets/gizmo_material.wgsl")),
+            // Bevy 0.11's naga_oil importer needs a path for diagnostics/imports.
+            Shader::from_wgsl(
+                include_str!("../../assets/gizmo_material.wgsl"),
+                "gizmo_material.wgsl",
+            ),
         );
 
-        app.add_startup_system(build_gizmo)
-            .add_system(position_gizmo)
-            .add_plugin(Ui3dNormalization)
-            .add_startup_system(initialize_joint_appearance)
+        app.add_plugins((Ui3dNormalization, MaterialPlugin::<GizmoMaterial>::default()))
+            .add_systems(Startup, (build_gizmo, initialize_joint_appearance))
             .init_resource::<JointAppearance>()
-            .add_system(add_hold_point_delete_zone_visualization)
             .add_systems(
+                Update,
                 (
-                    display_potential_joints,
-                    display_existing_joints,
-                    display_predelete_joints,
-                    delete_zone_visibility,
-                )
-                    .after(UpdateJointsLabel),
-            )
-            .add_plugin(MaterialPlugin::<GizmoMaterial>::default());
+                    position_gizmo,
+                    add_hold_point_delete_zone_visualization,
+                    (
+                        display_potential_joints,
+                        display_existing_joints,
+                        display_predelete_joints,
+                        delete_zone_visibility,
+                    )
+                        .after(UpdateJointsLabel),
+                ),
+            );
     }
 }
 

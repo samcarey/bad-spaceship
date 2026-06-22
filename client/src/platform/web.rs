@@ -17,21 +17,24 @@ pub struct PlatformPlugin;
 impl Plugin for PlatformPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(PointerLockTracker::new())
-            .add_system(hide_cursor.in_schedule(OnEnter(AppState::InGame)))
-            .add_system(toggle_menu_on_pointer_lock)
+            .add_systems(OnEnter(AppState::InGame), hide_cursor)
+            .add_systems(
+                Update,
+                (
+                    toggle_menu_on_pointer_lock,
+                    (
+                        get_wheel,
+                        get_keyboard_input,
+                        process_mouse_clicks,
+                        get_mouse_motion,
+                    )
+                        .before(InputEvents),
+                ),
+            )
             .insert_resource(MouseMovementTracker::new())
             .insert_resource(MouseClickTracker::new())
             .insert_resource(KeyboardTracker::new())
-            .insert_resource(WheelTracker::new())
-            .add_systems(
-                (
-                    get_wheel,
-                    get_keyboard_input,
-                    process_mouse_clicks,
-                    get_mouse_motion,
-                )
-                    .before(InputEvents),
-            );
+            .insert_resource(WheelTracker::new());
     }
 }
 
@@ -74,11 +77,11 @@ fn toggle_menu_on_pointer_lock(
     mut next_state: ResMut<NextState<AppState>>,
 ) {
     if lock_state.get() {
-        if state.0 == AppState::InGameMenu {
+        if *state.get() == AppState::InGameMenu {
             next_state.set(AppState::InGame);
         }
     } else {
-        if state.0 == AppState::InGame {
+        if *state.get() == AppState::InGame {
             next_state.set(AppState::InGameMenu);
         }
     }
@@ -237,8 +240,8 @@ pub fn get_keyboard_input(
     keyboard_input.set_state(&keyboard_tracker.d, KeyCode::D);
     keyboard_input.set_state(&keyboard_tracker.a, KeyCode::A);
     keyboard_input.set_state(&keyboard_tracker.space, KeyCode::Space);
-    keyboard_input.set_state(&keyboard_tracker.shift, KeyCode::LShift);
-    keyboard_input.set_state(&keyboard_tracker.control, KeyCode::LControl);
+    keyboard_input.set_state(&keyboard_tracker.shift, KeyCode::ShiftLeft);
+    keyboard_input.set_state(&keyboard_tracker.control, KeyCode::ControlLeft);
 }
 
 pub fn listen<F>(event_type: &'static str, callback: F)
@@ -324,6 +327,9 @@ impl WheelTracker {
                     },
                     y: (y as f32) / 1000.0 / 50.0,
                     x: 0.0,
+                    // Bevy 0.11 added a source-window field to mouse events; this
+                    // synthetic web event isn't tied to a winit window.
+                    window: Entity::PLACEHOLDER,
                 })
             }
         }

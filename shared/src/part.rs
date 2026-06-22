@@ -21,30 +21,29 @@ pub struct PartPlugin;
 
 impl Plugin for PartPlugin {
     fn build(&self, app: &mut App) {
-        app.add_startup_system(spawn_initial_parts)
-            .add_system(replace_fallen_parts)
-            .add_system(update_focused)
-            .add_system(position_held_part.after(zero_part_external_forces))
-            .add_event::<NewPart>()
-            .add_system(orient_held_part.after(zero_part_external_forces))
-            .add_system(spawn_part)
-            .add_system(update_attachable)
-            .add_system(zero_part_external_forces)
+        app.add_systems(Startup, spawn_initial_parts)
             .add_systems(
-                (update_active_joints, update_predelete_joints)
-                    .in_set(UpdateJointsLabel)
-                    .before(ToggleHoldingSystemLabel),
+                Update,
+                (
+                    replace_fallen_parts,
+                    update_focused,
+                    position_held_part.after(zero_part_external_forces),
+                    orient_held_part.after(zero_part_external_forces),
+                    spawn_part,
+                    update_attachable,
+                    zero_part_external_forces,
+                    (update_active_joints, update_predelete_joints)
+                        .in_set(UpdateJointsLabel)
+                        .before(ToggleHoldingSystemLabel),
+                    attach
+                        .after(ToggleHoldingSystemLabel)
+                        .after(UpdateJointsLabel),
+                    delete_joints
+                        .after(ToggleHoldingSystemLabel)
+                        .after(UpdateJointsLabel),
+                ),
             )
-            .add_system(
-                attach
-                    .after(ToggleHoldingSystemLabel)
-                    .after(UpdateJointsLabel),
-            )
-            .add_system(
-                delete_joints
-                    .after(ToggleHoldingSystemLabel)
-                    .after(UpdateJointsLabel),
-            )
+            .add_event::<NewPart>()
             .init_resource::<PotentialJoints>()
             .init_resource::<ExistingJoints>()
             .init_resource::<PredeleteJoints>();
@@ -130,6 +129,7 @@ struct PartBundle {
     external_force: ExternalForce,
 }
 
+#[derive(Event)]
 struct NewPart;
 
 fn get_random_shape(rng: &mut ThreadRng) -> ColliderShape {
