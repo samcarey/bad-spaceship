@@ -241,7 +241,17 @@
       // skips its own fetch and reuses the bytes we already streamed.
       const wasmBlob = blobs[RESOURCES.indexOf(WASM_URL)];
       const wasmModule = await WebAssembly.compile(await wasmBlob.arrayBuffer());
-      await init(wasmModule);
+      try {
+        await init(wasmModule);
+      } catch (e) {
+        // Bevy's winit event loop escapes init() by throwing a sentinel
+        // exception to unwind the Rust stack while leaving the app running in
+        // the background. It is not a real error — the game keeps rendering —
+        // so swallow it and let the loader hide. Anything else is a genuine
+        // failure and should surface.
+        const msg = (e && e.message) || '';
+        if (!msg.startsWith('Using exceptions for control flow')) throw e;
+      }
 
       barInner.style.width = '100%';
       loader.classList.add('hidden');
