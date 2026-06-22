@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Bad Spaceship is a 3D game built on the **Bevy 0.11** engine (ECS), with
+Bad Spaceship is a 3D game built on the **Bevy 0.12** engine (ECS), with
 `bevy_rapier3d` for physics and `bevy_egui` for UI. It is a Cargo workspace with
 three crates that compiles both to a **native** binary and to a **WASM** web
 build playable in the browser.
@@ -15,23 +15,28 @@ This is a 2023-era project pinned for reproducible builds — do not "upgrade" y
 way out of build errors:
 
 - **Rust is pinned to 1.75.0** via `rust-toolchain.toml` (auto-selected by rustup).
-  Bevy 0.11 / wgpu 0.16 build fine on it, but many *transitive* deps have since
+  Bevy 0.12 / wgpu 0.17 build fine on it, but many *transitive* deps have since
   published releases that raise their MSRV (crates that moved to edition 2024, or
   pulled in `getrandom` 0.3 / `wit-bindgen` needing Rust 1.85). The committed
   `Cargo.lock` pins the graph *back* to a compatible set — notably `indexmap` 2.5,
   `ahash` 0.8.11, `uuid` 1.11, `jobserver` 0.1.31, `spade` 2.12, `home` 0.5.9, `url`
-  2.5.0 (drops the `idna`/ICU4X stack). The oldest such pins that still build (e.g.
-  `spade`) need the relaxed private-in-public rule from Rust 1.74, hence 1.75. Do not
-  `cargo update` the whole graph — it will pull newer releases and break the toolchain.
+  2.5.0 (drops the `idna`/ICU4X stack), plus (added with the 0.12 bump) `blake3` 1.5.5
+  + `constant_time_eq` 0.3.1 (0.4 needs `edition2024`) and `file-id` 0.2.1 (0.2.3 needs
+  rustc 1.77, pulled via the `file_watcher` → `notify-debouncer-full` chain). The oldest
+  such pins that still build (e.g. `spade`) need the relaxed private-in-public rule from
+  Rust 1.74, hence 1.75. Do not `cargo update` the whole graph — it will pull newer
+  releases and break the toolchain. To hunt MSRV/edition offenders fast: `cargo tree`
+  surfaces `edition2024` parse errors, and `cargo metadata` filtered on `rust_version >
+  1.75` finds high-MSRV crates without a full compile.
 - **`Cargo.lock` is committed** and holds an MSRV-compatible dependency set. Always build
   with `--locked`; when a deliberate re-pin is needed, bump direct deps with targeted
   `cargo update -p <crate> --precise <ver>` rather than a blanket update.
 - The web build targets the **WebGL2 backend** via the `bevy/webgl2` feature (in the
-  client's `web` feature): Bevy 0.11's wgpu 0.16 otherwise compiles the WebGPU backend
+  client's `web` feature): Bevy 0.12's wgpu 0.17 otherwise compiles the WebGPU backend
   on wasm, which needs `--cfg=web_sys_unstable_apis` and a WebGPU-capable browser. WebGL2
   is the broad-support renderer the 0.10/wgpu 0.15 build already used on Pages.
-- The web build needs a **version-matched `wasm-bindgen` CLI (exactly 0.2.84)**, matching
-  the `wasm-bindgen` crate pinned in the client (kept compatible with Bevy 0.11 / wgpu 0.16).
+- The web build needs a **version-matched `wasm-bindgen` CLI (exactly 0.2.89)**, matching
+  the `wasm-bindgen` crate pinned in the client (kept compatible with Bevy 0.12 / wgpu 0.17).
   Use the prebuilt binary from
   the rustwasm GitHub release, not `cargo install` (building the CLI from source hits the
   same dependency bitrot).
@@ -121,12 +126,15 @@ server run, so game logic stays identical across renderers and platforms.
   exposed as the `CommonPlugins` plugin group (`shared/src/lib.rs`): third-party
   `RapierPhysicsPlugin` + `EasingsPlugin`, plus the custom `Character`, `Config`,
   `Map`, `Part`, and `Player` plugins. Game tuning lives in RON files under
-  `client/assets/config/` (`character.ron`, `player.ron`), deserialized by the
-  `ConfigPlugin`'s custom RON `AssetLoader` (`shared/src/config.rs`) into per-domain
-  `character::Config` / `player::Config` types. Both binaries keep the asset `Handle`s
-  alive in a `load_configs` startup system (dropping a handle unloads the asset) and
-  enable hot-reload via `AssetPlugin { watch_for_changes: ChangeWatcher::with_delay(..), .. }`
-  (Bevy 0.11 replaced the old `watch_for_changes: bool` flag with a debounced watcher).
+  `client/assets/config/` (`character.character.ron`, `player.player.ron`), deserialized
+  into per-domain `character::Config` / `player::Config` types. Because Bevy 0.12 resolves
+  asset loaders by **file extension only**, `ConfigPlugin` (`shared/src/config.rs`)
+  registers a generic `RonConfigLoader<T>` once per type under a type-specific extension
+  (`character.ron` / `player.ron`) — hence the doubled-up filenames. Both binaries keep the
+  asset `Handle`s alive in a `load_configs` startup system (dropping a handle unloads the
+  asset) and enable hot-reload via `AssetPlugin { watch_for_changes_override: Some(true), .. }`
+  (Bevy 0.12 replaced the 0.11 `ChangeWatcher` with this simple override flag; the watcher
+  only runs when the `file_watcher` feature is on, i.e. native).
 
   Note: asset paths in the `load_configs` systems are written with **Windows-style
   backslashes** (e.g. `"config\\character.ron"`); preserve that style when editing
