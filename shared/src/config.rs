@@ -49,12 +49,13 @@ where
     type Error = anyhow::Error;
 
     // Bevy 0.14 turned `AssetLoader::load` into a native `async fn`, dropping the
-    // hand-rolled `BoxedFuture` of 0.13.
+    // hand-rolled `BoxedFuture` of 0.13. The trait ties every `&'a` argument to the
+    // same lifetime, while the `Reader`/`LoadContext` *inner* lifetimes stay elided.
     async fn load<'a>(
         &'a self,
-        reader: &'a mut Reader<'a>,
+        reader: &'a mut Reader<'_>,
         _settings: &'a (),
-        _load_context: &'a mut LoadContext<'a>,
+        _load_context: &'a mut LoadContext<'_>,
     ) -> Result<T, Self::Error> {
         let mut bytes = Vec::new();
         reader.read_to_end(&mut bytes).await?;

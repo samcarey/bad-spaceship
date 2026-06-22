@@ -265,7 +265,7 @@ fn update_attachable(
     if let Some(held) = helds.iter().next() {
         let contacted = rapier_context
             .contact_pairs_with(held)
-            .filter(|x| x.has_any_active_contacts())
+            .filter(|x| x.has_any_active_contact())
             .map(|contact_pair| {
                 if contact_pair.collider1() == held {
                     contact_pair.collider2()
@@ -378,22 +378,22 @@ fn update_active_joints(
                             existing_joints.0.push(DisplayableJoint {
                                 entities: (held_entity, attachable_entity),
                                 points: (
-                                    joint.data.raw.local_frame2.translation.vector.into(),
-                                    joint.data.raw.local_frame1.translation.vector.into(), // todo: or just local anchor?
+                                    joint.data.as_ref().raw.local_frame2.translation.vector.into(),
+                                    joint.data.as_ref().raw.local_frame1.translation.vector.into(), // todo: or just local anchor?
                                 ),
                             });
                         } else if parent.get() == attachable_entity && joint.parent == held_entity {
                             existing_joints.0.push(DisplayableJoint {
                                 entities: (attachable_entity, held_entity),
                                 points: (
-                                    joint.data.raw.local_frame2.translation.vector.into(),
-                                    joint.data.raw.local_frame1.translation.vector.into(), // todo: or just local anchor?
+                                    joint.data.as_ref().raw.local_frame2.translation.vector.into(),
+                                    joint.data.as_ref().raw.local_frame1.translation.vector.into(), // todo: or just local anchor?
                                 ),
                             });
                         }
                     }
 
-                    if contact_pair.has_any_active_contacts() {
+                    if contact_pair.has_any_active_contact() {
                         for manifold in contact_pair.manifolds() {
                             for contact in manifold.points() {
                                 if existing_joints
@@ -441,7 +441,7 @@ fn update_predelete_joints(
                             let transform = transform.compute_transform();
                             let center = transform.translation
                                 + transform.rotation.mul_vec3(
-                                    joint.data.raw.local_frame2.translation.vector.into(),
+                                    joint.data.as_ref().raw.local_frame2.translation.vector.into(),
                                 );
                             if (center - hold_point_position.translation()).length() < DELETE_RADIUS
                             {
