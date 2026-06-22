@@ -3,7 +3,7 @@ use bevy::reflect::TypePath;
 use bevy::transform::TransformSystem;
 use bevy_rapier3d::{
     na::{UnitQuaternion, Vector3},
-    plugin::RapierContext,
+    plugin::ReadDefaultRapierContext,
     prelude::{
         ActiveCollisionTypes, AdditionalMassProperties, Collider, LockedAxes, MassProperties,
         RigidBody, Velocity,
@@ -71,7 +71,8 @@ fn spawn(
             commands
                 .entity(player_entity)
                 .insert(RigidBody::Dynamic)
-                .insert(TransformBundle::from(Transform::from_xyz(0.0, 10.0, 0.0)))
+                // Bevy 0.15: bare `Transform` (it now requires `GlobalTransform`).
+                .insert(Transform::from_xyz(0.0, 10.0, 0.0))
                 .insert(LockedAxes::ROTATION_LOCKED)
                 .insert(Collider::ball(config.size / 2.0))
                 // .insert(ActiveEvents::COLLISION_EVENTS)
@@ -129,7 +130,9 @@ struct TouchingGround(bool);
 
 fn touching_ground(
     mut query: Query<(Entity, &mut TouchingGround)>,
-    rapier_context: Res<RapierContext>,
+    // bevy_rapier 0.28 made `RapierContext` a component; `ReadDefaultRapierContext`
+    // is the system param that reads the single default physics world.
+    rapier_context: ReadDefaultRapierContext,
 ) {
     for (entity, mut touching_ground) in query.iter_mut() {
         touching_ground.0 = false;

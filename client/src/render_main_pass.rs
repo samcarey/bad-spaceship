@@ -20,27 +20,29 @@ impl Plugin for RenderMainPassPlugin {
 }
 
 fn add_lighting(mut commands: Commands) {
-    commands.spawn(DirectionalLightBundle {
-        directional_light: DirectionalLight {
+    // Bevy 0.15 replaced `DirectionalLightBundle` with the `DirectionalLight`
+    // required-components marker; the cascade config and transform are now plain
+    // sibling components in the spawned tuple.
+    commands.spawn((
+        DirectionalLight {
             illuminance: 10_000.0,
             shadows_enabled: true,
             ..Default::default()
         },
         // Bevy 0.10 replaced DirectionalLight's manual `shadow_projection` with
         // cascaded shadow maps; a single cascade spanning the platform suffices.
-        cascade_shadow_config: CascadeShadowConfigBuilder {
+        CascadeShadowConfigBuilder {
             num_cascades: 1,
             maximum_distance: PLATFORM_WIDTH_M * 2.0,
             ..Default::default()
         }
-        .into(),
-        transform: Transform {
+        .build(),
+        Transform {
             translation: Vec3::new(0.0, -2.0, 0.0),
             rotation: Quat::from_rotation_x(-std::f32::consts::FRAC_PI_4),
             ..Default::default()
         },
-        ..Default::default()
-    });
+    ));
 }
 
 #[derive(Component)]
@@ -63,13 +65,15 @@ fn assign_parts(
         let dims = collider_shape.as_cuboid().unwrap().half_extents();
         commands
             .entity(entity)
-            .insert(PbrBundle {
-                transform: transform.clone(),
-                global_transform: global_transform.clone(),
+            .insert((
+                transform.clone(),
+                global_transform.clone(),
+                // Bevy 0.15 replaced `PbrBundle` with the `Mesh3d` / `MeshMaterial3d`
+                // required-components wrappers — `Handle<T>` is no longer a component.
                 // Bevy 0.13 deprecated `shape::*` in favour of `bevy_math`
                 // primitives; the collider half-extents map to a full-size cuboid.
-                mesh: meshes.add(Cuboid::new(dims[0] * 2.0, dims[1] * 2.0, dims[2] * 2.0)),
-                material: materials.add(StandardMaterial {
+                Mesh3d(meshes.add(Cuboid::new(dims[0] * 2.0, dims[1] * 2.0, dims[2] * 2.0))),
+                MeshMaterial3d(materials.add(StandardMaterial {
                     base_color: Color::srgb(
                         rng.gen_range(COLOR_MIN..=COLOR_MAX),
                         rng.gen_range(COLOR_MIN..=COLOR_MAX),
@@ -79,9 +83,8 @@ fn assign_parts(
                     metallic: rng.gen_range(0.0..=1.0),
                     reflectance: rng.gen_range(0.0..=1.0),
                     ..Default::default()
-                }),
-                ..Default::default()
-            })
+                })),
+            ))
             .insert(AssignedMaterial);
     }
 }
@@ -98,21 +101,20 @@ fn assign_characters(
     for (entity, collider_shape, transform, global_transform) in unassigned.iter() {
         commands
             .entity(entity)
-            .insert(PbrBundle {
-                transform: transform.clone(),
-                global_transform: global_transform.clone(),
-                mesh: meshes.add(
+            .insert((
+                transform.clone(),
+                global_transform.clone(),
+                Mesh3d(meshes.add(
                     Sphere::new(collider_shape.as_ball().unwrap().radius())
                         .mesh()
                         .ico(5)
                         .unwrap(),
-                ),
-                material: materials.add(StandardMaterial {
+                )),
+                MeshMaterial3d(materials.add(StandardMaterial {
                     base_color: Color::srgb(0.8, 0.8, 0.8),
                     ..Default::default()
-                }),
-                ..Default::default()
-            })
+                })),
+            ))
             .insert(AssignedMaterial);
     }
 }
@@ -130,17 +132,16 @@ fn assign_grass(
     for (entity, collider_shape, transform, global_transform) in unassigned.iter() {
         commands
             .entity(entity)
-            .insert(PbrBundle {
-                transform: transform.clone(),
-                global_transform: global_transform.clone(),
-                mesh: meshes.add(compute_mesh(&collider_shape)),
-                material: materials.add(StandardMaterial {
+            .insert((
+                transform.clone(),
+                global_transform.clone(),
+                Mesh3d(meshes.add(compute_mesh(&collider_shape))),
+                MeshMaterial3d(materials.add(StandardMaterial {
                     base_color_texture: Some(asset_server.load("textures/grass.png")),
                     perceptual_roughness: 1.0,
                     ..Default::default()
-                }),
-                ..Default::default()
-            })
+                })),
+            ))
             .insert(AssignedMaterial);
     }
 }

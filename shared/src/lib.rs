@@ -26,7 +26,9 @@ impl PluginGroup for CommonPlugins {
         PluginGroupBuilder::start::<Self>()
             // Third-party plugins
             .add(RapierPhysicsPlugin::<NoUserData>::default())
-            .add(EasingsPlugin)
+            // bevy_easings 0.15 made `EasingsPlugin` a `Default` struct rather than
+            // a unit struct.
+            .add(EasingsPlugin::default())
             // Custom plugins
             .add(CharacterPlugin)
             .add(ConfigPlugin)

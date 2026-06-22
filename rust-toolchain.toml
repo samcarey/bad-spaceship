@@ -1,9 +1,9 @@
-# Pinned toolchain for reproducible builds of this Bevy 0.14 (2024-era) project.
-# Bevy 0.14 / wgpu 0.20 build with the version-matched `wasm-bindgen` 0.2.92.
-# Bevy 0.14's MSRV is Rust 1.79.0, so the toolchain is held at 1.79.0; several
+# Pinned toolchain for reproducible builds of this Bevy 0.15 (2024-era) project.
+# Bevy 0.15 / wgpu 23 build with the version-matched `wasm-bindgen` 0.2.97.
+# Bevy 0.15's MSRV is Rust 1.82.0, so the toolchain is held at 1.82.0; several
 # transitive deps are still pinned back in Cargo.lock to pre-edition-2024 releases
-# (see CLAUDE.md) so they keep building on it — anything needing rustc 1.85
-# (getrandom 0.3, async-lock 3.4, constant_time_eq 0.4, …) stays pinned back.
+# (see CLAUDE.md) so they keep building on it — anything needing edition 2024
+# (a Cargo >= 1.85 nightly to even parse) stays pinned back.
 [toolchain]
-channel = "1.79.0"
+channel = "1.82.0"
 targets = ["wasm32-unknown-unknown"]

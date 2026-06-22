@@ -48,7 +48,9 @@ impl Plugin for PlayerPlugin {
                         adjust_hold_point_on_hold,
                     )
                         .after(ToggleHoldingSystemLabel),
-                    bevy_easings::custom_ease_system::<Translation>.in_set(EaseLabel),
+                    // bevy_easings 0.15's `custom_ease_system` gained a first type
+                    // param for the `Time<T>` context; `()` selects the default clock.
+                    bevy_easings::custom_ease_system::<(), Translation>.in_set(EaseLabel),
                     ease_camera.in_set(EaseLabel),
                     set_part_rotation.after(MouseWheelLabel),
                 ),
@@ -100,15 +102,18 @@ fn spawn_camera(mut commands: Commands) {
         0.0,
     ));
     camera_transform.translation = -Vec3::Z * 20.0;
-    commands.spawn(Camera3dBundle {
-        transform: camera_transform,
+    // Bevy 0.15 replaced `Camera3dBundle` with the `Camera3d` required-components
+    // marker (it pulls in `Camera`, `Transform`, `Tonemapping`, etc.); spawn the
+    // marker plus the components we want to override.
+    commands.spawn((
+        Camera3d::default(),
+        camera_transform,
         // Bevy 0.11 changed the default tonemapper to TonyMcMapface, whose LUT
         // requires the `tonemapping_luts`/`ktx2`/`zstd` features (and embeds the
         // LUT in the wasm). Keep this minimal build small and preserve the prior
         // look by sticking with the 0.10 default, ReinhardLuminance.
-        tonemapping: Tonemapping::ReinhardLuminance,
-        ..Default::default()
-    });
+        Tonemapping::ReinhardLuminance,
+    ));
 }
 
 #[derive(Bundle, Default)]
@@ -184,7 +189,7 @@ fn attach_camera_orbit(
             // Mount the camera center to the player
             commands
                 .entity(character_entity)
-                .push_children(&[camera_orbit_center])
+                .add_children(&[camera_orbit_center])
                 .insert(PlayerCameraOrbitCenter(camera_orbit_center));
 
             // Mount the camera to the camera orbit center
@@ -211,7 +216,7 @@ fn attach_camera_orbit(
 
             commands
                 .entity(camera_orbit_center)
-                .push_children(&[hold_point]);
+                .add_children(&[hold_point]);
         }
     }
 }
@@ -232,11 +237,11 @@ fn mouse_motion(
         if let Some((mut yaw, mut pitch, mouse_delta, holding, modifying)) = query.iter_mut().next()
         {
             if !(holding.0 && modifying.0) {
-                yaw.0 = (yaw.0 + mouse_delta.0.x * time.delta_seconds() * config.look_sensitivity)
+                yaw.0 = (yaw.0 + mouse_delta.0.x * time.delta_secs() * config.look_sensitivity)
                     % std::f32::consts::TAU;
 
                 pitch.0 = (pitch.0
-                    + mouse_delta.0.y * time.delta_seconds() * config.look_sensitivity)
+                    + mouse_delta.0.y * time.delta_secs() * config.look_sensitivity)
                     .max(MIN_CAMERA_PITCH)
                     .min(MAX_CAMERA_PITCH);
             }

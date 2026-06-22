@@ -107,7 +107,7 @@ fn add_camera_to_player(
                 .insert(OrbitingCamera(camera_entity));
             commands
                 .entity(camera_orbit_center.0)
-                .push_children(&[camera_entity]);
+                .add_children(&[camera_entity]);
         }
     }
 }

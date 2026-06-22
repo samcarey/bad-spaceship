@@ -48,9 +48,9 @@ fn spawn_map(mut commands: Commands) {
     commands
         .spawn_empty()
         .insert(RigidBody::Fixed)
-        .insert(TransformBundle::from_transform(Transform::from_xyz(
-            0.0, 0.0, 0.0,
-        )))
+        // Bevy 0.15: `Transform` now requires `GlobalTransform`, so inserting the
+        // bare component replaces the old `TransformBundle`.
+        .insert(Transform::from_xyz(0.0, 0.0, 0.0))
         .insert(Collider::trimesh(vertices, indices))
         .insert(ActiveCollisionTypes::default())
         .insert(Grass);
