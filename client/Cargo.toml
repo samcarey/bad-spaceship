@@ -8,8 +8,8 @@ build = "build.rs"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-bevy = { version = "0.13", default-features = false }
-bevy_rapier3d = "0.25"
+bevy = { version = "0.14", default-features = false }
+bevy_rapier3d = "0.27"
 serde = { version = "1.0", features = ["derive"] }
 nalgebra = "0.32"
 log = "0.4"
@@ -17,9 +17,9 @@ gloo = { version = "0.7", optional = true }
 web-sys = { version = "0.3.40", optional = true }
 # Disable bevy_egui's clipboard/hyperlink extras (the menu uses neither); this
 # drops the arboard→image and webbrowser→home native dep chains. Keep fonts, and
-# keep `render` — bevy_egui 0.25 gates *all* egui drawing behind it (0.23 had no
+# keep `render` — bevy_egui 0.28 gates *all* egui drawing behind it (0.23 had no
 # such feature), so dropping it silently hides every egui panel/menu.
-bevy_egui = { version = "0.25", default-features = false, features = ["default_fonts", "render"] }
+bevy_egui = { version = "0.28", default-features = false, features = ["default_fonts", "render"] }
 bad-spaceship-shared = { path = "../shared" }
 shadow-rs = { version = "0.11", default-features = false }
 chrono = "0.4"
@@ -36,6 +36,10 @@ default = [
     "bevy/bevy_winit",
     "bevy/bevy_pbr",
     "bevy/bevy_core_pipeline",
+    # Bevy 0.14 extracted the state machine into a separate `bevy_state` crate
+    # gated behind this feature; with `default-features = false` it must be
+    # re-enabled or `init_state`/`NextState`/`OnEnter` disappear.
+    "bevy/bevy_state",
 ]
 
 native = [
@@ -46,13 +50,14 @@ native = [
     # umbrella feature, dropped in 0.10).
     "bevy/x11",
     # Hot-reload of RON config assets (watch_for_changes); native-only so the
-    # wasm build doesn't pull in the `notify` filesystem watcher. Bevy 0.13
-    # requires `multi-threaded` for the file watcher to function.
+    # wasm build doesn't pull in the `notify` filesystem watcher. Bevy 0.14
+    # requires `multi_threaded` for the file watcher to function (the feature was
+    # renamed from 0.13's hyphenated `multi-threaded` to use an underscore).
     "bevy/file_watcher",
-    "bevy/multi-threaded",
+    "bevy/multi_threaded",
 ]
 
-# Bevy 0.13's wgpu 0.19 compiles the WebGPU backend on wasm by default (which
+# Bevy 0.14's wgpu 0.20 compiles the WebGPU backend on wasm by default (which
 # needs `--cfg=web_sys_unstable_apis` and only works in WebGPU-capable browsers).
 # Enable WebGL2 so wgpu builds the GLES backend instead — broad browser support,
 # matching the renderer the 0.10/wgpu 0.15 build used on GitHub Pages.

@@ -3,7 +3,6 @@ use std::marker::PhantomData;
 use bevy::{
     asset::{io::Reader, AssetLoader, AsyncReadExt, LoadContext},
     prelude::*,
-    utils::BoxedFuture,
 };
 use serde::Deserialize;
 
@@ -49,17 +48,17 @@ where
     // `Into<Box<dyn Error>>` works — reuse `anyhow` (already a dep) for brevity.
     type Error = anyhow::Error;
 
-    fn load<'a>(
+    // Bevy 0.14 turned `AssetLoader::load` into a native `async fn`, dropping the
+    // hand-rolled `BoxedFuture` of 0.13.
+    async fn load<'a>(
         &'a self,
-        reader: &'a mut Reader,
+        reader: &'a mut Reader<'a>,
         _settings: &'a (),
-        _load_context: &'a mut LoadContext,
-    ) -> BoxedFuture<'a, Result<T, Self::Error>> {
-        Box::pin(async move {
-            let mut bytes = Vec::new();
-            reader.read_to_end(&mut bytes).await?;
-            Ok(ron::de::from_bytes::<T>(&bytes)?)
-        })
+        _load_context: &'a mut LoadContext<'a>,
+    ) -> Result<T, Self::Error> {
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes).await?;
+        Ok(ron::de::from_bytes::<T>(&bytes)?)
     }
 
     fn extensions(&self) -> &[&str] {

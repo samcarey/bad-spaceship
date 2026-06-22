@@ -2,7 +2,9 @@
 // longer be multiplied directly like the old `mat4x4`. Use the `mesh_functions`
 // helpers, which unpack the affine matrix and also handle the WebGL2 batching
 // path (where `mesh` is a fixed-size uniform array, not a storage buffer).
-#import bevy_pbr::mesh_functions::{get_model_matrix, mesh_position_local_to_clip}
+// Bevy 0.14 renamed `get_model_matrix` → `get_world_from_local` as part of its
+// `<dest>_from_<src>` matrix-naming convention.
+#import bevy_pbr::mesh_functions::{get_world_from_local, mesh_position_local_to_clip}
 
 struct GizmoMaterial {
     color: vec4<f32>,
@@ -30,7 +32,7 @@ struct VertexOutput {
 fn vertex(vertex: Vertex) -> VertexOutput {
     var out: VertexOutput;
     var modified_clip = mesh_position_local_to_clip(
-        get_model_matrix(vertex.instance_index),
+        get_world_from_local(vertex.instance_index),
         vec4<f32>(vertex.position, 1.0),
     );
     // Remap the depth to be right in front of the camera. We remap (mix) here instead of hardcoding

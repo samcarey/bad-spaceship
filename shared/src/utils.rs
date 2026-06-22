@@ -34,7 +34,8 @@ pub trait TransformExt {
 }
 
 impl TransformExt for Transform {
-    // Bevy 0.13's `Transform::local_*` now return `Direction3d`; deref to `Vec3`.
+    // Bevy 0.13's `Transform::local_*` return a direction type (`Dir3` since
+    // 0.14, formerly `Direction3d`); deref to `Vec3`.
     fn forward(&self) -> Vec3 {
         *self.local_z()
     }

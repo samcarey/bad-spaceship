@@ -70,11 +70,10 @@ fn assign_parts(
                 // primitives; the collider half-extents map to a full-size cuboid.
                 mesh: meshes.add(Cuboid::new(dims[0] * 2.0, dims[1] * 2.0, dims[2] * 2.0)),
                 material: materials.add(StandardMaterial {
-                    base_color: Color::rgba(
+                    base_color: Color::srgb(
                         rng.gen_range(COLOR_MIN..=COLOR_MAX),
                         rng.gen_range(COLOR_MIN..=COLOR_MAX),
                         rng.gen_range(COLOR_MIN..=COLOR_MAX),
-                        1.0,
                     ),
                     perceptual_roughness: rng.gen_range(0.0..=1.0),
                     metallic: rng.gen_range(0.0..=1.0),
@@ -109,7 +108,7 @@ fn assign_characters(
                         .unwrap(),
                 ),
                 material: materials.add(StandardMaterial {
-                    base_color: Color::rgb(0.8, 0.8, 0.8),
+                    base_color: Color::srgb(0.8, 0.8, 0.8),
                     ..Default::default()
                 }),
                 ..Default::default()

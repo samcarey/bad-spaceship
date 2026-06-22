@@ -441,7 +441,8 @@ fn set_part_rotation(
                 if let Ok(camera_orbit_center) = camera_orbit_centers.get(*child) {
                     let camera_orbit_center = camera_orbit_center.compute_transform();
                     rotation.0 = Quat::from_axis_angle(
-                        // Bevy 0.13: `Transform::back` returns `Direction3d`.
+                        // `Transform::back` returns a direction type (`Dir3`
+                        // since Bevy 0.14, formerly `Direction3d`); deref to `Vec3`.
                         *camera_orbit_center.back(),
                         mouse_wheel_delta.0 / 10.,
                     ) * rotation.0;

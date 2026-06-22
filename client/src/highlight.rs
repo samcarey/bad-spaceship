@@ -42,13 +42,12 @@ fn attacheable_add_highlight(
     for (entity, material_handle) in attachables.iter() {
         let color = &mut materials.get_mut(&*material_handle).unwrap().base_color;
         commands.entity(entity).insert(AttachableHighlight {
-            base_color: color.clone(),
+            base_color: *color,
         });
 
-        // Make turquiose
-        color.set_r(0.0);
-        color.set_g(1.0);
-        color.set_b(1.0);
+        // Make turquoise. Bevy 0.14 dropped `Color`'s per-channel setters, so
+        // build the highlight colour outright (preserving the original alpha).
+        *color = Color::srgba(0.0, 1.0, 1.0, color.alpha());
     }
 }
 
@@ -67,13 +66,11 @@ fn focused_add_highlight(
     for (entity, material_handle) in newly_focused.iter() {
         let color = &mut materials.get_mut(&*material_handle).unwrap().base_color;
         commands.entity(entity).insert(FocusedHighlight {
-            base_color: color.clone(),
+            base_color: *color,
         });
 
-        // Make yellow
-        color.set_r(1.0);
-        color.set_g(1.0);
-        color.set_b(0.0);
+        // Make yellow (preserving the original alpha; see Bevy 0.14 note above).
+        *color = Color::srgba(1.0, 1.0, 0.0, color.alpha());
     }
 }
 
