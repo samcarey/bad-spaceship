@@ -122,8 +122,13 @@ impl MouseMovementTracker {
 
 fn get_mouse_motion(
     mouse_motion_tracker: Res<MouseMovementTracker>,
-    mut mouse_motion_events: EventWriter<MouseMotion>,
+    mut mouse_motion_events: ResMut<Events<MouseMotion>>,
 ) {
+    // Bevy 0.13 bumped winit 0.28 → 0.29, which (unlike 0.28) emits its own
+    // `MouseMotion` on the web canvas under pointer lock. That phantom stream
+    // fights this crate's DOM-listener input and spins the camera on its own.
+    // Drop winit's events each frame and drive look solely from our tracker.
+    mouse_motion_events.clear();
     if let Some(mouse_motion) = mouse_motion_tracker.get_and_reset() {
         mouse_motion_events.send(mouse_motion);
     }
