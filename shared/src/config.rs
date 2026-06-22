@@ -1,7 +1,7 @@
 use bevy::{
     asset::{AssetDynamic, AssetLoader, LoadedAsset},
     prelude::*,
-    reflect::TypeUuid,
+    reflect::{TypePath, TypeUuid},
 };
 use serde::Deserialize;
 
@@ -15,7 +15,7 @@ impl Plugin for ConfigPlugin {
     }
 }
 
-fn load_ron<'a, T: TypeUuid + AssetDynamic + Deserialize<'a>>(
+fn load_ron<'a, T: TypeUuid + TypePath + AssetDynamic + Deserialize<'a>>(
     bytes: &'a [u8],
     load_context: &'a mut bevy::asset::LoadContext,
 ) -> Result<(), ron::Error> {

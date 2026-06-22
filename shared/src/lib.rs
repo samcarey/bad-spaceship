@@ -2,7 +2,7 @@ use bevy::{
     app::PluginGroupBuilder,
     ecs::component::Component,
     math::{Quat, Vec2, Vec3},
-    prelude::{Bundle, Entity, KeyCode, MouseButton, PluginGroup, Resource, SystemSet},
+    prelude::{Bundle, Entity, Event, KeyCode, MouseButton, PluginGroup, Resource, SystemSet},
 };
 use bevy_easings::EasingsPlugin;
 use bevy_rapier3d::plugin::{NoUserData, RapierPhysicsPlugin};
@@ -78,7 +78,7 @@ pub struct HoldPoint;
 #[derive(Default, Component)]
 pub struct MouseMotionDelta(pub Vec2);
 
-#[derive(Clone, Hash, Debug, PartialEq, Eq)]
+#[derive(Clone, Hash, Debug, PartialEq, Eq, Event)]
 pub struct PlayerClick;
 
 #[derive(Default, Component)]
@@ -112,10 +112,13 @@ pub struct LeftClicked(pub bool);
 #[derive(Default, Component)]
 pub struct Modifying(pub bool);
 
+#[derive(Event)]
 struct AttachEvent;
 
+#[derive(Event)]
 struct ReleaseEvent;
 
+#[derive(Event)]
 struct HoldEvent {
     held: Entity,
 }

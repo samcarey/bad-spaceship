@@ -5,10 +5,15 @@ pub struct HighlightPlugin;
 
 impl Plugin for HighlightPlugin {
     fn build(&self, app: &mut App) {
-        app.add_system(focused_add_highlight)
-            .add_system(attachable_remove_highlight)
-            .add_system(attacheable_add_highlight)
-            .add_system(focused_remove_highlight);
+        app.add_systems(
+            Update,
+            (
+                focused_add_highlight,
+                attachable_remove_highlight,
+                attacheable_add_highlight,
+                focused_remove_highlight,
+            ),
+        );
     }
 }
 

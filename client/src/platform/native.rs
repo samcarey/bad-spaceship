@@ -6,10 +6,10 @@ pub struct PlatformPlugin;
 
 impl Plugin for PlatformPlugin {
     fn build(&self, app: &mut App) {
-        app.add_startup_system(show_cursor)
-            .add_system(show_cursor.in_schedule(OnEnter(AppState::InGameMenu)))
-            .add_system(hide_cursor.in_schedule(OnEnter(AppState::InGame)))
-            .add_system(toggle_menu_on_key);
+        app.add_systems(Startup, show_cursor)
+            .add_systems(OnEnter(AppState::InGameMenu), show_cursor)
+            .add_systems(OnEnter(AppState::InGame), hide_cursor)
+            .add_systems(Update, toggle_menu_on_key);
     }
 }
 
@@ -31,7 +31,7 @@ fn toggle_menu_on_key(
     mut next_state: ResMut<NextState<AppState>>,
 ) {
     if input.just_pressed(KeyCode::Escape) {
-        match state.0 {
+        match *state.get() {
             AppState::InGame => next_state.set(AppState::InGameMenu),
             AppState::InGameMenu => next_state.set(AppState::InGame),
             _ => {}

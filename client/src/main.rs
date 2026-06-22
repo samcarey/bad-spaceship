@@ -3,9 +3,11 @@ use bad_spaceship_shared::{
 };
 pub mod highlight;
 use bad_spaceship_shared::player;
+use bevy::asset::ChangeWatcher;
 use bevy::pbr::AmbientLight;
 use bevy::prelude::*;
 use bevy::render::camera::Camera;
+use std::time::Duration;
 
 use highlight::HighlightPlugin;
 use input::InputPlugin;
@@ -41,24 +43,26 @@ fn main() {
                 }),
                 ..default()
             })
-            // Hot-reload config RON assets (previously done via
-            // AssetServer::watch_for_changes, removed in Bevy 0.9).
+            // Hot-reload config RON assets. Bevy 0.11 replaced the
+            // `watch_for_changes: bool` flag with an optional debounced watcher.
             .set(AssetPlugin {
-                watch_for_changes: true,
+                watch_for_changes: ChangeWatcher::with_delay(Duration::from_millis(200)),
                 ..default()
             }),
     )
         .add_state::<AppState>()
-        .add_plugin(UiPlugin)
-        .add_plugin(InputPlugin)
+        .add_plugins((
+            UiPlugin,
+            InputPlugin,
+            PlatformPlugin,
+            HighlightPlugin,
+            RenderMainPassPlugin,
+            RenderSecondaryPassPlugin,
+            CommonPlugins,
+        ))
         .insert_resource(ClearColor(Color::rgb(0.99, 0.99, 0.95)))
-        .add_plugin(PlatformPlugin)
-        .add_plugin(HighlightPlugin)
-        .add_plugin(RenderMainPassPlugin)
-        .add_plugin(RenderSecondaryPassPlugin)
-        .add_plugins(CommonPlugins)
-        .add_startup_system(load_configs)
-        .add_system(add_camera_to_player);
+        .add_systems(Startup, load_configs)
+        .add_systems(Update, add_camera_to_player);
 
     app.run();
 }

@@ -1,5 +1,5 @@
 use bevy::prelude::*;
-use bevy::reflect::TypeUuid;
+use bevy::reflect::{TypePath, TypeUuid};
 use bevy::transform::TransformSystem;
 use bevy_rapier3d::{
     na::{UnitQuaternion, Vector3},
@@ -20,36 +20,33 @@ pub struct CharacterPlugin;
 
 impl Plugin for CharacterPlugin {
     fn build(&self, app: &mut App) {
-        app.add_system(touching_ground)
-            .add_system(combine_directional_inputs.in_set(CombineInputs))
-            .add_system(
+        app.add_systems(
+            Update,
+            (
+                touching_ground,
+                combine_directional_inputs.in_set(CombineInputs),
                 walk_based_on_input
                     .after(CombineInputs)
                     .after(touching_ground),
-            )
-            .add_system(
                 jump_based_on_input
                     .after(CombineInputs)
                     .after(touching_ground),
-            )
-            // Must run after Rapier's writeback (which resets this
-            // ROTATION_LOCKED body's rotation to identity, before PostUpdate)
-            // and before transform propagation, so the yaw reaches the
-            // child camera-orbit hierarchy. Without the explicit `.before`,
-            // Bevy 0.10's base-set scheduling can run this after propagation,
-            // leaving the camera yaw stuck (it followed the stage ordering
-            // implicitly in 0.9).
-            .add_system(
-                rotate_character_based_on_input
-                    .in_base_set(CoreSet::PostUpdate)
-                    .before(TransformSystem::TransformPropagate),
-            )
-            .add_system(spawn)
-            .add_asset::<Config>();
+                spawn,
+            ),
+        )
+        // Must run after Rapier's writeback (which resets this ROTATION_LOCKED
+        // body's rotation to identity, before PostUpdate) and before transform
+        // propagation, so the yaw reaches the child camera-orbit hierarchy.
+        .add_systems(
+            PostUpdate,
+            rotate_character_based_on_input.before(TransformSystem::TransformPropagate),
+        )
+        .add_asset::<Config>();
     }
 }
 
-#[derive(Deserialize, Clone, TypeUuid, Debug)]
+// Bevy 0.11's `Asset` bound now also requires `TypePath`.
+#[derive(Deserialize, Clone, TypeUuid, TypePath, Debug)]
 #[uuid = "39cadc56-aa9c-4543-8640-a018b74b5051"]
 pub struct Config {
     size: f32,

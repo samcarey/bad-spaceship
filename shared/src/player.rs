@@ -1,6 +1,11 @@
 use std::{f32, time::Duration};
 
-use bevy::{math::Vec3A, prelude::*, reflect::TypeUuid};
+use bevy::{
+    core_pipeline::tonemapping::Tonemapping,
+    math::Vec3A,
+    prelude::*,
+    reflect::{TypePath, TypeUuid},
+};
 use bevy_easings::{CustomComponentEase, EaseFunction, EasingComponent, Lerp};
 use bevy_rapier3d::prelude::Collider;
 use serde::Deserialize;
@@ -24,39 +29,41 @@ pub struct PlayerPlugin;
 
 impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut App) {
-        app.add_startup_system(spawn_camera)
-            .add_system(spawn)
-            .add_system(mouse_motion.after(EaseLabel))
-            .add_system(
-                toggle_holding
-                    .in_set(ToggleHoldingSystemLabel)
-                    .after(InputEvents),
+        app.add_systems(Startup, spawn_camera)
+            .add_systems(
+                Update,
+                (
+                    spawn,
+                    mouse_motion.after(EaseLabel),
+                    toggle_holding
+                        .in_set(ToggleHoldingSystemLabel)
+                        .after(InputEvents),
+                    despawn,
+                    attach_camera_orbit.in_set(AttachCameraOrbitSystem),
+                    apply_part_rotation,
+                    (
+                        reset_camera_after_release,
+                        adjust_camera_on_hold,
+                        reset_hold_point_after_release.after(AttachCameraOrbitSystem),
+                        adjust_hold_point_on_hold,
+                    )
+                        .after(ToggleHoldingSystemLabel),
+                    bevy_easings::custom_ease_system::<Translation>.in_set(EaseLabel),
+                    ease_camera.in_set(EaseLabel),
+                    set_part_rotation.after(MouseWheelLabel),
+                ),
             )
-            .add_system(despawn)
-            .add_system(attach_camera_orbit.in_set(AttachCameraOrbitSystem))
             .add_event::<PlayerClick>()
             .add_asset::<Config>()
-            .add_system(apply_part_rotation)
             .add_event::<AttachEvent>()
             .add_event::<ReleaseEvent>()
             .init_resource::<CameraOrbitOffset>()
-            .add_systems(
-                (
-                    reset_camera_after_release,
-                    adjust_camera_on_hold,
-                    reset_hold_point_after_release.after(AttachCameraOrbitSystem),
-                    adjust_hold_point_on_hold,
-                )
-                    .after(ToggleHoldingSystemLabel),
-            )
-            .add_event::<HoldEvent>()
-            .add_system(bevy_easings::custom_ease_system::<Translation>.in_set(EaseLabel))
-            .add_system(ease_camera.in_set(EaseLabel))
-            .add_system(set_part_rotation.after(MouseWheelLabel));
+            .add_event::<HoldEvent>();
     }
 }
 
-#[derive(Deserialize, Copy, Clone, TypeUuid)]
+// Bevy 0.11's `Asset` bound now also requires `TypePath`.
+#[derive(Deserialize, Copy, Clone, TypeUuid, TypePath)]
 #[uuid = "39cadc56-aa9c-4543-8640-a018b74b5050"]
 pub struct Config {
     pub zoom_sensitivity: f32,
@@ -95,6 +102,11 @@ fn spawn_camera(mut commands: Commands) {
     camera_transform.translation = -Vec3::Z * 20.0;
     commands.spawn(Camera3dBundle {
         transform: camera_transform,
+        // Bevy 0.11 changed the default tonemapper to TonyMcMapface, whose LUT
+        // requires the `tonemapping_luts`/`ktx2`/`zstd` features (and embeds the
+        // LUT in the wasm). Keep this minimal build small and preserve the prior
+        // look by sticking with the 0.10 default, ReinhardLuminance.
+        tonemapping: Tonemapping::ReinhardLuminance,
         ..Default::default()
     });
 }

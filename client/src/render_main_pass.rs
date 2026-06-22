@@ -11,10 +11,8 @@ pub struct RenderMainPassPlugin;
 
 impl Plugin for RenderMainPassPlugin {
     fn build(&self, app: &mut App) {
-        app.add_startup_system(add_lighting)
-            .add_system(assign_parts)
-            .add_system(assign_grass)
-            .add_system(assign_characters);
+        app.add_systems(Startup, add_lighting)
+            .add_systems(Update, (assign_parts, assign_grass, assign_characters));
     }
 }
 

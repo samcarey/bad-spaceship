@@ -1,6 +1,6 @@
 use crate::AppState;
 use bevy::{
-    diagnostic::{Diagnostics, FrameTimeDiagnosticsPlugin},
+    diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin},
     input::mouse::MouseButtonInput,
     prelude::*,
 };
@@ -17,13 +17,17 @@ pub struct UiPlugin;
 
 impl Plugin for UiPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugin(EguiPlugin)
-            .add_plugin(FrameTimeDiagnosticsPlugin)
-            .add_system(show_menu.in_set(OnUpdate(AppState::InGameMenu)))
-            .add_system(capture_mouse_on_click.in_set(OnUpdate(AppState::Initial)))
-            .add_system(update_ui_scale_factor)
-            .add_system(show_instructions)
-            .add_system(show_bottom_panel);
+        app.add_plugins((EguiPlugin, FrameTimeDiagnosticsPlugin))
+            .add_systems(
+                Update,
+                (
+                    show_menu.run_if(in_state(AppState::InGameMenu)),
+                    capture_mouse_on_click.run_if(in_state(AppState::Initial)),
+                    update_ui_scale_factor,
+                    show_instructions,
+                    show_bottom_panel,
+                ),
+            );
     }
 }
 
@@ -43,7 +47,7 @@ fn update_ui_scale_factor(
     mut egui_settings: ResMut<EguiSettings>,
     mut custom_scale_factor: Local<CustomScaleFactor>,
 ) {
-    if key_input.pressed(KeyCode::LControl) || key_input.pressed(KeyCode::RControl) {
+    if key_input.pressed(KeyCode::ControlLeft) || key_input.pressed(KeyCode::ControlRight) {
         if let Some(adjustment) = if key_input.just_pressed(KeyCode::Equals) {
             Some(1.1)
         } else if key_input.just_pressed(KeyCode::Minus) {
@@ -122,7 +126,7 @@ fn commit_age() -> String {
     "0s".to_string()
 }
 
-fn show_bottom_panel(mut contexts: EguiContexts, diagnostics: Res<Diagnostics>) {
+fn show_bottom_panel(mut contexts: EguiContexts, diagnostics: Res<DiagnosticsStore>) {
     let mut fps = 0.0;
     if let Some(fps_diagnostic) = diagnostics.get(FrameTimeDiagnosticsPlugin::FPS) {
         if let Some(fps_avg) = fps_diagnostic.average() {
@@ -180,7 +184,7 @@ fn capture_mouse_on_click(
     mut next_state: ResMut<NextState<AppState>>,
 ) {
     for _ev in mouse_button_input_events.iter() {
-        if state.0 != AppState::InGame {
+        if *state.get() != AppState::InGame {
             next_state.set(AppState::InGame);
         }
     }

@@ -8,8 +8,8 @@ build = "build.rs"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-bevy = { version = "0.10", default-features = false }
-bevy_rapier3d = "0.21"
+bevy = { version = "0.11", default-features = false }
+bevy_rapier3d = "0.22"
 serde = { version = "1.0", features = ["derive"] }
 nalgebra = "0.31"
 log = "0.4"
@@ -17,7 +17,7 @@ gloo = { version = "0.7", optional = true }
 web-sys = { version = "0.3.40", optional = true }
 # Disable bevy_egui's clipboard/hyperlink extras (the menu uses neither); this
 # drops the arboard→image and webbrowser→home native dep chains. Keep fonts.
-bevy_egui = { version = "0.20", default-features = false, features = ["default_fonts"] }
+bevy_egui = { version = "0.21", default-features = false, features = ["default_fonts"] }
 bad-spaceship-shared = { path = "../shared" }
 shadow-rs = { version = "0.11", default-features = false }
 chrono = "0.4"
@@ -27,8 +27,8 @@ wasm-bindgen = "=0.2.84"
 once_cell = "1.8"
 
 [features]
-# Bevy 0.10 dropped the umbrella `render` feature; pull the renderer in via
-# bevy_pbr (3D/lighting) + bevy_core_pipeline, plus glTF and winit.
+# Bevy 0.10 dropped the umbrella `render` feature (still gone in 0.11); pull the
+# renderer in via bevy_pbr (3D/lighting) + bevy_core_pipeline, plus glTF and winit.
 default = [
     "bevy/bevy_gltf",
     "bevy/bevy_winit",
@@ -48,7 +48,11 @@ native = [
     "bevy/filesystem_watcher",
 ]
 
-web = ["web-sys", "gloo"]
+# Bevy 0.11's wgpu 0.16 compiles the WebGPU backend on wasm by default (which
+# needs `--cfg=web_sys_unstable_apis` and only works in WebGPU-capable browsers).
+# Enable WebGL2 so wgpu builds the GLES backend instead — broad browser support,
+# matching the renderer the 0.10/wgpu 0.15 build used on GitHub Pages.
+web = ["web-sys", "gloo", "bevy/webgl2"]
 
 [build-dependencies]
 shadow-rs = { version = "0.8", default-features = false }
