@@ -8,7 +8,8 @@ use bevy_egui::{
     egui::{self, Align, Align2, Color32, Frame, Layout},
     EguiContext, EguiPlugin, EguiSettings,
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, FixedOffset, Utc};
+use once_cell::sync::Lazy;
 use shadow_rs::shadow;
 
 shadow!(build);
@@ -91,35 +92,36 @@ fn show_menu(mut egui_ctx: ResMut<EguiContext>, mut state: ResMut<State<AppState
         });
 }
 
+/// The build timestamp, parsed once from the RFC 2822 string baked in at
+/// compile time (`None` if it somehow fails to parse).
+static BUILD_TIME: Lazy<Option<DateTime<FixedOffset>>> =
+    Lazy::new(|| DateTime::parse_from_rfc2822(build::BUILD_TIME_2822).ok());
+
 /// Age of the build, derived in real time by comparing now against the UTC
 /// build timestamp shown in the bottom panel. Rendered as the single largest
 /// whole unit (e.g. `0-59s`, `1-59m`, `1-23h`, `1-6d`, ...).
 fn commit_age() -> String {
-    let Ok(built) = DateTime::parse_from_rfc2822(build::BUILD_TIME_2822) else {
+    let Some(built) = *BUILD_TIME else {
         return "?".to_string();
     };
     let secs = Utc::now()
         .signed_duration_since(built)
         .num_seconds()
         .max(0);
-    const MINUTE: i64 = 60;
-    const HOUR: i64 = 60 * MINUTE;
-    const DAY: i64 = 24 * HOUR;
-    const WEEK: i64 = 7 * DAY;
-    const YEAR: i64 = 365 * DAY;
-    if secs < MINUTE {
-        format!("{}s", secs)
-    } else if secs < HOUR {
-        format!("{}m", secs / MINUTE)
-    } else if secs < DAY {
-        format!("{}h", secs / HOUR)
-    } else if secs < WEEK {
-        format!("{}d", secs / DAY)
-    } else if secs < YEAR {
-        format!("{}w", secs / WEEK)
-    } else {
-        format!("{}y", secs / YEAR)
+    const UNITS: &[(i64, &str)] = &[
+        (365 * 24 * 60 * 60, "y"),
+        (7 * 24 * 60 * 60, "w"),
+        (24 * 60 * 60, "d"),
+        (60 * 60, "h"),
+        (60, "m"),
+        (1, "s"),
+    ];
+    for &(threshold, unit) in UNITS {
+        if secs >= threshold {
+            return format!("{}{}", secs / threshold, unit);
+        }
     }
+    "0s".to_string()
 }
 
 fn show_bottom_panel(mut egui_ctx: ResMut<EguiContext>, diagnostics: Res<Diagnostics>) {
