@@ -1,5 +1,6 @@
 use bevy::prelude::*;
 use bevy::reflect::TypeUuid;
+use bevy::transform::TransformSystem;
 use bevy_rapier3d::{
     na::{UnitQuaternion, Vector3},
     plugin::RapierContext,
@@ -31,7 +32,18 @@ impl Plugin for CharacterPlugin {
                     .after(CombineInputs)
                     .after(touching_ground),
             )
-            .add_system(rotate_character_based_on_input.in_base_set(CoreSet::PostUpdate))
+            // Must run after Rapier's writeback (which resets this
+            // ROTATION_LOCKED body's rotation to identity, before PostUpdate)
+            // and before transform propagation, so the yaw reaches the
+            // child camera-orbit hierarchy. Without the explicit `.before`,
+            // Bevy 0.10's base-set scheduling can run this after propagation,
+            // leaving the camera yaw stuck (it followed the stage ordering
+            // implicitly in 0.9).
+            .add_system(
+                rotate_character_based_on_input
+                    .in_base_set(CoreSet::PostUpdate)
+                    .before(TransformSystem::TransformPropagate),
+            )
             .add_system(spawn)
             .add_asset::<Config>();
     }
