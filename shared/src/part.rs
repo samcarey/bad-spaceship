@@ -374,20 +374,23 @@ fn update_active_joints(
                     };
 
                     for (parent, joint) in joints.iter() {
+                        // rapier 0.27's `ImpulseJoint::data` is a `TypedJoint` enum;
+                        // reach the underlying `GenericJoint` once via `AsRef`.
+                        let frame = &joint.data.as_ref().raw;
                         if parent.get() == held_entity && joint.parent == attachable_entity {
                             existing_joints.0.push(DisplayableJoint {
                                 entities: (held_entity, attachable_entity),
                                 points: (
-                                    joint.data.as_ref().raw.local_frame2.translation.vector.into(),
-                                    joint.data.as_ref().raw.local_frame1.translation.vector.into(), // todo: or just local anchor?
+                                    frame.local_frame2.translation.vector.into(),
+                                    frame.local_frame1.translation.vector.into(), // todo: or just local anchor?
                                 ),
                             });
                         } else if parent.get() == attachable_entity && joint.parent == held_entity {
                             existing_joints.0.push(DisplayableJoint {
                                 entities: (attachable_entity, held_entity),
                                 points: (
-                                    joint.data.as_ref().raw.local_frame2.translation.vector.into(),
-                                    joint.data.as_ref().raw.local_frame1.translation.vector.into(), // todo: or just local anchor?
+                                    frame.local_frame2.translation.vector.into(),
+                                    frame.local_frame1.translation.vector.into(), // todo: or just local anchor?
                                 ),
                             });
                         }
