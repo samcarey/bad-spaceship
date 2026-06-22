@@ -1,5 +1,5 @@
 use bevy::prelude::*;
-use bevy::reflect::{TypePath, TypeUuid};
+use bevy::reflect::TypePath;
 use bevy::transform::TransformSystem;
 use bevy_rapier3d::{
     na::{UnitQuaternion, Vector3},
@@ -41,13 +41,13 @@ impl Plugin for CharacterPlugin {
             PostUpdate,
             rotate_character_based_on_input.before(TransformSystem::TransformPropagate),
         )
-        .add_asset::<Config>();
+        .init_asset::<Config>();
     }
 }
 
-// Bevy 0.11's `Asset` bound now also requires `TypePath`.
-#[derive(Deserialize, Clone, TypeUuid, TypePath, Debug)]
-#[uuid = "39cadc56-aa9c-4543-8640-a018b74b5051"]
+// Bevy 0.12's asset rework replaced `TypeUuid` with the `Asset` derive
+// (which still requires `TypePath`); the type id is derived, not a manual UUID.
+#[derive(Asset, Deserialize, Clone, TypePath, Debug)]
 pub struct Config {
     size: f32,
     max_speed: f32,

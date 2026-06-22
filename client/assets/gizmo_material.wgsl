@@ -1,6 +1,5 @@
-// Bevy 0.11's naga_oil-based importer needs explicit item imports; the old
-// whole-module `#import bevy_pbr::mesh_view_bindings` no longer brings `view`
-// and `mesh` into scope unqualified.
+// naga_oil item imports (Bevy 0.11+): bring `view` and the per-instance `mesh`
+// storage array into scope.
 #import bevy_pbr::mesh_view_bindings  view
 #import bevy_pbr::mesh_bindings        mesh
 
@@ -12,6 +11,9 @@ struct GizmoMaterial {
 var<uniform> material: GizmoMaterial;
 
 struct Vertex {
+    // Bevy 0.12 made `mesh` a per-instance storage array indexed by the
+    // instance index, so the vertex shader needs it as an input.
+    @builtin(instance_index) instance_index: u32,
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) uv: vec2<f32>,
@@ -24,7 +26,8 @@ struct VertexOutput {
 
 @vertex
 fn vertex(vertex: Vertex) -> VertexOutput {
-    let world_position = mesh.model * vec4<f32>(vertex.position, 1.0);
+    // 0.12: `mesh.model` became `mesh[instance_index].model`.
+    let world_position = mesh[vertex.instance_index].model * vec4<f32>(vertex.position, 1.0);
     var out: VertexOutput;
     var modified_clip = view.view_proj * world_position;
     // Remap the depth to be right in front of the camera. We remap (mix) here instead of hardcoding

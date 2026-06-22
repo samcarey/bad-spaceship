@@ -148,7 +148,7 @@ fn get_random_shape(rng: &mut ThreadRng) -> ColliderShape {
 
 fn spawn_part(mut commands: Commands, mut new_part_events: EventReader<NewPart>) {
     let mut rng = rand::thread_rng();
-    for _ in new_part_events.iter() {
+    for _ in new_part_events.read() {
         let shape = get_random_shape(&mut rng);
         commands
             .spawn_empty()
@@ -312,8 +312,10 @@ fn position_held_part(
                 .oscillator
                 .calculate_acceleration(&vector_between.into(), &velocity.linvel);
 
-            let gravity_cancelation_force = -mass_properties.0.mass * physics_config.gravity;
-            let positioning_force = positioning_acceleration * mass_properties.0.mass;
+            // bevy_rapier 0.23 made `ReadMassProperties`'s inner field private;
+            // it derefs to `MassProperties`, so drop the `.0`.
+            let gravity_cancelation_force = -mass_properties.mass * physics_config.gravity;
+            let positioning_force = positioning_acceleration * mass_properties.mass;
             ext_forces.force = positioning_force + gravity_cancelation_force;
         }
     }
@@ -343,7 +345,7 @@ fn orient_held_part(
         let angular_acceleration = target_orientation
             .oscillator
             .calculate_acceleration(&rotation_between, &velocity.angvel);
-        let inertia_sqrt = mass_properties.0.principal_inertia_local_frame;
+        let inertia_sqrt = mass_properties.principal_inertia_local_frame;
         // let torque = inertia_sqrt * (inertia_sqrt * angular_acceleration);
         let torque = inertia_sqrt * angular_acceleration;
         ext_forces.torque = torque;
@@ -461,7 +463,7 @@ fn attach(
     mut attach_events: EventReader<AttachEvent>,
     attach_points: Res<PotentialJoints>,
 ) {
-    if attach_events.iter().next().is_some() {
+    if attach_events.read().next().is_some() {
         for DisplayableJoint { points, entities } in attach_points.0.iter() {
             let joint = SphericalJointBuilder::new()
                 .local_anchor1(points.1)
@@ -480,7 +482,7 @@ fn delete_joints(
     predelete_joints: Res<PredeleteJoints>,
     mut clicks: EventReader<PlayerClick>,
 ) {
-    if clicks.iter().next().is_some() {
+    if clicks.read().next().is_some() {
         for PredeleteJoint { entity, .. } in predelete_joints.0.iter() {
             commands.entity(*entity).despawn_recursive();
         }

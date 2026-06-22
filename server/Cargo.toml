@@ -8,13 +8,13 @@ edition = "2021"
 
 [dependencies]
 bad-spaceship-shared = { path = "../shared" }
-bevy = { version = "0.11", default-features = false }
-bevy_rapier3d = "0.22"
+bevy = { version = "0.12", default-features = false }
+bevy_rapier3d = "0.23"
 
 [features]
 default = [
     "bevy_rapier3d/simd-stable",
     "bevy_rapier3d/parallel",
     # Hot-reload of RON config assets (watch_for_changes).
-    "bevy/filesystem_watcher",
+    "bevy/file_watcher",
 ]

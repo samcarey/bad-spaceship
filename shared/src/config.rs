@@ -1,7 +1,9 @@
+use std::marker::PhantomData;
+
 use bevy::{
-    asset::{AssetDynamic, AssetLoader, LoadedAsset},
+    asset::{io::Reader, AssetLoader, AsyncReadExt, LoadContext},
     prelude::*,
-    reflect::{TypePath, TypeUuid},
+    utils::BoxedFuture,
 };
 use serde::Deserialize;
 
@@ -11,43 +13,56 @@ pub struct ConfigPlugin;
 
 impl Plugin for ConfigPlugin {
     fn build(&self, app: &mut App) {
-        app.init_asset_loader::<ConfigAssetLoader>();
+        // Bevy 0.12's typed asset system picks a loader purely by file
+        // extension, so the single dynamic loader of 0.11 (which produced either
+        // config type from any `.ron`) no longer works. Register one typed loader
+        // per config under its own extension; the matching asset files are named
+        // `*.character.ron` / `*.player.ron` so each resolves to the right type.
+        app.register_asset_loader(RonConfigLoader::<character::Config>::new("character.ron"))
+            .register_asset_loader(RonConfigLoader::<player::Config>::new("player.ron"));
     }
 }
 
-fn load_ron<'a, T: TypeUuid + TypePath + AssetDynamic + Deserialize<'a>>(
-    bytes: &'a [u8],
-    load_context: &'a mut bevy::asset::LoadContext,
-) -> Result<(), ron::Error> {
-    let custom_asset = ron::de::from_bytes::<T>(bytes)?;
-    load_context.set_default_asset(LoadedAsset::new(custom_asset));
-    Ok(())
+/// Generic RON asset loader for a single config type, registered under a
+/// type-specific extension.
+struct RonConfigLoader<T> {
+    extension: &'static str,
+    _marker: PhantomData<fn() -> T>,
 }
 
-#[derive(Default)]
-pub struct ConfigAssetLoader;
+impl<T> RonConfigLoader<T> {
+    fn new(extension: &'static str) -> Self {
+        Self {
+            extension,
+            _marker: PhantomData,
+        }
+    }
+}
 
-impl AssetLoader for ConfigAssetLoader {
+impl<T> AssetLoader for RonConfigLoader<T>
+where
+    T: Asset + for<'de> Deserialize<'de>,
+{
+    type Asset = T;
+    type Settings = ();
+    // 0.12 dropped the hard `anyhow` dependency on loaders, but any
+    // `Into<Box<dyn Error>>` works — reuse `anyhow` (already a dep) for brevity.
+    type Error = anyhow::Error;
+
     fn load<'a>(
         &'a self,
-        bytes: &'a [u8],
-        load_context: &'a mut bevy::asset::LoadContext,
-    ) -> bevy::asset::BoxedFuture<'a, Result<(), anyhow::Error>> {
+        reader: &'a mut Reader,
+        _settings: &'a (),
+        _load_context: &'a mut LoadContext,
+    ) -> BoxedFuture<'a, Result<T, Self::Error>> {
         Box::pin(async move {
-            if load_ron::<character::Config>(bytes, load_context).is_ok()
-                | load_ron::<player::Config>(bytes, load_context).is_ok()
-            {
-                Ok(())
-            } else {
-                Err(anyhow::Error::msg(format!(
-                    "Failed to load config: {}",
-                    load_context.path().to_string_lossy(),
-                )))
-            }
+            let mut bytes = Vec::new();
+            reader.read_to_end(&mut bytes).await?;
+            Ok(ron::de::from_bytes::<T>(&bytes)?)
         })
     }
 
     fn extensions(&self) -> &[&str] {
-        &["ron"]
+        std::slice::from_ref(&self.extension)
     }
 }

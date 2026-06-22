@@ -4,7 +4,7 @@ use bad_spaceship_shared::{
     DisplayableJoint, ExistingJoints, HoldPoint, Holding, Modifying, PotentialJoints,
     PredeleteJoint, PredeleteJoints, UpdateJointsLabel,
 };
-use bevy::{pbr::NotShadowCaster, prelude::*};
+use bevy::{asset::load_internal_asset, pbr::NotShadowCaster, prelude::*};
 use normalization::*;
 
 use self::gizmo_material::GizmoMaterial;
@@ -17,14 +17,14 @@ mod normalization;
 pub struct RenderSecondaryPassPlugin;
 impl Plugin for RenderSecondaryPassPlugin {
     fn build(&self, app: &mut App) {
-        let mut shaders = app.world.get_resource_mut::<Assets<Shader>>().unwrap();
-        shaders.set_untracked(
+        // Bevy 0.12 dropped `Assets::set_untracked`; the idiomatic way to embed
+        // an internal shader is `load_internal_asset!`, which `include_str!`s the
+        // source and registers it under the given weak handle.
+        load_internal_asset!(
+            app,
             gizmo_material::GIZMO_SHADER_HANDLE,
-            // Bevy 0.11's naga_oil importer needs a path for diagnostics/imports.
-            Shader::from_wgsl(
-                include_str!("../../assets/gizmo_material.wgsl"),
-                "gizmo_material.wgsl",
-            ),
+            "../../assets/gizmo_material.wgsl",
+            Shader::from_wgsl
         );
 
         app.add_plugins((Ui3dNormalization, MaterialPlugin::<GizmoMaterial>::default()))
@@ -107,8 +107,12 @@ pub struct TransformGizmoBundle {
     gc: GizmoHub,
     transform: Transform,
     global_transform: GlobalTransform,
-    visible: Visibility,
-    computed_visibility: ComputedVisibility,
+    // Bevy 0.12 split `ComputedVisibility` into `InheritedVisibility` (hierarchy)
+    // and `ViewVisibility` (per-view culling); both are needed alongside the
+    // user-facing `Visibility` for the mesh children to render.
+    visibility: Visibility,
+    inherited_visibility: InheritedVisibility,
+    view_visibility: ViewVisibility,
     normalize: Normalize3d,
 }
 
@@ -117,8 +121,9 @@ impl Default for TransformGizmoBundle {
         TransformGizmoBundle {
             gc: GizmoHub,
             transform: Transform::from_translation(Vec3::splat(f32::MIN)),
-            visible: Visibility::Hidden,
-            computed_visibility: ComputedVisibility::default(),
+            visibility: Visibility::Hidden,
+            inherited_visibility: InheritedVisibility::default(),
+            view_visibility: ViewVisibility::default(),
             global_transform: GlobalTransform::default(),
             normalize: Normalize3d,
         }
