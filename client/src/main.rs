@@ -26,9 +26,11 @@ fn main() {
 
     app.insert_resource(AmbientLight {
         color: Color::WHITE,
-        // Bevy 0.13's lighting overhaul moved to physical units: AmbientLight
-        // brightness is now lux (default 80.0) rather than the old 0..1 factor.
-        brightness: 80.0,
+        // Bevy 0.13's lighting overhaul made AmbientLight brightness a physical
+        // lux value (default 80.0). The old 0.12 fill (~1/6 of full white) maps to
+        // ~600 lux under 0.13's default camera exposure; the engine default of 80
+        // left shadowed faces far too dark against the 10_000-lux directional.
+        brightness: 600.0,
     });
 
     app.add_plugins(
