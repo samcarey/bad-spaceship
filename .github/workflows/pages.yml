@@ -24,7 +24,7 @@ env:
   RUST_TOOLCHAIN: "1.85.0"
   # Must match the `wasm-bindgen` crate version resolved in Cargo.lock (driven by
   # bevy 0.16 / wgpu 24's web-sys). Bump in lockstep with the lockfile.
-  WASM_BINDGEN_VERSION: "0.2.100"
+  WASM_BINDGEN_VERSION: "0.2.125"
 
 jobs:
   build:
