@@ -130,7 +130,7 @@ fn get_mouse_motion(
     // Drop winit's events each frame and drive look solely from our tracker.
     mouse_motion_events.clear();
     if let Some(mouse_motion) = mouse_motion_tracker.get_and_reset() {
-        mouse_motion_events.write(mouse_motion);
+        mouse_motion_events.send(mouse_motion);
     }
 }
 

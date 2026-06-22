@@ -40,6 +40,10 @@ default = [
     # feature; with `default-features = false` it must be re-enabled or
     # `init_state`/`NextState`/`OnEnter` disappear.
     "bevy/bevy_state",
+    # Bevy 0.16 gates the `bevy::log` re-export behind this feature; without it the
+    # `bevy::log::info!` calls in the pause menu fail to resolve. (It was implicitly
+    # present under 0.15.)
+    "bevy/bevy_log",
 ]
 
 native = [

@@ -6,7 +6,7 @@ use bevy::{
 };
 use bevy_egui::{
     egui::{self, Align, Align2, Color32, Frame, Layout},
-    EguiContexts, EguiPlugin, EguiSettings,
+    EguiContexts, EguiContextSettings, EguiPlugin,
 };
 use chrono::{DateTime, FixedOffset, Utc};
 use once_cell::sync::Lazy;
@@ -53,9 +53,10 @@ const MAX_SCALE_FACTOR: f64 = 10.0;
 
 fn update_ui_scale_factor(
     key_input: Res<ButtonInput<KeyCode>>,
-    // bevy_egui 0.30 made `EguiSettings` a component (one per egui context, i.e.
-    // the primary window) rather than a resource.
-    mut egui_settings: Query<&mut EguiSettings>,
+    // bevy_egui 0.30 made egui settings a component (one per egui context, i.e.
+    // the primary window) rather than a resource; 0.34 renamed it from
+    // `EguiSettings` to `EguiContextSettings`.
+    mut egui_settings: Query<&mut EguiContextSettings>,
     mut custom_scale_factor: Local<CustomScaleFactor>,
 ) {
     if key_input.pressed(KeyCode::ControlLeft) || key_input.pressed(KeyCode::ControlRight) {
