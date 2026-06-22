@@ -29,28 +29,29 @@ impl Plugin for PlayerPlugin {
             .add_system(mouse_motion.after(EaseLabel))
             .add_system(
                 toggle_holding
-                    .label(ToggleHoldingSystemLabel)
+                    .in_set(ToggleHoldingSystemLabel)
                     .after(InputEvents),
             )
             .add_system(despawn)
-            .add_system(attach_camera_orbit.label(AttachCameraOrbitSystem))
+            .add_system(attach_camera_orbit.in_set(AttachCameraOrbitSystem))
             .add_event::<PlayerClick>()
             .add_asset::<Config>()
             .add_system(apply_part_rotation)
             .add_event::<AttachEvent>()
             .add_event::<ReleaseEvent>()
             .init_resource::<CameraOrbitOffset>()
-            .add_system_set(
-                SystemSet::new()
-                    .after(ToggleHoldingSystemLabel)
-                    .with_system(reset_camera_after_release)
-                    .with_system(adjust_camera_on_hold)
-                    .with_system(reset_hold_point_after_release.after(AttachCameraOrbitSystem))
-                    .with_system(adjust_hold_point_on_hold),
+            .add_systems(
+                (
+                    reset_camera_after_release,
+                    adjust_camera_on_hold,
+                    reset_hold_point_after_release.after(AttachCameraOrbitSystem),
+                    adjust_hold_point_on_hold,
+                )
+                    .after(ToggleHoldingSystemLabel),
             )
             .add_event::<HoldEvent>()
-            .add_system(bevy_easings::custom_ease_system::<Translation>.label(EaseLabel))
-            .add_system(ease_camera.label(EaseLabel))
+            .add_system(bevy_easings::custom_ease_system::<Translation>.in_set(EaseLabel))
+            .add_system(ease_camera.in_set(EaseLabel))
             .add_system(set_part_rotation.after(MouseWheelLabel));
     }
 }
@@ -134,7 +135,7 @@ struct CameraOrbitOffset {
     min: Vec3,
 }
 
-#[derive(SystemLabel, Clone, Hash, Debug, PartialEq, Eq)]
+#[derive(SystemSet, Clone, Hash, Debug, PartialEq, Eq)]
 struct AttachCameraOrbitSystem;
 
 fn attach_camera_orbit(
@@ -180,10 +181,13 @@ fn attach_camera_orbit(
             //     .push_children(&[camera]);
 
             let hold_point_transform = Transform::from_translation(Vec3::Z * 5.0);
-            let mut hold_point_global_transform = character_global_transform.clone();
-            *hold_point_global_transform.translation_mut() += Vec3A::from(
+            // GlobalTransform lost `translation_mut()` in Bevy 0.10; offset the
+            // character's global transform through its affine instead.
+            let mut hold_point_affine = character_global_transform.affine();
+            hold_point_affine.translation += Vec3A::from(
                 camera_orbit_center_transform.translation + hold_point_transform.translation,
             );
+            let hold_point_global_transform = GlobalTransform::from(hold_point_affine);
             let hold_point = commands
                 .spawn(HoldPointBundle {
                     transform: hold_point_transform.clone(),
@@ -327,7 +331,7 @@ impl Lerp for Translation {
     }
 }
 
-#[derive(SystemLabel, Clone, Hash, Debug, PartialEq, Eq)]
+#[derive(SystemSet, Clone, Hash, Debug, PartialEq, Eq)]
 struct EaseLabel;
 
 fn adjust_camera_on_hold(

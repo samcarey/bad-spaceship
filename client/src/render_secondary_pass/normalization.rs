@@ -1,17 +1,11 @@
 use bevy::{prelude::*, render::camera::Camera, transform::TransformSystem};
 
-#[derive(Debug, Hash, PartialEq, Eq, Clone, SystemLabel)]
-pub enum FseNormalizeSystem {
-    Normalize,
-}
-
 pub struct Ui3dNormalization;
 impl Plugin for Ui3dNormalization {
     fn build(&self, app: &mut App) {
-        app.add_system_to_stage(
-            CoreStage::PostUpdate,
+        app.add_system(
             normalize
-                .label(FseNormalizeSystem::Normalize)
+                .in_base_set(CoreSet::PostUpdate)
                 .before(TransformSystem::TransformPropagate),
         );
     }

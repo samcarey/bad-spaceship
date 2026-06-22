@@ -29,16 +29,27 @@ impl Plugin for RenderSecondaryPassPlugin {
             .add_startup_system(initialize_joint_appearance)
             .init_resource::<JointAppearance>()
             .add_system(add_hold_point_delete_zone_visualization)
-            .add_system_set(
-                SystemSet::new()
-                    .after(UpdateJointsLabel)
-                    .with_system(display_potential_joints)
-                    .with_system(display_existing_joints)
-                    .with_system(display_predelete_joints)
-                    .with_system(delete_zone_visibility),
+            .add_systems(
+                (
+                    display_potential_joints,
+                    display_existing_joints,
+                    display_predelete_joints,
+                    delete_zone_visibility,
+                )
+                    .after(UpdateJointsLabel),
             )
             .add_plugin(MaterialPlugin::<GizmoMaterial>::default());
     }
+}
+
+/// Bevy 0.10 turned `Visibility` into an enum; this maps a bool onto the
+/// explicit `Visible`/`Hidden` variants used throughout this module.
+fn set_visible(visibility: &mut Visibility, visible: bool) {
+    *visibility = if visible {
+        Visibility::Visible
+    } else {
+        Visibility::Hidden
+    };
 }
 
 fn position_gizmo(
@@ -68,14 +79,14 @@ fn position_gizmo(
                 should_be_visible = true;
             }
         }
-        visible.is_visible = should_be_visible;
+        set_visible(&mut visible, should_be_visible);
 
         childs = children.iter().cloned().collect();
     }
 
     for child in childs {
         if let Ok(mut visible) = gizmo_pieces.get_mut(child) {
-            visible.is_visible = should_be_visible;
+            set_visible(&mut visible, should_be_visible);
         }
     }
 }
@@ -92,6 +103,7 @@ pub struct TransformGizmoBundle {
     transform: Transform,
     global_transform: GlobalTransform,
     visible: Visibility,
+    computed_visibility: ComputedVisibility,
     normalize: Normalize3d,
 }
 
@@ -100,10 +112,8 @@ impl Default for TransformGizmoBundle {
         TransformGizmoBundle {
             gc: GizmoHub,
             transform: Transform::from_translation(Vec3::splat(f32::MIN)),
-            visible: Visibility {
-                is_visible: false,
-                ..Default::default()
-            },
+            visible: Visibility::Hidden,
+            computed_visibility: ComputedVisibility::default(),
             global_transform: GlobalTransform::default(),
             normalize: Normalize3d,
         }
@@ -228,10 +238,15 @@ fn initialize_joint_appearance(
 ) {
     let (s, l, a) = (1.0, 0.5, 0.75);
     *joint_appearance = JointAppearance {
-        mesh: Some(meshes.add(Mesh::from(shape::Icosphere {
-            radius: 0.1,
-            ..Default::default()
-        }))),
+        mesh: Some(
+            meshes.add(
+                Mesh::try_from(shape::Icosphere {
+                    radius: 0.1,
+                    ..Default::default()
+                })
+                .unwrap(),
+            ),
+        ),
         valid_material: Some(materials.add(GizmoMaterial::from(Color::hsla(260.0, s, l, a)))),
         invalid_material: Some(materials.add(GizmoMaterial::from(Color::hsla(20.0, s, l, a)))),
         predelete_material: Some(materials.add(GizmoMaterial::from(Color::hsla(20.0, s, l, a)))),
@@ -259,7 +274,7 @@ fn display_potential_joints(
                 display_points_iter.next()
             {
                 displayed_transform.translation = center;
-                displayed_visible.is_visible = true;
+                *displayed_visible = Visibility::Visible;
             } else {
                 commands
                     .spawn(MaterialMeshBundle {
@@ -274,7 +289,7 @@ fn display_potential_joints(
         }
     }
     for (_, mut displayed_visible) in display_points_iter {
-        displayed_visible.is_visible = false;
+        *displayed_visible = Visibility::Hidden;
     }
 }
 
@@ -298,7 +313,7 @@ fn display_existing_joints(
                 display_joints_iter.next()
             {
                 displayed_transform.translation = center;
-                displayed_visible.is_visible = true;
+                *displayed_visible = Visibility::Visible;
             } else {
                 commands
                     .spawn(MaterialMeshBundle {
@@ -313,7 +328,7 @@ fn display_existing_joints(
         }
     }
     for (_, mut displayed_visible) in display_joints_iter {
-        displayed_visible.is_visible = false;
+        *displayed_visible = Visibility::Hidden;
     }
 }
 
@@ -335,7 +350,7 @@ fn display_predelete_joints(
             .unwrap();
         if let Some((mut displayed_transform, mut displayed_visible)) = display_joints_iter.next() {
             displayed_transform.translation = center;
-            displayed_visible.is_visible = true;
+            *displayed_visible = Visibility::Visible;
         } else {
             commands
                 .spawn(MaterialMeshBundle {
@@ -349,7 +364,7 @@ fn display_predelete_joints(
         }
     }
     for (_, mut displayed_visible) in display_joints_iter {
-        displayed_visible.is_visible = false;
+        *displayed_visible = Visibility::Hidden;
     }
 }
 
@@ -363,13 +378,13 @@ fn add_hold_point_delete_zone_visualization(
         commands
             .entity(entity)
             .insert(MaterialMeshBundle {
-                visibility: Visibility { is_visible: false },
+                visibility: Visibility::Hidden,
                 mesh: meshes.add(
-                    shape::Icosphere {
+                    Mesh::try_from(shape::Icosphere {
                         radius: DELETE_RADIUS,
                         ..Default::default()
-                    }
-                    .into(),
+                    })
+                    .unwrap(),
                 ),
                 material: materials.add(StandardMaterial {
                     base_color: Color::hsla(20.0, 1.0, 0.3, 0.25),
@@ -398,7 +413,7 @@ fn delete_zone_visibility(
             get_hold_point_entity(player_children, camera_orbit_centers, &hold_points0)
         {
             if let Ok(mut visible) = hold_points1.get_mut(entity) {
-                visible.is_visible = modifying.0 && !holding.0;
+                set_visible(&mut visible, modifying.0 && !holding.0);
             }
         }
     }
