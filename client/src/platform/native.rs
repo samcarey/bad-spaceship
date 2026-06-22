@@ -15,13 +15,18 @@ impl Plugin for PlatformPlugin {
 
 fn show_cursor(mut windows: Query<&mut Window, With<PrimaryWindow>>) {
     // Bevy 0.15 moved the cursor fields off `Window` into a `cursor_options` struct.
-    let mut window = windows.single_mut();
+    // Bevy 0.16 made `Query::single_mut` fallible (returns `Result`).
+    let Ok(mut window) = windows.single_mut() else {
+        return;
+    };
     window.cursor_options.grab_mode = CursorGrabMode::None;
     window.cursor_options.visible = true;
 }
 
 fn hide_cursor(mut windows: Query<&mut Window, With<PrimaryWindow>>) {
-    let mut window = windows.single_mut();
+    let Ok(mut window) = windows.single_mut() else {
+        return;
+    };
     window.cursor_options.grab_mode = CursorGrabMode::Locked;
     window.cursor_options.visible = false;
 }

@@ -171,7 +171,7 @@ fn spawn_part(mut commands: Commands, mut new_part_events: EventReader<NewPart>)
 
 fn spawn_initial_parts(mut new_part_events: EventWriter<NewPart>) {
     for _ in 0..NUM_PARTS {
-        new_part_events.send(NewPart);
+        new_part_events.write(NewPart);
     }
 }
 
@@ -183,7 +183,7 @@ fn replace_fallen_parts(
     for (transform, entity) in parts.iter() {
         if transform.translation.y < -10.0 {
             commands.entity(entity).despawn();
-            new_part_events.send(NewPart);
+            new_part_events.write(NewPart);
         }
     }
 }
@@ -306,7 +306,11 @@ fn position_held_part(
     // entity; with a single default world this query resolves to one item.
     rapier_config: Query<&RapierConfiguration>,
 ) {
-    let gravity = rapier_config.single().gravity;
+    // Bevy 0.16 made `Query::single` fallible (returns `Result`).
+    let Ok(rapier_config) = rapier_config.single() else {
+        return;
+    };
+    let gravity = rapier_config.gravity;
     for (part_transform, target_position, mass_properties, velocity, mut ext_forces) in
         parts.iter_mut()
     {
@@ -362,7 +366,9 @@ fn update_active_joints(
     mut potential_joints: ResMut<PotentialJoints>,
     mut existing_joints: ResMut<ExistingJoints>,
     players: Query<(&Holding, &FocusedInteractable)>,
-    joints: Query<(&Parent, &ImpulseJoint)>,
+    // Bevy 0.16's relationships rework renamed the `Parent` component to `ChildOf`
+    // (its parent accessor is `.parent()` rather than the old `.get()`).
+    joints: Query<(&ChildOf, &ImpulseJoint)>,
 ) {
     potential_joints.0.clear();
     existing_joints.0.clear();
@@ -381,7 +387,7 @@ fn update_active_joints(
                         // rapier 0.27's `ImpulseJoint::data` is a `TypedJoint` enum;
                         // reach the underlying `GenericJoint` once via `AsRef`.
                         let frame = &joint.data.as_ref().raw;
-                        if parent.get() == held_entity && joint.parent == attachable_entity {
+                        if parent.parent() == held_entity && joint.parent == attachable_entity {
                             existing_joints.0.push(DisplayableJoint {
                                 entities: (held_entity, attachable_entity),
                                 points: (
@@ -389,7 +395,7 @@ fn update_active_joints(
                                     frame.local_frame1.translation.vector.into(), // todo: or just local anchor?
                                 ),
                             });
-                        } else if parent.get() == attachable_entity && joint.parent == held_entity {
+                        } else if parent.parent() == attachable_entity && joint.parent == held_entity {
                             existing_joints.0.push(DisplayableJoint {
                                 entities: (attachable_entity, held_entity),
                                 points: (
@@ -430,7 +436,7 @@ fn update_predelete_joints(
     holdables: Query<&GlobalTransform, With<Holdable>>,
     mut predelete_joints: ResMut<PredeleteJoints>,
     players: Query<(&Holding, &Modifying, &Children)>,
-    joints: Query<(Entity, &ImpulseJoint, &Parent)>,
+    joints: Query<(Entity, &ImpulseJoint, &ChildOf)>,
     hold_points0: Query<(), With<HoldPoint>>,
     hold_points1: Query<&GlobalTransform, With<HoldPoint>>,
     camera_orbit_centers: Query<&Children>,
@@ -444,7 +450,7 @@ fn update_predelete_joints(
             {
                 if let Ok(hold_point_position) = hold_points1.get(entity) {
                     for (joint_entity, joint, joint_parent) in joints.iter() {
-                        if let Ok(transform) = holdables.get(joint_parent.get()) {
+                        if let Ok(transform) = holdables.get(joint_parent.parent()) {
                             let transform = transform.compute_transform();
                             let center = transform.translation
                                 + transform.rotation.mul_vec3(
@@ -491,7 +497,9 @@ fn delete_joints(
 ) {
     if clicks.read().next().is_some() {
         for PredeleteJoint { entity, .. } in predelete_joints.0.iter() {
-            commands.entity(*entity).despawn_recursive();
+            // Bevy 0.16 made `despawn()` recursive by default (the old
+            // `despawn_recursive()` is gone).
+            commands.entity(*entity).despawn();
         }
     }
 }

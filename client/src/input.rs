@@ -134,7 +134,7 @@ pub fn process_mouse_clicks(
         if native_mouse_button_input.just_pressed(MouseButton::Left)
             || web_mouse_button_input.pressed(WebMouseButton(MouseButton::Left))
         {
-            player_clicks.send(PlayerClick);
+            player_clicks.write(PlayerClick);
         }
     }
 }

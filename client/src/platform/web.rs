@@ -130,7 +130,7 @@ fn get_mouse_motion(
     // Drop winit's events each frame and drive look solely from our tracker.
     mouse_motion_events.clear();
     if let Some(mouse_motion) = mouse_motion_tracker.get_and_reset() {
-        mouse_motion_events.send(mouse_motion);
+        mouse_motion_events.write(mouse_motion);
     }
 }
 
@@ -343,6 +343,6 @@ impl WheelTracker {
 
 fn get_wheel(wheel_tracker: ResMut<WheelTracker>, mut mouse_wheel_events: EventWriter<MouseWheel>) {
     if let Some(event) = wheel_tracker.get() {
-        mouse_wheel_events.send(event);
+        mouse_wheel_events.write(event);
     }
 }

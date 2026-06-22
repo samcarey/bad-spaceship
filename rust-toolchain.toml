@@ -1,9 +1,9 @@
-# Pinned toolchain for reproducible builds of this Bevy 0.15 (2024-era) project.
-# Bevy 0.15 / wgpu 23 build with the version-matched `wasm-bindgen` 0.2.97.
-# Bevy 0.15's MSRV is Rust 1.82.0, so the toolchain is held at 1.82.0; several
-# transitive deps are still pinned back in Cargo.lock to pre-edition-2024 releases
-# (see CLAUDE.md) so they keep building on it — anything needing edition 2024
-# (a Cargo >= 1.85 nightly to even parse) stays pinned back.
+# Pinned toolchain for reproducible builds of this Bevy 0.16 (2025-era) project.
+# Bevy 0.16 / wgpu 24 build with a version-matched `wasm-bindgen` CLI (see
+# `.github/workflows/pages.yml`). Bevy 0.16's MSRV is Rust 1.85.0, the first
+# stable to ship edition 2024 — so the old 1.82-era edition-2024 dependency pins
+# (indexmap/proc-macro-crate/image/blake3/… in CLAUDE.md) are no longer needed and
+# have been dropped; the graph resolves forward freely now.
 [toolchain]
-channel = "1.82.0"
+channel = "1.85.0"
 targets = ["wasm32-unknown-unknown"]

@@ -137,12 +137,22 @@ fn spawn(mut commands: Commands, players: Query<(), With<Player>>) {
     }
 }
 
-fn despawn(players: Query<(&Transform, Entity, &Children), With<Player>>, mut commands: Commands) {
-    for (player_transform, player_entity, player_children) in players.iter() {
+fn despawn(
+    players: Query<(&Transform, Entity), With<Player>>,
+    cameras: Query<Entity, With<Camera>>,
+    mut commands: Commands,
+) {
+    for (player_transform, player_entity) in players.iter() {
         if player_transform.translation.y < -30.0 {
-            let camera_orbit_center = player_children.iter().next().unwrap();
+            // The single, app-lifetime camera is parented under the player's
+            // orbit hierarchy. Bevy 0.16 made `despawn()` recursive, so detach
+            // the camera first (clear its `ChildOf`) to keep it alive — it gets
+            // re-parented to the next player by `add_camera_to_player`. Despawning
+            // the player then clears the whole orbit-center/hold-point subtree.
+            if let Some(camera) = cameras.iter().next() {
+                commands.entity(camera).remove::<ChildOf>();
+            }
             commands.entity(player_entity).despawn();
-            commands.entity(*camera_orbit_center).despawn();
         }
     }
 }
@@ -310,13 +320,13 @@ fn toggle_holding(
                     {
                         if holding.0 {
                             if modifying.0 {
-                                attach_events.send(AttachEvent);
+                                attach_events.write(AttachEvent);
                             } else {
                                 holding.0 = false;
                                 commands
                                     .entity(current_interactable)
                                     .remove::<HeldBundle>();
-                                release_events.send(ReleaseEvent);
+                                release_events.write(ReleaseEvent);
                             }
                         } else if !modifying.0 {
                             holding.0 = true;
@@ -326,7 +336,7 @@ fn toggle_holding(
                                     hold_point_entity,
                                     original_transform.compute_transform().rotation,
                                 ));
-                            hold_events.send(HoldEvent {
+                            hold_events.write(HoldEvent {
                                 held: current_interactable,
                             });
                         }

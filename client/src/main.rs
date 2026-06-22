@@ -31,6 +31,9 @@ fn main() {
         // ~600 lux under 0.13's default camera exposure; the engine default of 80
         // left shadowed faces far too dark against the 10_000-lux directional.
         brightness: 600.0,
+        // Bevy 0.16 added a mixed-lighting field to every light; we use no
+        // lightmaps, so the default (`true`) is correct.
+        ..default()
     });
 
     app.add_plugins(

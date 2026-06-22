@@ -8,8 +8,8 @@ build = "build.rs"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-bevy = { version = "0.15", default-features = false }
-bevy_rapier3d = "0.28"
+bevy = { version = "0.16", default-features = false }
+bevy_rapier3d = "0.30"
 serde = { version = "1.0", features = ["derive"] }
 nalgebra = "0.32"
 log = "0.4"
@@ -19,12 +19,12 @@ web-sys = { version = "0.3.40", optional = true }
 # drops the arboard→image and webbrowser→home native dep chains. Keep fonts, and
 # keep `render` — bevy_egui gates *all* egui drawing behind it, so dropping it
 # silently hides every egui panel/menu.
-bevy_egui = { version = "0.31", default-features = false, features = ["default_fonts", "render"] }
+bevy_egui = { version = "0.34", default-features = false, features = ["default_fonts", "render"] }
 bad-spaceship-shared = { path = "../shared" }
 shadow-rs = { version = "0.11", default-features = false }
 chrono = "0.4"
 rand = "0.8"
-wasm-bindgen = "=0.2.97"
+wasm-bindgen = "0.2"
 
 once_cell = "1.8"
 
