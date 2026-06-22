@@ -17,7 +17,16 @@ pub struct UiPlugin;
 
 impl Plugin for UiPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins((EguiPlugin, FrameTimeDiagnosticsPlugin))
+        // bevy_egui 0.34 made `EguiPlugin` carry a required multipass flag. This
+        // UI is plain immediate-mode egui drawn from `Update` systems, so keep the
+        // legacy single-pass mode (multipass is opt-in for advanced egui features
+        // we don't use).
+        app.add_plugins((
+            EguiPlugin {
+                enable_multipass_for_primary_context: false,
+            },
+            FrameTimeDiagnosticsPlugin::default(),
+        ))
             .add_systems(
                 Update,
                 (

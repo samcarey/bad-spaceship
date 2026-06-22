@@ -271,11 +271,13 @@ pub fn get_hold_point_entity(
 ) -> Option<Entity> {
     // TODO: eliminate need for this function
     let mut held_entity: Option<Entity> = None;
+    // Bevy 0.16's `Children::iter()` (a `RelationshipTarget` method) yields
+    // `Entity` by value now, not `&Entity`, so these no longer need dereferencing.
     if let Some(camera_orbit_center) = player_children.iter().next() {
-        if let Ok(potential_hold_points) = camera_orbit_centers.get(*camera_orbit_center) {
+        if let Ok(potential_hold_points) = camera_orbit_centers.get(camera_orbit_center) {
             for potential_hold_point in potential_hold_points.iter() {
-                if hold_points.get(*potential_hold_point).is_ok() {
-                    held_entity = Some(*potential_hold_point);
+                if hold_points.get(potential_hold_point).is_ok() {
+                    held_entity = Some(potential_hold_point);
                 }
             }
         }
@@ -453,7 +455,7 @@ fn set_part_rotation(
         rotation.0 = Quat::default();
         if modifying.0 {
             for child in player_children.iter() {
-                if let Ok(camera_orbit_center) = camera_orbit_centers.get(*child) {
+                if let Ok(camera_orbit_center) = camera_orbit_centers.get(child) {
                     let camera_orbit_center = camera_orbit_center.compute_transform();
                     rotation.0 = Quat::from_axis_angle(
                         // `Transform::back` returns a direction type (`Dir3`
