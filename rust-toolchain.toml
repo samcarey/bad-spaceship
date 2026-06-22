@@ -1,6 +1,7 @@
-# Pinned toolchain for reproducible builds of this Bevy 0.7 (2022-era) project.
-# Newer Rust releases reject the pinned `wasm-bindgen` 0.2.79 required by
-# Bevy 0.7 / wgpu 0.12, so the toolchain is held at the contemporary 1.66.0.
+# Pinned toolchain for reproducible builds of this Bevy 0.9 (2022-era) project.
+# Bevy 0.9 / wgpu 0.14 need the version-matched `wasm-bindgen` 0.2.83, and several
+# transitive deps have since published releases that raise their MSRV above 1.66
+# (see CLAUDE.md), so the toolchain is held at the contemporary 1.66.0.
 [toolchain]
 channel = "1.66.0"
 targets = ["wasm32-unknown-unknown"]

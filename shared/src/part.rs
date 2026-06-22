@@ -153,10 +153,10 @@ fn spawn_part(mut commands: Commands, mut new_part_events: EventReader<NewPart>)
     for _ in new_part_events.iter() {
         let shape = get_random_shape(&mut rng);
         commands
-            .spawn()
+            .spawn_empty()
             .insert(BoundingRadius(shape.compute_local_bounding_sphere().radius))
             .insert(RigidBody::Dynamic)
-            .insert_bundle(TransformBundle::from(Transform::from_xyz(
+            .insert(TransformBundle::from(Transform::from_xyz(
                 rng.gen_range(-SPAWN_ZONE_HALF_WIDTH..=SPAWN_ZONE_HALF_WIDTH),
                 rng.gen_range(5.0..=15.0),
                 rng.gen_range(-SPAWN_ZONE_HALF_WIDTH..=SPAWN_ZONE_HALF_WIDTH),
@@ -166,7 +166,7 @@ fn spawn_part(mut commands: Commands, mut new_part_events: EventReader<NewPart>)
             .insert(Friction::coefficient(1.0))
             .insert(Restitution::coefficient(0.1))
             .insert(ActiveEvents::COLLISION_EVENTS)
-            .insert_bundle(PartBundle::default());
+            .insert(PartBundle::default());
     }
 }
 
@@ -470,7 +470,7 @@ fn attach(
                 .local_anchor2(points.0);
             commands.entity(entities.0).with_children(|children| {
                 children
-                    .spawn()
+                    .spawn_empty()
                     .insert(ImpulseJoint::new(entities.1, joint));
             });
         }

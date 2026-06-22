@@ -144,7 +144,7 @@ fn show_bottom_panel(mut egui_ctx: ResMut<EguiContext>, diagnostics: Res<Diagnos
                         commit_age(),
                     ),
                 );
-                ui.with_layout(Layout::right_to_left(), |ui| {
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     ui.colored_label(Color32::from_rgb(255, 0, 0), format!("{:.0} FPS", fps,));
                 });
             });

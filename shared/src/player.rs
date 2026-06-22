@@ -92,7 +92,7 @@ fn spawn_camera(mut commands: Commands) {
         0.0,
     ));
     camera_transform.translation = -Vec3::Z * 20.0;
-    commands.spawn_bundle(Camera3dBundle {
+    commands.spawn(Camera3dBundle {
         transform: camera_transform,
         ..Default::default()
     });
@@ -114,8 +114,8 @@ struct PlayerBundle {
 fn spawn(mut commands: Commands, players: Query<(), With<Player>>) {
     if players.iter().next().is_none() {
         commands
-            .spawn_bundle(PlayerBundle::default())
-            .insert_bundle(PlayerInput::default());
+            .spawn(PlayerBundle::default())
+            .insert(PlayerInput::default());
     }
 }
 
@@ -129,7 +129,7 @@ fn despawn(players: Query<(&Transform, Entity, &Children), With<Player>>, mut co
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Resource)]
 struct CameraOrbitOffset {
     min: Vec3,
 }
@@ -162,8 +162,7 @@ fn attach_camera_orbit(
                 Transform::from_translation(camera_orbit_offset.min);
             camera_orbit_center_transform.rotation = Quat::from_rotation_x(INITIAL_CAMERA_PITCH);
             let camera_orbit_center = commands
-                .spawn()
-                .insert_bundle(CameraOrbitCenterBundle {
+                .spawn(CameraOrbitCenterBundle {
                     transform: camera_orbit_center_transform,
                     ..Default::default()
                 })
@@ -186,8 +185,7 @@ fn attach_camera_orbit(
                 camera_orbit_center_transform.translation + hold_point_transform.translation,
             );
             let hold_point = commands
-                .spawn()
-                .insert_bundle(HoldPointBundle {
+                .spawn(HoldPointBundle {
                     transform: hold_point_transform.clone(),
                     global_transform: hold_point_global_transform,
                     original_position: OriginalPosition(hold_point_transform.translation),
@@ -296,14 +294,14 @@ fn toggle_holding(
                                 holding.0 = false;
                                 commands
                                     .entity(current_interactable)
-                                    .remove_bundle::<HeldBundle>();
+                                    .remove::<HeldBundle>();
                                 release_events.send(ReleaseEvent);
                             }
                         } else if !modifying.0 {
                             holding.0 = true;
                             commands
                                 .entity(current_interactable)
-                                .insert_bundle(HeldBundle::new(
+                                .insert(HeldBundle::new(
                                     hold_point_entity,
                                     original_transform.compute_transform().rotation,
                                 ));

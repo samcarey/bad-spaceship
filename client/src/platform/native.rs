@@ -1,5 +1,6 @@
 use crate::AppState;
 use bevy::prelude::*;
+use bevy::window::CursorGrabMode;
 
 pub struct PlatformPlugin;
 
@@ -14,13 +15,13 @@ impl Plugin for PlatformPlugin {
 
 fn show_cursor(mut windows: ResMut<Windows>) {
     let window = windows.get_primary_mut().unwrap();
-    window.set_cursor_lock_mode(false);
+    window.set_cursor_grab_mode(CursorGrabMode::None);
     window.set_cursor_visibility(true);
 }
 
 fn hide_cursor(mut windows: ResMut<Windows>) {
     let window = windows.get_primary_mut().unwrap();
-    window.set_cursor_lock_mode(true);
+    window.set_cursor_grab_mode(CursorGrabMode::Locked);
     window.set_cursor_visibility(false);
 }
 

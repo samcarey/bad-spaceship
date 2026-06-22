@@ -46,9 +46,9 @@ fn spawn_map(mut commands: Commands) {
     }
 
     commands
-        .spawn()
+        .spawn_empty()
         .insert(RigidBody::Fixed)
-        .insert_bundle(TransformBundle::from_transform(Transform::from_xyz(
+        .insert(TransformBundle::from_transform(Transform::from_xyz(
             0.0, 0.0, 0.0,
         )))
         .insert(Collider::trimesh(vertices, indices))

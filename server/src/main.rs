@@ -3,7 +3,7 @@ use std::time::Duration;
 use bad_spaceship_shared::{character, player, CommonPlugins};
 use bevy::{
     app::ScheduleRunnerSettings,
-    asset::{AssetPlugin, AssetServerSettings},
+    asset::AssetPlugin,
     prelude::*,
 };
 
@@ -13,10 +13,10 @@ fn main() {
             1.0 / 60.,
         )))
         .add_plugins(MinimalPlugins)
-        .add_plugin(AssetPlugin)
-        .insert_resource(AssetServerSettings {
+        // AssetServerSettings was folded into AssetPlugin in Bevy 0.9.
+        .add_plugin(AssetPlugin {
             asset_folder: "../client/assets".to_string(),
-            ..Default::default()
+            watch_for_changes: true,
         })
         .add_plugins(CommonPlugins)
         .add_startup_system(load_configs)
@@ -38,6 +38,4 @@ fn load_configs(
     // TODO: Fix this
     // Theoretically this should work instead of the above, but it doesn't...
     // *handles = Some(asset_server.load_folder("config").unwrap());
-
-    asset_server.watch_for_changes().unwrap();
 }
