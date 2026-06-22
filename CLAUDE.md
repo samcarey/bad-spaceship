@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Bad Spaceship is a 3D game built on the **Bevy 0.13** engine (ECS), with
+Bad Spaceship is a 3D game built on the **Bevy 0.14** engine (ECS), with
 `bevy_rapier3d` for physics and `bevy_egui` for UI. It is a Cargo workspace with
 three crates that compiles both to a **native** binary and to a **WASM** web
 build playable in the browser.
@@ -14,34 +14,43 @@ build playable in the browser.
 This is a pinned-for-reproducibility project — do not "upgrade" your way out of
 build errors (the deliberate Bevy bumps are the exception, done branch-by-branch):
 
-- **Rust is pinned to 1.76.0** via `rust-toolchain.toml` (auto-selected by rustup).
-  Bevy 0.13's MSRV is exactly 1.76.0, so that is the floor. Many *transitive* deps
-  have since published releases that raise their MSRV (crates that moved to edition
-  2024, or pulled in `getrandom` 0.3 / `async-lock` 3.4 needing Rust 1.85). The
-  committed `Cargo.lock` pins the graph *back* to a compatible set — notably
-  `indexmap` 2.5, `ahash` 0.8.11, `uuid` 1.11, `jobserver` 0.1.31, `spade` 2.12,
-  `home` 0.5.9, `url` 2.5.0 (drops the `idna`/ICU4X stack), `blake3` 1.5.5 +
-  `constant_time_eq` 0.3.1 (0.4 needs `edition2024`), `file-id` 0.2.1 (0.2.3 needs
-  rustc 1.77, pulled via the `file_watcher` → `notify-debouncer-full` chain), and
-  (added with the 0.13 bump) `async-lock` 3.3.0 (3.4 needs rustc 1.85, pulled via
-  bevy's `async-executor`/`async-fs` chain). Do not `cargo update` the whole graph —
-  it will pull newer releases and break the toolchain. To hunt MSRV/edition offenders
-  fast: `cargo tree` surfaces `edition2024` parse errors, `cargo metadata` filtered on
-  `rust_version > 1.76` finds high-MSRV crates, and `cargo build` itself now prints a
-  precise "requires rustc 1.XX" error naming the offending crate + a `cargo update -p
-  … --precise …` hint to pin it back.
+- **Rust is pinned to 1.79.0** via `rust-toolchain.toml` (auto-selected by rustup).
+  Bevy 0.14's MSRV is exactly 1.79.0, so that is the floor (it was 1.76.0 under Bevy
+  0.13). Many *transitive* deps have since published releases that raise their MSRV
+  (crates that moved to edition 2024, which needs a Cargo ≥ 1.85 nightly to even
+  *parse*, or that bumped `rust-version` past 1.79). The committed `Cargo.lock` pins
+  the graph *back* to a 1.79-compatible set — notably `indexmap` 2.5 (2.14 needs
+  edition2024), `proc-macro-crate` 3.2.0 (3.5 pulls `toml_edit` 0.25 → `indexmap`
+  2.13+), `image` 0.25.5 (0.25.6+ pulls `moxcms`, edition2024), `blake3` 1.5.5 +
+  `constant_time_eq` 0.3.1 (0.4 needs edition2024), the `wayland-*` family
+  (`wayland-protocols` 0.32.5, `-client` 0.31.7, `-backend` 0.3.7, `-scanner`/`-sys`
+  0.31.5; the latest releases went edition2024 — downgrade them *together* since they
+  cross-require each other in lockstep), `async-lock` 3.3.0 (3.4 needs rustc 1.85),
+  `rayon` 1.10.0 + `rayon-core` 1.12.1 (1.11/1.13 need rustc 1.80), `spade` 2.12.1
+  (2.15 uses `iter::repeat_n`, unstable until 1.82), plus `ahash` 0.8.11 and `uuid`
+  1.11.0 — the 0.8.12 / 1.16 releases pull **`getrandom` 0.3**, which fails to compile
+  for `wasm32-unknown-unknown` (it needs an explicit `wasm_js` cfg the old build never
+  set); pinning both keeps the wasm graph on `getrandom` 0.2. Do not `cargo update`
+  the whole graph — it will pull newer releases and break the toolchain. To hunt
+  offenders fast: `cargo build` prints a precise "requires rustc 1.XX" error naming the
+  crate + a `cargo update -p … --precise …` hint; `cargo metadata`/`cargo tree` surface
+  `edition2024` *parse* failures (note these flag **all** targets, including
+  Android-only deps like `jni`/`android-activity` that never compile for native-Linux
+  or wasm — chase only the ones an actual `cargo build` for your target stops on).
 - **`Cargo.lock` is committed** and holds an MSRV-compatible dependency set. Always build
   with `--locked`; when a deliberate re-pin is needed, bump direct deps with targeted
   `cargo update -p <crate> --precise <ver>` rather than a blanket update.
 - The web build targets the **WebGL2 backend** via the `bevy/webgl2` feature (in the
-  client's `web` feature): Bevy 0.13's wgpu 0.19 otherwise compiles the WebGPU backend
+  client's `web` feature): Bevy 0.14's wgpu 0.20 otherwise compiles the WebGPU backend
   on wasm, which needs `--cfg=web_sys_unstable_apis` and a WebGPU-capable browser. WebGL2
   is the broad-support renderer the 0.10/wgpu 0.15 build already used on Pages.
 - The web build needs a **version-matched `wasm-bindgen` CLI (exactly 0.2.92)**, matching
-  the `wasm-bindgen` crate pinned in the client (kept compatible with Bevy 0.13 / wgpu 0.19).
+  the `wasm-bindgen` crate pinned in the client (still 0.2.92 under Bevy 0.14 / wgpu 0.20).
   Use the prebuilt binary from
   the rustwasm GitHub release, not `cargo install` (building the CLI from source hits the
-  same dependency bitrot).
+  same dependency bitrot). The Pages CI also hardcodes `RUST_TOOLCHAIN` in
+  `.github/workflows/pages.yml` (it `rustup override set`s it, shadowing
+  `rust-toolchain.toml`) — bump **both** in lockstep on a Bevy upgrade.
 
 ## Build & run
 
@@ -188,7 +197,7 @@ visuals at runtime:
 
 - **`bevy_egui` needs its `render` feature.** We pull `bevy_egui` with
   `default-features = false` (to drop native clipboard/`open` deps that don't
-  belong on web); under bevy_egui 0.25 that also drops `render`, which silently
+  belong on web); under bevy_egui 0.28 that also drops `render`, which silently
   disables *all* egui drawing — the pause menu and the instructions/FPS overlays
   vanish while egui still runs. Re-add `"render"` to the feature list (kept
   separate from the clipboard/hyperlink features) so the UI paints.
@@ -197,7 +206,37 @@ visuals at runtime:
   no longer means the same thing). Left at the new default, shadowed faces read
   almost black under the bright directional sun. We set `brightness` to ~`600`
   to restore the soft fill the 0.12 build had; tune this single value if the
-  dark sides look too flat or too dark.
+  dark sides look too flat or too dark. (Bevy 0.14 left these light units
+  unchanged, so the `600` carried over as-is.)
+
+### Bevy 0.14 migration gotchas
+
+The 0.13 → 0.14 bump (third-party deps: `bevy_rapier3d` 0.25 → 0.27, `bevy_egui`
+0.25 → 0.28, `bevy_easings` 0.13 → 0.14). Most changes were compile-time and
+mechanical, but a few are easy to get wrong:
+
+- **`bevy_state` is a Cargo feature now.** 0.14 split the state machine into its own
+  crate gated behind `bevy/bevy_state`. The client uses `default-features = false`,
+  so `init_state`/`NextState`/`OnEnter` vanish until that feature is re-added (it's
+  in the client's `default` feature list).
+- **`multi-threaded` → `multi_threaded`.** Bevy renamed the hyphenated feature to an
+  underscore; the `file_watcher` hot-reload path still needs it (client + server).
+- **Color is `srgb`, and no longer a uniform type.** `Color::rgb/rgba` →
+  `Color::srgb/srgba`, and per-channel setters (`set_r/g/b`) are gone (rebuild the
+  highlight colours outright). `Color` also dropped `ShaderType`, so `GizmoMaterial`'s
+  `#[uniform(0)]` stores `LinearRgba` (via `Color::to_linear()`) — the same
+  representation the 0.13 `Color` uniform already serialized, so colours are unchanged.
+- **WGSL matrix helpers renamed.** `get_model_matrix` → `get_world_from_local` (part of
+  0.14's `<dest>_from_<src>` naming). This is a *runtime* shader-compile failure, not a
+  Rust error — see `client/assets/gizmo_material.wgsl`.
+- **`AssetLoader::load` is a native `async fn`** (no more hand-rolled `BoxedFuture`).
+  The trait ties every `&'a` argument to one lifetime while leaving the
+  `Reader`/`LoadContext` *inner* lifetimes elided (`Reader<'_>`, `LoadContext<'_>`);
+  matching that exactly is the only fiddly part (see `shared/src/config.rs`).
+- **rapier 0.27 joints + contacts.** `ImpulseJoint::data` is now a `TypedJoint` enum;
+  reach the underlying `GenericJoint` (and its `.raw` rapier frame) via
+  `AsRef<GenericJoint>` (`joint.data.as_ref().raw…`). `ContactPairView::
+  has_any_active_contacts` lost its trailing `s` → `has_any_active_contact`.
 
 ## Pull request workflow
 
