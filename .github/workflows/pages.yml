@@ -86,8 +86,12 @@ jobs:
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v5
         with:
-          # Enable Pages via the API on first run so no manual settings change
-          # is needed (requires the workflow's `pages: write` permission).
+          # Enables Pages on first run if it's entirely off. NOTE: this does NOT
+          # convert an existing "Deploy from a branch" site to the Actions source
+          # — that one-time switch must be done by hand in Settings → Pages
+          # (Source → "GitHub Actions"). Until it is, GitHub's legacy Jekyll
+          # build of the repo root wins and serves README.md instead of this
+          # artifact. See the Deployment section of CLAUDE.md.
           enablement: true
 
       - name: Upload Pages artifact

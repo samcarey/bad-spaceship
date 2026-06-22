@@ -166,10 +166,38 @@ viewport via CSS (`canvas { width/height: 100% }` in `index.html`): Bevy 0.13 re
 `Window::fit_canvas_to_parent` (which had itself replaced the old
 `bevy_web_fullscreen` plugin), and the recommended replacement is plain CSS.
 
+One Bevy 0.13 web gotcha lives here: the 0.13 bump pulled winit 0.28 → 0.29,
+which (unlike 0.28) emits its *own* `MouseMotion` events from the web canvas
+under pointer lock. Those phantom deltas double-fed the DOM-listener look path
+and spun the camera on its own with the mouse held still. The fix in
+`get_mouse_motion` (web): take `ResMut<Events<MouseMotion>>`, `clear()` the
+buffer each frame to drop winit's events, then re-send only our tracker's
+delta — so look is driven solely by our listeners. If wheel/keyboard ever
+start double-firing on web, it's the same cause and the same clear-then-inject
+pattern is the remedy.
+
 ### Build metadata
 
 `client/build.rs` uses `shadow-rs` and `git rev-parse HEAD` to inject a
 `SHORT_GIT_HASH` shown in-game, so the build needs git history available.
+
+### Bevy 0.13 rendering/UI gotchas
+
+Two more 0.13-bump surprises that don't show up at build time, only as wrong
+visuals at runtime:
+
+- **`bevy_egui` needs its `render` feature.** We pull `bevy_egui` with
+  `default-features = false` (to drop native clipboard/`open` deps that don't
+  belong on web); under bevy_egui 0.25 that also drops `render`, which silently
+  disables *all* egui drawing — the pause menu and the instructions/FPS overlays
+  vanish while egui still runs. Re-add `"render"` to the feature list (kept
+  separate from the clipboard/hyperlink features) so the UI paints.
+- **Ambient light is now in lux.** Bevy 0.13's lighting/exposure overhaul made
+  `AmbientLight::brightness` a physical lux value (the 0.12 default of `0.05`
+  no longer means the same thing). Left at the new default, shadowed faces read
+  almost black under the bright directional sun. We set `brightness` to ~`600`
+  to restore the soft fill the 0.12 build had; tune this single value if the
+  dark sides look too flat or too dark.
 
 ## Pull request workflow
 
@@ -189,3 +217,18 @@ ending the turn (in order):
 
 `.github/workflows/pages.yml` builds the web client and publishes it to GitHub
 Pages on every push to `master` (migrated from the original GitLab Pages CI).
+
+**The Pages source must be set to "GitHub Actions", not "Deploy from a branch".**
+This is a one-time, manual repo setting (Settings → Pages → Source) that the
+workflow *cannot* set for you — `configure-pages`' `enablement: true` only turns
+Pages on when it's fully off; it will not convert an existing branch-source site.
+If the source is left on "Deploy from a branch", GitHub silently runs its own
+legacy **Jekyll** build of the repo root *alongside* this workflow, and that
+Jekyll deploy wins — so the live site renders `README.md` as the index instead of
+the game (symptom: the site shows the README; `loader-manifest.json` and
+`target/wasm.js` 404). Both pipelines show up green in the Actions tab, which
+masks the conflict. Tell-tales of the wrong setting: the served HTML carries a
+`<meta name="generator" content="Jekyll …">` tag, and a "pages build and
+deployment" run fires on each push next to "Deploy web build to GitHub Pages".
+Fix: flip the source to "GitHub Actions" (`gh api -X PUT repos/<o>/<r>/pages -f
+build_type=workflow`) and re-run this workflow.
