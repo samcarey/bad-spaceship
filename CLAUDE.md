@@ -54,6 +54,58 @@ wasm-bindgen --out-dir <out> --out-name wasm --target web --no-typescript \
 mutually exclusive deps). `.vscode/tasks.json` has equivalents for all of the above.
 There is no test suite configured.
 
+## Remote build & test box (Mac mini "mini4")
+
+The Claude Code **web** sandbox can't run the heavy parts of this project — full
+`--release` native/WASM builds, `wasm-bindgen`, long compiles, or anything wanting a
+real machine. Offload those to the **Mac mini dev box** (`samcarey@mini4`, Apple M4,
+32 GB, public IP `65.28.10.210`). Agents reach it over HTTP — **no SSH needed for
+build/test work**.
+
+### How an agent runs commands on it
+
+A small "cmd-api" service exposes a shell inside a **Linux `aarch64` Docker container**
+on the Mac (Colima VM) — *not* macOS directly. Commands run as `root`, home `/root`.
+
+- Endpoint: `https://cmd-api.dev.whoeverwants.com` (also exposed as `$MAC_API_URL` in
+  some environments; fall back to the literal URL when that var is unset).
+- Auth: bearer token in the **`MAC_API_TOKEN`** env var (present in web sessions).
+  **Never** hardcode the token in code, commits, or logs.
+- `POST /exec` with JSON `{"cmd": "<shell>"}`; response is `{"exit_code", "stdout",
+  "stderr"}`. (`/run`, `/command`, and `/` behave the same; `/exec` is canonical. The
+  body key must be `cmd` — `command` is ignored.)
+
+Paste-able helper:
+
+```bash
+mac() {  # usage: mac 'shell command; another'
+  curl -sS -m 600 -X POST "${MAC_API_URL:-https://cmd-api.dev.whoeverwants.com}/exec" \
+    -H "Authorization: Bearer $MAC_API_TOKEN" -H "Content-Type: application/json" \
+    --data "$(python3 -c 'import json,sys; print(json.dumps({"cmd": sys.argv[1]}))' "$1")"
+}
+mac 'hostname; nproc; df -h /'
+```
+
+### What's on the box (verified 2026-06-22)
+
+- 6 CPUs, ~23 GB RAM, ~45 GB free disk; outbound internet works (can fetch crates/toolchains).
+- Preinstalled: `git`, `docker`, `python3`. **Not** present: `rustc`/`cargo`/`rustup`,
+  `node`, Homebrew. Install the pinned **Rust 1.66.0** toolchain (see *Toolchain &
+  reproducibility*) before building.
+- Treat the container filesystem as **disposable** — clone fresh and don't rely on
+  long-term state surviving a host/VM restart.
+
+### When the agent needs the user (host-level changes)
+
+The cmd-api only reaches *inside* the Linux container. Anything on the **macOS host**
+itself — Colima CPU/RAM sizing, `~/devbox/` config, LaunchAgents, the cmd-api service,
+rebuilding the container image, or debugging when the endpoint is down — needs the user,
+who has SSH/physical access to `mini4` and can install/configure tooling on request.
+
+**Rule for asking the user:** request **one command at a time** (a single line; chaining
+with `;` / `&&` is fine). Wait for the result before sending the next. Do **not** dump a
+long multi-step checklist at once.
+
 ## Architecture
 
 The key idea is a **shared simulation** crate that both the client and the headless
