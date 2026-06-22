@@ -106,13 +106,10 @@ struct GizmoPiece;
 pub struct TransformGizmoBundle {
     gc: GizmoHub,
     transform: Transform,
-    global_transform: GlobalTransform,
-    // Bevy 0.12 split `ComputedVisibility` into `InheritedVisibility` (hierarchy)
-    // and `ViewVisibility` (per-view culling); both are needed alongside the
-    // user-facing `Visibility` for the mesh children to render.
+    // Bevy 0.15's required components mean `Visibility` now pulls in
+    // `InheritedVisibility`/`ViewVisibility` and `Transform` pulls in
+    // `GlobalTransform`, so they no longer need to be listed here.
     visibility: Visibility,
-    inherited_visibility: InheritedVisibility,
-    view_visibility: ViewVisibility,
     normalize: Normalize3d,
 }
 
@@ -122,9 +119,6 @@ impl Default for TransformGizmoBundle {
             gc: GizmoHub,
             transform: Transform::from_translation(Vec3::splat(f32::MIN)),
             visibility: Visibility::Hidden,
-            inherited_visibility: InheritedVisibility::default(),
-            view_visibility: ViewVisibility::default(),
-            global_transform: GlobalTransform::default(),
             normalize: Normalize3d,
         }
     }
@@ -157,77 +151,69 @@ fn build_gizmo(
     commands
         .spawn(TransformGizmoBundle::default())
         .with_children(|parent| {
-            // Translation Axes
-            parent
-                .spawn(MaterialMeshBundle {
-                    mesh: arrow_tail_mesh.clone(),
-                    material: gizmo_material_x.clone(),
-                    transform: Transform::from_matrix(Mat4::from_rotation_translation(
-                        Quat::from_rotation_z(std::f32::consts::PI / 2.0),
-                        Vec3::new(axis_length / 2.0, 0.0, 0.0),
-                    )),
-                    ..Default::default()
-                })
-                .insert(GizmoPiece)
-                .insert(NotShadowCaster);
-            parent
-                .spawn(MaterialMeshBundle {
-                    mesh: arrow_tail_mesh.clone(),
-                    material: gizmo_material_y.clone(),
-                    transform: Transform::from_matrix(Mat4::from_rotation_translation(
-                        Quat::from_rotation_y(std::f32::consts::PI / 2.0),
-                        Vec3::new(0.0, axis_length / 2.0, 0.0),
-                    )),
-                    ..Default::default()
-                })
-                .insert(GizmoPiece)
-                .insert(NotShadowCaster);
-            parent
-                .spawn(MaterialMeshBundle {
-                    mesh: arrow_tail_mesh,
-                    material: gizmo_material_z.clone(),
-                    transform: Transform::from_matrix(Mat4::from_rotation_translation(
-                        Quat::from_rotation_x(std::f32::consts::PI / 2.0),
-                        Vec3::new(0.0, 0.0, axis_length / 2.0),
-                    )),
-                    ..Default::default()
-                })
-                .insert(GizmoPiece)
-                .insert(NotShadowCaster);
+            // Bevy 0.15: `MaterialMeshBundle` is replaced by the `Mesh3d` /
+            // `MeshMaterial3d` required-components wrappers, and marker components
+            // can ride along in the spawn tuple. Every gizmo piece is the same five
+            // components differing only in mesh, material, and transform.
+            let mut piece =
+                |mesh: Handle<Mesh>, material: Handle<GizmoMaterial>, transform: Transform| {
+                    parent.spawn((
+                        Mesh3d(mesh),
+                        MeshMaterial3d(material),
+                        transform,
+                        GizmoPiece,
+                        NotShadowCaster,
+                    ));
+                };
 
-            parent
-                .spawn(MaterialMeshBundle {
-                    mesh: cone_mesh.clone(),
-                    material: gizmo_material_x_selectable.clone(),
-                    transform: Transform::from_matrix(Mat4::from_rotation_translation(
-                        Quat::from_rotation_z(std::f32::consts::PI / -2.0),
-                        Vec3::new(axis_length, 0.0, 0.0),
-                    )),
-                    ..Default::default()
-                })
-                .insert(GizmoPiece)
-                .insert(NotShadowCaster);
-            parent
-                .spawn(MaterialMeshBundle {
-                    mesh: cone_mesh.clone(),
-                    material: gizmo_material_y_selectable.clone(),
-                    transform: Transform::from_translation(Vec3::new(0.0, axis_length, 0.0)),
-                    ..Default::default()
-                })
-                .insert(GizmoPiece)
-                .insert(NotShadowCaster);
-            parent
-                .spawn(MaterialMeshBundle {
-                    mesh: cone_mesh.clone(),
-                    material: gizmo_material_z_selectable.clone(),
-                    transform: Transform::from_matrix(Mat4::from_rotation_translation(
-                        Quat::from_rotation_x(std::f32::consts::PI / 2.0),
-                        Vec3::new(0.0, 0.0, axis_length),
-                    )),
-                    ..Default::default()
-                })
-                .insert(GizmoPiece)
-                .insert(NotShadowCaster);
+            // Translation axis tails
+            piece(
+                arrow_tail_mesh.clone(),
+                gizmo_material_x.clone(),
+                Transform::from_matrix(Mat4::from_rotation_translation(
+                    Quat::from_rotation_z(std::f32::consts::PI / 2.0),
+                    Vec3::new(axis_length / 2.0, 0.0, 0.0),
+                )),
+            );
+            piece(
+                arrow_tail_mesh.clone(),
+                gizmo_material_y.clone(),
+                Transform::from_matrix(Mat4::from_rotation_translation(
+                    Quat::from_rotation_y(std::f32::consts::PI / 2.0),
+                    Vec3::new(0.0, axis_length / 2.0, 0.0),
+                )),
+            );
+            piece(
+                arrow_tail_mesh,
+                gizmo_material_z.clone(),
+                Transform::from_matrix(Mat4::from_rotation_translation(
+                    Quat::from_rotation_x(std::f32::consts::PI / 2.0),
+                    Vec3::new(0.0, 0.0, axis_length / 2.0),
+                )),
+            );
+
+            // Selectable cone heads
+            piece(
+                cone_mesh.clone(),
+                gizmo_material_x_selectable.clone(),
+                Transform::from_matrix(Mat4::from_rotation_translation(
+                    Quat::from_rotation_z(std::f32::consts::PI / -2.0),
+                    Vec3::new(axis_length, 0.0, 0.0),
+                )),
+            );
+            piece(
+                cone_mesh.clone(),
+                gizmo_material_y_selectable.clone(),
+                Transform::from_translation(Vec3::new(0.0, axis_length, 0.0)),
+            );
+            piece(
+                cone_mesh.clone(),
+                gizmo_material_z_selectable.clone(),
+                Transform::from_matrix(Mat4::from_rotation_translation(
+                    Quat::from_rotation_x(std::f32::consts::PI / 2.0),
+                    Vec3::new(0.0, 0.0, axis_length),
+                )),
+            );
         });
 }
 
@@ -277,12 +263,11 @@ fn display_potential_joints(
                 *displayed_visible = Visibility::Visible;
             } else {
                 commands
-                    .spawn(MaterialMeshBundle {
-                        mesh: displayed_joint_appearance.mesh.clone().unwrap(),
-                        material,
-                        transform: Transform::from_translation(center),
-                        ..Default::default()
-                    })
+                    .spawn((
+                        Mesh3d(displayed_joint_appearance.mesh.clone().unwrap()),
+                        MeshMaterial3d(material),
+                        Transform::from_translation(center),
+                    ))
                     .insert(DisplayedPotentialJoint)
                     .insert(NotShadowCaster);
             }
@@ -316,12 +301,11 @@ fn display_existing_joints(
                 *displayed_visible = Visibility::Visible;
             } else {
                 commands
-                    .spawn(MaterialMeshBundle {
-                        mesh: displayed_joint_appearance.mesh.clone().unwrap(),
-                        material,
-                        transform: Transform::from_translation(center),
-                        ..Default::default()
-                    })
+                    .spawn((
+                        Mesh3d(displayed_joint_appearance.mesh.clone().unwrap()),
+                        MeshMaterial3d(material),
+                        Transform::from_translation(center),
+                    ))
                     .insert(DisplayedExistingJoint)
                     .insert(NotShadowCaster);
             }
@@ -353,12 +337,11 @@ fn display_predelete_joints(
             *displayed_visible = Visibility::Visible;
         } else {
             commands
-                .spawn(MaterialMeshBundle {
-                    mesh: displayed_joint_appearance.mesh.clone().unwrap(),
-                    material,
-                    transform: Transform::from_translation(center),
-                    ..Default::default()
-                })
+                .spawn((
+                    Mesh3d(displayed_joint_appearance.mesh.clone().unwrap()),
+                    MeshMaterial3d(material),
+                    Transform::from_translation(center),
+                ))
                 .insert(DisplayedPredeleteJoint)
                 .insert(NotShadowCaster);
         }
@@ -377,17 +360,16 @@ fn add_hold_point_delete_zone_visualization(
     if let Some(entity) = hold_points_without_visualization.iter().next() {
         commands
             .entity(entity)
-            .insert(MaterialMeshBundle {
-                visibility: Visibility::Hidden,
-                mesh: meshes.add(Sphere::new(DELETE_RADIUS).mesh().ico(5).unwrap()),
-                material: materials.add(StandardMaterial {
+            .insert((
+                Visibility::Hidden,
+                Mesh3d(meshes.add(Sphere::new(DELETE_RADIUS).mesh().ico(5).unwrap())),
+                MeshMaterial3d(materials.add(StandardMaterial {
                     base_color: Color::hsla(20.0, 1.0, 0.3, 0.25),
                     alpha_mode: AlphaMode::Blend,
                     unlit: true,
                     ..Default::default()
-                }),
-                ..Default::default()
-            })
+                })),
+            ))
             .insert(NotShadowCaster);
     }
 }

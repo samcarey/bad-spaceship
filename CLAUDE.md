@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Bad Spaceship is a 3D game built on the **Bevy 0.14** engine (ECS), with
+Bad Spaceship is a 3D game built on the **Bevy 0.15** engine (ECS), with
 `bevy_rapier3d` for physics and `bevy_egui` for UI. It is a Cargo workspace with
 three crates that compiles both to a **native** binary and to a **WASM** web
 build playable in the browser.
@@ -14,42 +14,53 @@ build playable in the browser.
 This is a pinned-for-reproducibility project — do not "upgrade" your way out of
 build errors (the deliberate Bevy bumps are the exception, done branch-by-branch):
 
-- **Rust is pinned to 1.79.0** via `rust-toolchain.toml` (auto-selected by rustup).
-  Bevy 0.14's MSRV is exactly 1.79.0, so that is the floor (it was 1.76.0 under Bevy
-  0.13). Many *transitive* deps have since published releases that raise their MSRV
-  (crates that moved to edition 2024, which needs a Cargo ≥ 1.85 nightly to even
-  *parse*, or that bumped `rust-version` past 1.79). The committed `Cargo.lock` pins
-  the graph *back* to a 1.79-compatible set — notably `indexmap` 2.5 (2.14 needs
-  edition2024), `proc-macro-crate` 3.2.0 (3.5 pulls `toml_edit` 0.25 → `indexmap`
-  2.13+), `image` 0.25.5 (0.25.6+ pulls `moxcms`, edition2024), `blake3` 1.5.5 +
-  `constant_time_eq` 0.3.1 (0.4 needs edition2024), the `wayland-*` family
-  (`wayland-protocols` 0.32.5, `-client` 0.31.7, `-backend` 0.3.7, `-scanner`/`-sys`
-  0.31.5; the latest releases went edition2024 — downgrade them *together* since they
-  cross-require each other in lockstep), `async-lock` 3.3.0 (3.4 needs rustc 1.85),
-  `rayon` 1.10.0 + `rayon-core` 1.12.1 (1.11/1.13 need rustc 1.80), `spade` 2.12.1
-  (2.15 uses `iter::repeat_n`, unstable until 1.82), plus `ahash` 0.8.11 and `uuid`
-  1.11.0 — the 0.8.12 / 1.16 releases pull **`getrandom` 0.3**, which fails to compile
-  for `wasm32-unknown-unknown` (it needs an explicit `wasm_js` cfg the old build never
-  set); pinning both keeps the wasm graph on `getrandom` 0.2. Do not `cargo update`
-  the whole graph — it will pull newer releases and break the toolchain. To hunt
-  offenders fast: `cargo build` prints a precise "requires rustc 1.XX" error naming the
-  crate + a `cargo update -p … --precise …` hint; `cargo metadata`/`cargo tree` surface
-  `edition2024` *parse* failures (note these flag **all** targets, including
-  Android-only deps like `jni`/`android-activity` that never compile for native-Linux
-  or wasm — chase only the ones an actual `cargo build` for your target stops on).
+- **Rust is pinned to 1.82.0** via `rust-toolchain.toml` (auto-selected by rustup).
+  Bevy 0.15's MSRV is exactly 1.82.0, so that is the floor (it was 1.79.0 under Bevy
+  0.14). Many *transitive* deps publish releases that raise their MSRV — either by
+  moving to **edition 2024** (which needs a Cargo ≥ 1.85 nightly to even *parse*, so no
+  amount of toolchain bumping short of 1.85 helps) or by bumping `rust-version` past
+  1.82. The committed `Cargo.lock` pins the graph *back* to a 1.82-compatible set.
+  Two flavours of pin:
+  - *edition2024 parse blockers* — `indexmap` 2.13.0 (2.14 went edition2024),
+    `proc-macro-crate` 3.2.0 (3.5 pulls `toml_edit` 0.25 → `toml_datetime` 1.1.1,
+    edition2024), `image` 0.25.5 (0.25.6+ pulls `moxcms` → `pxfm`, edition2024),
+    `blake3` 1.5.5 + `constant_time_eq` 0.3.1 (newer `blake3` needs `cpufeatures` 0.3,
+    edition2024; pinning `blake3` drags both back), `stackfuture` 0.3.0 (0.3.1 went
+    edition2024; pulled by `bevy_asset`), and `wayland-protocols` 0.32.12 (only 0.32.13
+    went edition2024 — the rest of the `wayland-*` family is fine at its current
+    versions now, so pin just this one).
+  - *rustc-MSRV (>1.82) blockers* — `gilrs` 0.11.1 (0.11.2 needs rustc 1.84; native
+    gamepad dep), `async-lock` 3.4.1 (3.4.2 needs rustc 1.85), plus `ahash` 0.8.11
+    (0.8.12 pulls **`getrandom` 0.3**, which fails to compile for
+    `wasm32-unknown-unknown` — it needs an explicit `wasm_js` cfg the old build never
+    set; pinning keeps the wasm graph on `getrandom` 0.2).
+  Note the 1.82 floor *relaxed* several pins the 0.14 build needed (`rayon` 1.11/1.13
+  wanted 1.80, `spade` 2.15 wanted 1.82, `uuid` — those resolve forward freely now).
+  Do not `cargo update` the whole graph — it will pull newer releases and break the
+  toolchain. To hunt offenders fast: `cargo build` prints a precise "requires rustc
+  1.XX" error naming the crate + a `cargo update -p … --precise …` hint. For the
+  edition2024 ones, `cargo metadata --filter-platform <target>` (run for
+  `wasm32-unknown-unknown` **and** the native target) parses only the deps that
+  *actually* build for that platform — the unfiltered `cargo metadata`/`cargo tree`
+  flag **all** targets, including Android-only deps (`jni`/`android-activity`) and the
+  unused-on-our-targets `wayland-protocols`, that never compile for native-Linux or
+  wasm. The crates.io versions API exposes a per-version `edition`/`rust_version`
+  field, handy for finding the newest pre-edition2024 / pre-MSRV-bump release to pin to.
 - **`Cargo.lock` is committed** and holds an MSRV-compatible dependency set. Always build
   with `--locked`; when a deliberate re-pin is needed, bump direct deps with targeted
   `cargo update -p <crate> --precise <ver>` rather than a blanket update.
 - The web build targets the **WebGL2 backend** via the `bevy/webgl2` feature (in the
-  client's `web` feature): Bevy 0.14's wgpu 0.20 otherwise compiles the WebGPU backend
+  client's `web` feature): Bevy 0.15's wgpu 23 otherwise compiles the WebGPU backend
   on wasm, which needs `--cfg=web_sys_unstable_apis` and a WebGPU-capable browser. WebGL2
-  is the broad-support renderer the 0.10/wgpu 0.15 build already used on Pages.
-- The web build needs a **version-matched `wasm-bindgen` CLI (exactly 0.2.92)**, matching
-  the `wasm-bindgen` crate pinned in the client (still 0.2.92 under Bevy 0.14 / wgpu 0.20).
-  Use the prebuilt binary from
-  the rustwasm GitHub release, not `cargo install` (building the CLI from source hits the
-  same dependency bitrot). The Pages CI also hardcodes `RUST_TOOLCHAIN` in
-  `.github/workflows/pages.yml` (it `rustup override set`s it, shadowing
+  is the broad-support renderer the build has used on Pages all along.
+- The web build needs a **version-matched `wasm-bindgen` CLI (exactly 0.2.97)**, matching
+  the `wasm-bindgen` crate pinned in the client. Note 0.2.97 is *not* wgpu 23's floor
+  (0.2.95) — `bevy_egui` 0.31 pulls `web-sys` 0.3.74, which hard-pins
+  `wasm-bindgen = "=0.2.97"`, so the whole graph is dragged up to 0.2.97 (and the CLI
+  must match). Use the prebuilt binary from the rustwasm GitHub release, not
+  `cargo install` (building the CLI from source hits the same dependency bitrot). The
+  Pages CI also hardcodes `RUST_TOOLCHAIN` and `WASM_BINDGEN_VERSION` in
+  `.github/workflows/pages.yml` (it `rustup override set`s the toolchain, shadowing
   `rust-toolchain.toml`) — bump **both** in lockstep on a Bevy upgrade.
 
 ## Build & run
@@ -112,7 +123,7 @@ mac 'hostname; nproc; df -h /'
 
 - 6 CPUs, ~23 GB RAM, ~45 GB free disk; outbound internet works (can fetch crates/toolchains).
 - Preinstalled: `git`, `docker`, `python3`. **Not** present: `rustc`/`cargo`/`rustup`,
-  `node`, Homebrew. Install the pinned **Rust 1.76.0** toolchain (see *Toolchain &
+  `node`, Homebrew. Install the pinned **Rust 1.82.0** toolchain (see *Toolchain &
   reproducibility*) before building. Note: `rustup override set` from a prior session
   can shadow `rust-toolchain.toml` for `/root/bs` — `rustup override unset` in the repo
   if `rustc --version` doesn't match the pin.
@@ -237,6 +248,56 @@ mechanical, but a few are easy to get wrong:
   reach the underlying `GenericJoint` (and its `.raw` rapier frame) via
   `AsRef<GenericJoint>` (`joint.data.as_ref().raw…`). `ContactPairView::
   has_any_active_contacts` lost its trailing `s` → `has_any_active_contact`.
+
+### Bevy 0.15 migration gotchas
+
+The 0.14 → 0.15 bump (third-party deps: `bevy_rapier3d` 0.27 → 0.28, `bevy_egui`
+0.28 → 0.31, `bevy_easings` 0.14 → 0.15). The headline change is **required
+components** replacing prefab bundles, which touched almost every spawn:
+
+- **Bundles → required components, and `Handle<T>` is no longer a `Component`.**
+  `Camera3dBundle` → `Camera3d::default()`, `DirectionalLightBundle` →
+  `DirectionalLight`, `PbrBundle`/`MaterialMeshBundle` → the `Mesh3d(handle)` +
+  `MeshMaterial3d(handle)` wrappers, `TransformBundle::from(t)` → bare `t` (since
+  `Transform` now *requires* `GlobalTransform`). Marker components can ride along in
+  the spawn tuple. The wrappers `Deref` to the inner `Handle`, but `Assets::get_mut`
+  wants an id — use `mesh_material.id()`. Querying a material is now
+  `&MeshMaterial3d<StandardMaterial>`, not `&Handle<StandardMaterial>`
+  (`client/src/highlight.rs`). `CascadeShadowConfigBuilder` is a standalone component
+  via `.build()`. User-defined `#[derive(Bundle)]` structs still work and stay the
+  right tool for grouping the game's *own* components — but drop now-redundant
+  `GlobalTransform`/`InheritedVisibility`/`ViewVisibility` fields that the required
+  components of `Transform`/`Visibility` now supply (see `TransformGizmoBundle`).
+- **Gamepads are entities.** No more `Res<ButtonInput<GamepadButton>>` /
+  `Res<Axis<GamepadAxis>>` / `GamepadConnectionEvent` lobby bookkeeping. Query
+  `Query<&Gamepad>` and read state off the component (`gamepad.get(GamepadAxis::…)`,
+  `gamepad.just_pressed(GamepadButton::…)`); the enums lost their `*Type` suffix
+  (`GamepadButtonType::South` → `GamepadButton::South`). This let the whole
+  `GamepadLobby` resource + connection system be deleted (`client/src/input.rs`).
+- **rapier 0.28 made `RapierContext`/`RapierConfiguration` components.** They were
+  resources. `Res<RapierContext>` → the `ReadDefaultRapierContext` system param
+  (derefs to `RapierContext`, so method calls are unchanged); `RapierConfiguration`
+  (for `.gravity`) is now read via `Query<&RapierConfiguration>` + `.single()`. (The
+  *further* split of `RapierContext` into `RapierContextColliders`/`…Joints`/etc. is
+  0.29 — not yet relevant on 0.28.)
+- **bevy_egui 0.30+ made `EguiSettings` a component**, not a resource — query
+  `Query<&mut EguiSettings>` (one per egui context) instead of `ResMut<EguiSettings>`.
+- **`Window.cursor` → `Window.cursor_options`** (grab mode / visibility live in the
+  `cursor_options` sub-struct now; `client/src/platform/native.rs`).
+- **`AsyncReadExt`/`Reader` simplification.** `AssetLoader::load` now takes
+  `reader: &mut dyn Reader` with fully elided lifetimes (drop the `<'a>`), and
+  `Reader` provides `read_to_end` itself — the `AsyncReadExt` import becomes unused
+  (`shared/src/config.rs`).
+- **Smaller renames:** `Time::delta_seconds()` → `delta_secs()`;
+  `EntityCommands::push_children()` → `add_children()`; `EasingsPlugin` is now a
+  `Default` struct (`EasingsPlugin::default()`); `bevy_easings::custom_ease_system`
+  gained a leading `Time<T>` type param (`custom_ease_system::<(), MyComponent>`).
+- **`Reflect` is in the prelude and impl'd for atomics.** Bevy 0.15's
+  `PartialReflect::set` plus `Reflect` impls for `AtomicBool`/`AtomicI32` collide with
+  any custom `.set()` extension method on those types under `use bevy::prelude::*`.
+  The fix was renaming the project's atomic-ext `set` → `store_val`
+  (`client/src/platform/web.rs`). If a bare method call on a std type suddenly
+  "expects `Box<dyn Reflect>`", this is why — rename, don't de-glob the prelude.
 
 ## Pull request workflow
 

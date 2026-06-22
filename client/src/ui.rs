@@ -44,7 +44,9 @@ const MAX_SCALE_FACTOR: f64 = 10.0;
 
 fn update_ui_scale_factor(
     key_input: Res<ButtonInput<KeyCode>>,
-    mut egui_settings: ResMut<EguiSettings>,
+    // bevy_egui 0.30 made `EguiSettings` a component (one per egui context, i.e.
+    // the primary window) rather than a resource.
+    mut egui_settings: Query<&mut EguiSettings>,
     mut custom_scale_factor: Local<CustomScaleFactor>,
 ) {
     if key_input.pressed(KeyCode::ControlLeft) || key_input.pressed(KeyCode::ControlRight) {
@@ -61,9 +63,10 @@ fn update_ui_scale_factor(
             println!("Custom scale factor set to {}", custom_scale_factor.0);
         }
     }
-    // bevy_egui 0.25's `EguiSettings::scale_factor` is now `f32` (was `f64`),
-    // matching Bevy 0.13's switch to `f32` window scale factors.
-    egui_settings.scale_factor = custom_scale_factor.0 as f32;
+    // `EguiSettings::scale_factor` is `f32`; apply to every egui context present.
+    for mut settings in egui_settings.iter_mut() {
+        settings.scale_factor = custom_scale_factor.0 as f32;
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]

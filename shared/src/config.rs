@@ -1,7 +1,7 @@
 use std::marker::PhantomData;
 
 use bevy::{
-    asset::{io::Reader, AssetLoader, AsyncReadExt, LoadContext},
+    asset::{io::Reader, AssetLoader, LoadContext},
     prelude::*,
 };
 use serde::Deserialize;
@@ -48,14 +48,14 @@ where
     // `Into<Box<dyn Error>>` works — reuse `anyhow` (already a dep) for brevity.
     type Error = anyhow::Error;
 
-    // Bevy 0.14 turned `AssetLoader::load` into a native `async fn`, dropping the
-    // hand-rolled `BoxedFuture` of 0.13. The trait ties every `&'a` argument to the
-    // same lifetime, while the `Reader`/`LoadContext` *inner* lifetimes stay elided.
-    async fn load<'a>(
-        &'a self,
-        reader: &'a mut Reader<'_>,
-        _settings: &'a (),
-        _load_context: &'a mut LoadContext<'_>,
+    // Bevy 0.15 simplified `AssetLoader::load` to fully elided lifetimes and turned
+    // `Reader` into a trait object (`&mut dyn Reader`) — no more explicit `'a` tying
+    // the arguments together (0.14 had `&'a mut Reader<'_>`).
+    async fn load(
+        &self,
+        reader: &mut dyn Reader,
+        _settings: &(),
+        _load_context: &mut LoadContext<'_>,
     ) -> Result<T, Self::Error> {
         let mut bytes = Vec::new();
         reader.read_to_end(&mut bytes).await?;

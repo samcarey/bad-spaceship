@@ -7,7 +7,7 @@ use crate::{
     PotentialJoints, PredeleteJoint, PredeleteJoints, ToggleHoldingSystemLabel, UpdateJointsLabel,
 };
 use bevy::prelude::*;
-use bevy_rapier3d::plugin::{RapierConfiguration, RapierContext};
+use bevy_rapier3d::plugin::{RapierConfiguration, ReadDefaultRapierContext};
 use bevy_rapier3d::prelude::{
     ActiveEvents, Collider, ColliderMassProperties, ExternalForce, Friction, ImpulseJoint,
     ReadMassProperties, Restitution, RigidBody, SphericalJointBuilder, Velocity,
@@ -154,11 +154,12 @@ fn spawn_part(mut commands: Commands, mut new_part_events: EventReader<NewPart>)
             .spawn_empty()
             .insert(BoundingRadius(shape.compute_local_bounding_sphere().radius))
             .insert(RigidBody::Dynamic)
-            .insert(TransformBundle::from(Transform::from_xyz(
+            // Bevy 0.15: bare `Transform` (it now requires `GlobalTransform`).
+            .insert(Transform::from_xyz(
                 rng.gen_range(-SPAWN_ZONE_HALF_WIDTH..=SPAWN_ZONE_HALF_WIDTH),
                 rng.gen_range(5.0..=15.0),
                 rng.gen_range(-SPAWN_ZONE_HALF_WIDTH..=SPAWN_ZONE_HALF_WIDTH),
-            )))
+            ))
             .insert(Collider::from(shape))
             .insert(ColliderMassProperties::Density(2.0))
             .insert(Friction::coefficient(1.0))
@@ -260,7 +261,7 @@ fn update_attachable(
     holdables: Query<(), With<Holdable>>,
     attachables: Query<Entity, (With<Holdable>, With<Attachable>)>,
     not_attachables: Query<Entity, (With<Holdable>, Without<Attachable>)>,
-    rapier_context: Res<RapierContext>,
+    rapier_context: ReadDefaultRapierContext,
 ) {
     if let Some(held) = helds.iter().next() {
         let contacted = rapier_context
@@ -301,8 +302,11 @@ fn position_held_part(
         &Velocity,
         &mut ExternalForce,
     )>,
-    physics_config: Res<RapierConfiguration>,
+    // bevy_rapier 0.28 made `RapierConfiguration` a component on the physics-world
+    // entity; with a single default world this query resolves to one item.
+    rapier_config: Query<&RapierConfiguration>,
 ) {
+    let gravity = rapier_config.single().gravity;
     for (part_transform, target_position, mass_properties, velocity, mut ext_forces) in
         parts.iter_mut()
     {
@@ -314,7 +318,7 @@ fn position_held_part(
 
             // bevy_rapier 0.23 made `ReadMassProperties`'s inner field private;
             // it derefs to `MassProperties`, so drop the `.0`.
-            let gravity_cancelation_force = -mass_properties.mass * physics_config.gravity;
+            let gravity_cancelation_force = -mass_properties.mass * gravity;
             let positioning_force = positioning_acceleration * mass_properties.mass;
             ext_forces.force = positioning_force + gravity_cancelation_force;
         }
@@ -354,7 +358,7 @@ fn orient_held_part(
 
 fn update_active_joints(
     holdables: Query<Option<&Children>, (With<GlobalTransform>, With<Holdable>)>, //remove transform??
-    rapier_context: Res<RapierContext>,
+    rapier_context: ReadDefaultRapierContext,
     mut potential_joints: ResMut<PotentialJoints>,
     mut existing_joints: ResMut<ExistingJoints>,
     players: Query<(&Holding, &FocusedInteractable)>,

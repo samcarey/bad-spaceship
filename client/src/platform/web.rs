@@ -51,11 +51,11 @@ impl PointerLockTracker {
             match get_document().pointer_lock_element() {
                 Some(element) => {
                     if element == get_body().dyn_into::<Element>().unwrap() {
-                        clone.lock.set(true);
+                        clone.lock.store_val(true);
                     }
                 }
                 None => {
-                    clone.lock.set(false);
+                    clone.lock.store_val(false);
                 }
             }
         });
@@ -99,8 +99,8 @@ impl MouseMovementTracker {
         let clone = new.clone();
         listen("mousemove", move |_event| {
             let me = _event.clone().dyn_into::<MouseEvent>().unwrap();
-            clone.delta_x.set(me.movement_x());
-            clone.delta_y.set(me.movement_y());
+            clone.delta_x.store_val(me.movement_x());
+            clone.delta_y.store_val(me.movement_y());
         });
         new
     }
@@ -109,8 +109,8 @@ impl MouseMovementTracker {
         let delta = Vec2::new(self.delta_x.get() as f32, self.delta_y.get() as f32);
 
         if delta != Vec2::ZERO {
-            self.delta_x.set(0);
-            self.delta_y.set(0);
+            self.delta_x.store_val(0);
+            self.delta_y.store_val(0);
             Some(MouseMotion {
                 delta: delta * 0.15,
             })
@@ -149,9 +149,9 @@ impl MouseClickTracker {
             let me = _event.clone().dyn_into::<MouseEvent>().unwrap();
             // Wait for left click specifically
             if me.button() == 0 {
-                clone.just_pressed.set(true);
-                clone.x.set(me.client_x());
-                clone.y.set(me.client_y());
+                clone.just_pressed.store_val(true);
+                clone.x.store_val(me.client_x());
+                clone.y.store_val(me.client_y());
             }
         });
         new
@@ -166,7 +166,7 @@ impl SetWebMouseButton for ButtonInput<WebMouseButton> {
     fn set_state(&mut self, atomic_key: &Arc<AtomicBool>, button: MouseButton) {
         if atomic_key.get() {
             self.press(WebMouseButton(button));
-            atomic_key.set(false);
+            atomic_key.store_val(false);
         } else {
             self.release(WebMouseButton(button));
         }
@@ -196,7 +196,7 @@ impl KeyboardTracker {
         listen(&event_type, move |_event| {
             let cast_event = _event.clone().dyn_into::<KeyboardEvent>().unwrap();
             if let Some(arc) = self.key_to_arc(&cast_event.key()) {
-                arc.set(set_value);
+                arc.store_val(set_value);
             }
         });
     }
@@ -269,7 +269,7 @@ pub fn get_body() -> HtmlElement {
 
 pub trait AtomicBoolExt {
     fn toggle(&self);
-    fn set(&self, value: bool);
+    fn store_val(&self, value: bool);
     fn get(&self) -> bool;
 }
 
@@ -278,7 +278,7 @@ impl AtomicBoolExt for AtomicBool {
         self.store(!self.load(SeqCst), SeqCst);
     }
 
-    fn set(&self, value: bool) {
+    fn store_val(&self, value: bool) {
         self.store(value, SeqCst);
     }
 
@@ -288,12 +288,12 @@ impl AtomicBoolExt for AtomicBool {
 }
 
 pub trait AtomicI32Ext {
-    fn set(&self, value: i32);
+    fn store_val(&self, value: i32);
     fn get(&self) -> i32;
 }
 
 impl AtomicI32Ext for AtomicI32 {
-    fn set(&self, value: i32) {
+    fn store_val(&self, value: i32) {
         self.store(value, SeqCst);
     }
 
@@ -314,8 +314,8 @@ impl WheelTracker {
         let clone = new.clone();
         listen("wheel", move |_event| {
             let we = _event.clone().dyn_into::<WheelEvent>().unwrap();
-            clone.delta_y.set((we.delta_y() * 1000.0) as i32);
-            clone.delta_mode.set(we.delta_mode() as i32);
+            clone.delta_y.store_val((we.delta_y() * 1000.0) as i32);
+            clone.delta_mode.store_val(we.delta_mode() as i32);
         });
         new
     }
@@ -324,7 +324,7 @@ impl WheelTracker {
         match self.delta_y.get() {
             0 => None,
             y => {
-                self.delta_y.set(0);
+                self.delta_y.store_val(0);
                 Some(MouseWheel {
                     unit: match self.delta_mode.get() {
                         0 => MouseScrollUnit::Pixel,
