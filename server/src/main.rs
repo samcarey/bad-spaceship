@@ -1,11 +1,7 @@
 use std::time::Duration;
 
 use bad_spaceship_shared::{character, player, CommonPlugins};
-use bevy::{
-    app::ScheduleRunnerPlugin,
-    asset::{AssetPlugin, ChangeWatcher},
-    prelude::*,
-};
+use bevy::{app::ScheduleRunnerPlugin, asset::AssetPlugin, prelude::*};
 
 fn main() {
     App::new()
@@ -14,10 +10,13 @@ fn main() {
         .add_plugins(MinimalPlugins.set(ScheduleRunnerPlugin::run_loop(
             Duration::from_secs_f64(1.0 / 60.),
         )))
-        // AssetServerSettings was folded into AssetPlugin in Bevy 0.9.
+        // AssetServerSettings was folded into AssetPlugin in Bevy 0.9; 0.12
+        // renamed `asset_folder` to `file_path` and swapped the `ChangeWatcher`
+        // for a simple `watch_for_changes_override` flag.
         .add_plugins(AssetPlugin {
-            asset_folder: "../client/assets".to_string(),
-            watch_for_changes: ChangeWatcher::with_delay(Duration::from_millis(200)),
+            file_path: "../client/assets".to_string(),
+            watch_for_changes_override: Some(true),
+            ..default()
         })
         .add_plugins(CommonPlugins)
         .add_systems(Startup, load_configs)
@@ -33,8 +32,8 @@ fn load_configs(
 ) {
     // We're not going to use these handles,
     // but we need to store them or else the assets will be dropped
-    *handle = Some(asset_server.load("..\\assets\\config\\character.ron"));
-    *handle2 = Some(asset_server.load("..\\..\\assets\\config\\player.ron"));
+    *handle = Some(asset_server.load("..\\assets\\config\\character.character.ron"));
+    *handle2 = Some(asset_server.load("..\\..\\assets\\config\\player.player.ron"));
 
     // TODO: Fix this
     // Theoretically this should work instead of the above, but it doesn't...

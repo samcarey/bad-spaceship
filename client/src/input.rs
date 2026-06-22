@@ -117,7 +117,7 @@ pub fn get_look(
     state: Res<bevy::prelude::State<AppState>>,
 ) {
     let motion = match *state.get() {
-        AppState::InGame => match mouse_motion_events.iter().last() {
+        AppState::InGame => match mouse_motion_events.read().last() {
             Some(event) => event.delta,
             None => Vec2::ZERO,
         },
@@ -183,7 +183,7 @@ fn connection_system(
 ) {
     // Bevy 0.10 split the monolithic GamepadEvent/GamepadEventType into typed
     // events; connections now arrive as GamepadConnectionEvent.
-    for event in gamepad_events.iter() {
+    for event in gamepad_events.read() {
         match &event.connection {
             GamepadConnection::Connected(_) => {
                 lobby.gamepads.insert(event.gamepad);
@@ -256,7 +256,7 @@ fn mouse_wheel(
 ) {
     if let Some(mut mouse_wheel_delta) = players.iter_mut().next() {
         mouse_wheel_delta.0 = 0.0;
-        if let Some(mouse_wheel) = mouse_wheel_events.iter().last() {
+        if let Some(mouse_wheel) = mouse_wheel_events.read().last() {
             mouse_wheel_delta.0 = match mouse_wheel.unit {
                 MouseScrollUnit::Line => mouse_wheel.y,
                 MouseScrollUnit::Pixel => mouse_wheel.y / 108.0,

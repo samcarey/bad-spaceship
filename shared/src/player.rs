@@ -4,7 +4,7 @@ use bevy::{
     core_pipeline::tonemapping::Tonemapping,
     math::Vec3A,
     prelude::*,
-    reflect::{TypePath, TypeUuid},
+    reflect::TypePath,
 };
 use bevy_easings::{CustomComponentEase, EaseFunction, EasingComponent, Lerp};
 use bevy_rapier3d::prelude::Collider;
@@ -54,7 +54,7 @@ impl Plugin for PlayerPlugin {
                 ),
             )
             .add_event::<PlayerClick>()
-            .add_asset::<Config>()
+            .init_asset::<Config>()
             .add_event::<AttachEvent>()
             .add_event::<ReleaseEvent>()
             .init_resource::<CameraOrbitOffset>()
@@ -62,9 +62,9 @@ impl Plugin for PlayerPlugin {
     }
 }
 
-// Bevy 0.11's `Asset` bound now also requires `TypePath`.
-#[derive(Deserialize, Copy, Clone, TypeUuid, TypePath)]
-#[uuid = "39cadc56-aa9c-4543-8640-a018b74b5050"]
+// Bevy 0.12's asset rework replaced `TypeUuid` with the `Asset` derive
+// (which still requires `TypePath`); the type id is derived, not a manual UUID.
+#[derive(Asset, Deserialize, Copy, Clone, TypePath)]
 pub struct Config {
     pub zoom_sensitivity: f32,
     look_sensitivity: f32,
@@ -294,7 +294,7 @@ fn toggle_holding(
     mut release_events: EventWriter<ReleaseEvent>,
     mut hold_events: EventWriter<HoldEvent>,
 ) {
-    if clicks.iter().next().is_some() {
+    if clicks.read().next().is_some() {
         if let Some((mut holding, interactable, player_children, modifying)) =
             players.iter_mut().next()
         {
@@ -353,7 +353,7 @@ fn adjust_camera_on_hold(
     camera_orbit_centers: Query<(Entity, &Transform), With<CameraOrbitCenter>>,
     radiuses: Query<&BoundingRadius, With<Holdable>>,
 ) {
-    if let Some(hold_event) = hold_events.iter().next() {
+    if let Some(hold_event) = hold_events.read().next() {
         if let Ok(radius) = radiuses.get(hold_event.held) {
             for (entity, transform) in camera_orbit_centers.iter() {
                 commands
@@ -376,7 +376,7 @@ fn reset_camera_after_release(
     camera_orbit_offset: ResMut<CameraOrbitOffset>,
     mut camera_orbit_centers: Query<(Entity, &mut Transform), With<CameraOrbitCenter>>,
 ) {
-    if release_events.iter().next().is_some() {
+    if release_events.read().next().is_some() {
         for (entity, transform) in camera_orbit_centers.iter_mut() {
             commands
                 .entity(entity)
@@ -407,7 +407,7 @@ fn adjust_hold_point_on_hold(
     mut hold_points: Query<(&mut Transform, &OriginalPosition), With<HoldPoint>>,
     radiuses: Query<&BoundingRadius, With<Holdable>>,
 ) {
-    if let Some(hold_event) = hold_events.iter().next() {
+    if let Some(hold_event) = hold_events.read().next() {
         if let Ok(radius) = radiuses.get(hold_event.held) {
             for (mut transform, original_position) in hold_points.iter_mut() {
                 transform.translation = original_position.0 + Vec3::Z * radius.0;
@@ -420,7 +420,7 @@ fn reset_hold_point_after_release(
     mut release_events: EventReader<ReleaseEvent>,
     mut hold_points: Query<(&mut Transform, &OriginalPosition), With<HoldPoint>>,
 ) {
-    if release_events.iter().next().is_some() {
+    if release_events.read().next().is_some() {
         for (mut transform, original_position) in hold_points.iter_mut() {
             transform.translation = original_position.0;
         }

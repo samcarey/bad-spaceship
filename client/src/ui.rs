@@ -135,6 +135,8 @@ fn show_bottom_panel(mut contexts: EguiContexts, diagnostics: Res<DiagnosticsSto
     }
     egui::TopBottomPanel::bottom("bottom_panel")
         .frame(Frame::default().multiply_with_opacity(0.0))
+        // Drop the hairline divider egui draws at the panel's edge.
+        .show_separator_line(false)
         .show(contexts.ctx_mut(), |ui| {
             ui.horizontal(|ui| {
                 ui.colored_label(
@@ -171,6 +173,8 @@ Click while joint is highlighted red to delete it.
 fn show_instructions(mut contexts: EguiContexts) {
     egui::TopBottomPanel::top("top_panel")
         .frame(Frame::default().multiply_with_opacity(0.0))
+        // Drop the hairline divider egui draws at the panel's edge.
+        .show_separator_line(false)
         .show(contexts.ctx_mut(), |ui| {
             ui.horizontal(|ui| {
                 ui.colored_label(Color32::from_rgb(255, 0, 0), INSTRUCTIONS);
@@ -183,7 +187,7 @@ fn capture_mouse_on_click(
     state: Res<State<AppState>>,
     mut next_state: ResMut<NextState<AppState>>,
 ) {
-    for _ev in mouse_button_input_events.iter() {
+    for _ev in mouse_button_input_events.read() {
         if *state.get() != AppState::InGame {
             next_state.set(AppState::InGame);
         }

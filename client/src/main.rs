@@ -3,11 +3,9 @@ use bad_spaceship_shared::{
 };
 pub mod highlight;
 use bad_spaceship_shared::player;
-use bevy::asset::ChangeWatcher;
 use bevy::pbr::AmbientLight;
 use bevy::prelude::*;
 use bevy::render::camera::Camera;
-use std::time::Duration;
 
 use highlight::HighlightPlugin;
 use input::InputPlugin;
@@ -43,10 +41,11 @@ fn main() {
                 }),
                 ..default()
             })
-            // Hot-reload config RON assets. Bevy 0.11 replaced the
-            // `watch_for_changes: bool` flag with an optional debounced watcher.
+            // Hot-reload config RON assets. Bevy 0.12's asset rework replaced the
+            // debounced `ChangeWatcher` with a simple override flag; the actual
+            // watcher is only active when the `file_watcher` feature is on (native).
             .set(AssetPlugin {
-                watch_for_changes: ChangeWatcher::with_delay(Duration::from_millis(200)),
+                watch_for_changes_override: Some(true),
                 ..default()
             }),
     )
@@ -84,8 +83,8 @@ fn load_configs(
 ) {
     // We're not going to use these handles,
     // but we need to store them or else the assets will be dropped
-    *handle = Some(asset_server.load("config\\character.ron"));
-    *handle2 = Some(asset_server.load("config\\player.ron"));
+    *handle = Some(asset_server.load("config\\character.character.ron"));
+    *handle2 = Some(asset_server.load("config\\player.player.ron"));
 
     // TODO: Fix this
     // Theoretically this should work instead of the above, but it doesn't...
