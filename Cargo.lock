@@ -208,6 +208,7 @@ dependencies = [
  "bevy_egui",
  "bevy_rapier3d",
  "bevy_web_fullscreen",
+ "chrono",
  "gloo",
  "log",
  "nalgebra",

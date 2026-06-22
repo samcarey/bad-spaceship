@@ -8,6 +8,7 @@ use bevy_egui::{
     egui::{self, Align, Align2, Color32, Frame, Layout},
     EguiContext, EguiPlugin, EguiSettings,
 };
+use chrono::{DateTime, Utc};
 use shadow_rs::shadow;
 
 shadow!(build);
@@ -90,6 +91,37 @@ fn show_menu(mut egui_ctx: ResMut<EguiContext>, mut state: ResMut<State<AppState
         });
 }
 
+/// Age of the build, derived in real time by comparing now against the UTC
+/// build timestamp shown in the bottom panel. Rendered as the single largest
+/// whole unit (e.g. `0-59s`, `1-59m`, `1-23h`, `1-6d`, ...).
+fn commit_age() -> String {
+    let Ok(built) = DateTime::parse_from_rfc2822(build::BUILD_TIME_2822) else {
+        return "?".to_string();
+    };
+    let secs = Utc::now()
+        .signed_duration_since(built)
+        .num_seconds()
+        .max(0);
+    const MINUTE: i64 = 60;
+    const HOUR: i64 = 60 * MINUTE;
+    const DAY: i64 = 24 * HOUR;
+    const WEEK: i64 = 7 * DAY;
+    const YEAR: i64 = 365 * DAY;
+    if secs < MINUTE {
+        format!("{}s", secs)
+    } else if secs < HOUR {
+        format!("{}m", secs / MINUTE)
+    } else if secs < DAY {
+        format!("{}h", secs / HOUR)
+    } else if secs < WEEK {
+        format!("{}d", secs / DAY)
+    } else if secs < YEAR {
+        format!("{}w", secs / WEEK)
+    } else {
+        format!("{}y", secs / YEAR)
+    }
+}
+
 fn show_bottom_panel(mut egui_ctx: ResMut<EguiContext>, diagnostics: Res<Diagnostics>) {
     let mut fps = 0.0;
     if let Some(fps_diagnostic) = diagnostics.get(FrameTimeDiagnosticsPlugin::FPS) {
@@ -104,9 +136,10 @@ fn show_bottom_panel(mut egui_ctx: ResMut<EguiContext>, diagnostics: Res<Diagnos
                 ui.colored_label(
                     Color32::from_rgb(255, 0, 0),
                     format!(
-                        "Commit: {}, Built: {}",
+                        "Commit: {}, Built: {} ({} ago)",
                         env!("SHORT_GIT_HASH"),
-                        build::BUILD_TIME_2822
+                        build::BUILD_TIME_2822,
+                        commit_age(),
                     ),
                 );
                 ui.with_layout(Layout::right_to_left(), |ui| {
