@@ -1,7 +1,8 @@
-// naga_oil item imports (Bevy 0.11+): bring `view` and the per-instance `mesh`
-// storage array into scope.
-#import bevy_pbr::mesh_view_bindings  view
-#import bevy_pbr::mesh_bindings        mesh
+// Bevy 0.12 stores `Mesh.model` as a compressed affine `mat3x4`, so it can no
+// longer be multiplied directly like the old `mat4x4`. Use the `mesh_functions`
+// helpers, which unpack the affine matrix and also handle the WebGL2 batching
+// path (where `mesh` is a fixed-size uniform array, not a storage buffer).
+#import bevy_pbr::mesh_functions::{get_model_matrix, mesh_position_local_to_clip}
 
 struct GizmoMaterial {
     color: vec4<f32>,
@@ -11,8 +12,7 @@ struct GizmoMaterial {
 var<uniform> material: GizmoMaterial;
 
 struct Vertex {
-    // Bevy 0.12 made `mesh` a per-instance storage array indexed by the
-    // instance index, so the vertex shader needs it as an input.
+    // Needed to look up this instance's model matrix.
     @builtin(instance_index) instance_index: u32,
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
@@ -26,10 +26,11 @@ struct VertexOutput {
 
 @vertex
 fn vertex(vertex: Vertex) -> VertexOutput {
-    // 0.12: `mesh.model` became `mesh[instance_index].model`.
-    let world_position = mesh[vertex.instance_index].model * vec4<f32>(vertex.position, 1.0);
     var out: VertexOutput;
-    var modified_clip = view.view_proj * world_position;
+    var modified_clip = mesh_position_local_to_clip(
+        get_model_matrix(vertex.instance_index),
+        vec4<f32>(vertex.position, 1.0),
+    );
     // Remap the depth to be right in front of the camera. We remap (mix) here instead of hardcoding
     // the depth, to ensure the components of the gizmo mesh are sorted correctly.
     modified_clip.z = mix(0.999, 1.0, modified_clip.z);
