@@ -1,8 +1,6 @@
 use bevy::prelude::*;
 use bevy::reflect::TypePath;
-use bevy::transform::TransformSystem;
 use bevy_rapier3d::{
-    na::{UnitQuaternion, Vector3},
     plugin::ReadRapierContext,
     prelude::{
         ActiveCollisionTypes, AdditionalMassProperties, Collider, LockedAxes, MassProperties,
@@ -33,13 +31,6 @@ impl Plugin for CharacterPlugin {
                     .after(touching_ground),
                 spawn,
             ),
-        )
-        // Must run after Rapier's writeback (which resets this ROTATION_LOCKED
-        // body's rotation to identity, before PostUpdate) and before transform
-        // propagation, so the yaw reaches the child camera-orbit hierarchy.
-        .add_systems(
-            PostUpdate,
-            rotate_character_based_on_input.before(TransformSystem::TransformPropagate),
         )
         .init_asset::<Config>();
     }
@@ -154,20 +145,20 @@ fn touching_ground(
 }
 
 fn walk_based_on_input(
-    mut query: Query<(
-        &mut DirectionalInput,
-        &Transform,
-        &mut Velocity,
-        &TouchingGround,
-    )>,
+    mut query: Query<(&mut DirectionalInput, &Yaw, &mut Velocity, &TouchingGround)>,
     configs: Res<Assets<Config>>,
 ) {
     if let Some((_, config)) = configs.iter().next() {
-        for (directional_input, transform, mut velocity, touching_ground) in query.iter_mut() {
+        for (directional_input, yaw, mut velocity, touching_ground) in query.iter_mut() {
             let current_velocity: Vec3 = velocity.linvel.into();
-            let forward = transform.back() * directional_input.0.z;
-            let right = transform.left() * directional_input.0.x;
-            let desired_velocity = Vec3::from(forward + right) * config.max_speed;
+            // The character body is a ROTATION_LOCKED ball whose rotation Rapier
+            // owns, so movement is derived from the look `Yaw` directly instead of
+            // the body transform. This matches the old basis: `back()` = +Z and
+            // `left()` = -X, both yawed by `-yaw` (see `mouse_motion`).
+            let look = Quat::from_rotation_y(-yaw.0);
+            let forward = look * Vec3::Z * directional_input.0.z;
+            let right = look * Vec3::NEG_X * directional_input.0.x;
+            let desired_velocity = (forward + right) * config.max_speed;
             let current_horizontal_velocity =
                 Vec3::new(current_velocity.x, 0.0, current_velocity.z);
             let mut horizontal_velocity_change = if desired_velocity != Vec3::ZERO {
@@ -217,12 +208,5 @@ fn jump_based_on_input(
                 }
             }
         }
-    }
-}
-
-fn rotate_character_based_on_input(mut query: Query<(&mut Transform, &Yaw)>) {
-    for (mut transform, yaw) in query.iter_mut() {
-        let rotation = UnitQuaternion::from_axis_angle(&Vector3::y_axis(), -yaw.0);
-        transform.rotation = rotation.into();
     }
 }
