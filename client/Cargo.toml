@@ -25,6 +25,11 @@ bad-spaceship-shared = { path = "../shared" }
 # selected (it dropped the implicit wasm fallback). The backend cfg is set for
 # the wasm target in `.cargo/config.toml`; this enables the matching feature.
 getrandom = { version = "0.3", features = ["wasm_js"], optional = true }
+# `rand 0.8` (used by client + shared) pulls getrandom *0.2* transitively, a
+# separate line from the 0.3 above. On wasm it needs its `js` backend feature
+# (the 0.3 `wasm_js` cfg doesn't apply to 0.2); enabling it here unifies the
+# feature across the graph so the transitive 0.2 builds for wasm.
+getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"], optional = true }
 shadow-rs = { version = "0.11", default-features = false }
 chrono = "0.4"
 rand = "0.8"
@@ -69,7 +74,7 @@ native = [
 # needs `--cfg=web_sys_unstable_apis` and only works in WebGPU-capable browsers).
 # Enable WebGL2 so wgpu builds the GLES backend instead — broad browser support,
 # matching the renderer the build has used on GitHub Pages all along.
-web = ["web-sys", "gloo", "bevy/webgl2", "getrandom"]
+web = ["web-sys", "gloo", "bevy/webgl2", "getrandom", "getrandom_02"]
 
 [build-dependencies]
 shadow-rs = { version = "0.8", default-features = false }
