@@ -2,7 +2,9 @@ use bevy::{
     asset::uuid_handle,
     prelude::*,
     reflect::TypePath,
-    render::render_resource::{AsBindGroup, ShaderRef},
+    render::render_resource::AsBindGroup,
+    // Bevy 0.17 moved shader types (incl. `ShaderRef`) to `bevy_shader` (`bevy::shader`).
+    shader::ShaderRef,
 };
 
 // Bevy 0.16 deprecated `Handle::weak_from_u128` in favour of the `weak_handle!`

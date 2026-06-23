@@ -3,7 +3,9 @@ use bad_spaceship_shared::{
 };
 pub mod highlight;
 use bad_spaceship_shared::player;
-use bevy::pbr::AmbientLight;
+// Bevy 0.17 split the renderer into focused crates: light types (incl.
+// `AmbientLight`) moved from `bevy_pbr` to `bevy_light` (facade `bevy::light`).
+use bevy::light::AmbientLight;
 use bevy::prelude::*;
 
 use highlight::HighlightPlugin;

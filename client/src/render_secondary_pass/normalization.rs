@@ -31,8 +31,9 @@ pub fn normalize(
         .expect("No camera present in scene");
 
     for mut transform in normalize_query.iter_mut() {
+        // Bevy 0.17 renamed `GlobalTransform::compute_matrix` → `to_matrix`.
         let distance = -camera_position
-            .compute_matrix()
+            .to_matrix()
             .inverse()
             .transform_point3(transform.translation)
             .z;

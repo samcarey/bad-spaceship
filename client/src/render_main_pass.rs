@@ -1,11 +1,13 @@
 use bad_spaceship_shared::{map::PLATFORM_WIDTH_M, part::Holdable, Character, Grass};
+// Bevy 0.17's render-crate split relocated several types out of `bevy_render`:
+// `CascadeShadowConfigBuilder` → `bevy_light` (`bevy::light`), `Indices` /
+// `VertexAttributeValues` → `bevy_mesh` (`bevy::mesh`), and `RenderAssetUsages`
+// → `bevy_asset` (`bevy::asset`).
 use bevy::{
-    pbr::CascadeShadowConfigBuilder,
+    asset::RenderAssetUsages,
+    light::CascadeShadowConfigBuilder,
+    mesh::{Indices, VertexAttributeValues},
     prelude::*,
-    render::{
-        mesh::{Indices, VertexAttributeValues},
-        render_asset::RenderAssetUsages,
-    },
 };
 use bevy_rapier3d::prelude::Collider;
 use rand::Rng;
