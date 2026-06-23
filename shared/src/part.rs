@@ -7,8 +7,8 @@ use crate::{
     PotentialJoints, PredeleteJoint, PredeleteJoints, ToggleHoldingSystemLabel, UpdateJointsLabel,
 };
 use avian3d::prelude::{
-    AngularVelocity, Collider, ColliderDensity, Collisions, Forces, Friction, Gravity,
-    LinearVelocity, ReadRigidBodyForces, Restitution, RigidBody, SphericalJoint, SweptCcd,
+    AngularVelocity, Collider, ColliderDensity, Collisions, ComputedCenterOfMass, Forces, Friction,
+    Gravity, LinearVelocity, ReadRigidBodyForces, Restitution, RigidBody, SphericalJoint, SweptCcd,
     WriteRigidBodyForces,
 };
 use bevy::prelude::*;
@@ -358,10 +358,13 @@ fn orient_held_part(mut parts: Query<(&Transform, &TargetOrientation, Forces)>) 
 
 fn update_active_joints(
     collisions: Collisions,
-    // Part rotations, used to map Avian's world-space (COM-relative) contact
-    // anchors into each body's local frame. Parts are centered uniform cuboids,
-    // so their center of mass coincides with the entity origin.
+    // Body rotations + centers of mass, used to map Avian's world-space,
+    // COM-relative contact anchors into each body's local frame (see the per-point
+    // conversion below). The cuboid parts have their COM at the origin, but the
+    // ground bowl is a trimesh whose COM is *not* at its origin — so the COM term
+    // is required, otherwise a part joined to the ground gets yanked into it.
     transforms: Query<&Transform>,
+    centers_of_mass: Query<&ComputedCenterOfMass>,
     mut potential_joints: ResMut<PotentialJoints>,
     mut existing_joints: ResMut<ExistingJoints>,
     players: Query<(&Holding, &FocusedInteractable)>,
@@ -408,8 +411,13 @@ fn update_active_joints(
 
                     if contact_pair.is_touching() {
                         // Avian contact anchors are world-space, relative to each
-                        // body's center of mass; rotate into the body's local frame
-                        // to recover rapier's `local_p1`/`local_p2`.
+                        // body's center of mass: `anchor = world_point - (pos + rot *
+                        // com_local)`. Recover the body-local contact point with
+                        // `rot⁻¹ * anchor + com_local`. Dropping the `+ com_local`
+                        // term only happens to work when the COM sits at the origin
+                        // (the centered cuboid parts); the ground trimesh's COM does
+                        // not, so omitting it offset the ground anchor and dragged the
+                        // joined part down into the bowl.
                         let rot1 = transforms
                             .get(collider1)
                             .map(|t| t.rotation)
@@ -418,10 +426,18 @@ fn update_active_joints(
                             .get(collider2)
                             .map(|t| t.rotation)
                             .unwrap_or(Quat::IDENTITY);
+                        let com1 = centers_of_mass
+                            .get(collider1)
+                            .map(|c| c.0)
+                            .unwrap_or(Vec3::ZERO);
+                        let com2 = centers_of_mass
+                            .get(collider2)
+                            .map(|c| c.0)
+                            .unwrap_or(Vec3::ZERO);
                         for manifold in &contact_pair.manifolds {
                             for contact in &manifold.points {
-                                let local_p1 = rot1.inverse() * contact.anchor1;
-                                let local_p2 = rot2.inverse() * contact.anchor2;
+                                let local_p1 = rot1.inverse() * contact.anchor1 + com1;
+                                let local_p2 = rot2.inverse() * contact.anchor2 + com2;
                                 if existing_joints
                                     .0
                                     .iter()
