@@ -25,7 +25,12 @@ fn add_lighting(mut commands: Commands) {
     // sibling components in the spawned tuple.
     commands.spawn((
         DirectionalLight {
-            illuminance: 10_000.0,
+            // Scaled down from 10_000 (the value carried over verbatim from the
+            // 0.12 build) because Bevy 0.13+ added a physically-based camera
+            // `Exposure` that 0.12 lacked, making the same illuminance read
+            // brighter. ~0.6x dims the whole scene back toward the 0.12 look;
+            // tune alongside the ambient fill in main.rs.
+            illuminance: 6_000.0,
             shadows_enabled: true,
             ..Default::default()
         },
