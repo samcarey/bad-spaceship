@@ -7,7 +7,7 @@ use std::sync::{
     Arc,
 };
 use wasm_bindgen::JsCast;
-use web_sys::{Document, Element, Event, HtmlElement};
+use web_sys::{Document, Event, HtmlElement};
 
 pub struct PlatformPlugin;
 
@@ -42,16 +42,11 @@ impl PointerLockTracker {
         let new = Self::default();
         let clone = new.clone();
         listen("pointerlockchange", move |_event| {
-            match get_document().pointer_lock_element() {
-                Some(element) => {
-                    if element == get_body().dyn_into::<Element>().unwrap() {
-                        clone.lock.store_val(true);
-                    }
-                }
-                None => {
-                    clone.lock.store_val(false);
-                }
-            }
+            // Locked whenever *any* element holds the lock — that element is the
+            // canvas (see `hide_cursor`), not `<body>`.
+            clone
+                .lock
+                .store_val(get_document().pointer_lock_element().is_some());
         });
         new
     }
@@ -62,7 +57,22 @@ impl PointerLockTracker {
 }
 
 fn hide_cursor() {
-    get_body().request_pointer_lock();
+    // Lock the *canvas*, not `<body>`. winit's mouse-button and scroll-wheel
+    // listeners live on the canvas, and under pointer lock the browser routes
+    // mouse events only to the lock element — locking `<body>` meant winit never
+    // saw in-game clicks or scroll. (Keyboard was unaffected: key events target
+    // the focused canvas regardless of pointer lock, which is why WASD worked but
+    // clicking to grab didn't.) Locking the canvas lets winit's native input see
+    // clicks/scroll under lock. Mouse *motion* comes through either way — winit's
+    // `MouseMotion` fires from a document-level raw-motion listener.
+    if let Some(canvas) = get_document()
+        .query_selector("canvas")
+        .ok()
+        .flatten()
+        .and_then(|el| el.dyn_into::<HtmlElement>().ok())
+    {
+        canvas.request_pointer_lock();
+    }
 }
 
 /// Tells the HTML loading overlay (`client/index.html`) that the game is actually
