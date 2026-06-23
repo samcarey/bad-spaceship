@@ -9,7 +9,7 @@ use crate::{
 use bevy::prelude::*;
 use bevy_rapier3d::plugin::{RapierConfiguration, ReadRapierContext};
 use bevy_rapier3d::prelude::{
-    ActiveEvents, Collider, ColliderMassProperties, ExternalForce, Friction, ImpulseJoint,
+    ActiveEvents, Ccd, Collider, ColliderMassProperties, ExternalForce, Friction, ImpulseJoint,
     ReadMassProperties, Restitution, RigidBody, SphericalJointBuilder, Velocity,
 };
 use bevy_rapier3d::rapier::prelude::ColliderShape;
@@ -165,6 +165,15 @@ fn spawn_part(mut commands: Commands, mut new_part_events: EventReader<NewPart>)
             .insert(Friction::coefficient(1.0))
             .insert(Restitution::coefficient(0.1))
             .insert(ActiveEvents::COLLISION_EVENTS)
+            // Blocks spawn high (y 5..15) and hit the thin trimesh ground fast.
+            // Without continuous collision detection, rapier 0.30's discrete
+            // solver lets a fast impact penetrate deeply in a single step and
+            // its soft-contact recovery leaves the block partially embedded
+            // (a regression vs the Bevy 0.12-era rapier, which pushed them back
+            // out). CCD catches the fast impact so blocks rest flush. Measured
+            // on the headless server: worst-case ground penetration dropped from
+            // ~0.07-0.08 to ~0.002 (normal contact margin) with this enabled.
+            .insert(Ccd::enabled())
             .insert(PartBundle::default());
     }
 }
