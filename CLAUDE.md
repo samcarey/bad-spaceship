@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Bad Spaceship is a 3D game built on the **Bevy 0.18** engine (ECS), with
+Bad Spaceship is a 3D game built on the **Bevy 0.19** engine (ECS), with
 **Avian** (`avian3d`, an XPBD physics engine) for physics and `bevy_egui` for UI.
 It is a Cargo workspace with three crates that compiles both to a **native**
 binary and to a **WASM** web build playable in the browser. (Physics was migrated
@@ -453,6 +453,43 @@ small, mostly-mechanical bump — only four code changes:
   `custom_ease_system::<(), C>` signature is unchanged. wgpu 27 needed no shader/bind-group
   changes (`#{MATERIAL_BIND_GROUP}` already tracks the engine). web-sys/wasm-bindgen stayed
   at 0.3.102 / 0.2.125, so the CI `WASM_BINDGEN_VERSION` pin is unchanged.
+
+### Bevy 0.19 migration gotchas
+
+The 0.18 → 0.19 bump (third-party deps: `avian3d` 0.6.1 → **0.7.0** — the Avian release
+targeting 0.19, parry3d 0.26 → 0.27; `bevy_egui` 0.39 → **0.40** — targets 0.19, bundles
+egui 0.34). MSRV rose to **1.95**, still under the 1.96 pin, so the toolchain is unchanged.
+wgpu went 27 → **29**. This bump was *tiny* — `shared`/server compiled with zero code
+changes, and the client needed only two one-line fixes. The 0.19 guide's two headline
+changes (Resources-are-Components, rendering-as-systems) don't touch anything here.
+
+- **`DirectionalLight::shadows_enabled` → `shadow_maps_enabled`.** A straight field rename
+  (`client/src/render_main_pass.rs`). The only Bevy-side code change in the whole bump.
+- **bevy_egui 0.40 removed `EguiContextSettings::scale_factor`.** UI scaling moved to egui
+  0.34's per-context **zoom factor**. The Ctrl +/- zoom handler (`update_ui_scale_factor`,
+  `client/src/ui.rs`) now calls `ctx.set_zoom_factor(..)` instead of writing the old
+  settings field, and turns egui's *built-in* keyboard zoom off
+  (`options.zoom_with_keyboard = false`) so the two don't both react to the same keypress.
+  Because it now touches an egui context, the system moved from `Update` into
+  `EguiPrimaryContextPass` and became fallible (`-> Result`, `ctx_mut()?`).
+- **`bevy/webgl2` is still valid in 0.19** — the umbrella `bevy` crate exposes `webgl2`
+  (it forwards to the inner `bevy_internal/webgl`), so the `web` feature is unchanged.
+  Don't be fooled by `bevy_internal` naming the feature `webgl`; the public name is `webgl2`.
+- **wasm-bindgen / web-sys unchanged at 0.2.125 / 0.3.102** despite wgpu 27 → 29 (verified by
+  regenerating the lock), so the client `=0.2.125` pin and CI `WASM_BINDGEN_VERSION` hold.
+- **Lockfile regenerated from scratch** (`rm Cargo.lock && cargo generate-lockfile`), the
+  prescribed move on a Bevy bump: single Bevy 0.19 in the graph, no duplicate engine.
+- **Known deferred deprecations (warnings, not errors):** egui 0.34 deprecated the
+  top-level panel-on-context API — `egui::TopBottomPanel::{top,bottom}` and `Panel::show(ctx, ..)`
+  (used by `show_instructions`/`show_bottom_panel` in `ui.rs`) warn, pointing at
+  `Panel::{top,bottom}` + `show_inside(ui, ..)`. They still compile and render identically;
+  the replacement nests panels inside a `Ui` rather than a context, a non-trivial restructure
+  with layout-regression risk, so it's left as a separate egui-focused follow-up.
+- **Verify at runtime (wgpu 29):** the custom gizmo overlay shader
+  (`client/assets/gizmo_material.wgsl`). The migration guide lists no required WGSL/bind-group
+  changes and `#{MATERIAL_BIND_GROUP}` tracks the engine, but wgpu major bumps occasionally
+  surface as a runtime shader-compile failure (not a Rust error) — eyeball the gizmo/cone
+  overlays and scene lighting/shadows on the live build.
 
 ## Migrating bevy_rapier3d → Avian
 

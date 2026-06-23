@@ -1,6 +1,6 @@
-# Pinned toolchain for reproducible builds of this Bevy 0.18 (2026-era) project.
-# Bevy 0.18 / wgpu 27 build with a version-matched `wasm-bindgen` CLI (see
-# `.github/workflows/pages.yml`). Bevy 0.18's MSRV is 1.89; this pins a recent
+# Pinned toolchain for reproducible builds of this Bevy 0.19 (2026-era) project.
+# Bevy 0.19 / wgpu 29 build with a version-matched `wasm-bindgen` CLI (see
+# `.github/workflows/pages.yml`). Bevy 0.19's MSRV is 1.95; this pins a recent
 # stable comfortably above it, known to build the whole graph. Keep this and
 # `RUST_TOOLCHAIN` in pages.yml in lockstep.
 [toolchain]

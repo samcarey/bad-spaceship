@@ -6,7 +6,7 @@ use bevy::{
 };
 use bevy_egui::{
     egui::{self, Align, Align2, Color32, Frame, Layout},
-    EguiContexts, EguiContextSettings, EguiPlugin, EguiPrimaryContextPass,
+    EguiContexts, EguiPlugin, EguiPrimaryContextPass,
 };
 use chrono::{DateTime, FixedOffset, Utc};
 use once_cell::sync::Lazy;
@@ -20,21 +20,22 @@ impl Plugin for UiPlugin {
         // bevy_egui 0.35 deprecated single-pass mode (the old
         // `enable_multipass_for_primary_context` flag) and made multipass the only
         // supported path, so add the plugin with `default()`. Multipass requires
-        // egui-drawing systems to run in the dedicated `EguiPrimaryContextPass`
-        // schedule rather than `Update`, and `EguiContexts::ctx_mut()` now returns
-        // a `Result` (the systems below are fallible and use `?`). Systems that
-        // only read input or egui settings (not the context) stay in `Update`.
+        // systems that touch an egui context to run in the dedicated
+        // `EguiPrimaryContextPass` schedule rather than `Update`, and
+        // `EguiContexts::ctx_mut()` returns a `Result` (those systems are fallible
+        // and use `?`). `update_ui_scale_factor` now drives the egui zoom factor
+        // (bevy_egui 0.40 removed `EguiContextSettings::scale_factor`), so it moved
+        // into the egui pass too. Systems that only read input (not the context),
+        // like `capture_mouse_on_click`, stay in `Update`.
         app.add_plugins((EguiPlugin::default(), FrameTimeDiagnosticsPlugin::default()))
             .add_systems(
                 Update,
-                (
-                    capture_mouse_on_click.run_if(in_state(AppState::Initial)),
-                    update_ui_scale_factor,
-                ),
+                capture_mouse_on_click.run_if(in_state(AppState::Initial)),
             )
             .add_systems(
                 EguiPrimaryContextPass,
                 (
+                    update_ui_scale_factor,
                     show_menu.run_if(in_state(AppState::InGameMenu)),
                     show_instructions,
                     show_bottom_panel,
@@ -56,12 +57,9 @@ const MAX_SCALE_FACTOR: f64 = 10.0;
 
 fn update_ui_scale_factor(
     key_input: Res<ButtonInput<KeyCode>>,
-    // bevy_egui 0.30 made egui settings a component (one per egui context, i.e.
-    // the primary window) rather than a resource; 0.34 renamed it from
-    // `EguiSettings` to `EguiContextSettings`.
-    mut egui_settings: Query<&mut EguiContextSettings>,
+    mut contexts: EguiContexts,
     mut custom_scale_factor: Local<CustomScaleFactor>,
-) {
+) -> Result {
     if key_input.pressed(KeyCode::ControlLeft) || key_input.pressed(KeyCode::ControlRight) {
         if let Some(adjustment) = if key_input.just_pressed(KeyCode::Equal) {
             Some(1.1)
@@ -73,13 +71,16 @@ fn update_ui_scale_factor(
             custom_scale_factor.0 = (custom_scale_factor.0 * adjustment)
                 .max(MIN_SCALE_FACTOR)
                 .min(MAX_SCALE_FACTOR);
-            println!("Custom scale factor set to {}", custom_scale_factor.0);
         }
     }
-    // `EguiSettings::scale_factor` is `f32`; apply to every egui context present.
-    for mut settings in egui_settings.iter_mut() {
-        settings.scale_factor = custom_scale_factor.0 as f32;
-    }
+    // bevy_egui 0.40 / egui 0.34 removed `EguiContextSettings::scale_factor`; UI
+    // scaling is now egui's per-context *zoom factor*. Drive it from our own
+    // Ctrl +/- handler and turn off egui's built-in keyboard zoom so the two don't
+    // both react to the same keypress.
+    let ctx = contexts.ctx_mut()?;
+    ctx.options_mut(|options| options.zoom_with_keyboard = false);
+    ctx.set_zoom_factor(custom_scale_factor.0 as f32);
+    Ok(())
 }
 
 #[cfg(not(target_arch = "wasm32"))]
