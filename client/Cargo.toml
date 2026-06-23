@@ -9,9 +9,11 @@ build = "build.rs"
 
 [dependencies]
 bevy = { version = "0.18", default-features = false }
-bevy_rapier3d = "0.34"
+# Avian replaces bevy_rapier3d (see shared/Cargo.toml for the feature rationale).
+# The client only needs collider introspection for building render meshes, so the
+# same minimal feature set as `shared` applies; `native` adds the perf features.
+avian3d = { version = "0.6.1", default-features = false, features = ["3d", "f32", "parry-f32"] }
 serde = { version = "1.0", features = ["derive"] }
-nalgebra = "0.32"
 log = "0.4"
 gloo = { version = "0.7", optional = true }
 web-sys = { version = "0.3.40", optional = true }
@@ -56,8 +58,10 @@ default = [
 ]
 
 native = [
-    "bevy_rapier3d/simd-stable",
-    "bevy_rapier3d/parallel",
+    # Avian perf features (rapier's `simd-stable`/`parallel` equivalents). `parallel`
+    # pulls `bevy/multi_threaded`, which the file watcher below also needs.
+    "avian3d/simd",
+    "avian3d/parallel",
     "bevy/bevy_gilrs",
     # winit needs a windowing backend on Linux (was implied by the old `render`
     # umbrella feature, dropped in 0.10).

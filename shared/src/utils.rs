@@ -2,7 +2,6 @@ use bevy::{
     math::{Quat, Vec3},
     prelude::{Entity, Transform},
 };
-use bevy_rapier3d::na::{Quaternion, Unit, UnitQuaternion};
 use std::f32::consts::PI;
 
 pub const DEG_TO_RADIANS: f32 = PI / 180.;
@@ -52,8 +51,6 @@ impl TransformExt for Transform {
 pub trait QuatExt {
     fn to(&self, other: Quat) -> Quat;
     fn to_rotation_vector(&self) -> Vec3;
-    fn to_quaternion(&self) -> Quaternion<f32>;
-    fn to_unit_quaternion(&self) -> UnitQuaternion<f32>;
 }
 
 impl QuatExt for Quat {
@@ -71,24 +68,6 @@ impl QuatExt for Quat {
         let q = if self.w < 0.0 { -*self } else { *self };
         let (axis, angle) = q.to_axis_angle();
         axis * angle
-    }
-
-    fn to_quaternion(&self) -> Quaternion<f32> {
-        Quaternion::new(self.w, self.x, self.y, self.z)
-    }
-
-    fn to_unit_quaternion(&self) -> UnitQuaternion<f32> {
-        UnitQuaternion::from_quaternion(self.to_quaternion())
-    }
-}
-
-pub trait QuaternionExt {
-    fn to_quat(&self) -> Quat;
-}
-
-impl QuaternionExt for Unit<Quaternion<f32>> {
-    fn to_quat(&self) -> Quat {
-        Quat::from_xyzw(self.i, self.j, self.k, self.w)
     }
 }
 

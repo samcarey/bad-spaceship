@@ -6,13 +6,12 @@ use crate::{
     Focused, FocusedInteractable, HoldPoint, Holding, Modifying, Player, PlayerClick,
     PotentialJoints, PredeleteJoint, PredeleteJoints, ToggleHoldingSystemLabel, UpdateJointsLabel,
 };
-use bevy::prelude::*;
-use bevy_rapier3d::plugin::{RapierConfiguration, ReadRapierContext};
-use bevy_rapier3d::prelude::{
-    ActiveEvents, Ccd, Collider, ColliderMassProperties, ExternalForce, Friction, ImpulseJoint,
-    ReadMassProperties, Restitution, RigidBody, SphericalJointBuilder, Velocity,
+use avian3d::prelude::{
+    AngularVelocity, Collider, ColliderDensity, Collisions, Forces, Friction, Gravity,
+    LinearVelocity, ReadRigidBodyForces, Restitution, RigidBody, SphericalJoint, SweptCcd,
+    WriteRigidBodyForces,
 };
-use bevy_rapier3d::rapier::prelude::ColliderShape;
+use bevy::prelude::*;
 use rand::prelude::ThreadRng;
 use rand::Rng;
 use std::f32;
@@ -27,11 +26,14 @@ impl Plugin for PartPlugin {
                 (
                     replace_fallen_parts,
                     update_focused,
-                    position_held_part.after(zero_part_external_forces),
-                    orient_held_part.after(zero_part_external_forces),
+                    // Avian's `Forces` helper auto-clears after the physics step, so
+                    // the old per-frame `zero_part_external_forces` system is gone.
+                    // Both force systems write through `Forces` on the held part, so
+                    // order them to avoid an ambiguous double-write.
+                    position_held_part,
+                    orient_held_part.after(position_held_part),
                     spawn_part,
                     update_attachable,
-                    zero_part_external_forces,
                     (update_active_joints, update_predelete_joints)
                         .in_set(UpdateJointsLabel)
                         .before(ToggleHoldingSystemLabel),
@@ -124,15 +126,18 @@ struct PartBundle {
     interactable: Interactable,
     holdable: Holdable,
     gets_replaced: GetsReplaced,
-    mass_properties: ReadMassProperties,
-    velocity: Velocity,
-    external_force: ExternalForce,
+    // Avian splits rapier's `Velocity` into two components; mass/inertia are
+    // computed automatically from the collider + density (no `ReadMassProperties`
+    // to carry), and forces are applied via the `Forces` query helper (no
+    // `ExternalForce` component).
+    linear_velocity: LinearVelocity,
+    angular_velocity: AngularVelocity,
 }
 
 #[derive(Message)]
 struct NewPart;
 
-fn get_random_shape(rng: &mut ThreadRng) -> ColliderShape {
+fn get_random_shape(rng: &mut ThreadRng) -> Collider {
     loop {
         let (x, y, z) = (
             rng.gen_range(MIN_PART_SIZE..=MAX_PART_SIZE),
@@ -141,7 +146,9 @@ fn get_random_shape(rng: &mut ThreadRng) -> ColliderShape {
         );
         let volume = x * y * z;
         if volume < MAX_PART_VOLUME && volume > MIN_PART_VOLUME {
-            return ColliderShape::cuboid(x / 2.0, y / 2.0, z / 2.0);
+            // Avian's `Collider::cuboid` takes FULL extents (rapier's cuboid took
+            // half-extents, hence the old `/ 2.0`); the resulting box is identical.
+            return Collider::cuboid(x, y, z);
         }
     }
 }
@@ -149,10 +156,12 @@ fn get_random_shape(rng: &mut ThreadRng) -> ColliderShape {
 fn spawn_part(mut commands: Commands, mut new_part_events: MessageReader<NewPart>) {
     let mut rng = rand::thread_rng();
     for _ in new_part_events.read() {
-        let shape = get_random_shape(&mut rng);
+        let collider = get_random_shape(&mut rng);
+        // Bounding radius from the parry shape, before the collider is moved in.
+        let bounding_radius = collider.shape().compute_local_bounding_sphere().radius;
         commands
             .spawn_empty()
-            .insert(BoundingRadius(shape.compute_local_bounding_sphere().radius))
+            .insert(BoundingRadius(bounding_radius))
             .insert(RigidBody::Dynamic)
             // Bevy 0.15: bare `Transform` (it now requires `GlobalTransform`).
             .insert(Transform::from_xyz(
@@ -160,20 +169,20 @@ fn spawn_part(mut commands: Commands, mut new_part_events: MessageReader<NewPart
                 rng.gen_range(5.0..=15.0),
                 rng.gen_range(-SPAWN_ZONE_HALF_WIDTH..=SPAWN_ZONE_HALF_WIDTH),
             ))
-            .insert(Collider::from(shape))
-            .insert(ColliderMassProperties::Density(2.0))
-            .insert(Friction::coefficient(1.0))
-            .insert(Restitution::coefficient(0.1))
-            .insert(ActiveEvents::COLLISION_EVENTS)
+            .insert(collider)
+            // rapier's `ColliderMassProperties::Density` / `Friction::coefficient` /
+            // `Restitution::coefficient` → Avian's `ColliderDensity` / `Friction::new`
+            // / `Restitution::new`. Avian tracks contacts in its graph by default, so
+            // rapier's `ActiveEvents::COLLISION_EVENTS` opt-in is no longer needed.
+            .insert(ColliderDensity(2.0))
+            .insert(Friction::new(1.0))
+            .insert(Restitution::new(0.1))
             // Blocks spawn high (y 5..15) and hit the thin trimesh ground fast.
-            // Without continuous collision detection, rapier 0.30's discrete
-            // solver lets a fast impact penetrate deeply in a single step and
-            // its soft-contact recovery leaves the block partially embedded
-            // (a regression vs the Bevy 0.12-era rapier, which pushed them back
-            // out). CCD catches the fast impact so blocks rest flush. Measured
-            // on the headless server: worst-case ground penetration dropped from
-            // ~0.07-0.08 to ~0.002 (normal contact margin) with this enabled.
-            .insert(Ccd::enabled())
+            // Without continuous collision detection a fast impact can penetrate
+            // deeply in a single solver step and the soft-contact recovery leaves
+            // the block partially embedded. CCD catches the fast impact so blocks
+            // rest flush. (rapier's `Ccd::enabled()` → Avian's `SweptCcd`.)
+            .insert(SweptCcd::default())
             .insert(PartBundle::default());
     }
 }
@@ -270,21 +279,20 @@ fn update_attachable(
     holdables: Query<(), With<Holdable>>,
     attachables: Query<Entity, (With<Holdable>, With<Attachable>)>,
     not_attachables: Query<Entity, (With<Holdable>, Without<Attachable>)>,
-    read_rapier_context: ReadRapierContext,
+    collisions: Collisions,
 ) {
     if let Some(held) = helds.iter().next() {
-        let Ok(rapier_context) = read_rapier_context.single() else {
-            return;
-        };
-        let contacted = rapier_context
-            .contact_pairs_with(held)
-            .filter(|x| x.has_any_active_contact())
-            // bevy_rapier 0.30's `ContactPairView::collider{1,2}` now return
-            // `Option<Entity>` (a collider may have no backing entity); take the
-            // other collider in the pair, skipping any without an entity.
-            .filter_map(|contact_pair| {
-                let (c1, c2) = (contact_pair.collider1()?, contact_pair.collider2()?);
-                Some(if c1 == held { c2 } else { c1 })
+        let contacted = collisions
+            .collisions_with(held)
+            .filter(|pair| pair.is_touching())
+            // Avian's `ContactPair::collider1/2` are plain `Entity` (rapier's were
+            // `Option`); take the other collider in each touching pair.
+            .map(|pair| {
+                if pair.collider1 == held {
+                    pair.collider2
+                } else {
+                    pair.collider1
+                }
             })
             .filter(|&contacted| holdables.get(contacted).is_ok())
             .collect::<Vec<_>>();
@@ -307,82 +315,59 @@ fn update_attachable(
 
 fn position_held_part(
     hold_points: Query<&GlobalTransform, With<HoldPoint>>,
-    mut parts: Query<(
-        &Transform,
-        &TargetPosition,
-        &ReadMassProperties,
-        &Velocity,
-        &mut ExternalForce,
-    )>,
-    // bevy_rapier 0.28 made `RapierConfiguration` a component on the physics-world
-    // entity; with a single default world this query resolves to one item.
-    rapier_config: Query<&RapierConfiguration>,
+    // `Forces` (no `&`/`&mut`) is Avian's per-frame force helper; it accumulates
+    // during the physics step and auto-clears afterwards (rapier's `ExternalForce`
+    // had to be zeroed each frame). It takes `LinearVelocity`/`AngularVelocity`
+    // mutably internally, so it can't share a query with `&LinearVelocity` — read
+    // the velocity off the helper instead.
+    mut parts: Query<(&Transform, &TargetPosition, Forces)>,
+    // Avian's global gravity is a `Res<Gravity>` (rapier read it off the per-world
+    // `RapierConfiguration` component).
+    gravity: Res<Gravity>,
 ) {
-    // Bevy 0.16 made `Query::single` fallible (returns `Result`).
-    let Ok(rapier_config) = rapier_config.single() else {
-        return;
-    };
-    let gravity = rapier_config.gravity;
-    for (part_transform, target_position, mass_properties, velocity, mut ext_forces) in
-        parts.iter_mut()
-    {
+    for (part_transform, target_position, mut forces) in parts.iter_mut() {
         if let Ok(hold_point_position) = hold_points.get(target_position.hold_point_entity) {
             let vector_between = hold_point_position.translation() - part_transform.translation;
+            let velocity = forces.linear_velocity();
             let positioning_acceleration = target_position
                 .oscillator
-                // bevy_rapier 0.34 renamed `Velocity::linvel`/`angvel` →
-                // `linear`/`angular`.
-                .calculate_acceleration(&vector_between.into(), &velocity.linear);
-
-            // bevy_rapier 0.23 made `ReadMassProperties`'s inner field private;
-            // it derefs to `MassProperties`, so drop the `.0`.
-            let gravity_cancelation_force = -mass_properties.mass * gravity;
-            let positioning_force = positioning_acceleration * mass_properties.mass;
-            ext_forces.force = positioning_force + gravity_cancelation_force;
+                .calculate_acceleration(&vector_between, &velocity);
+            // Apply as an acceleration so Avian handles the mass conversion;
+            // subtracting gravity cancels the part's weight so it floats to the hold
+            // point (rapier set force = mass·(accel − gravity) explicitly).
+            forces.apply_linear_acceleration(positioning_acceleration - gravity.0);
         }
     }
 }
 
-fn zero_part_external_forces(mut parts: Query<&mut ExternalForce, With<Holdable>>) {
-    for mut forces in parts.iter_mut() {
-        forces.force = Vec3::ZERO;
-        forces.torque = Vec3::ZERO;
-    }
-}
-
-fn orient_held_part(
-    mut parts: Query<(
-        &Transform,
-        &TargetOrientation,
-        &Velocity,
-        &mut ExternalForce,
-        &ReadMassProperties,
-    )>,
-) {
-    for (part_transform, target_orientation, velocity, mut ext_forces, mass_properties) in
-        parts.iter_mut()
-    {
+fn orient_held_part(mut parts: Query<(&Transform, &TargetOrientation, Forces)>) {
+    for (part_transform, target_orientation, mut forces) in parts.iter_mut() {
         let rotation_between =
             (target_orientation.quat * part_transform.rotation.conjugate()).to_rotation_vector();
+        let angular_velocity = forces.angular_velocity();
         let angular_acceleration = target_orientation
             .oscillator
-            .calculate_acceleration(&rotation_between, &velocity.angular);
-        let inertia_sqrt = mass_properties.principal_inertia_local_frame;
-        // let torque = inertia_sqrt * (inertia_sqrt * angular_acceleration);
-        let torque = inertia_sqrt * angular_acceleration;
-        ext_forces.torque = torque;
+            .calculate_acceleration(&rotation_between, &angular_velocity);
+        // Apply as angular acceleration; Avian converts it to torque via the body's
+        // inertia tensor. (rapier multiplied by the principal-inertia vector
+        // explicitly — the held-part orientation response may feel slightly
+        // different but is now physically consistent.)
+        forces.apply_angular_acceleration(angular_acceleration);
     }
 }
 
 fn update_active_joints(
-    holdables: Query<Option<&Children>, (With<GlobalTransform>, With<Holdable>)>, //remove transform??
-    read_rapier_context: ReadRapierContext,
+    collisions: Collisions,
+    // Part rotations, used to map Avian's world-space (COM-relative) contact
+    // anchors into each body's local frame. Parts are centered uniform cuboids,
+    // so their center of mass coincides with the entity origin.
+    transforms: Query<&Transform>,
     mut potential_joints: ResMut<PotentialJoints>,
     mut existing_joints: ResMut<ExistingJoints>,
     players: Query<(&Holding, &FocusedInteractable)>,
-    // Bevy 0.16's relationships rework renamed the `Parent` component to `ChildOf`
-    // (its parent accessor is `.parent()` rather than the old `.get()`).
-    joints: Query<(&ChildOf, &ImpulseJoint)>,
+    // Avian joints are standalone entities carrying `body1`/`body2` (rapier's
+    // joint was a child of one body, with the other reached via `joint.parent`).
+    joints: Query<&SphericalJoint>,
 ) {
     potential_joints.0.clear();
     existing_joints.0.clear();
@@ -390,60 +375,62 @@ fn update_active_joints(
     if let Some((holding, interactable)) = players.iter().next() {
         if holding.0 {
             if let Some(held_entity) = interactable.0 {
-                let Ok(rapier_context) = read_rapier_context.single() else {
-                    return;
-                };
-                for contact_pair in rapier_context.contact_pairs_with(held_entity) {
-                    // bevy_rapier 0.30's `collider{1,2}` now return `Option<Entity>`;
-                    // skip any pair whose colliders lack a backing entity.
-                    let (Some(collider1), Some(collider2)) =
-                        (contact_pair.collider1(), contact_pair.collider2())
-                    else {
-                        continue;
-                    };
+                for contact_pair in collisions.collisions_with(held_entity) {
+                    // Avian's `collider1/2` are plain `Entity` (rapier's were `Option`).
+                    let (collider1, collider2) =
+                        (contact_pair.collider1, contact_pair.collider2);
                     let attachable_entity = if collider1 == held_entity {
                         collider2
                     } else {
                         collider1
                     };
 
-                    for (parent, joint) in joints.iter() {
-                        // rapier 0.27's `ImpulseJoint::data` is a `TypedJoint` enum;
-                        // reach the underlying `GenericJoint` once via `AsRef`.
-                        // bevy_rapier 0.34 exposes the raw frame's `local_frame*.
-                        // translation` as a glam `Vec3` (no more nalgebra `.vector`).
-                        let frame = &joint.data.as_ref().raw;
-                        if parent.parent() == held_entity && joint.parent == attachable_entity {
+                    // The `DisplayableJoint` convention is "points.0 is the local
+                    // anchor on entities.0"; `attach` maps body2/anchor2 → entities.0.
+                    for joint in joints.iter() {
+                        let (Some(anchor1), Some(anchor2)) =
+                            (joint.local_anchor1(), joint.local_anchor2())
+                        else {
+                            continue;
+                        };
+                        if joint.body2 == held_entity && joint.body1 == attachable_entity {
                             existing_joints.0.push(DisplayableJoint {
                                 entities: (held_entity, attachable_entity),
-                                points: (
-                                    frame.local_frame2.translation,
-                                    frame.local_frame1.translation, // todo: or just local anchor?
-                                ),
+                                points: (anchor2, anchor1),
                             });
-                        } else if parent.parent() == attachable_entity && joint.parent == held_entity {
+                        } else if joint.body2 == attachable_entity && joint.body1 == held_entity {
                             existing_joints.0.push(DisplayableJoint {
                                 entities: (attachable_entity, held_entity),
-                                points: (
-                                    frame.local_frame2.translation,
-                                    frame.local_frame1.translation, // todo: or just local anchor?
-                                ),
+                                points: (anchor2, anchor1),
                             });
                         }
                     }
 
-                    if contact_pair.has_any_active_contact() {
-                        for manifold in contact_pair.manifolds() {
-                            for contact in manifold.points() {
+                    if contact_pair.is_touching() {
+                        // Avian contact anchors are world-space, relative to each
+                        // body's center of mass; rotate into the body's local frame
+                        // to recover rapier's `local_p1`/`local_p2`.
+                        let rot1 = transforms
+                            .get(collider1)
+                            .map(|t| t.rotation)
+                            .unwrap_or(Quat::IDENTITY);
+                        let rot2 = transforms
+                            .get(collider2)
+                            .map(|t| t.rotation)
+                            .unwrap_or(Quat::IDENTITY);
+                        for manifold in &contact_pair.manifolds {
+                            for contact in &manifold.points {
+                                let local_p1 = rot1.inverse() * contact.anchor1;
+                                let local_p2 = rot2.inverse() * contact.anchor2;
                                 if existing_joints
                                     .0
                                     .iter()
-                                    .map(|p| (p.points.0 - contact.local_p1()).norm())
+                                    .map(|p| (p.points.0 - local_p1).norm())
                                     .all(|d| d > MIN_JOINT_SPACING)
                                 {
                                     potential_joints.0.push(DisplayableJoint {
                                         entities: (collider1, collider2),
-                                        points: (contact.local_p1(), contact.local_p2()),
+                                        points: (local_p1, local_p2),
                                     });
                                 }
                             }
@@ -459,7 +446,7 @@ fn update_predelete_joints(
     holdables: Query<&GlobalTransform, With<Holdable>>,
     mut predelete_joints: ResMut<PredeleteJoints>,
     players: Query<(&Holding, &Modifying, &Children)>,
-    joints: Query<(Entity, &ImpulseJoint, &ChildOf)>,
+    joints: Query<(Entity, &SphericalJoint)>,
     hold_points0: Query<(), With<HoldPoint>>,
     hold_points1: Query<&GlobalTransform, With<HoldPoint>>,
     camera_orbit_centers: Query<&Children>,
@@ -472,13 +459,15 @@ fn update_predelete_joints(
                 get_hold_point_entity(player_children, camera_orbit_centers, &hold_points0)
             {
                 if let Ok(hold_point_position) = hold_points1.get(entity) {
-                    for (joint_entity, joint, joint_parent) in joints.iter() {
-                        if let Ok(transform) = holdables.get(joint_parent.parent()) {
+                    for (joint_entity, joint) in joints.iter() {
+                        // World position of the joint's anchor on `body2` (rapier
+                        // used the joint's parent body + `local_frame2`).
+                        if let (Ok(transform), Some(anchor2)) =
+                            (holdables.get(joint.body2), joint.local_anchor2())
+                        {
                             let transform = transform.compute_transform();
-                            let center = transform.translation
-                                + transform.rotation.mul_vec3(
-                                    joint.data.as_ref().raw.local_frame2.translation,
-                                );
+                            let center =
+                                transform.translation + transform.rotation.mul_vec3(anchor2);
                             if (center - hold_point_position.translation()).length() < DELETE_RADIUS
                             {
                                 predelete_joints.0.push(PredeleteJoint {
@@ -501,14 +490,16 @@ fn attach(
 ) {
     if attach_events.read().next().is_some() {
         for DisplayableJoint { points, entities } in attach_points.0.iter() {
-            let joint = SphericalJointBuilder::new()
-                .local_anchor1(points.1)
-                .local_anchor2(points.0);
-            commands.entity(entities.0).with_children(|children| {
-                children
-                    .spawn_empty()
-                    .insert(ImpulseJoint::new(entities.1, joint));
-            });
+            // Avian joints are standalone entities referencing both bodies (rapier
+            // spawned the joint as a child of `entities.0`). Preserve the rapier
+            // anchor mapping: body1/anchor1 = entities.1/points.1, and
+            // body2/anchor2 = entities.0/points.0 — which keeps `update_*_joints`
+            // and the gizmo rendering (which read back `body2`/`anchor2`) consistent.
+            commands.spawn(
+                SphericalJoint::new(entities.1, entities.0)
+                    .with_local_anchor1(points.1)
+                    .with_local_anchor2(points.0),
+            );
         }
     }
 }

@@ -9,7 +9,7 @@ use bevy::{
     mesh::{Indices, VertexAttributeValues},
     prelude::*,
 };
-use bevy_rapier3d::prelude::Collider;
+use avian3d::prelude::Collider;
 use rand::Rng;
 
 pub struct RenderMainPassPlugin;
@@ -69,7 +69,9 @@ fn assign_parts(
 ) {
     let mut rng = rand::thread_rng();
     for (entity, collider_shape, transform, global_transform) in unassigned.iter() {
-        let dims = collider_shape.as_cuboid().unwrap().half_extents();
+        // Avian colliders expose their parry shape via `.shape()`; parry's
+        // `Cuboid::half_extents` is a field (nalgebra `Vector3`, still indexable).
+        let dims = collider_shape.shape().as_cuboid().unwrap().half_extents;
         commands
             .entity(entity)
             .insert((
@@ -112,7 +114,8 @@ fn assign_characters(
                 transform.clone(),
                 global_transform.clone(),
                 Mesh3d(meshes.add(
-                    Sphere::new(collider_shape.as_ball().unwrap().radius())
+                    // parry's `Ball::radius` is a field (via Avian's `.shape()`).
+                    Sphere::new(collider_shape.shape().as_ball().unwrap().radius)
                         .mesh()
                         .ico(5)
                         .unwrap(),
@@ -158,28 +161,32 @@ fn compute_mesh(shape: &Collider) -> Mesh {
         bevy::render::render_resource::PrimitiveTopology::TriangleList,
         RenderAssetUsages::default(),
     );
-    let trimesh = shape.as_trimesh().unwrap();
+    // Avian exposes the parry shape via `.shape()`. parry's `TriMesh::vertices()`
+    // returns a slice of nalgebra `Point3<f32>` (rapier's view yielded glam-like
+    // points); convert to glam `Vec3` once up front so the rest stays in glam.
+    let trimesh = shape.shape().as_trimesh().unwrap();
+    let verts: Vec<Vec3> = trimesh
+        .vertices()
+        .iter()
+        .map(|v| Vec3::new(v.x, v.y, v.z))
+        .collect();
+    let tris: Vec<[u32; 3]> = trimesh.indices().to_vec();
+
     mesh.insert_attribute(
         Mesh::ATTRIBUTE_POSITION,
-        VertexAttributeValues::from(
-            trimesh
-                .vertices()
-                .map(|vertex| [vertex.x, vertex.y, vertex.z])
-                .collect::<Vec<_>>(),
-        ),
+        VertexAttributeValues::from(verts.iter().map(|v| [v.x, v.y, v.z]).collect::<Vec<_>>()),
     );
     // Compute vertex normals by averaging the normals
     // of every triangle they appear in.
     // NOTE: This is a bit shonky, but good enough for visualisation.
-    let verts = trimesh.vertices().collect::<Vec<_>>();
-    let mut normals: Vec<Vec3> = vec![Vec3::ZERO; trimesh.vertices().len()];
-    for triangle in trimesh.indices().iter() {
+    let mut normals: Vec<Vec3> = vec![Vec3::ZERO; verts.len()];
+    for triangle in tris.iter() {
         let ab = verts[triangle[1] as usize] - verts[triangle[0] as usize];
         let ac = verts[triangle[2] as usize] - verts[triangle[0] as usize];
         let normal = ab.cross(ac);
         // Contribute this normal to each vertex in the triangle.
         for i in 0..3 {
-            normals[triangle[i] as usize] += Vec3::new(normal.x, normal.y, normal.z);
+            normals[triangle[i] as usize] += normal;
         }
     }
     let normals: Vec<[f32; 3]> = normals
@@ -196,24 +203,14 @@ fn compute_mesh(shape: &Collider) -> Mesh {
     mesh.insert_attribute(
         Mesh::ATTRIBUTE_UV_0,
         VertexAttributeValues::from(
-            trimesh
-                .vertices()
-                .map(|vertex| {
-                    [
-                        vertex.x / PLATFORM_WIDTH_M + 0.5,
-                        vertex.z / PLATFORM_WIDTH_M + 0.5,
-                    ]
-                })
+            verts
+                .iter()
+                .map(|v| [v.x / PLATFORM_WIDTH_M + 0.5, v.z / PLATFORM_WIDTH_M + 0.5])
                 .collect::<Vec<_>>(),
         ),
     );
     mesh.insert_indices(Indices::U32(
-        trimesh
-            .indices()
-            .iter()
-            .flat_map(|triangle| triangle.iter())
-            .cloned()
-            .collect(),
+        tris.iter().flat_map(|t| t.iter().copied()).collect(),
     ));
     mesh
 }

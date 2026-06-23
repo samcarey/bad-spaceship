@@ -1,12 +1,6 @@
+use avian3d::prelude::{Collider, Collisions, LinearVelocity, LockedAxes, Mass, RigidBody};
 use bevy::prelude::*;
 use bevy::reflect::TypePath;
-use bevy_rapier3d::{
-    plugin::ReadRapierContext,
-    prelude::{
-        ActiveCollisionTypes, AdditionalMassProperties, Collider, LockedAxes, MassProperties,
-        RigidBody, Velocity,
-    },
-};
 
 use serde::Deserialize;
 
@@ -48,7 +42,9 @@ pub struct Config {
 #[derive(Default, Bundle)]
 struct CharacterBundle {
     character: Character,
-    velocity: Velocity,
+    // Avian splits rapier's single `Velocity` into separate `LinearVelocity` /
+    // `AngularVelocity`; the character only reads/writes linear velocity.
+    linear_velocity: LinearVelocity,
     touching_ground: TouchingGround,
 }
 
@@ -65,14 +61,15 @@ fn spawn(
                 // Bevy 0.15: bare `Transform` (it now requires `GlobalTransform`).
                 .insert(Transform::from_xyz(0.0, 10.0, 0.0))
                 .insert(LockedAxes::ROTATION_LOCKED)
-                .insert(Collider::ball(config.size / 2.0))
-                // .insert(ActiveEvents::COLLISION_EVENTS)
-                .insert(ActiveCollisionTypes::default() | ActiveCollisionTypes::STATIC_STATIC)
+                // Avian's sphere constructor (rapier's "ball"). Avian collides all
+                // collider pairs by default, so rapier's `ActiveCollisionTypes`
+                // opt-in is dropped.
+                .insert(Collider::sphere(config.size / 2.0))
                 .insert(CharacterBundle::default())
-                .insert(AdditionalMassProperties::MassProperties(MassProperties {
-                    mass: 1.0,
-                    ..Default::default()
-                }));
+                // Pin mass to 1.0 (rapier's `AdditionalMassProperties` did this);
+                // movement sets velocity directly so this only scales how the
+                // character shoves parts on contact.
+                .insert(Mass(1.0));
         }
     }
 }
@@ -121,21 +118,19 @@ struct TouchingGround(bool);
 
 fn touching_ground(
     mut query: Query<(Entity, &mut TouchingGround)>,
-    // bevy_rapier 0.30 split `RapierContext` into several components; the
-    // `ReadRapierContext` system param reads the single default physics world and
-    // its `single()` returns a bundled `RapierContext` view (now fallible).
-    read_rapier_context: ReadRapierContext,
+    // Avian's `Collisions` system param yields only the touching contact pairs
+    // (a convenience view over the `ContactGraph`); `collisions_with` is the
+    // rapier `contact_pairs_with` equivalent.
+    collisions: Collisions,
 ) {
-    let Ok(rapier_context) = read_rapier_context.single() else {
-        return;
-    };
     for (entity, mut touching_ground) in query.iter_mut() {
         touching_ground.0 = false;
-        // There's a function called "any_active_contact" that used to work for this,
-        // but doesn't anymore, so I'm just doing it manually until I figure what is wrong.
-        for contact in rapier_context.contact_pairs_with(entity) {
-            if let Some((_, contact)) = contact.find_deepest_contact() {
-                if contact.dist() < 0.002 {
+        for pair in collisions.collisions_with(entity) {
+            if let Some(contact) = pair.find_deepest_contact() {
+                // Avian's `penetration` is positive when the bodies overlap — the
+                // opposite sign from rapier's `dist()`. The old `dist < 0.002`
+                // "in contact" test becomes `penetration > -0.002`.
+                if contact.penetration > -0.002 {
                     touching_ground.0 = true;
                     break;
                 }
@@ -145,12 +140,13 @@ fn touching_ground(
 }
 
 fn walk_based_on_input(
-    mut query: Query<(&mut DirectionalInput, &Yaw, &mut Velocity, &TouchingGround)>,
+    mut query: Query<(&mut DirectionalInput, &Yaw, &mut LinearVelocity, &TouchingGround)>,
     configs: Res<Assets<Config>>,
 ) {
     if let Some((_, config)) = configs.iter().next() {
         for (directional_input, yaw, mut velocity, touching_ground) in query.iter_mut() {
-            let current_velocity: Vec3 = velocity.linear.into();
+            // `LinearVelocity` is a `Vec3` newtype (rapier's `Velocity.linvel`).
+            let current_velocity: Vec3 = velocity.0;
             // The character body is a ROTATION_LOCKED ball whose rotation Rapier
             // owns, so movement is derived from the look `Yaw` directly instead of
             // the body transform. This matches the old basis: `back()` = +Z and
@@ -173,7 +169,7 @@ fn walk_based_on_input(
             if !touching_ground.0 {
                 horizontal_velocity_change *= 0.13; // slowing down even more when in air
             }
-            velocity.linear += horizontal_velocity_change * 0.13; // tuning factor
+            velocity.0 += horizontal_velocity_change * 0.13; // tuning factor
         }
     }
 }
@@ -182,7 +178,7 @@ fn jump_based_on_input(
     mut query: Query<(
         &mut DirectionalInput,
         &Transform,
-        &mut Velocity,
+        &mut LinearVelocity,
         &TouchingGround,
     )>,
     configs: Res<Assets<Config>>,
@@ -191,7 +187,7 @@ fn jump_based_on_input(
         for (directional_input, transform, mut velocity, touching_ground) in query.iter_mut() {
             if directional_input.0.y != 0. {
                 if touching_ground.0 {
-                    let current_velocity: Vec3 = velocity.linear.into();
+                    let current_velocity: Vec3 = velocity.0;
                     let up = transform.up() * directional_input.0.y;
                     let desired_velocity = Vec3::from(up) * config.jump_force;
                     let current_vertical_velocity = Vec3::new(0.0, current_velocity.y, 0.0);
@@ -204,7 +200,7 @@ fn jump_based_on_input(
                     } else {
                         Vec3::ZERO
                     };
-                    velocity.linear += vertical_velocity;
+                    velocity.0 += vertical_velocity;
                 }
             }
         }
