@@ -150,7 +150,7 @@ fn walk_based_on_input(
 ) {
     if let Some((_, config)) = configs.iter().next() {
         for (directional_input, yaw, mut velocity, touching_ground) in query.iter_mut() {
-            let current_velocity: Vec3 = velocity.linvel.into();
+            let current_velocity: Vec3 = velocity.linear.into();
             // The character body is a ROTATION_LOCKED ball whose rotation Rapier
             // owns, so movement is derived from the look `Yaw` directly instead of
             // the body transform. This matches the old basis: `back()` = +Z and
@@ -173,7 +173,7 @@ fn walk_based_on_input(
             if !touching_ground.0 {
                 horizontal_velocity_change *= 0.13; // slowing down even more when in air
             }
-            velocity.linvel += horizontal_velocity_change * 0.13; // tuning factor
+            velocity.linear += horizontal_velocity_change * 0.13; // tuning factor
         }
     }
 }
@@ -191,7 +191,7 @@ fn jump_based_on_input(
         for (directional_input, transform, mut velocity, touching_ground) in query.iter_mut() {
             if directional_input.0.y != 0. {
                 if touching_ground.0 {
-                    let current_velocity: Vec3 = velocity.linvel.into();
+                    let current_velocity: Vec3 = velocity.linear.into();
                     let up = transform.up() * directional_input.0.y;
                     let desired_velocity = Vec3::from(up) * config.jump_force;
                     let current_vertical_velocity = Vec3::new(0.0, current_velocity.y, 0.0);
@@ -204,7 +204,7 @@ fn jump_based_on_input(
                     } else {
                         Vec3::ZERO
                     };
-                    velocity.linvel += vertical_velocity;
+                    velocity.linear += vertical_velocity;
                 }
             }
         }

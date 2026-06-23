@@ -330,7 +330,9 @@ fn position_held_part(
             let vector_between = hold_point_position.translation() - part_transform.translation;
             let positioning_acceleration = target_position
                 .oscillator
-                .calculate_acceleration(&vector_between.into(), &velocity.linvel);
+                // bevy_rapier 0.34 renamed `Velocity::linvel`/`angvel` →
+                // `linear`/`angular`.
+                .calculate_acceleration(&vector_between.into(), &velocity.linear);
 
             // bevy_rapier 0.23 made `ReadMassProperties`'s inner field private;
             // it derefs to `MassProperties`, so drop the `.0`.
@@ -364,7 +366,7 @@ fn orient_held_part(
             (target_orientation.quat * part_transform.rotation.conjugate()).to_rotation_vector();
         let angular_acceleration = target_orientation
             .oscillator
-            .calculate_acceleration(&rotation_between, &velocity.angvel);
+            .calculate_acceleration(&rotation_between, &velocity.angular);
         let inertia_sqrt = mass_properties.principal_inertia_local_frame;
         // let torque = inertia_sqrt * (inertia_sqrt * angular_acceleration);
         let torque = inertia_sqrt * angular_acceleration;
@@ -408,21 +410,23 @@ fn update_active_joints(
                     for (parent, joint) in joints.iter() {
                         // rapier 0.27's `ImpulseJoint::data` is a `TypedJoint` enum;
                         // reach the underlying `GenericJoint` once via `AsRef`.
+                        // bevy_rapier 0.34 exposes the raw frame's `local_frame*.
+                        // translation` as a glam `Vec3` (no more nalgebra `.vector`).
                         let frame = &joint.data.as_ref().raw;
                         if parent.parent() == held_entity && joint.parent == attachable_entity {
                             existing_joints.0.push(DisplayableJoint {
                                 entities: (held_entity, attachable_entity),
                                 points: (
-                                    frame.local_frame2.translation.vector.into(),
-                                    frame.local_frame1.translation.vector.into(), // todo: or just local anchor?
+                                    frame.local_frame2.translation,
+                                    frame.local_frame1.translation, // todo: or just local anchor?
                                 ),
                             });
                         } else if parent.parent() == attachable_entity && joint.parent == held_entity {
                             existing_joints.0.push(DisplayableJoint {
                                 entities: (attachable_entity, held_entity),
                                 points: (
-                                    frame.local_frame2.translation.vector.into(),
-                                    frame.local_frame1.translation.vector.into(), // todo: or just local anchor?
+                                    frame.local_frame2.translation,
+                                    frame.local_frame1.translation, // todo: or just local anchor?
                                 ),
                             });
                         }
@@ -473,7 +477,7 @@ fn update_predelete_joints(
                             let transform = transform.compute_transform();
                             let center = transform.translation
                                 + transform.rotation.mul_vec3(
-                                    joint.data.as_ref().raw.local_frame2.translation.vector.into(),
+                                    joint.data.as_ref().raw.local_frame2.translation,
                                 );
                             if (center - hold_point_position.translation()).length() < DELETE_RADIUS
                             {

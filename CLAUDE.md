@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Bad Spaceship is a 3D game built on the **Bevy 0.17** engine (ECS), with
+Bad Spaceship is a 3D game built on the **Bevy 0.18** engine (ECS), with
 `bevy_rapier3d` for physics and `bevy_egui` for UI. It is a Cargo workspace with
 three crates that compiles both to a **native** binary and to a **WASM** web
 build playable in the browser.
@@ -411,6 +411,44 @@ headline changes are the **event→message rename** and the **render-crate split
   (`TransformSystem::TransformPropagate` → `TransformSystems::Propagate`,
   `client/src/render_secondary_pass/normalization.rs`); `GlobalTransform::compute_matrix` →
   `to_matrix`.
+
+### Bevy 0.18 migration gotchas
+
+The 0.17 → 0.18 bump (third-party deps: `bevy_rapier3d` 0.32 → **0.34** — 0.33 is the
+first 0.18 release, 0.34 the latest; `bevy_egui` 0.38 → **0.39** — *not* 0.40, which
+already targets Bevy 0.19; `bevy_easings` 0.17 → 0.18). MSRV rose to **1.89**, still well
+under the 1.96 pin, so the toolchain is unchanged. wgpu went 25/26 → **27**. This was a
+small, mostly-mechanical bump — only four code changes:
+
+- **Ambient light split into a component *and* a resource.** The scene-wide ambient that
+  0.17 set via `insert_resource(AmbientLight { .. })` moved to a dedicated
+  `GlobalAmbientLight` **resource**; the `AmbientLight` **component** now only overrides
+  ambient per-camera. Swap the resource type — the fields and the `360.0` lux value are
+  unchanged (`bevy::light::GlobalAmbientLight`, `client/src/main.rs`).
+- **`AssetLoader` now requires `TypePath`.** 0.18 added a `TypePath` supertrait bound to
+  `AssetLoader` (and `AssetSaver`/`AssetTransformer`/`Process`). The generic
+  `RonConfigLoader<T>` must derive it (`#[derive(TypePath)]`; the derive bounds
+  `T: TypePath`, which every config satisfies via its `Asset` derive) (`shared/src/config.rs`).
+- **rapier 0.34 renamed `Velocity` fields and switched joint frames to glam.**
+  `Velocity::linvel`/`angvel` → `linear`/`angular` (`shared/src/{character,part}.rs`). The
+  raw `GenericJoint` frame's `local_frame*.translation` is now a glam `Vec3`, so the old
+  nalgebra `.translation.vector` access becomes plain `.translation` (`shared/src/part.rs`).
+- **`bevy_input` split its sources behind features** (`mouse`/`keyboard`/`gamepad`/`touch`/
+  `gestures`). `bevy_window`/`bevy_winit` and `bevy_gilrs` auto-enable the ones they need,
+  so the client (pulls `bevy_winit`, plus `bevy_gilrs` on native) and the server (references
+  only the input *types*, not the gated systems) both build unchanged — **no explicit
+  feature needed**. If a future headless consumer references `KeyCode`/`MouseButton`/
+  `ButtonInput` and fails to resolve them, add `bevy/keyboard` + `bevy/mouse`.
+- **`NextState::set` always triggers transitions now** — it fires `OnEnter`/`OnExit` even
+  when the next state equals the current one (`set_if_neq` restores the old skip-if-same
+  behaviour). Every `next_state.set(..)` here is already guarded by a state check, so no
+  change was needed; watch this if you add an unguarded `set`.
+- **No-ops for us:** bevy_egui 0.38 → 0.39 only removed the deprecated `PICKING_ORDER`
+  const (we don't use picking) — the multipass / `EguiPrimaryContextPass` /
+  `ctx_mut() -> Result` shape is unchanged from 0.17. bevy_easings 0.18's
+  `custom_ease_system::<(), C>` signature is unchanged. wgpu 27 needed no shader/bind-group
+  changes (`#{MATERIAL_BIND_GROUP}` already tracks the engine). web-sys/wasm-bindgen stayed
+  at 0.3.102 / 0.2.125, so the CI `WASM_BINDGEN_VERSION` pin is unchanged.
 
 ## Pull request workflow
 

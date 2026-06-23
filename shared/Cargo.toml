@@ -7,14 +7,14 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-bevy = { version = "0.17", default-features = false }
-bevy_rapier3d = "0.32"
+bevy = { version = "0.18", default-features = false }
+bevy_rapier3d = "0.34"
 serde = { version = "1.0", features = ["derive"] }
 ron = "0.7"
 rand = "0.8"
 include_dir = { version = "0.7" }
 anyhow = "1.0"
-bevy_easings = { version = "0.17", default-features = false }
+bevy_easings = { version = "0.18", default-features = false }
 
 [features]
 default = ["bevy/png"]

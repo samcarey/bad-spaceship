@@ -3,9 +3,11 @@ use bad_spaceship_shared::{
 };
 pub mod highlight;
 use bad_spaceship_shared::player;
-// Bevy 0.17 split the renderer into focused crates: light types (incl.
-// `AmbientLight`) moved from `bevy_pbr` to `bevy_light` (facade `bevy::light`).
-use bevy::light::AmbientLight;
+// Bevy 0.17 split the renderer into focused crates: light types moved from
+// `bevy_pbr` to `bevy_light` (facade `bevy::light`). Bevy 0.18 then split the
+// scene-wide ambient light off the `AmbientLight` *component* into a dedicated
+// `GlobalAmbientLight` *resource* (the component now only overrides per-camera).
+use bevy::light::GlobalAmbientLight;
 use bevy::prelude::*;
 
 use highlight::HighlightPlugin;
@@ -25,9 +27,9 @@ mod ui;
 fn main() {
     let mut app = App::new();
 
-    app.insert_resource(AmbientLight {
+    app.insert_resource(GlobalAmbientLight {
         color: Color::WHITE,
-        // Bevy 0.13's lighting overhaul made AmbientLight brightness a physical
+        // Bevy 0.13's lighting overhaul made ambient brightness a physical
         // lux value (default 80.0). The old 0.12 fill (~1/6 of full white) was
         // first remapped to ~600 lux, but with the directional sun that left the
         // whole scene reading brighter than 0.12; scaled to 360 (~0.6x, in step

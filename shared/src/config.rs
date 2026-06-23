@@ -24,6 +24,10 @@ impl Plugin for ConfigPlugin {
 
 /// Generic RON asset loader for a single config type, registered under a
 /// type-specific extension.
+// Bevy 0.18 added a `TypePath` bound to the `AssetLoader` trait, so the loader
+// type itself must now derive it (the derive bounds `T: TypePath`, which every
+// config type satisfies via its `Asset` derive).
+#[derive(TypePath)]
 struct RonConfigLoader<T> {
     extension: &'static str,
     _marker: PhantomData<fn() -> T>,
