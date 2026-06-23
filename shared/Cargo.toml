@@ -10,11 +10,15 @@ edition = "2021"
 bevy = { version = "0.18", default-features = false }
 # Avian (XPBD physics) replaces bevy_rapier3d. avian3d 0.6.1 is the release that
 # targets Bevy 0.18 (parry3d 0.26 under the hood). `default-features = false` with
-# just `3d`/`f32`/`parry-f32` keeps the headless server and the wasm client off
-# Avian's `debug-plugin` (which pulls `bevy_render`) and `parallel` (which pulls
-# `multi_threaded`); `parry-f32` brings in the parry-backed `Collider`. The native
-# binary and server re-add `simd`/`parallel` for perf via their own feature lists.
-avian3d = { version = "0.6.1", default-features = false, features = ["3d", "f32", "parry-f32"] }
+# just `3d`/`f32`/`parry-f32`/`xpbd_joints` keeps the headless server and the wasm
+# client off Avian's `debug-plugin` (which pulls `bevy_render`) and `parallel`
+# (which pulls `multi_threaded`); `parry-f32` brings in the parry-backed `Collider`.
+# `xpbd_joints` is a *default* Avian feature that gates the joint *solver*
+# (`XpbdSolverPlugin`): without it the joint types (`SphericalJoint`, …) still
+# compile and spawn, but nothing enforces them, so attached parts never move
+# together — it must be re-added explicitly under `default-features = false`. The
+# native binary and server re-add `simd`/`parallel` for perf via their own lists.
+avian3d = { version = "0.6.1", default-features = false, features = ["3d", "f32", "parry-f32", "xpbd_joints"] }
 serde = { version = "1.0", features = ["derive"] }
 ron = "0.7"
 rand = "0.8"

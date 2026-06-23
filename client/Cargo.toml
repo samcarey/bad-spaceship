@@ -11,8 +11,9 @@ build = "build.rs"
 bevy = { version = "0.18", default-features = false }
 # Avian replaces bevy_rapier3d (see shared/Cargo.toml for the feature rationale).
 # The client only needs collider introspection for building render meshes, so the
-# same minimal feature set as `shared` applies; `native` adds the perf features.
-avian3d = { version = "0.6.1", default-features = false, features = ["3d", "f32", "parry-f32"] }
+# same minimal feature set as `shared` applies (including `xpbd_joints` so the joint
+# solver is compiled into the native binary); `native` adds the perf features.
+avian3d = { version = "0.6.1", default-features = false, features = ["3d", "f32", "parry-f32", "xpbd_joints"] }
 serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
 gloo = { version = "0.7", optional = true }
