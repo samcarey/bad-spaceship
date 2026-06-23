@@ -354,6 +354,15 @@ becoming fallible. Mostly compile-time and mechanical, but several are subtle:
   (`Query<&RapierConfiguration>`, `.gravity` intact); the contact-manifold/`ContactView`
   methods (`has_any_active_contact`, `find_deepest_contact`, `manifolds`, `points`,
   `local_p1/2`, `dist`) are unchanged. (`shared/src/{character,part,map}.rs`.)
+- **rapier 0.30 needs CCD on the falling blocks (runtime, not compile).** The parts
+  spawn high (`y 5..15`) and hit the *thin trimesh* bowl ground fast. rapier 0.30's
+  discrete solver lets a fast impact penetrate deeply in one step, and its newer
+  soft-contact recovery leaves the block partially embedded — the Bevy 0.12-era rapier
+  pushed them back out, so this reads as a regression ("blocks stuck in the ground on
+  spawn"). Fix: `.insert(Ccd::enabled())` on the dynamic parts (`shared/src/part.rs`).
+  Quantified on the headless server (drop 10 blocks, settle 600 ticks, measure deepest
+  `contact.dist()` against the ground): worst-case penetration ~`0.07-0.08` without CCD
+  (intermittent, ~1-2 of 10 blocks) → ~`0.002` (normal contact margin, 0 stuck) with it.
 
 ## Pull request workflow
 
