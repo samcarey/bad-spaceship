@@ -8,12 +8,12 @@ edition = "2021"
 
 [dependencies]
 bad-spaceship-shared = { path = "../shared" }
-bevy = { version = "0.18", default-features = false }
+bevy = { version = "0.19", default-features = false }
 # Avian replaces bevy_rapier3d (see shared/Cargo.toml). The headless server only
 # runs the shared simulation, but declares Avian directly to turn on the perf
 # features below; `default-features = false` keeps the render-pulling `debug-plugin`
 # out of the headless build. `xpbd_joints` is re-added so the joint solver runs.
-avian3d = { version = "0.6.1", default-features = false, features = ["3d", "f32", "parry-f32", "xpbd_joints"] }
+avian3d = { version = "0.7.0", default-features = false, features = ["3d", "f32", "parry-f32", "xpbd_joints"] }
 
 [features]
 default = [

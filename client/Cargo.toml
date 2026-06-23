@@ -8,12 +8,12 @@ build = "build.rs"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-bevy = { version = "0.18", default-features = false }
+bevy = { version = "0.19", default-features = false }
 # Avian replaces bevy_rapier3d (see shared/Cargo.toml for the feature rationale).
 # The client only needs collider introspection for building render meshes, so the
 # same minimal feature set as `shared` applies (including `xpbd_joints` so the joint
 # solver is compiled into the native binary); `native` adds the perf features.
-avian3d = { version = "0.6.1", default-features = false, features = ["3d", "f32", "parry-f32", "xpbd_joints"] }
+avian3d = { version = "0.7.0", default-features = false, features = ["3d", "f32", "parry-f32", "xpbd_joints"] }
 serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
 gloo = { version = "0.7", optional = true }
@@ -22,7 +22,7 @@ web-sys = { version = "0.3.40", optional = true }
 # drops the arboard→image and webbrowser→home native dep chains. Keep fonts, and
 # keep `render` — bevy_egui gates *all* egui drawing behind it, so dropping it
 # silently hides every egui panel/menu.
-bevy_egui = { version = "0.39", default-features = false, features = ["default_fonts", "render"] }
+bevy_egui = { version = "0.40", default-features = false, features = ["default_fonts", "render"] }
 bad-spaceship-shared = { path = "../shared" }
 # Bevy 0.17's wasm build needs getrandom 0.3's `wasm_js` backend explicitly
 # selected (it dropped the implicit wasm fallback). The backend cfg is set for

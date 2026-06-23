@@ -2,6 +2,7 @@ use crate::AppState;
 use bad_spaceship_shared::{Grass, InputEvents, WebKeyCode, WebMouseButton};
 use bevy::{
     input::mouse::{MouseMotion, MouseScrollUnit, MouseWheel},
+    input::touch::TouchPhase,
     prelude::*,
 };
 use gloo::events::EventListener;
@@ -358,6 +359,9 @@ impl WheelTracker {
                     // Bevy 0.11 added a source-window field to mouse events; this
                     // synthetic web event isn't tied to a winit window.
                     window: Entity::PLACEHOLDER,
+                    // Bevy 0.19 added a touch `phase` to `MouseWheel`; for a mouse
+                    // (vs a touchpad) it's always `TouchPhase::Moved`.
+                    phase: TouchPhase::Moved,
                 })
             }
         }
