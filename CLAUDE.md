@@ -140,9 +140,11 @@ server run, so game logic stays identical across renderers and platforms.
 
 - **`shared/`** (`bad-spaceship-shared`, lib) — all platform-agnostic game logic,
   exposed as the `CommonPlugins` plugin group (`shared/src/lib.rs`): third-party
-  Avian `PhysicsPlugins` (added via `add_group`, since it's a `PluginGroup`) +
-  `EasingsPlugin`, plus the custom `Character`, `Config`,
-  `Map`, `Part`, and `Player` plugins. Game tuning lives in RON files under
+  Avian `PhysicsPlugins` (added via `add_group`, since it's a `PluginGroup`),
+  plus the custom `Character`, `Config`,
+  `Map`, `Part`, and `Player` plugins. (The former `bevy_easings` dependency was
+  dropped — see "Dropping bevy_easings" below — so the one camera tween it powered
+  is now hand-rolled in `player.rs`.) Game tuning lives in RON files under
   `client/assets/config/` (`character.character.ron`, `player.player.ron`), deserialized
   into per-domain `character::Config` / `player::Config` types. Because Bevy 0.12 resolves
   asset loaders by **file extension only**, `ConfigPlugin` (`shared/src/config.rs`)
@@ -552,6 +554,32 @@ physics-engine change from any engine bump. Notes for anyone touching physics:
   conversion). The headless server smoke-tests clean (parts spawn/fall/settle, no
   panic), but the holding/attaching/joint-deleting flow is input-driven and only
   exercised in the client.
+
+## Dropping bevy_easings
+
+`bevy_easings` was removed from the workspace. It tracks Bevy releases slowly — at
+the time of writing its latest release (and even its git `main`) still targeted Bevy
+0.18 while `avian3d` 0.7 and `bevy_egui` 0.40 already targeted 0.19 — so it was the
+*sole* remaining blocker for the Bevy 0.18 → 0.19 bump. Rather than wait on upstream,
+the one effect it powered was hand-rolled:
+
+- It drove a single camera transition: the camera-orbit-center eases to a new offset
+  on pick-up (`adjust_camera_on_hold`) and back on release (`reset_camera_after_release`),
+  a `Vec3` `QuadraticInOut` tween over 0.5 s. That was the whole dependency.
+- The replacement is a self-contained `CameraTween { start, end, elapsed, duration }`
+  component plus a `quadratic_in_out` helper, both in `player.rs`. The trigger systems
+  `insert` a `CameraTween` (replacing any in-progress one, so re-triggering restarts
+  from the current position); `ease_camera` advances `elapsed` by `time.delta_secs()`,
+  writes `start.lerp(end, quadratic_in_out(t))` into the orbit center's
+  `Transform.translation`, and `remove`s the component once `t >= 1` (snapping exactly
+  to `end`). This matches the old `EasingType::Once` semantics (eases once, then holds).
+- The old `Translation` newtype + its `bevy_easings::Lerp` impl, the
+  `custom_ease_system::<(), Translation>` registration, and the `easing: Translation`
+  bundle field are all gone. `ease_camera` stays in the `EaseLabel` set so
+  `mouse_motion.after(EaseLabel)` ordering (rotation written after translation) is
+  preserved.
+- Removing the dep also pruned its unique transitive crate `interpolation` from the
+  lockfile; nothing else moved.
 
 ## Pull request workflow
 

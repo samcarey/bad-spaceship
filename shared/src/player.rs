@@ -1,4 +1,4 @@
-use std::{f32, time::Duration};
+use std::f32;
 
 use bevy::{
     core_pipeline::tonemapping::Tonemapping,
@@ -7,7 +7,6 @@ use bevy::{
     reflect::TypePath,
 };
 use avian3d::prelude::Collider;
-use bevy_easings::{CustomComponentEase, EaseFunction, EasingComponent, Lerp};
 use serde::Deserialize;
 
 use crate::{
@@ -48,9 +47,6 @@ impl Plugin for PlayerPlugin {
                         adjust_hold_point_on_hold,
                     )
                         .after(ToggleHoldingSystemLabel),
-                    // bevy_easings 0.15's `custom_ease_system` gained a first type
-                    // param for the `Time<T>` context; `()` selects the default clock.
-                    bevy_easings::custom_ease_system::<(), Translation>.in_set(EaseLabel),
                     ease_camera.in_set(EaseLabel),
                     set_part_rotation.after(MouseWheelLabel),
                 ),
@@ -81,7 +77,6 @@ pub struct CameraOrbitCenterBundle {
     pub transform: Transform,
     pub global_transform: GlobalTransform,
     camera_orbit_center: CameraOrbitCenter,
-    easing: Translation,
 }
 
 #[derive(Bundle, Default)]
@@ -355,14 +350,39 @@ fn toggle_holding(
     }
 }
 
-#[derive(Default, Component)]
-struct Translation(Vec3);
+/// A self-contained translation tween for the camera orbit center, replacing the
+/// former `bevy_easings` dependency (which lagged Bevy releases). It eases the
+/// orbit center's `Transform.translation` from `start` to `end` over `duration`
+/// seconds with a quadratic in-out curve; `ease_camera` advances it and removes
+/// the component when the tween completes.
+#[derive(Component)]
+struct CameraTween {
+    start: Vec3,
+    end: Vec3,
+    elapsed: f32,
+    duration: f32,
+}
 
-impl Lerp for Translation {
-    type Scalar = f32;
+const CAMERA_TWEEN_DURATION: f32 = 0.5;
 
-    fn lerp(&self, other: &Self, scalar: &Self::Scalar) -> Self {
-        Self(self.0.lerp(other.0, *scalar))
+impl CameraTween {
+    fn new(start: Vec3, end: Vec3) -> Self {
+        Self {
+            start,
+            end,
+            elapsed: 0.0,
+            duration: CAMERA_TWEEN_DURATION,
+        }
+    }
+}
+
+// Quadratic ease-in-out, matching the old `EaseFunction::QuadraticInOut`: accelerate
+// over the first half, decelerate over the second.
+fn quadratic_in_out(t: f32) -> f32 {
+    if t < 0.5 {
+        2.0 * t * t
+    } else {
+        1.0 - (-2.0 * t + 2.0).powi(2) / 2.0
     }
 }
 
@@ -379,15 +399,10 @@ fn adjust_camera_on_hold(
     if let Some(hold_event) = hold_events.read().next() {
         if let Ok(radius) = radiuses.get(hold_event.held) {
             for (entity, transform) in camera_orbit_centers.iter() {
-                commands
-                    .entity(entity)
-                    .insert(Translation(transform.translation).ease_to(
-                        Translation(camera_orbit_offset.min + Vec3::Y * radius.0),
-                        EaseFunction::QuadraticInOut,
-                        bevy_easings::EasingType::Once {
-                            duration: Duration::from_secs_f32(0.5),
-                        },
-                    ));
+                commands.entity(entity).insert(CameraTween::new(
+                    transform.translation,
+                    camera_orbit_offset.min + Vec3::Y * radius.0,
+                ));
             }
         }
     }
@@ -403,25 +418,24 @@ fn reset_camera_after_release(
         for (entity, transform) in camera_orbit_centers.iter_mut() {
             commands
                 .entity(entity)
-                .insert(Translation(transform.translation).ease_to(
-                    Translation(camera_orbit_offset.min),
-                    EaseFunction::QuadraticInOut,
-                    bevy_easings::EasingType::Once {
-                        duration: Duration::from_secs_f32(0.5),
-                    },
-                ));
+                .insert(CameraTween::new(transform.translation, camera_orbit_offset.min));
         }
     }
 }
 
 fn ease_camera(
-    mut cameras: Query<
-        (&mut Transform, &Translation),
-        (With<EasingComponent<Translation>>, With<CameraOrbitCenter>),
-    >,
+    mut commands: Commands,
+    time: Res<Time>,
+    mut cameras: Query<(Entity, &mut Transform, &mut CameraTween), With<CameraOrbitCenter>>,
 ) {
-    for (mut transform, translation) in cameras.iter_mut() {
-        transform.translation = translation.0
+    for (entity, mut transform, mut tween) in cameras.iter_mut() {
+        tween.elapsed += time.delta_secs();
+        let progress = (tween.elapsed / tween.duration).clamp(0.0, 1.0);
+        transform.translation = tween.start.lerp(tween.end, quadratic_in_out(progress));
+        // Tween done: snap exactly to the target and drop the component so it stops.
+        if progress >= 1.0 {
+            commands.entity(entity).remove::<CameraTween>();
+        }
     }
 }
 
