@@ -1,0 +1,6 @@
+{
+  "resources": [
+    { "url": "./target/wasm_bg.wasm", "bytes": 26800484 },
+    { "url": "./assets/textures/grass.png", "bytes": 1153480 }
+  ]
+}

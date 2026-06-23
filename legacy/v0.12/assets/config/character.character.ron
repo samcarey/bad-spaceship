@@ -1,0 +1,5 @@
+(
+    size: 1.5,
+    max_speed: 13,
+    jump_force: 10,
+)
