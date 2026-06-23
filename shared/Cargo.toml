@@ -24,7 +24,6 @@ ron = "0.7"
 rand = "0.8"
 include_dir = { version = "0.7" }
 anyhow = "1.0"
-bevy_easings = { version = "0.18", default-features = false }
 
 [features]
 # Avian (`default-features = false`) no longer pulls in the bevy features that

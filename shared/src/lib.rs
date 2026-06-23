@@ -5,7 +5,6 @@ use bevy::{
     prelude::{Bundle, Entity, KeyCode, Message, MouseButton, PluginGroup, Resource, SystemSet},
 };
 use avian3d::PhysicsPlugins;
-use bevy_easings::EasingsPlugin;
 use character::CharacterPlugin;
 use config::ConfigPlugin;
 use map::MapPlugin;
@@ -29,9 +28,6 @@ impl PluginGroup for CommonPlugins {
             // XPBD solver, integrator, CCD, sleeping). Unlike rapier's single
             // plugin, it's a `PluginGroup`, so nest it with `add_group`.
             .add_group(PhysicsPlugins::default())
-            // bevy_easings 0.15 made `EasingsPlugin` a `Default` struct rather than
-            // a unit struct.
-            .add(EasingsPlugin::default())
             // Custom plugins
             .add(CharacterPlugin)
             .add(ConfigPlugin)
