@@ -1,0 +1,8 @@
+(
+    zoom_sensitivity: 30,
+    look_sensitivity: 0.6,
+    
+    min_camera_distance: 0.01, // Not zero to avoid singularity on normalize()
+    max_camera_distance: 30,
+    camera_offset_character_size_ratio: (0.0, 1.5, 0.5),
+)

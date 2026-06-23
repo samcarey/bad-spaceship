@@ -70,6 +70,9 @@ jobs:
             target/wasm32-unknown-unknown/release/bad-spaceship-client.wasm
           cp client/index.html _site/
           cp -r client/assets _site/assets
+          # Publish any committed archive builds (e.g. the playable Bevy 0.12
+          # build under legacy/v0.12) verbatim alongside the current site.
+          if [ -d legacy ]; then cp -r legacy _site/legacy; fi
           # Emit the loader manifest with *uncompressed* byte sizes so the
           # loading bar reports an honest percentage/ETA even when the assets
           # are served gzip/br-compressed (Content-Length would be the
