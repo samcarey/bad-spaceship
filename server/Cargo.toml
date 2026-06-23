@@ -9,12 +9,17 @@ edition = "2021"
 [dependencies]
 bad-spaceship-shared = { path = "../shared" }
 bevy = { version = "0.18", default-features = false }
-bevy_rapier3d = "0.34"
+# Avian replaces bevy_rapier3d (see shared/Cargo.toml). The headless server only
+# runs the shared simulation, but declares Avian directly to turn on the perf
+# features below; `default-features = false` keeps the render-pulling `debug-plugin`
+# out of the headless build.
+avian3d = { version = "0.6.1", default-features = false, features = ["3d", "f32", "parry-f32"] }
 
 [features]
 default = [
-    "bevy_rapier3d/simd-stable",
-    "bevy_rapier3d/parallel",
+    # Avian perf features (rapier's `simd-stable`/`parallel` equivalents).
+    "avian3d/simd",
+    "avian3d/parallel",
     # Hot-reload of RON config assets (watch_for_changes). The file watcher needs
     # the `multi_threaded` feature on to function.
     "bevy/file_watcher",

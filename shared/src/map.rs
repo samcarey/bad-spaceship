@@ -1,5 +1,5 @@
+use avian3d::prelude::{Collider, RigidBody};
 use bevy::prelude::*;
-use bevy_rapier3d::prelude::{ActiveCollisionTypes, Collider, RigidBody};
 
 use crate::Grass;
 pub struct MapPlugin;
@@ -47,13 +47,15 @@ fn spawn_map(mut commands: Commands) {
 
     commands
         .spawn_empty()
-        .insert(RigidBody::Fixed)
+        // Avian renamed rapier's `RigidBody::Fixed` to `Static`.
+        .insert(RigidBody::Static)
         // Bevy 0.15: `Transform` now requires `GlobalTransform`, so inserting the
         // bare component replaces the old `TransformBundle`.
         .insert(Transform::from_xyz(0.0, 0.0, 0.0))
-        // bevy_rapier 0.30's `Collider::trimesh` is now fallible; the bowl mesh is
-        // always valid (non-empty, matching index count), so unwrap it.
-        .insert(Collider::trimesh(vertices, indices).expect("valid bowl trimesh"))
-        .insert(ActiveCollisionTypes::default())
+        // Avian's fallible trimesh constructor is `try_trimesh`; the bowl mesh is
+        // always valid (non-empty, matching index count), so unwrap it. (Avian
+        // collides all collider pairs by default, so rapier's `ActiveCollisionTypes`
+        // opt-in is no longer needed.)
+        .insert(Collider::try_trimesh(vertices, indices).expect("valid bowl trimesh"))
         .insert(Grass);
 }

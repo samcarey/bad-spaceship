@@ -6,8 +6,8 @@ use bevy::{
     prelude::*,
     reflect::TypePath,
 };
+use avian3d::prelude::Collider;
 use bevy_easings::{CustomComponentEase, EaseFunction, EasingComponent, Lerp};
-use bevy_rapier3d::prelude::Collider;
 use serde::Deserialize;
 
 use crate::{
@@ -181,8 +181,10 @@ fn attach_camera_orbit(
             // This is simply a point that hovers above the character that the camera orbits around.
             // This is for the purpose of making it easier to see over obstructions.
             camera_orbit_offset.min = config.camera_offset_character_size_ratio.to_vec3()
+                // Avian exposes the underlying parry shape via `.shape()` (rapier
+                // used a public `.raw` field); the bounding-sphere call is parry's.
                 * character_collider
-                    .raw
+                    .shape()
                     .compute_local_bounding_sphere()
                     .radius
                 * 2.0;

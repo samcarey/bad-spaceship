@@ -5,9 +5,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 Bad Spaceship is a 3D game built on the **Bevy 0.18** engine (ECS), with
-`bevy_rapier3d` for physics and `bevy_egui` for UI. It is a Cargo workspace with
-three crates that compiles both to a **native** binary and to a **WASM** web
-build playable in the browser.
+**Avian** (`avian3d`, an XPBD physics engine) for physics and `bevy_egui` for UI.
+It is a Cargo workspace with three crates that compiles both to a **native**
+binary and to a **WASM** web build playable in the browser. (Physics was migrated
+off `bevy_rapier3d` — see the "Migrating bevy_rapier3d → Avian" section below.)
 
 ## Toolchain & reproducibility (read first)
 
@@ -139,7 +140,8 @@ server run, so game logic stays identical across renderers and platforms.
 
 - **`shared/`** (`bad-spaceship-shared`, lib) — all platform-agnostic game logic,
   exposed as the `CommonPlugins` plugin group (`shared/src/lib.rs`): third-party
-  `RapierPhysicsPlugin` + `EasingsPlugin`, plus the custom `Character`, `Config`,
+  Avian `PhysicsPlugins` (added via `add_group`, since it's a `PluginGroup`) +
+  `EasingsPlugin`, plus the custom `Character`, `Config`,
   `Map`, `Part`, and `Player` plugins. Game tuning lives in RON files under
   `client/assets/config/` (`character.character.ron`, `player.player.ron`), deserialized
   into per-domain `character::Config` / `player::Config` types. Because Bevy 0.12 resolves
@@ -449,6 +451,97 @@ small, mostly-mechanical bump — only four code changes:
   `custom_ease_system::<(), C>` signature is unchanged. wgpu 27 needed no shader/bind-group
   changes (`#{MATERIAL_BIND_GROUP}` already tracks the engine). web-sys/wasm-bindgen stayed
   at 0.3.102 / 0.2.125, so the CI `WASM_BINDGEN_VERSION` pin is unchanged.
+
+## Migrating bevy_rapier3d → Avian
+
+The physics engine was swapped from `bevy_rapier3d` 0.34 to **`avian3d` 0.6.1** (the
+Avian release that targets Bevy 0.18; it uses parry3d 0.26 under the hood). The
+motivation: Avian tracks Bevy releases far more promptly than rapier — at the time of
+the swap, rapier (even its git `master`) still targeted Bevy 0.18 with no 0.19 build,
+while `avian3d` 0.7 already targeted 0.19 — so moving to Avian is the path to future
+Bevy bumps. This migration deliberately *stayed on Bevy 0.18* to isolate the
+physics-engine change from any engine bump. Notes for anyone touching physics:
+
+- **Cargo features.** `avian3d` is pulled with `default-features = false, features =
+  ["3d", "f32", "parry-f32"]` in all three crates. Avian's default features include
+  `debug-plugin` (pulls `bevy_render` — bad for the headless server) and `parallel`
+  (pulls `bevy/multi_threaded` — unwanted on wasm), so they're off by default; the
+  native client and the server re-add `avian3d/simd` + `avian3d/parallel` for perf
+  (rapier's `simd-stable`/`parallel` equivalents). `parry-f32` is what brings in the
+  parry-backed `Collider`.
+- **`shared` must now name the bevy features rapier used to pull in transitively.**
+  bevy_rapier's *default* features dragged `bevy_render` / `bevy_core_pipeline` / the
+  `bevy_input` source features into `shared` as a side effect; Avian (with
+  `default-features = false`) does not. Since `shared` references those types directly
+  (player.rs spawns a `Camera3d` + reads `Tonemapping`; lib.rs uses `KeyCode` /
+  `MouseButton`), `shared`'s `default` feature now explicitly lists `bevy/bevy_render`,
+  `bevy/bevy_core_pipeline`, `bevy/keyboard`, `bevy/mouse`. Symptom if missing: `cannot
+  find type Camera/Camera3d`, `unresolved import KeyCode/MouseButton` in `shared`.
+- **`PhysicsPlugins` is a `PluginGroup`, not a single `Plugin`** — nest it into
+  `CommonPlugins` with `add_group`, not `add` (rapier's `RapierPhysicsPlugin` was a
+  single plugin) (`shared/src/lib.rs`).
+- **Component/API renames.** `RigidBody::Fixed` → `Static`; `Collider::ball` →
+  `Collider::sphere`; `Collider::cuboid` now takes **full** extents (rapier took
+  half — drop the `/2.0`); `Collider::trimesh` (fallible) → `Collider::try_trimesh`;
+  `Velocity{linvel,angvel}` → separate `LinearVelocity` / `AngularVelocity` `Vec3`
+  newtypes; `ColliderMassProperties::Density` → `ColliderDensity`;
+  `Friction::coefficient`/`Restitution::coefficient` → `::new`; `Ccd::enabled()` →
+  `SweptCcd::default()`; gravity moved off the `RapierConfiguration` component to a
+  `Res<Gravity>` resource. `LockedAxes::ROTATION_LOCKED` is unchanged. Avian collides
+  all collider pairs by default, so rapier's `ActiveCollisionTypes` / `ActiveEvents`
+  opt-ins are simply dropped.
+- **Forces are applied through the `Forces` query helper, not an `ExternalForce`
+  component** (which Avian removed in 0.4). Add `Forces` to a `Query` *without*
+  `&`/`&mut`; it accumulates during the physics step and **auto-clears** afterwards —
+  so the old per-frame "zero the force" system is gone. `Forces` takes
+  `LinearVelocity`/`AngularVelocity` **mutably** internally, so it *cannot* share a
+  query with a `&LinearVelocity`/`&AngularVelocity` — read those off the helper
+  (`forces.linear_velocity()` / `.angular_velocity()`, from the `ReadRigidBodyForces`
+  trait — import it *and* `WriteRigidBodyForces`, since supertrait methods need the
+  trait in scope). Held-part control now calls `apply_linear_acceleration` /
+  `apply_angular_acceleration` and lets Avian do the mass/inertia conversion (rapier
+  multiplied by mass / principal inertia by hand). Two systems both writing through
+  `Forces` on the same parts must be **explicitly ordered** (`.after(...)`) or Bevy
+  flags an ambiguous double-write; a single query mixing `Forces` with a conflicting
+  `&mut`/`&` of its internal components **panics at startup** ("Mutable component
+  access must be unique").
+- **Contacts: `Collisions` system param.** `rapier_context.contact_pairs_with(e)` →
+  `collisions.collisions_with(e)` (the `Collisions` param is a read-only view over the
+  contact graph, yielding touching pairs). `ContactPair::collider1/2` are plain
+  `Entity` (rapier's were `Option`); `has_any_active_contact()` → `is_touching()`;
+  `.manifolds()`/`.points()` methods → `.manifolds`/`.points` **fields**.
+  **`ContactPoint` has no local-frame points** — only world-space, **COM-relative**
+  `anchor1`/`anchor2` (+ a world `point`), and `penetration` is **positive when
+  overlapping** (rapier's `dist()` was negative). The part-attach logic needs each
+  contact point in the body's *local* frame, so it rotates the anchor by the body's
+  inverse rotation (`R⁻¹ · anchorN`); parts are centered uniform cuboids, so COM ==
+  origin and that's exact.
+- **Joints are standalone entities**, not children of a body. `SphericalJointBuilder` +
+  `ImpulseJoint::new(other, joint)` (spawned as a child of one body) →
+  `SphericalJoint::new(body1, body2).with_local_anchor1(a1).with_local_anchor2(a2)`,
+  spawned as its own entity. Read anchors back with `joint.local_anchor1()` /
+  `local_anchor2()` (→ `Option<Vec3>`, plain glam — no raw nalgebra frame digging) and
+  the bodies via the public `joint.body1`/`body2` fields (rapier needed the `ChildOf`
+  parent + `joint.parent`). **Caveat:** because the joint no longer hangs off a body,
+  despawning a body does *not* take its joints with it (rapier's recursive child
+  despawn did) — a fallen/attached part that gets despawned can leave a dangling joint
+  referencing a missing body. Avian tolerates this without crashing, but watch for it
+  if attached assemblies fall off the platform.
+- **Collider shape introspection** (building render meshes from colliders, in
+  `client/src/render_main_pass.rs` + `player.rs`): rapier's `collider.as_cuboid()` /
+  `.as_ball()` / `.as_trimesh()` / `.raw.compute_local_bounding_sphere()` → go through
+  the parry shape with `collider.shape().as_cuboid()` etc. parry's `Cuboid::half_extents`
+  and `Ball::radius` are **fields** (not methods), and `TriMesh::vertices()` returns a
+  **slice** of nalgebra `Point3<f32>` (rapier's view yielded glam-like points) — convert
+  to glam up front. The dead nalgebra glam↔quaternion helpers in `utils.rs` (which
+  imported `bevy_rapier3d::na`) were unused and were deleted outright.
+- **Behaviors to verify by play-testing** (clean compile, but physics differs): ground
+  detection (now `penetration > -0.002` instead of rapier's `dist() < 0.002`), the
+  held-part *orientation* feel (acceleration via the full inertia tensor vs rapier's
+  principal-inertia vector), and attach-point placement (the world→local anchor
+  conversion). The headless server smoke-tests clean (parts spawn/fall/settle, no
+  panic), but the holding/attaching/joint-deleting flow is input-driven and only
+  exercised in the client.
 
 ## Pull request workflow
 

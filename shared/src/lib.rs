@@ -4,8 +4,8 @@ use bevy::{
     math::{Quat, Vec2, Vec3},
     prelude::{Bundle, Entity, KeyCode, Message, MouseButton, PluginGroup, Resource, SystemSet},
 };
+use avian3d::PhysicsPlugins;
 use bevy_easings::EasingsPlugin;
-use bevy_rapier3d::plugin::{NoUserData, RapierPhysicsPlugin};
 use character::CharacterPlugin;
 use config::ConfigPlugin;
 use map::MapPlugin;
@@ -24,8 +24,11 @@ pub struct CommonPlugins;
 impl PluginGroup for CommonPlugins {
     fn build(self) -> PluginGroupBuilder {
         PluginGroupBuilder::start::<Self>()
-            // Third-party plugins
-            .add(RapierPhysicsPlugin::<NoUserData>::default())
+            // Third-party plugins. Avian's `PhysicsPlugins` group is the
+            // bevy_rapier `RapierPhysicsPlugin` replacement (broad/narrow phase,
+            // XPBD solver, integrator, CCD, sleeping). Unlike rapier's single
+            // plugin, it's a `PluginGroup`, so nest it with `add_group`.
+            .add_group(PhysicsPlugins::default())
             // bevy_easings 0.15 made `EasingsPlugin` a `Default` struct rather than
             // a unit struct.
             .add(EasingsPlugin::default())
