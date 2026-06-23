@@ -255,10 +255,14 @@ fn mouse_motion(
                     .max(MIN_CAMERA_PITCH)
                     .min(MAX_CAMERA_PITCH);
             }
-            // By tilting the orbit center that the camera is attached to,
-            // the camera itself is swung to the correct position
+            // The camera orbit center carries the full look orientation. Yaw used
+            // to be applied by rotating the character body, but that body is a
+            // Rapier-owned ROTATION_LOCKED ball whose rotation the physics writeback
+            // overwrites — so yaw is applied here too (the composition `Ry(-yaw) *
+            // Rx(pitch)` matches the old `body(Ry(-yaw)) * orbit(Rx(pitch))`).
             if let Some(mut transform) = camera_orbit_center_transforms.iter_mut().next() {
-                transform.rotation = Quat::from_rotation_x(pitch.0);
+                transform.rotation =
+                    Quat::from_rotation_y(-yaw.0) * Quat::from_rotation_x(pitch.0);
             }
         }
     }
