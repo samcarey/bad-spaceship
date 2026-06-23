@@ -1,0 +1,8 @@
+# Bevy 0.17 bumped getrandom to 0.3, which no longer auto-selects a backend on
+# `wasm32-unknown-unknown`; it must be told to use the `wasm_js` (Web Crypto)
+# backend at compile time. Scoped to the wasm target so native builds are
+# unaffected. The matching `getrandom`/`wasm_js` Cargo feature is enabled by the
+# client's `web` feature. Keeping this in-repo means local, CI, and remote wasm
+# builds all agree without anyone having to remember to export RUSTFLAGS.
+[target.wasm32-unknown-unknown]
+rustflags = ['--cfg', 'getrandom_backend="wasm_js"']
