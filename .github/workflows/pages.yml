@@ -20,10 +20,11 @@ concurrency:
 
 env:
   # Toolchain is also pinned in rust-toolchain.toml; kept here for clarity.
-  # Bevy 0.16's MSRV is 1.85.0 (was 1.82.0 under Bevy 0.15).
-  RUST_TOOLCHAIN: "1.85.0"
-  # Must match the `wasm-bindgen` crate version resolved in Cargo.lock (driven by
-  # bevy 0.16 / wgpu 24's web-sys). Bump in lockstep with the lockfile.
+  # Bevy 0.17 / wgpu 25 raise the MSRV past 1.85; this pins a recent stable.
+  RUST_TOOLCHAIN: "1.96.0"
+  # Must match the `wasm-bindgen` crate version resolved in Cargo.lock. bevy 0.17 /
+  # wgpu 25's web-sys 0.3.102 still resolves wasm-bindgen 0.2.125 (the client also
+  # pins `=0.2.125`), so this is unchanged from 0.16. Bump in lockstep with the lock.
   WASM_BINDGEN_VERSION: "0.2.125"
 
 jobs:

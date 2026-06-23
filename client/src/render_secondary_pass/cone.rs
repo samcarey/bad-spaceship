@@ -1,7 +1,6 @@
-use bevy::{
-    prelude::*,
-    render::{mesh::Indices, render_asset::RenderAssetUsages},
-};
+// Bevy 0.17 moved `Indices` to `bevy_mesh` (`bevy::mesh`) and `RenderAssetUsages`
+// to `bevy_asset` (`bevy::asset`).
+use bevy::{asset::RenderAssetUsages, mesh::Indices, prelude::*};
 /// A cone) shape.
 #[derive(Debug, Clone, Copy)]
 pub struct Cone {

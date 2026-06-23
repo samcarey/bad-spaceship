@@ -7,7 +7,6 @@ use bevy::{
     input::mouse::MouseMotion,
     input::mouse::{MouseScrollUnit, MouseWheel},
     prelude::*,
-    render::camera::Camera,
 };
 
 use crate::AppState;
@@ -33,7 +32,7 @@ impl Plugin for InputPlugin {
         )
         .init_resource::<ButtonInput<WebKeyCode>>()
         .init_resource::<ButtonInput<WebMouseButton>>()
-        .add_event::<PlayerClick>();
+        .add_message::<PlayerClick>();
     }
 }
 
@@ -108,7 +107,7 @@ fn process_keyboard_input(
 }
 
 pub fn get_look(
-    mut mouse_motion_events: EventReader<MouseMotion>,
+    mut mouse_motion_events: MessageReader<MouseMotion>,
     mut mouse_deltas: Query<&mut MouseMotionDelta>,
     state: Res<bevy::prelude::State<AppState>>,
 ) {
@@ -127,7 +126,7 @@ pub fn get_look(
 pub fn process_mouse_clicks(
     native_mouse_button_input: Res<ButtonInput<MouseButton>>,
     web_mouse_button_input: Res<ButtonInput<WebMouseButton>>,
-    mut player_clicks: EventWriter<PlayerClick>,
+    mut player_clicks: MessageWriter<PlayerClick>,
     state: Res<State<AppState>>,
 ) {
     if *state.get() == AppState::InGame {
@@ -208,7 +207,7 @@ fn gamepad_system(
 }
 
 fn mouse_wheel(
-    mut mouse_wheel_events: EventReader<MouseWheel>,
+    mut mouse_wheel_events: MessageReader<MouseWheel>,
     mut players: Query<&mut MouseWheelDelta>,
 ) {
     if let Some(mut mouse_wheel_delta) = players.iter_mut().next() {

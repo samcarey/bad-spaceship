@@ -1,6 +1,6 @@
 use crate::AppState;
 use bevy::prelude::*;
-use bevy::window::{CursorGrabMode, PrimaryWindow};
+use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 
 pub struct PlatformPlugin;
 
@@ -13,22 +13,23 @@ impl Plugin for PlatformPlugin {
     }
 }
 
-fn show_cursor(mut windows: Query<&mut Window, With<PrimaryWindow>>) {
-    // Bevy 0.15 moved the cursor fields off `Window` into a `cursor_options` struct.
-    // Bevy 0.16 made `Query::single_mut` fallible (returns `Result`).
-    let Ok(mut window) = windows.single_mut() else {
+// Bevy 0.15 moved the cursor fields off `Window` into a `cursor_options` struct;
+// Bevy 0.17 promoted that struct to its own `CursorOptions` component on the
+// window entity, so query it directly. (`Query::single_mut` is fallible since 0.16.)
+fn show_cursor(mut cursors: Query<&mut CursorOptions, With<PrimaryWindow>>) {
+    let Ok(mut cursor) = cursors.single_mut() else {
         return;
     };
-    window.cursor_options.grab_mode = CursorGrabMode::None;
-    window.cursor_options.visible = true;
+    cursor.grab_mode = CursorGrabMode::None;
+    cursor.visible = true;
 }
 
-fn hide_cursor(mut windows: Query<&mut Window, With<PrimaryWindow>>) {
-    let Ok(mut window) = windows.single_mut() else {
+fn hide_cursor(mut cursors: Query<&mut CursorOptions, With<PrimaryWindow>>) {
+    let Ok(mut cursor) = cursors.single_mut() else {
         return;
     };
-    window.cursor_options.grab_mode = CursorGrabMode::Locked;
-    window.cursor_options.visible = false;
+    cursor.grab_mode = CursorGrabMode::Locked;
+    cursor.visible = false;
 }
 
 fn toggle_menu_on_key(

@@ -4,7 +4,8 @@ use bad_spaceship_shared::{
     DisplayableJoint, ExistingJoints, HoldPoint, Holding, Modifying, PotentialJoints,
     PredeleteJoint, PredeleteJoints, UpdateJointsLabel,
 };
-use bevy::{asset::load_internal_asset, pbr::NotShadowCaster, prelude::*};
+// Bevy 0.17 moved `NotShadowCaster` from `bevy_pbr` to `bevy_light` (`bevy::light`).
+use bevy::{asset::load_internal_asset, light::NotShadowCaster, prelude::*};
 use normalization::*;
 
 use self::gizmo_material::GizmoMaterial;

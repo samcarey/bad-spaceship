@@ -143,15 +143,17 @@ impl MouseMovementTracker {
 
 fn get_mouse_motion(
     mouse_motion_tracker: Res<MouseMovementTracker>,
-    mut mouse_motion_events: ResMut<Events<MouseMotion>>,
+    mut mouse_motion_events: ResMut<Messages<MouseMotion>>,
 ) {
     // Bevy 0.13 bumped winit 0.28 → 0.29, which (unlike 0.28) emits its own
     // `MouseMotion` on the web canvas under pointer lock. That phantom stream
     // fights this crate's DOM-listener input and spins the camera on its own.
     // Drop winit's events each frame and drive look solely from our tracker.
+    // Bevy 0.17 renamed buffered "events" to "messages": `Events<E>` → `Messages<M>`
+    // and the resource's `.send()` → `.write()` (`.clear()` is unchanged).
     mouse_motion_events.clear();
     if let Some(mouse_motion) = mouse_motion_tracker.get_and_reset() {
-        mouse_motion_events.send(mouse_motion);
+        mouse_motion_events.write(mouse_motion);
     }
 }
 
@@ -362,7 +364,7 @@ impl WheelTracker {
     }
 }
 
-fn get_wheel(wheel_tracker: ResMut<WheelTracker>, mut mouse_wheel_events: EventWriter<MouseWheel>) {
+fn get_wheel(wheel_tracker: ResMut<WheelTracker>, mut mouse_wheel_events: MessageWriter<MouseWheel>) {
     if let Some(event) = wheel_tracker.get() {
         mouse_wheel_events.write(event);
     }

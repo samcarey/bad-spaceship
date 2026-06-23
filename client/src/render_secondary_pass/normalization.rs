@@ -1,11 +1,14 @@
-use bevy::{prelude::*, render::camera::Camera, transform::TransformSystem};
+// Bevy 0.17 standardised system-set names on the `*Systems` suffix:
+// `TransformSystem` → `TransformSystems`. `Camera` comes from the prelude now
+// (it moved to the `bevy_camera` crate, but the prelude re-export is unchanged).
+use bevy::{prelude::*, transform::TransformSystems};
 
 pub struct Ui3dNormalization;
 impl Plugin for Ui3dNormalization {
     fn build(&self, app: &mut App) {
         app.add_systems(
             PostUpdate,
-            normalize.before(TransformSystem::TransformPropagate),
+            normalize.before(TransformSystems::Propagate),
         );
     }
 }
@@ -28,8 +31,9 @@ pub fn normalize(
         .expect("No camera present in scene");
 
     for mut transform in normalize_query.iter_mut() {
+        // Bevy 0.17 renamed `GlobalTransform::compute_matrix` → `to_matrix`.
         let distance = -camera_position
-            .compute_matrix()
+            .to_matrix()
             .inverse()
             .transform_point3(transform.translation)
             .z;

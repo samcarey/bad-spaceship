@@ -10,9 +10,11 @@ struct GizmoMaterial {
     color: vec4<f32>,
 };
 
-// Bevy 0.13 moved custom material bind groups from @group(1) to @group(2)
-// (group 1 is now the view-independent mesh binding).
-@group(2) @binding(0)
+// Bevy 0.13 moved custom material bind groups from @group(1) to @group(2).
+// Bevy 0.17's wgpu 25 shuffled the 3D bind groups again (mesh resources took
+// group 2, materials moved to group 3); the `#{MATERIAL_BIND_GROUP}` shader def
+// expands to the current material group so this stays correct across the change.
+@group(#{MATERIAL_BIND_GROUP}) @binding(0)
 var<uniform> material: GizmoMaterial;
 
 struct Vertex {

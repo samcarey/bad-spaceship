@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Bad Spaceship is a 3D game built on the **Bevy 0.16** engine (ECS), with
+Bad Spaceship is a 3D game built on the **Bevy 0.17** engine (ECS), with
 `bevy_rapier3d` for physics and `bevy_egui` for UI. It is a Cargo workspace with
 three crates that compiles both to a **native** binary and to a **WASM** web
 build playable in the browser.
@@ -14,45 +14,43 @@ build playable in the browser.
 This is a pinned-for-reproducibility project — do not "upgrade" your way out of
 build errors (the deliberate Bevy bumps are the exception, done branch-by-branch):
 
-- **Rust is pinned to 1.85.0** via `rust-toolchain.toml` (auto-selected by rustup).
-  Bevy 0.16's MSRV is exactly 1.85.0, so that is the floor (it was 1.82.0 under Bevy
-  0.15). 1.85 is the first stable to ship **edition 2024**, so the whole *class* of
-  "edition2024 parse-blocker" pins the 0.15 build needed (`indexmap` 2.13,
-  `proc-macro-crate` 3.2, `image` 0.25.5, `blake3`/`constant_time_eq`, `stackfuture`,
-  `wayland-protocols`) **dissolved** on this bump — the graph resolves those forward
-  freely now. What remains are deps that raise `rust-version` *past* 1.85; the
-  committed `Cargo.lock` pins those *back* to their newest 1.85-compatible release:
-  - `image` 0.25.9 (0.25.10 needs rustc 1.88; pulled by `bevy_image`),
-  - `wayland-protocols` 0.32.12 (0.32.13 needs rustc 1.86; Linux-windowing dep,
-    doesn't actually compile for our native-Linux/wasm targets but is in the graph),
-  - `built` 0.8.0 (0.8.1 needs rustc 1.87; build-dep of `shadow-rs`),
-  - `wasip2` 1.0.1 (1.0.4 needs rustc 1.87; wasi-0.2 shim in the wasm graph).
-  The old `>1.82` pins are gone: `gilrs`/`async-lock` resolve forward now, and
-  **`ahash` 0.8.12 / `getrandom` 0.3 is no longer a problem** — on wasm the runtime
-  still resolves `getrandom` 0.2 (the `getrandom` 0.4 in the graph is host-only, pulled
-  by `uuid` under the `bevy_reflect_derive` *proc-macro*, so it never compiles for
-  `wasm32-unknown-unknown`). Do not `cargo update` the whole graph blindly. To hunt
-  offenders fast: a fresh `cargo generate-lockfile` prints "requires Rust 1.XX" notes
-  naming each crate; pin back with `cargo update -p <crate>@<bad> --precise <good>`.
-  `cargo metadata --filter-platform <target>` (run for `wasm32-unknown-unknown` **and**
-  the native target) parses only the deps that build for that platform; the crates.io
-  per-version `rust_version` field gives the newest pre-MSRV-bump release to pin to.
-- **`Cargo.lock` is committed** and holds an MSRV-compatible dependency set. Always build
-  with `--locked`; when a deliberate re-pin is needed, bump direct deps with targeted
-  `cargo update -p <crate> --precise <ver>` rather than a blanket update.
+- **Rust is pinned to 1.96.0** via `rust-toolchain.toml` (auto-selected by rustup).
+  Bevy 0.17 / wgpu 25 raise the MSRV past the old 1.85 floor (wgpu 25's MSRV is 1.87),
+  so the pin moved to a recent stable. Because 1.96 is well ahead of every dep's
+  `rust-version`, the whole *class* of MSRV-back-pins the 0.16 lockfile needed (`image`
+  0.25.9, `wayland-protocols` 0.32.12, `built` 0.8.0, `wasip2` 1.0.1) **dissolved** — a
+  fresh `cargo generate-lockfile` resolves the graph forward freely with no "requires
+  Rust 1.XX" notes. Do not `cargo update` the whole graph blindly on a non-upgrade
+  branch, but on a Bevy bump regenerating the lock from scratch is the right move.
+- **`Cargo.lock` is committed.** Always build with `--locked`; when a deliberate re-pin
+  is needed, bump direct deps with targeted `cargo update -p <crate> --precise <ver>`
+  rather than a blanket update.
+- **getrandom on wasm needs explicit backends.** Bevy 0.17 moved to `getrandom` 0.3,
+  which no longer auto-selects a wasm backend: it needs `--cfg getrandom_backend="wasm_js"`
+  (set for the wasm target in the committed **`.cargo/config.toml`**) plus the matching
+  `wasm_js` feature (client `web` feature). Separately, `rand` 0.8 (client + shared) pulls
+  `getrandom` *0.2* transitively, which on wasm needs *its* `js` feature — enabled via a
+  renamed `getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }`
+  optional dep wired into the `web` feature (feature unification covers the transitive
+  copy). Symptom if either is missing: `the wasm*-unknown-unknown targets are not
+  supported by default` at `getrandom` compile.
 - The web build targets the **WebGL2 backend** via the `bevy/webgl2` feature (in the
-  client's `web` feature): Bevy 0.16's wgpu 24 otherwise compiles the WebGPU backend
+  client's `web` feature): Bevy 0.17's wgpu 26 otherwise compiles the WebGPU backend
   on wasm, which needs `--cfg=web_sys_unstable_apis` and a WebGPU-capable browser. WebGL2
   is the broad-support renderer the build has used on Pages all along.
 - The web build needs a **version-matched `wasm-bindgen` CLI (exactly 0.2.125)**, matching
-  the `wasm-bindgen` crate the graph resolves (bevy 0.16 / wgpu 24's `web-sys` 0.3.102
-  drags the whole graph to 0.2.125; the client pins `wasm-bindgen = "=0.2.125"` to keep
-  it stable). The CLI version must match the crate exactly or `wasm-bindgen` refuses the
-  module (schema mismatch). Use the prebuilt binary from the rustwasm GitHub release, not
-  `cargo install` (building the CLI from source hits the same dependency bitrot). The
-  Pages CI also hardcodes `RUST_TOOLCHAIN` and `WASM_BINDGEN_VERSION` in
-  `.github/workflows/pages.yml` (it `rustup override set`s the toolchain, shadowing
-  `rust-toolchain.toml`) — bump **both** in lockstep on a Bevy upgrade.
+  the `wasm-bindgen` crate the graph resolves (bevy 0.17 / wgpu 26's `web-sys` 0.3.102
+  still resolves to 0.2.125 — unchanged from 0.16; the client pins `wasm-bindgen =
+  "=0.2.125"` to keep it stable). The CLI version must match the crate exactly or
+  `wasm-bindgen` refuses the module (schema mismatch). Use the prebuilt binary from the
+  rustwasm GitHub release, not `cargo install` (building the CLI from source hits the same
+  dependency bitrot). The Pages CI also hardcodes `RUST_TOOLCHAIN` and
+  `WASM_BINDGEN_VERSION` in `.github/workflows/pages.yml` (it `rustup override set`s the
+  toolchain, shadowing `rust-toolchain.toml`) — bump **both** in lockstep on a Bevy upgrade.
+  (Note: on the Apple-silicon Mac build box the x86_64 `wasm-bindgen` binary aborts under
+  emulation with a bogus huge allocation; that is an emulation artifact — the GitHub
+  x86_64 runners run it natively and fine. Verify wasm *compilation* on the Mac and leave
+  the `wasm-bindgen` step to CI.)
 
 ## Build & run
 
@@ -363,6 +361,56 @@ becoming fallible. Mostly compile-time and mechanical, but several are subtle:
   Quantified on the headless server (drop 10 blocks, settle 600 ticks, measure deepest
   `contact.dist()` against the ground): worst-case penetration ~`0.07-0.08` without CCD
   (intermittent, ~1-2 of 10 blocks) → ~`0.002` (normal contact margin, 0 stuck) with it.
+
+### Bevy 0.17 migration gotchas
+
+The 0.16 → 0.17 bump (third-party deps: `bevy_rapier3d` 0.30 → **0.32** — *not* 0.31,
+which is still a Bevy-0.16 release and silently drags a *second* whole Bevy into the
+graph; 0.32 is the 0.17 release; `bevy_egui` 0.34 → 0.38, `bevy_easings` 0.16 → 0.17).
+Match third-party crates by their *declared* bevy dep (`crates.io/api/v1/crates/<c>/<v>/
+dependencies`), not a blog/readme — bevy_rapier's README tracks unreleased master. The two
+headline changes are the **event→message rename** and the **render-crate split**:
+
+- **Buffered "events" are now "messages."** The `Event` trait/`EventReader`/`EventWriter`/
+  `Events<E>` (the *buffered* queue API) became `Message`/`MessageReader`/`MessageWriter`/
+  `Messages<M>`; `App::add_event` → `add_message`; the `Events` resource's `.send()` →
+  `.write()` (the `EventWriter` method was already `.write()` since 0.16, and `.read()`/
+  `.clear()` are unchanged). `Event` now means *observer* events only. Every custom buffered
+  type (`PlayerClick`, `NewPart`, `AttachEvent`/`ReleaseEvent`/`HoldEvent`) derives `Message`
+  now, and the built-in input streams (`MouseMotion`, `MouseWheel`, `MouseButtonInput`) are
+  read via `MessageReader` (`shared/src/{lib,part,player}.rs`, `client/src/{input,ui}.rs`,
+  `client/src/platform/web.rs`).
+- **`bevy_render` split into focused crates** (better modularity / compile times). Types
+  moved out of `bevy::render::*` / `bevy::pbr::*` to new facade modules — and the old paths
+  are now *private*, so this is a compile error, not a deprecation: `AmbientLight` /
+  `CascadeShadowConfigBuilder` / `NotShadowCaster` → `bevy::light`; `Indices` /
+  `VertexAttributeValues` → `bevy::mesh`; `RenderAssetUsages` → `bevy::asset`; `ShaderRef`
+  → `bevy::shader`. `Camera` is still in the prelude (drop the explicit
+  `bevy::render::camera::Camera` imports). `AsBindGroup` and `PrimitiveTopology` stayed in
+  `bevy::render::render_resource`. cargo's "import directly" suggestions point at the
+  *inner* crates (`bevy_light::…`) which aren't our deps — use the `bevy::<module>` facade
+  re-export instead (`bevy_internal/src/lib.rs` maps `bevy_light as light`, etc.).
+- **bevy_egui 0.35+ deprecated single-pass; multipass is the only path.** Add the plugin
+  with `EguiPlugin::default()` (the old `enable_multipass_for_primary_context` flag is
+  deprecated), move egui-drawing systems out of `Update` into the **`EguiPrimaryContextPass`**
+  schedule, and make them fallible — `EguiContexts::ctx_mut()` now returns `Result`, so the
+  systems return `Result` and use `ctx_mut()?` (`client/src/ui.rs`). Systems that only read
+  input/`EguiContextSettings` (not the context) stay in `Update`.
+- **`CursorOptions` is its own component.** 0.15 moved the cursor fields off `Window` into a
+  `cursor_options` sub-struct; 0.17 promotes that to a standalone `CursorOptions` component
+  on the window entity — query `Query<&mut CursorOptions, With<PrimaryWindow>>` directly
+  instead of going through `Window` (`client/src/platform/native.rs`).
+- **`weak_handle!` → `uuid_handle!`.** The macro was renamed (the `Handle::Weak` variant
+  became `Handle::Uuid`); import `bevy::asset::uuid_handle`. The UUID is unchanged so the
+  registered shader handle is byte-for-byte identical (`render_secondary_pass/gizmo_material.rs`).
+- **wgpu 25 shuffled the 3D bind groups again.** Material resources moved off `@group(2)`;
+  use the `#{MATERIAL_BIND_GROUP}` shader-def placeholder instead of a hardcoded group index
+  so the WGSL tracks the engine (`client/assets/gizmo_material.wgsl`). Runtime shader-compile
+  failure, not a Rust error.
+- **Smaller renames:** system sets standardised on the `*Systems` suffix
+  (`TransformSystem::TransformPropagate` → `TransformSystems::Propagate`,
+  `client/src/render_secondary_pass/normalization.rs`); `GlobalTransform::compute_matrix` →
+  `to_matrix`.
 
 ## Pull request workflow
 
