@@ -1,7 +1,6 @@
 use bad_spaceship_shared::{
     player, GameStickDirectionalInput, InputEvents, KeyboardDirectionalInput, LeftClicked,
     Modifying, MouseMotionDelta, MouseWheelDelta, MouseWheelLabel, OrbitingCamera, PlayerClick,
-    WebKeyCode, WebMouseButton,
 };
 use bevy::{
     input::mouse::MouseMotion,
@@ -30,34 +29,15 @@ impl Plugin for InputPlugin {
                 zoom_camera.after(MouseWheelLabel),
             ),
         )
-        .init_resource::<ButtonInput<WebKeyCode>>()
-        .init_resource::<ButtonInput<WebMouseButton>>()
         .add_message::<PlayerClick>();
     }
 }
 
-struct MergedKeyboardInput<'a> {
-    native_keyboard_input: &'a Res<'a, ButtonInput<KeyCode>>,
-    web_keyboard_input: &'a Res<'a, ButtonInput<WebKeyCode>>,
-}
-
-impl<'a> MergedKeyboardInput<'a> {
-    pub fn pressed(&self, input: KeyCode) -> bool {
-        self.native_keyboard_input.pressed(input)
-            || self.web_keyboard_input.pressed(WebKeyCode(input))
-    }
-}
-
 fn process_keyboard_input(
-    keyboard_input: Res<ButtonInput<KeyCode>>,
-    web_keyboard_input: Res<ButtonInput<WebKeyCode>>,
+    input: Res<ButtonInput<KeyCode>>,
     mut query: Query<&mut KeyboardDirectionalInput>,
     state: Res<State<AppState>>,
 ) {
-    let input = MergedKeyboardInput {
-        native_keyboard_input: &keyboard_input,
-        web_keyboard_input: &web_keyboard_input,
-    };
     //
     // Note: keyboard_directional_input vector components match Bevy/Rapier vector definitions:
     //  Horizontal = (X,Z)
@@ -100,7 +80,6 @@ fn process_keyboard_input(
     }
 
     for mut keyboard_directional_input in query.iter_mut() {
-        // Sum with whatever other input is also being applied (e.g. web)
         keyboard_directional_input.0 =
             (keyboard_directional_input.0 + direction).normalize_or_zero();
     }
@@ -124,44 +103,34 @@ pub fn get_look(
 }
 
 pub fn process_mouse_clicks(
-    native_mouse_button_input: Res<ButtonInput<MouseButton>>,
-    web_mouse_button_input: Res<ButtonInput<WebMouseButton>>,
+    mouse_button_input: Res<ButtonInput<MouseButton>>,
     mut player_clicks: MessageWriter<PlayerClick>,
     state: Res<State<AppState>>,
 ) {
     if *state.get() == AppState::InGame {
-        if native_mouse_button_input.just_pressed(MouseButton::Left)
-            || web_mouse_button_input.pressed(WebMouseButton(MouseButton::Left))
-        {
+        if mouse_button_input.just_pressed(MouseButton::Left) {
             player_clicks.write(PlayerClick);
         }
     }
 }
 
 fn get_left_click(
-    native_mouse_button_input: Res<ButtonInput<MouseButton>>,
-    web_mouse_button_input: Res<ButtonInput<WebMouseButton>>,
+    mouse_button_input: Res<ButtonInput<MouseButton>>,
     state: Res<State<AppState>>,
     mut clicked_query: Query<&mut LeftClicked>,
 ) {
     if let Some(mut clicked) = clicked_query.iter_mut().next() {
         clicked.0 = (*state.get() == AppState::InGame)
-            && (native_mouse_button_input.just_pressed(MouseButton::Left)
-                || web_mouse_button_input.pressed(WebMouseButton(MouseButton::Left)));
+            && mouse_button_input.just_pressed(MouseButton::Left);
     }
 }
 
 fn get_modifying(
-    native_keyboard_input: Res<ButtonInput<KeyCode>>,
-    web_keyboard_input: Res<ButtonInput<WebKeyCode>>,
+    input: Res<ButtonInput<KeyCode>>,
     mut players: Query<&mut Modifying>,
     state: Res<State<AppState>>,
 ) {
     if let Some(mut modifying) = players.iter_mut().next() {
-        let input = MergedKeyboardInput {
-            native_keyboard_input: &native_keyboard_input,
-            web_keyboard_input: &web_keyboard_input,
-        };
         modifying.0 = (*state.get() == AppState::InGame)
             && (input.pressed(KeyCode::ShiftLeft) | input.pressed(KeyCode::ShiftRight));
     }

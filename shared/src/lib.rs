@@ -2,7 +2,7 @@ use bevy::{
     app::PluginGroupBuilder,
     ecs::component::Component,
     math::{Quat, Vec2, Vec3},
-    prelude::{Bundle, Entity, KeyCode, Message, MouseButton, PluginGroup, Resource, SystemSet},
+    prelude::{Bundle, Entity, Message, PluginGroup, Resource, SystemSet},
 };
 use avian3d::PhysicsPlugins;
 use character::CharacterPlugin;
@@ -93,15 +93,6 @@ pub struct InputEvents;
 
 #[derive(Default, Component)]
 pub struct PartRotation(pub Quat);
-// Bevy 0.13 rewrote `KeyCode` as a physical-key enum that no longer derives
-// `Ord`/`PartialOrd`; this newtype only needs `Hash`/`Eq` to key a `ButtonInput`.
-#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
-#[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
-pub struct WebKeyCode(pub KeyCode);
-
-#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
-#[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
-pub struct WebMouseButton(pub MouseButton);
 
 #[derive(Component)]
 pub struct Focused;

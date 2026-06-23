@@ -173,23 +173,22 @@ server run, so game logic stays identical across renderers and platforms.
 ### Platform abstraction
 
 `client/src/platform/mod.rs` `#[cfg]`-switches between `native.rs` and `web.rs`,
-both exposing a `PlatformPlugin`. The **web** implementation wires browser input
-directly through DOM event listeners (`web-sys` / `gloo`) — pointer lock, mouse
-motion, wheel, and keyboard — rather than relying on `winit`. Most platform-specific
-code is gated on `#[cfg(target_arch = "wasm32")]`. The WASM canvas is sized to the
-viewport via CSS (`canvas { width/height: 100% }` in `index.html`): Bevy 0.13 removed
+both exposing a `PlatformPlugin`. **Both platforms now read the same winit-native
+input** — `ButtonInput<KeyCode>` / `ButtonInput<MouseButton>` / `MouseWheel` /
+`MouseMotion` — so `input.rs` has a single code path (see "Unifying web input on
+winit-native" below). Most platform-specific code is gated on
+`#[cfg(target_arch = "wasm32")]`. The WASM canvas is sized to the viewport via CSS
+(`canvas { width/height: 100% }` in `index.html`): Bevy 0.13 removed
 `Window::fit_canvas_to_parent` (which had itself replaced the old
 `bevy_web_fullscreen` plugin), and the recommended replacement is plain CSS.
 
-One Bevy 0.13 web gotcha lives here: the 0.13 bump pulled winit 0.28 → 0.29,
-which (unlike 0.28) emits its *own* `MouseMotion` events from the web canvas
-under pointer lock. Those phantom deltas double-fed the DOM-listener look path
-and spun the camera on its own with the mouse held still. The fix in
-`get_mouse_motion` (web): take `ResMut<Events<MouseMotion>>`, `clear()` the
-buffer each frame to drop winit's events, then re-send only our tracker's
-delta — so look is driven solely by our listeners. If wheel/keyboard ever
-start double-firing on web, it's the same cause and the same clear-then-inject
-pattern is the remedy.
+`web.rs` is now just the genuinely browser-specific glue: a `pointerlockchange`
+DOM listener (the browser owns the Esc-to-exit-lock gesture, so menu toggling keys
+off lock state rather than a keypress), a `request_pointer_lock()` call on entering
+the game, and the `signal_game_ready` loader-overlay handshake (tags `<body
+data-game-ready>` once the ground mesh has drawn). Mouse-look relies on winit
+emitting `MouseMotion` under pointer lock — see the unification section for the
+history (this used to be fought as a *bug*).
 
 ### Build metadata
 
@@ -617,6 +616,49 @@ the one effect it powered was hand-rolled:
   preserved.
 - Removing the dep also pruned its unique transitive crate `interpolation` from the
   lockfile; nothing else moved.
+
+## Unifying web input on winit-native
+
+The web build used to wire **all** browser input by hand through DOM event listeners
+(`web-sys` / `gloo`): a `KeyCode`/`MouseButton` newtype each (`WebKeyCode` /
+`WebMouseButton`), four trackers (`KeyboardTracker` / `MouseClickTracker` /
+`WheelTracker` / `MouseMovementTracker`) feeding parallel `ButtonInput<Web*>`
+resources, plus a `MergedKeyboardInput` step in `input.rs` that OR'd the web stream
+into the native one. That whole layer dated to the **Bevy 0.12 era**, when winit's
+web input didn't work. It was removed — winit **0.30** (on Bevy 0.19) delivers
+keyboard, mouse buttons, the scroll wheel, and pointer-lock mouse motion natively on
+web, so `input.rs` now has a **single** code path reading the standard
+`ButtonInput<KeyCode>` / `ButtonInput<MouseButton>` / `MouseWheel` / `MouseMotion` on
+both platforms.
+
+- **The decisive evidence was in the repo.** The old `get_mouse_motion` had to
+  `clear()` winit's `MouseMotion` buffer every frame because winit *already* emitted
+  its own deltas under pointer lock (they double-fed the look and spun the camera).
+  That bug-we-fought is exactly the feature we now depend on: winit emits `MouseMotion`
+  whenever the document is pointer-locked, **even though `web.rs` requests the lock
+  itself** (not via winit's `CursorGrabMode`) — so mouse-look needs no DOM listener.
+- **Removing the hand-rolled keyboard tracker also *fixes* latent bugs**, not just
+  simplifies: it only ever wired `W/A/S/D/Space/ShiftLeft/ControlLeft` (no `ShiftRight`,
+  no other keys) and dropped keys on focus loss (raw `keyup` listeners). winit handles
+  all keys and focus transitions properly.
+- **What stayed in `web.rs`:** the `pointerlockchange` listener + `request_pointer_lock`
+  (browser owns the Esc-exit gesture; `toggle_menu_on_pointer_lock` keys off lock state),
+  `signal_game_ready`, and the `get_document`/`get_body`/`listen` helpers. The
+  `AtomicBoolExt` trait shrank to `store_val`/`get` (its `toggle` and the whole
+  `AtomicI32Ext` were only used by the deleted trackers).
+- **`shared` shed `WebKeyCode`/`WebMouseButton`** and no longer references
+  `KeyCode`/`MouseButton` itself, but its `bevy/keyboard` + `bevy/mouse` features are
+  **kept** so those types still compile workspace-wide for the client (`input.rs`) and
+  server, carried to every consumer by feature unification.
+- **Sensitivity caveat (verify on Pages):** the old DOM path scaled deltas by `0.15`
+  before the per-config look sensitivity; winit's native deltas skip that, so web
+  mouse-look may feel faster/slower than before and now matches native — tune the
+  `player.player.ron` look sensitivity if needed. Also note Bevy issue
+  [#18855](https://github.com/bevyengine/bevy/issues/18855) (open, `S-Blocked`): on
+  some browsers native wasm `MouseMotion` under pointer lock under-reports slow motions.
+  If mouse-look regresses on web, the fallback is to reinstate **only** the
+  `MouseMovementTracker` DOM shim (movementX/Y) for motion while keeping everything
+  else on the winit-native path.
 
 ## Pull request workflow
 

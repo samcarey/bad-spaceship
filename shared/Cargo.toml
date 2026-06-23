@@ -27,10 +27,12 @@ anyhow = "1.0"
 
 [features]
 # Avian (`default-features = false`) no longer pulls in the bevy features that
-# bevy_rapier's defaults used to bring along transitively. `shared` references
-# these types directly — player.rs spawns a `Camera3d` and reads `Tonemapping`
-# (bevy_render / bevy_core_pipeline), and lib.rs uses `KeyCode` / `MouseButton`
-# (bevy_input's `keyboard` / `mouse` source features) — so enable them here.
+# bevy_rapier's defaults used to bring along transitively. `shared`'s player.rs
+# spawns a `Camera3d` and reads `Tonemapping` (bevy_render / bevy_core_pipeline),
+# so enable those here. `keyboard` / `mouse` (bevy_input's source features) are
+# kept so the `KeyCode` / `MouseButton` types compile workspace-wide — the client
+# (input.rs) and server consume them through `shared`; feature unification then
+# carries them to every consumer regardless of who pulls in winit.
 default = [
     "bevy/png",
     "bevy/bevy_render",
