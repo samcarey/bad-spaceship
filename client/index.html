@@ -26,6 +26,12 @@
       touch-action: none;
       width: 100% !important;
       height: 100% !important;
+      /* Newer winit (pulled in by the Bevy bumps) gives the canvas a `tabindex`
+         so it can receive keyboard focus, which makes the browser paint its
+         default blue focus ring around the viewport when clicked. The 0.12
+         build's older winit left the canvas non-focusable, so no ring. Suppress
+         it — pointer lock / our DOM listeners drive input, not the focus ring. */
+      outline: none;
     }
 
     /* Lightweight loading overlay shown instantly while the heavy WASM game
