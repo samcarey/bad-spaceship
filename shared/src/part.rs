@@ -43,7 +43,7 @@ impl Plugin for PartPlugin {
                         .after(UpdateJointsLabel),
                 ),
             )
-            .add_event::<NewPart>()
+            .add_message::<NewPart>()
             .init_resource::<PotentialJoints>()
             .init_resource::<ExistingJoints>()
             .init_resource::<PredeleteJoints>();
@@ -129,7 +129,7 @@ struct PartBundle {
     external_force: ExternalForce,
 }
 
-#[derive(Event)]
+#[derive(Message)]
 struct NewPart;
 
 fn get_random_shape(rng: &mut ThreadRng) -> ColliderShape {
@@ -146,7 +146,7 @@ fn get_random_shape(rng: &mut ThreadRng) -> ColliderShape {
     }
 }
 
-fn spawn_part(mut commands: Commands, mut new_part_events: EventReader<NewPart>) {
+fn spawn_part(mut commands: Commands, mut new_part_events: MessageReader<NewPart>) {
     let mut rng = rand::thread_rng();
     for _ in new_part_events.read() {
         let shape = get_random_shape(&mut rng);
@@ -178,7 +178,7 @@ fn spawn_part(mut commands: Commands, mut new_part_events: EventReader<NewPart>)
     }
 }
 
-fn spawn_initial_parts(mut new_part_events: EventWriter<NewPart>) {
+fn spawn_initial_parts(mut new_part_events: MessageWriter<NewPart>) {
     for _ in 0..NUM_PARTS {
         new_part_events.write(NewPart);
     }
@@ -187,7 +187,7 @@ fn spawn_initial_parts(mut new_part_events: EventWriter<NewPart>) {
 fn replace_fallen_parts(
     mut commands: Commands,
     parts: Query<(&Transform, Entity), With<GetsReplaced>>,
-    mut new_part_events: EventWriter<NewPart>,
+    mut new_part_events: MessageWriter<NewPart>,
 ) {
     for (transform, entity) in parts.iter() {
         if transform.translation.y < -10.0 {
@@ -492,7 +492,7 @@ fn update_predelete_joints(
 
 fn attach(
     mut commands: Commands,
-    mut attach_events: EventReader<AttachEvent>,
+    mut attach_events: MessageReader<AttachEvent>,
     attach_points: Res<PotentialJoints>,
 ) {
     if attach_events.read().next().is_some() {
@@ -512,7 +512,7 @@ fn attach(
 fn delete_joints(
     mut commands: Commands,
     predelete_joints: Res<PredeleteJoints>,
-    mut clicks: EventReader<PlayerClick>,
+    mut clicks: MessageReader<PlayerClick>,
 ) {
     if clicks.read().next().is_some() {
         for PredeleteJoint { entity, .. } in predelete_joints.0.iter() {

@@ -55,12 +55,12 @@ impl Plugin for PlayerPlugin {
                     set_part_rotation.after(MouseWheelLabel),
                 ),
             )
-            .add_event::<PlayerClick>()
+            .add_message::<PlayerClick>()
             .init_asset::<Config>()
-            .add_event::<AttachEvent>()
-            .add_event::<ReleaseEvent>()
+            .add_message::<AttachEvent>()
+            .add_message::<ReleaseEvent>()
             .init_resource::<CameraOrbitOffset>()
-            .add_event::<HoldEvent>();
+            .add_message::<HoldEvent>();
     }
 }
 
@@ -305,15 +305,15 @@ impl HeldBundle {
 }
 
 fn toggle_holding(
-    mut clicks: EventReader<PlayerClick>,
+    mut clicks: MessageReader<PlayerClick>,
     mut commands: Commands,
     mut players: Query<(&mut Holding, &FocusedInteractable, &Children, &Modifying), With<Player>>,
     camera_orbit_centers: Query<&Children>,
     hold_points: Query<(), With<HoldPoint>>,
     holdables: Query<&GlobalTransform, With<Holdable>>,
-    mut attach_events: EventWriter<AttachEvent>,
-    mut release_events: EventWriter<ReleaseEvent>,
-    mut hold_events: EventWriter<HoldEvent>,
+    mut attach_events: MessageWriter<AttachEvent>,
+    mut release_events: MessageWriter<ReleaseEvent>,
+    mut hold_events: MessageWriter<HoldEvent>,
 ) {
     if clicks.read().next().is_some() {
         if let Some((mut holding, interactable, player_children, modifying)) =
@@ -369,7 +369,7 @@ struct EaseLabel;
 
 fn adjust_camera_on_hold(
     mut commands: Commands,
-    mut hold_events: EventReader<HoldEvent>,
+    mut hold_events: MessageReader<HoldEvent>,
     camera_orbit_offset: Res<CameraOrbitOffset>,
     camera_orbit_centers: Query<(Entity, &Transform), With<CameraOrbitCenter>>,
     radiuses: Query<&BoundingRadius, With<Holdable>>,
@@ -393,7 +393,7 @@ fn adjust_camera_on_hold(
 
 fn reset_camera_after_release(
     mut commands: Commands,
-    mut release_events: EventReader<ReleaseEvent>,
+    mut release_events: MessageReader<ReleaseEvent>,
     camera_orbit_offset: ResMut<CameraOrbitOffset>,
     mut camera_orbit_centers: Query<(Entity, &mut Transform), With<CameraOrbitCenter>>,
 ) {
@@ -424,7 +424,7 @@ fn ease_camera(
 }
 
 fn adjust_hold_point_on_hold(
-    mut hold_events: EventReader<HoldEvent>,
+    mut hold_events: MessageReader<HoldEvent>,
     mut hold_points: Query<(&mut Transform, &OriginalPosition), With<HoldPoint>>,
     radiuses: Query<&BoundingRadius, With<Holdable>>,
 ) {
@@ -438,7 +438,7 @@ fn adjust_hold_point_on_hold(
 }
 
 fn reset_hold_point_after_release(
-    mut release_events: EventReader<ReleaseEvent>,
+    mut release_events: MessageReader<ReleaseEvent>,
     mut hold_points: Query<(&mut Transform, &OriginalPosition), With<HoldPoint>>,
 ) {
     if release_events.read().next().is_some() {

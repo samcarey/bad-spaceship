@@ -1,11 +1,14 @@
-use bevy::{prelude::*, render::camera::Camera, transform::TransformSystem};
+// Bevy 0.17 standardised system-set names on the `*Systems` suffix:
+// `TransformSystem` → `TransformSystems`. `Camera` comes from the prelude now
+// (it moved to the `bevy_camera` crate, but the prelude re-export is unchanged).
+use bevy::{prelude::*, transform::TransformSystems};
 
 pub struct Ui3dNormalization;
 impl Plugin for Ui3dNormalization {
     fn build(&self, app: &mut App) {
         app.add_systems(
             PostUpdate,
-            normalize.before(TransformSystem::TransformPropagate),
+            normalize.before(TransformSystems::Propagate),
         );
     }
 }

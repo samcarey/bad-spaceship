@@ -5,7 +5,6 @@ pub mod highlight;
 use bad_spaceship_shared::player;
 use bevy::pbr::AmbientLight;
 use bevy::prelude::*;
-use bevy::render::camera::Camera;
 
 use highlight::HighlightPlugin;
 use input::InputPlugin;

@@ -6,7 +6,7 @@ use bevy::{
 };
 use bevy_egui::{
     egui::{self, Align, Align2, Color32, Frame, Layout},
-    EguiContexts, EguiContextSettings, EguiPlugin,
+    EguiContexts, EguiContextSettings, EguiPlugin, EguiPrimaryContextPass,
 };
 use chrono::{DateTime, FixedOffset, Utc};
 use once_cell::sync::Lazy;
@@ -17,22 +17,25 @@ pub struct UiPlugin;
 
 impl Plugin for UiPlugin {
     fn build(&self, app: &mut App) {
-        // bevy_egui 0.34 made `EguiPlugin` carry a required multipass flag. This
-        // UI is plain immediate-mode egui drawn from `Update` systems, so keep the
-        // legacy single-pass mode (multipass is opt-in for advanced egui features
-        // we don't use).
-        app.add_plugins((
-            EguiPlugin {
-                enable_multipass_for_primary_context: false,
-            },
-            FrameTimeDiagnosticsPlugin::default(),
-        ))
+        // bevy_egui 0.35 deprecated single-pass mode (the old
+        // `enable_multipass_for_primary_context` flag) and made multipass the only
+        // supported path, so add the plugin with `default()`. Multipass requires
+        // egui-drawing systems to run in the dedicated `EguiPrimaryContextPass`
+        // schedule rather than `Update`, and `EguiContexts::ctx_mut()` now returns
+        // a `Result` (the systems below are fallible and use `?`). Systems that
+        // only read input or egui settings (not the context) stay in `Update`.
+        app.add_plugins((EguiPlugin::default(), FrameTimeDiagnosticsPlugin::default()))
             .add_systems(
                 Update,
                 (
-                    show_menu.run_if(in_state(AppState::InGameMenu)),
                     capture_mouse_on_click.run_if(in_state(AppState::Initial)),
                     update_ui_scale_factor,
+                ),
+            )
+            .add_systems(
+                EguiPrimaryContextPass,
+                (
+                    show_menu.run_if(in_state(AppState::InGameMenu)),
                     show_instructions,
                     show_bottom_panel,
                 ),
@@ -89,11 +92,14 @@ fn align_menu(window: egui::Window) -> egui::Window {
     window.anchor(Align2::CENTER_CENTER, [0., -70.])
 }
 
-fn show_menu(mut contexts: EguiContexts, mut next_state: ResMut<NextState<AppState>>) {
+fn show_menu(
+    mut contexts: EguiContexts,
+    mut next_state: ResMut<NextState<AppState>>,
+) -> Result {
     align_menu(egui::Window::new("Bad Spaceship"))
         .collapsible(false)
         .resizable(false)
-        .show(contexts.ctx_mut(), |ui| {
+        .show(contexts.ctx_mut()?, |ui| {
             ui.with_layout(Layout::top_down_justified(Align::Center), |ui| {
                 if ui.button("Options").clicked() {
                     bevy::log::info!("Options selected");
@@ -107,6 +113,7 @@ fn show_menu(mut contexts: EguiContexts, mut next_state: ResMut<NextState<AppSta
                 }
             });
         });
+    Ok(())
 }
 
 /// The build timestamp, parsed once from the RFC 2822 string baked in at
@@ -141,7 +148,10 @@ fn commit_age() -> String {
     "0s".to_string()
 }
 
-fn show_bottom_panel(mut contexts: EguiContexts, diagnostics: Res<DiagnosticsStore>) {
+fn show_bottom_panel(
+    mut contexts: EguiContexts,
+    diagnostics: Res<DiagnosticsStore>,
+) -> Result {
     let mut fps = 0.0;
     // Bevy 0.13 replaced `DiagnosticId` with `DiagnosticPath`; `get` takes `&path`.
     if let Some(fps_diagnostic) = diagnostics.get(&FrameTimeDiagnosticsPlugin::FPS) {
@@ -153,7 +163,7 @@ fn show_bottom_panel(mut contexts: EguiContexts, diagnostics: Res<DiagnosticsSto
         .frame(Frame::default().multiply_with_opacity(0.0))
         // Drop the hairline divider egui draws at the panel's edge.
         .show_separator_line(false)
-        .show(contexts.ctx_mut(), |ui| {
+        .show(contexts.ctx_mut()?, |ui| {
             ui.horizontal(|ui| {
                 ui.colored_label(
                     Color32::from_rgb(255, 0, 0),
@@ -169,6 +179,7 @@ fn show_bottom_panel(mut contexts: EguiContexts, diagnostics: Res<DiagnosticsSto
                 });
             });
         });
+    Ok(())
 }
 
 const INSTRUCTIONS: &str = "Instructions:
@@ -186,20 +197,21 @@ Hold deletion zone over existing joint to highlight it in red.
 Click while joint is highlighted red to delete it.
 ";
 
-fn show_instructions(mut contexts: EguiContexts) {
+fn show_instructions(mut contexts: EguiContexts) -> Result {
     egui::TopBottomPanel::top("top_panel")
         .frame(Frame::default().multiply_with_opacity(0.0))
         // Drop the hairline divider egui draws at the panel's edge.
         .show_separator_line(false)
-        .show(contexts.ctx_mut(), |ui| {
+        .show(contexts.ctx_mut()?, |ui| {
             ui.horizontal(|ui| {
                 ui.colored_label(Color32::from_rgb(255, 0, 0), INSTRUCTIONS);
             });
         });
+    Ok(())
 }
 
 fn capture_mouse_on_click(
-    mut mouse_button_input_events: EventReader<MouseButtonInput>,
+    mut mouse_button_input_events: MessageReader<MouseButtonInput>,
     state: Res<State<AppState>>,
     mut next_state: ResMut<NextState<AppState>>,
 ) {
