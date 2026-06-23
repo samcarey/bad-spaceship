@@ -1,5 +1,5 @@
 use crate::AppState;
-use bad_spaceship_shared::{InputEvents, WebKeyCode, WebMouseButton};
+use bad_spaceship_shared::{Grass, InputEvents, WebKeyCode, WebMouseButton};
 use bevy::{
     input::mouse::{MouseMotion, MouseScrollUnit, MouseWheel},
     prelude::*,
@@ -22,6 +22,7 @@ impl Plugin for PlatformPlugin {
                 Update,
                 (
                     toggle_menu_on_pointer_lock,
+                    signal_game_ready,
                     (
                         get_wheel,
                         get_keyboard_input,
@@ -69,6 +70,26 @@ impl PointerLockTracker {
 
 fn hide_cursor() {
     get_body().request_pointer_lock();
+}
+
+/// Tells the HTML loading overlay (`client/index.html`) that the game is actually
+/// on screen, so it can hide instead of cutting to a blank screen while Bevy 0.16
+/// compiles its render pipelines on first use. Fires a few frames after the ground
+/// mesh exists (i.e. the map has loaded and been drawn) by tagging `<body>`; the
+/// loader polls for the attribute, with its own timeout as a fallback.
+fn signal_game_ready(
+    grass: Query<(), (With<Grass>, With<Mesh3d>)>,
+    mut frames_drawn: Local<u32>,
+    mut done: Local<bool>,
+) {
+    if *done || grass.is_empty() {
+        return;
+    }
+    *frames_drawn += 1;
+    if *frames_drawn >= 3 {
+        *done = true;
+        let _ = get_body().set_attribute("data-game-ready", "1");
+    }
 }
 
 fn toggle_menu_on_pointer_lock(

@@ -258,8 +258,26 @@
       }
 
       barInner.style.width = '100%';
-      loader.classList.add('hidden');
-      setTimeout(() => loader.remove(), 500);
+
+      // `init()` returns as soon as the WASM module starts; Bevy then spends a
+      // few seconds loading assets and compiling render pipelines before the
+      // first frame is actually drawn. Hiding the loader now would cut to a blank
+      // screen, so wait until the game tags <body data-game-ready> (set by the
+      // web platform once the ground mesh has been drawn). Fall back to a timeout
+      // so the loader can never get stuck if that signal never arrives.
+      statusEl.textContent = 'Starting…';
+      etaEl.textContent = '';
+      const readyStart = performance.now();
+      function hideWhenReady() {
+        const ready = document.body.getAttribute('data-game-ready') === '1';
+        if (ready || performance.now() - readyStart > 20000) {
+          loader.classList.add('hidden');
+          setTimeout(() => loader.remove(), 500);
+        } else {
+          requestAnimationFrame(hideWhenReady);
+        }
+      }
+      hideWhenReady();
     }
 
     run().catch((e) => {
