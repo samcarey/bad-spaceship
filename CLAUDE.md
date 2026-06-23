@@ -463,12 +463,22 @@ Bevy bumps. This migration deliberately *stayed on Bevy 0.18* to isolate the
 physics-engine change from any engine bump. Notes for anyone touching physics:
 
 - **Cargo features.** `avian3d` is pulled with `default-features = false, features =
-  ["3d", "f32", "parry-f32"]` in all three crates. Avian's default features include
-  `debug-plugin` (pulls `bevy_render` — bad for the headless server) and `parallel`
-  (pulls `bevy/multi_threaded` — unwanted on wasm), so they're off by default; the
-  native client and the server re-add `avian3d/simd` + `avian3d/parallel` for perf
-  (rapier's `simd-stable`/`parallel` equivalents). `parry-f32` is what brings in the
-  parry-backed `Collider`.
+  ["3d", "f32", "parry-f32", "xpbd_joints"]` in all three crates. Avian's default
+  features include `debug-plugin` (pulls `bevy_render` — bad for the headless server)
+  and `parallel` (pulls `bevy/multi_threaded` — unwanted on wasm), so they're off by
+  default; the native client and the server re-add `avian3d/simd` + `avian3d/parallel`
+  for perf (rapier's `simd-stable`/`parallel` equivalents). `parry-f32` is what brings
+  in the parry-backed `Collider`.
+- **`xpbd_joints` is a *default* Avian feature gating the joint *solver* — it MUST be
+  re-added under `default-features = false`.** This one bites silently: the joint
+  *types* (`SphericalJoint`, `FixedJoint`, …) and `JointGraphPlugin` compile and the
+  joints spawn fine *without* the feature, but `XpbdSolverPlugin` (the system that
+  actually enforces joints) is `#[cfg(feature = "xpbd_joints")]`-gated and is the only
+  thing `PhysicsPlugins` adds for joint solving. Drop the feature and attached parts
+  never move together — the joint sits inert in the world with no error. Symptom:
+  shift-click attach "works" (potential-joint dots appear, a `SphericalJoint` entity is
+  spawned) but lifting the held part leaves the attached part behind. Enabling the
+  feature is the whole fix (the solver is auto-added by `PhysicsPlugins` once it's on).
 - **`shared` must now name the bevy features rapier used to pull in transitively.**
   bevy_rapier's *default* features dragged `bevy_render` / `bevy_core_pipeline` / the
   `bevy_input` source features into `shared` as a side effect; Avian (with
