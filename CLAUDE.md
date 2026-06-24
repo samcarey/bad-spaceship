@@ -752,6 +752,71 @@ origin before going public.**
   so "Create Match" from the web provisions a server-side match — it never makes
   the browser a host.
 
+## Multiplayer netcode (lightyear 0.27)
+
+Server-authoritative netcode over **lightyear 0.27** (the release targeting Bevy
+0.18 — the reason the engine is held at 0.18). Current state is a **thin vertical
+slice**: a dedicated server accepts WebSocket clients and replicates a player
+entity per connection; the client draws each replicated player. It is **gated
+off by default** (env vars below) so single-player is byte-identical, and the
+live connection is **compile-verified on native + wasm** but the end-to-end
+session still needs real endpoints to exercise.
+
+**Protocol** (`shared/src/net.rs`, `ProtocolPlugin`): registered with the 0.27
+builder API `app.component::<C>().replicate()` (the old `register_component` is
+deprecated). Replicates `NetPlayer` (owner id) and **`NetTransform`** — a plain
+`[f32;3]`+`[f32;4]` pose mirror, because Bevy's `Transform` isn't `Serialize` and
+`.replicate()` requires it; map it to/from `Transform` on each side.
+
+**Server** (`server/src/net.rs`, `NetServerPlugin`, added only when
+`BS_MULTIPLAYER` is set): adds `ServerPlugins { tick_duration }`, then the
+protocol, then spawns the server entity `(NetcodeServer::new(NetcodeConfig::
+default()), LocalAddr(addr), WebSocketServerIo { config })` and triggers `Start {
+entity }`. An `On<Add, Connected>` observer spawns a `Replicate::to_clients(
+NetworkTarget::All)` player per client. Bind via `BS_SERVER_BIND` (default
+`0.0.0.0:5001`).
+
+**Client** (`client/src/net.rs`, `NetClientPlugin`, added only when
+`multiplayer_target()` is `Some`): adds `ClientPlugins`, the protocol, spawns
+`(NetcodeClient::new(Authentication::Manual{..}, ..), WebSocketClientIo::from_url
+(..))` and triggers `Connect { entity }`; a system draws a cube on each
+replicated `NetPlayer` and applies `NetTransform`. `multiplayer_target()` reads
+`BS_CONNECT=host:port` on native; on **wasm it's always `None`** (so web stays
+single-player) — the connection spawn is `#[cfg(not(wasm))]` because it uses
+aeronet's native TLS config. **Web multiplayer is the next step** and needs
+`wss://` + reading the room off `window.__BS_NET__`.
+
+**0.27 API gotchas worth remembering** (the published book lags the crate; the
+ground truth is the crate source in `~/.cargo/registry/src/.../lightyear*-0.27.0`):
+- Plugin groups are `ClientPlugins`/`ServerPlugins` structs with a `tick_duration`
+  field (Default 1/60s); add the group *before* the protocol *before* spawning the
+  connection entity.
+- Replication is built on **bevy_replicon** under the hood.
+- Connection is **entity/component-based**: `NetcodeClient`/`NetcodeServer`
+  components (require `Link`/`Client`), IO components (`WebSocketClientIo` /
+  `WebSocketServerIo`), triggered by `Connect`/`Start` (EntityEvents with an
+  `entity` field). Observers read the target via `trigger.entity` (a field, not
+  `.target()`).
+- **Dev transport is plain `ws://` via `with_no_encryption()`** on both
+  `ServerConfig::builder()` and `ClientConfig::builder()` — no TLS certs needed
+  for a native loopback test. Production / browsers need `wss://` (server
+  `with_identity(Identity::self_signed([..]))` or a real cert).
+- `Entity` → `u64` is `entity.to_bits()` (`.index()` returns `EntityIndex` now).
+- wasm note: aeronet's `ClientConfig` is a unit struct on wasm (the browser owns
+  TLS), so the `builder().with_no_encryption()` path is native-only.
+
+**Run the native loopback slice** (two terminals):
+```bash
+BS_MULTIPLAYER=1 cargo run -p bad-spaceship-server        # ws://0.0.0.0:5001
+cd client && BS_CONNECT=127.0.0.1:5001 cargo run --features native
+```
+
+**Remaining for real multiplayer** (needs live testing): drive the replicated
+players from the actual `Character` sim (vs the placeholder pose), suppress the
+client's *local* authoritative sim in multiplayer mode, networked input +
+client-side prediction/interpolation, parts/joints replication, `wss://` for the
+browser, and wiring the matchmaker to hand out real game-server endpoints.
+
 ## Deployment
 
 `.github/workflows/pages.yml` builds the web client and publishes it to GitHub

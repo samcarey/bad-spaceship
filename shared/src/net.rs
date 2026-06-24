@@ -23,6 +23,34 @@ pub struct NetPlayer {
     pub client_id: u64,
 }
 
+/// Replicated pose. Bevy's `Transform` isn't `Serialize`, and lightyear's
+/// `.replicate()` requires it, so we replicate this plain-`f32` mirror instead
+/// and map it to/from `Transform` on each side (server writes it from the
+/// authoritative sim; the client applies it to the rendered entity).
+#[derive(Component, Serialize, Deserialize, Clone, Copy, PartialEq, Debug, Default)]
+pub struct NetTransform {
+    pub translation: [f32; 3],
+    /// Rotation quaternion, `[x, y, z, w]`.
+    pub rotation: [f32; 4],
+}
+
+impl NetTransform {
+    pub fn from_transform(t: &Transform) -> Self {
+        Self {
+            translation: t.translation.to_array(),
+            rotation: t.rotation.to_array(),
+        }
+    }
+
+    pub fn to_transform(&self) -> Transform {
+        Transform {
+            translation: Vec3::from_array(self.translation),
+            rotation: Quat::from_array(self.rotation),
+            ..default()
+        }
+    }
+}
+
 /// Per-tick player intent, sent client → server. Registered as a networked
 /// input once the client/server input plugins are wired up (Phase 2b).
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug, Default)]
@@ -43,6 +71,8 @@ impl Plugin for ProtocolPlugin {
     fn build(&self, app: &mut App) {
         // lightyear 0.27 builder API (the older `register_component` is
         // deprecated). `.replicate()` marks the component for World replication.
+        // Thin slice: replicate the player marker + its transform, server → client.
         app.component::<NetPlayer>().replicate();
+        app.component::<NetTransform>().replicate();
     }
 }
