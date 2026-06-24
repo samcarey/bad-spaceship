@@ -836,9 +836,23 @@ orthogonal — the owner gets both a Confirmed entity it controls and an Interpo
 copy it renders). Trade-off: a small fixed interpolation delay (needs two snapshots
 to blend) in exchange for smooth motion. (`Interpolated`, `InterpolationTarget`,
 and the `add_interpolation_with`/`LerpFn` registration are in `lightyear::prelude`
-under the `interpolation` feature.) Client-side **prediction** of the owner's own
-avatar (to remove the round-trip delay on the self-view) is the remaining smoothing
-step.
+under the `interpolation` feature.)
+
+**Prediction of the owner's own avatar.** Interpolation alone leaves the owner's
+own avatar a fixed delay behind their character. But this is a *client-authoritative
+pose* model — the client forwards its real `Character` pose, the server only mirrors
+it — so the client already knows its own position with **zero delay** (the local
+pose), and "prediction" is exact and rollback-free (unlike lightyear's server-
+authoritative input-replay prediction, which doesn't fit). `mark_own_avatar` tags
+the `Interpolated` entity whose `NetPlayer.client_id` matches the `Controlled` one
+with `OwnAvatar`; `apply_net_transform` excludes `OwnAvatar` (so interpolation
+doesn't fight it) and `predict_own_avatar` drives its transform from the live local
+character pose each frame. Other players' avatars and the demo bot stay interpolated.
+Gotcha: read the character's **`Transform`, not `GlobalTransform`** — the latter is
+only refreshed in PostUpdate propagation, so reading it in `Update` lags a frame
+(a visible trail that converges on stop); the character is a root entity, so its
+`Transform` is the current world pose and the avatar then propagates in lockstep
+with the rendered character.
 
 **0.27 API gotchas worth remembering** (the published book lags the crate; the
 ground truth is the crate source in `~/.cargo/registry/src/.../lightyear*-0.27.0`):
@@ -873,14 +887,13 @@ replication (motion streamed over the wire) without a second device — necessar
 because mobile browsers suspend background tabs, so two tabs on one phone never hold
 simultaneous connections. Remove it once real player movement lands.
 
-**Remaining for real multiplayer** (needs live testing): client-side
-**prediction** of the owner's own avatar (to remove the round-trip delay on the
-self-view that interpolation alone leaves), exercising two real devices for
-genuine peer visibility (vs the single-device demo bot), parts/joints
+**Remaining for real multiplayer** (needs live testing): exercising two real
+devices for genuine peer visibility (vs the single-device demo bot), parts/joints
 replication, and wiring the matchmaker to hand out real game-server endpoints.
 (Browser `wss://`, a faithful self-avatar — position + heading, driven from the
-real `Character` pose over networked input — and **interpolation** smoothing are
-**done**, verified live from mobile Safari.)
+real `Character` pose over networked input — **interpolation** of remote avatars,
+and zero-delay **prediction** of the owner's own avatar are **done**, verified
+live from mobile Safari.)
 
 ### Live test endpoint (Mac mini + Tailscale)
 
