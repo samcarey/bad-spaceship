@@ -63,12 +63,20 @@ fn start_server(mut commands: Commands) {
 
 /// When a client finishes connecting (`Connected` added to its link entity),
 /// spawn a player entity owned by the server and replicated to everyone.
-fn spawn_player_for_client(trigger: On<Add, Connected>, mut commands: Commands) {
+fn spawn_player_for_client(
+    trigger: On<Add, Connected>,
+    mut commands: Commands,
+    mut count: Local<u32>,
+) {
     let client = trigger.entity;
+    // Fan players out along x so distinct clients are visibly separate (until
+    // input/real Character positions drive them in a later phase).
+    let x = (*count as f32) * 2.5 - 2.5;
+    *count += 1;
     commands.spawn((
         NetPlayer { client_id: client.to_bits() },
-        NetTransform::from_transform(&Transform::from_xyz(0.0, 2.0, 0.0)),
+        NetTransform::from_transform(&Transform::from_xyz(x, 2.0, 0.0)),
         Replicate::to_clients(NetworkTarget::All),
     ));
-    info!("client {client:?} connected — spawned replicated player");
+    info!("client {client:?} connected — spawned replicated player at x={x}");
 }
