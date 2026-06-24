@@ -11,10 +11,13 @@
 //!
 //! Layout: two fixed joysticks in the bottom corners — move (left) feeds the
 //! analog response curve, look (right) is rate-control (a held deflection keeps
-//! turning, writing the look delta each frame). A jump button sits low-center
-//! between them; the click + shift buttons sit centered above them with
-//! context-specific labels (GRAB/DROP/ATTACH/DELETE and ROTATE/DELETE) keyed off
-//! the player's hold state and the latched modifier. A small pause sits top-right.
+//! turning, writing the look delta each frame). A center vertical stack of three
+//! buttons: the action button (JOIN when holding / DELETE when empty-handed) sits
+//! at the screen-center "grab area" reticle, with grab (DROP/GRAB) and jump below
+//! it. A small pause sits top-right. Rotating a held part is done by dragging the
+//! free area (no rotate button); the delete zone is always live when empty-handed.
+//! `apply_pointer` derives the `Modifying` flag from hold state + per-tap intent,
+//! so one `PlayerClick` routes to pickup/drop/attach/delete without a toggle.
 //!
 //! Activation is auto-detected: `MobileActive` flips on the first touch, after
 //! which the on-screen overlay and the touch systems turn on. Desktop/mouse users
@@ -32,7 +35,8 @@
 use crate::input::{get_look, get_modifying, process_keyboard_input};
 use crate::AppState;
 use bad_spaceship_shared::{
-    Holding, KeyboardDirectionalInput, Modifying, MouseMotionDelta, PlayerClick,
+    Holding, InputEvents, KeyboardDirectionalInput, Modifying, MouseMotionDelta, PlayerClick,
+    UpdateJointsLabel,
 };
 use bevy::{input::touch::Touches, prelude::*, window::PrimaryWindow};
 use bevy_egui::{egui, EguiContexts, EguiPrimaryContextPass};
@@ -65,10 +69,16 @@ impl Plugin for MobilePlugin {
                         .run_if(mobile_active)
                         .run_if(in_state(AppState::InGame)),
                     // Drives the camera-look delta and the modifier directly
-                    // (replacing the winit `get_look` path, which is suppressed on
-                    // mobile), and routes a free-area drag into part rotation while
-                    // holding. Runs after the input systems it supersedes.
+                    // (replacing the winit `get_look` path, suppressed on mobile),
+                    // and routes a free-area drag into part rotation while holding.
+                    // It is the authority on `Modifying`, so it must run *before* the
+                    // systems that read it for the click: `toggle_holding` (after
+                    // `InputEvents`) and `update_predelete_joints` (in
+                    // `UpdateJointsLabel`). Hence `in_set(InputEvents)` +
+                    // `before(UpdateJointsLabel)`.
                     apply_pointer
+                        .in_set(InputEvents)
+                        .before(UpdateJointsLabel)
                         .after(classify_touches)
                         .after(get_look)
                         .after(get_modifying)
@@ -116,8 +126,10 @@ struct TouchControls {
     rotate_delta: Vec2,
     /// Finger held on the jump button.
     jump_touch: Option<u64>,
-    /// Latched rotate/delete modifier (Shift equivalent), toggled by its button.
-    modify_on: bool,
+    /// Per-frame button taps (set in `classify_touches`, consumed by `apply_pointer`
+    /// to pick the modifier for that click). grab → grab/drop, action → join/delete.
+    grab_tap: bool,
+    action_tap: bool,
 }
 
 impl TouchControls {
@@ -145,9 +157,10 @@ struct ControlLayout {
     joystick_radius: f32,
     move_center: Vec2,
     look_center: Vec2,
+    /// Vertical center stack (top→bottom): action (join/delete), grab, jump.
+    action: Vec2,
+    grab: Vec2,
     jump: Vec2,
-    click: Vec2,
-    shift: Vec2,
     pause: Vec2,
 }
 
@@ -155,7 +168,7 @@ impl ControlLayout {
     fn recompute(&mut self, w: f32, h: f32) {
         let small = w.min(h);
         let jr = (small * 0.18).clamp(60.0, 130.0);
-        let r = (small * 0.075).clamp(30.0, 56.0);
+        let r = (small * 0.07).clamp(30.0, 46.0);
         let edge = 20.0;
         self.width = w;
         self.height = h;
@@ -165,13 +178,15 @@ impl ControlLayout {
         // Fixed sticks in the bottom corners.
         self.move_center = Vec2::new(jr + edge, h - jr - edge);
         self.look_center = Vec2::new(w - jr - edge, h - jr - edge);
-        // Jump low-center, between the sticks.
-        self.jump = Vec2::new(w * 0.5, h - r - edge);
-        // Click + shift centered above the sticks, flanking the centerline.
-        let pair_dx = r + 14.0;
-        let cluster_y = (self.move_center.y - jr - r - 12.0).max(r + edge);
-        self.click = Vec2::new(w * 0.5 - pair_dx, cluster_y);
-        self.shift = Vec2::new(w * 0.5 + pair_dx, cluster_y);
+        // Vertical center stack: the action (join/delete) button sits at the center
+        // of the screen — the "grab area" reticle you aim with — and grab + jump
+        // stack below it.
+        let cx = w * 0.5;
+        let cy = h * 0.5;
+        let gap = 2.0 * r + 10.0;
+        self.action = Vec2::new(cx, cy);
+        self.grab = Vec2::new(cx, cy + gap);
+        self.jump = Vec2::new(cx, cy + 2.0 * gap);
         self.pause = Vec2::new(w - self.pause_r - 12.0, self.pause_r + 12.0);
     }
 
@@ -230,6 +245,10 @@ fn classify_touches(
     mut clicks: MessageWriter<PlayerClick>,
     mut next_state: ResMut<NextState<AppState>>,
 ) {
+    // Per-frame button taps, recomputed each frame.
+    controls.grab_tap = false;
+    controls.action_tap = false;
+
     // Release any role whose finger is no longer down.
     let is_active = |id: Option<u64>| -> bool {
         id.map(|id| touches.iter().any(|t| t.id() == id))
@@ -265,14 +284,19 @@ fn classify_touches(
             controls.jump_touch = Some(id);
             continue;
         }
-        if layout.hit(layout.click, p) {
-            crate::tlog!("hit click");
+        // Both action buttons fire a `PlayerClick`; the modifier set by
+        // `apply_pointer` (from these tap flags) routes it to grab/drop vs
+        // join/delete.
+        if layout.hit(layout.grab, p) {
+            crate::tlog!("hit grab");
+            controls.grab_tap = true;
             clicks.write(PlayerClick);
             continue;
         }
-        if layout.hit(layout.shift, p) {
-            controls.modify_on = !controls.modify_on;
-            crate::tlog!("hit shift -> {}", controls.modify_on);
+        if layout.hit(layout.action, p) {
+            crate::tlog!("hit action");
+            controls.action_tap = true;
+            clicks.write(PlayerClick);
             continue;
         }
         // Fixed sticks: grab whichever zone the finger lands in (one finger each).
@@ -358,15 +382,17 @@ fn apply_movement(
 }
 
 /// Single mobile writer of the look/rotate delta (`MouseMotionDelta`) and the
-/// modifier (`Modifying`), replacing the suppressed winit `get_look` path. The
-/// shared consumers downstream are: `player::mouse_motion` (turns the camera, but
-/// *skips* it while holding+modifying) and `player::set_part_rotation` (trackball-
-/// rotates the held part while modifying). So:
-/// - Holding a part + a free-area drag → feed that drag and force the modifier on:
-///   the part rotates (trackball) and the camera stays put.
-/// - Otherwise → feed the look stick and apply only the latched modifier: the
-///   camera turns (or, with the modifier toggled on, the look stick rotates the
-///   part — matching desktop shift+drag).
+/// modifier (`Modifying`), replacing the suppressed winit `get_look`/`get_modifying`
+/// path. Downstream, `Modifying` selects what the click does and what's shown:
+/// `toggle_holding` (holding+modify = attach, holding+!modify = drop, !holding+
+/// !modify = pickup), `delete_joints`/`update_predelete_joints` (!holding+modify =
+/// delete zone), and `set_part_rotation`/`mouse_motion` (rotate held part vs turn
+/// camera). So the modifier is derived from state + the per-tap intent:
+/// - grab tap → modifier off  → pickup (empty) / drop (holding)
+/// - action tap → modifier on → delete (empty) / attach (holding)
+/// - free-area drag while holding → modifier on → trackball-rotate the part
+/// - otherwise empty-handed → modifier on → delete zone always visible
+/// - otherwise holding → modifier off → look stick turns the camera, drop ready
 fn apply_pointer(
     controls: Res<TouchControls>,
     holders: Query<&Holding>,
@@ -383,10 +409,17 @@ fn apply_pointer(
     for mut d in deltas.iter_mut() {
         d.0 = delta;
     }
-    if rotating || controls.modify_on {
-        for mut m in modifiers.iter_mut() {
-            m.0 = true;
-        }
+    let modify = if controls.grab_tap {
+        false
+    } else if controls.action_tap {
+        true
+    } else if rotating {
+        true
+    } else {
+        !holding
+    };
+    for mut m in modifiers.iter_mut() {
+        m.0 = modify;
     }
 }
 
@@ -403,8 +436,8 @@ fn draw_button(painter: &egui::Painter, center: Vec2, r: f32, label: &str, activ
         fill,
         egui::Stroke::new(2.0, egui::Color32::from_white_alpha(170)),
     );
-    // Shrink the font for longer labels so words like "ATTACH"/"ROTATE" fit inside
-    // the circle (roughly fit the label width to the diameter).
+    // Shrink the font for longer labels so words like "DELETE" fit inside the
+    // circle (roughly fit the label width to the diameter).
     let font = (1.7 * r / label.len().max(1) as f32).clamp(11.0, r * 0.62);
     painter.text(
         c,
@@ -465,22 +498,17 @@ fn draw_overlay(
     draw_stick(&painter, layout.move_center, layout.joystick_radius, move_knob, "MOVE");
     draw_stick(&painter, layout.look_center, layout.joystick_radius, look_knob, "LOOK");
 
-    // Context-specific labels for the click + shift buttons. `holding` and the
-    // latched `modify_on` select what a click does and what shift toggles into.
+    // Context labels: the top action button joins (holding) or deletes (empty),
+    // the grab button drops (holding) or grabs (empty). The action button is
+    // highlighted when empty-handed since the delete zone is then always live.
     let holding = holders.iter().next().map(|h| h.0).unwrap_or(false);
-    let modifying = controls.modify_on;
-    let click_label = match (holding, modifying) {
-        (true, true) => "ATTACH",
-        (true, false) => "DROP",
-        (false, true) => "DELETE",
-        (false, false) => "GRAB",
-    };
-    let shift_label = if holding { "ROTATE" } else { "DELETE" };
+    let action_label = if holding { "JOIN" } else { "DELETE" };
+    let grab_label = if holding { "DROP" } else { "GRAB" };
 
     let r = layout.btn_r;
+    draw_button(&painter, layout.action, r, action_label, !holding);
+    draw_button(&painter, layout.grab, r, grab_label, false);
     draw_button(&painter, layout.jump, r, "JUMP", controls.jump_touch.is_some());
-    draw_button(&painter, layout.click, r, click_label, false);
-    draw_button(&painter, layout.shift, r, shift_label, modifying);
     draw_button(&painter, layout.pause, layout.pause_r, "II", false);
 
     Ok(())

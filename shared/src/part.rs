@@ -213,15 +213,21 @@ const MAX_INTERACT_ANGLE: f32 = MAX_INTERACT_ANGLE_DEGREES * utils::DEG_TO_RADIA
 
 fn update_focused(
     mut commands: Commands,
-    mut players: Query<(&mut FocusedInteractable, &Holding, &Children, &Modifying), With<Player>>,
+    mut players: Query<(&mut FocusedInteractable, &Holding, &Children), With<Player>>,
     mut interactables: Query<(&mut Transform, Entity), With<Interactable>>,
     camera_orbit_centers: Query<&GlobalTransform, With<CameraOrbitCenter>>,
 ) {
     // Determine which iteractable entity each player is focused on (i.e. looking at, within range)
-    for (mut focused_interactable, holding, player_children, modifying) in players.iter_mut() {
+    for (mut focused_interactable, holding, player_children) in players.iter_mut() {
         if !holding.0 {
             let mut newly_focused_interactable_option = None;
-            if !modifying.0 {
+            // Focus is independent of the modifier: a grabbable block stays
+            // highlighted even while the delete zone is shown (the modifier no
+            // longer toggles between "focus to grab" and "delete mode"; on touch the
+            // delete zone is always on when empty-handed, and grabbing is selected by
+            // the click itself — see `mobile::apply_pointer`). Pickup still requires
+            // the modifier off (`player::toggle_holding`), so the two never collide.
+            {
                 for player_child in player_children.iter() {
                     if let Ok(camera_orbit_center) = camera_orbit_centers.get(player_child) {
                         // Search for the most appropriate interactable that should be focused by the player
