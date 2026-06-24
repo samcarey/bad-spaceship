@@ -123,6 +123,10 @@ struct ControlLayout {
     btn_r: f32,
     pause_r: f32,
     joystick_radius: f32,
+    /// Resting position of the move-stick hint (drawn when no finger is on it, so
+    /// the player can see the left-half move zone exists). The live stick still
+    /// floats to wherever the finger lands.
+    joystick_home: Vec2,
     jump: Vec2,
     grab: Vec2,
     modify: Vec2,
@@ -139,6 +143,12 @@ impl ControlLayout {
         self.btn_r = r;
         self.pause_r = r * 0.7;
         self.joystick_radius = (small * 0.18).clamp(60.0, 140.0);
+        // Move-stick hint anchored bottom-left (thumb reach), mirroring the
+        // action cluster on the right.
+        self.joystick_home = Vec2::new(
+            self.joystick_radius + 24.0,
+            h - self.joystick_radius - 24.0,
+        );
         let margin = r + 16.0;
         // Action cluster anchored bottom-right (thumb reach), Pause top-right.
         self.jump = Vec2::new(w - margin, h - margin);
@@ -267,20 +277,38 @@ fn classify_touches(
             let offset = touch.position() - controls.move_origin;
             let clamped = offset.clamp_length_max(layout.joystick_radius);
             controls.move_knob = controls.move_origin + clamped;
-            let norm = clamped / layout.joystick_radius;
+            // Analog speed with a response curve: keep the *direction* of the
+            // deflection but map its 0..1 magnitude through a deadzone + expo
+            // curve so small pushes give small speeds (the raw linear mapping
+            // jumped to full speed the instant you left the deadzone, because the
+            // magnitude was normalized away downstream — that's now preserved).
+            let deflection = clamped.length() / layout.joystick_radius;
+            let speed = response_curve(deflection);
+            let dir2 = clamped.normalize_or_zero() * speed;
             // Screen y is downward, so forward (+z, "W") is -y; +x ("D") is +x.
-            let mut v = Vec3::new(norm.x, 0.0, -norm.y);
-            if v.length() < 0.15 {
-                v = Vec3::ZERO; // deadzone to stop jitter near the origin
-            }
-            controls.move_dir = v;
+            controls.move_dir = Vec3::new(dir2.x, 0.0, -dir2.y);
         }
     }
 }
 
-/// Adds the joystick direction (and jump) into `KeyboardDirectionalInput` the same
-/// way `process_keyboard_input` adds the WASD/Space direction; `combine_directional_inputs`
-/// reads and zeroes it each frame.
+/// Maps raw joystick deflection (0..1) to a movement speed (0..1): a small
+/// deadzone kills origin jitter, then a quadratic ramp keeps fine control near
+/// center while still reaching full speed at the rim. Tune `DEADZONE`/`EXPO`.
+fn response_curve(deflection: f32) -> f32 {
+    const DEADZONE: f32 = 0.12;
+    const EXPO: f32 = 2.0;
+    if deflection <= DEADZONE {
+        return 0.0;
+    }
+    let t = ((deflection - DEADZONE) / (1.0 - DEADZONE)).clamp(0.0, 1.0);
+    t.powf(EXPO)
+}
+
+/// Adds the joystick direction (and jump) into `KeyboardDirectionalInput`, the same
+/// sink `process_keyboard_input` feeds; `combine_directional_inputs` reads and
+/// zeroes it each frame. Unlike the WASD path we must *preserve* the sub-unit
+/// magnitude (analog speed) the response curve produced, so clamp the length
+/// instead of normalizing it to 1.
 fn apply_movement(
     controls: Res<TouchControls>,
     mut query: Query<&mut KeyboardDirectionalInput>,
@@ -293,7 +321,7 @@ fn apply_movement(
         return;
     }
     for mut input in query.iter_mut() {
-        input.0 = (input.0 + dir).normalize_or_zero();
+        input.0 = (input.0 + dir).clamp_length_max(1.0);
     }
 }
 
@@ -358,21 +386,32 @@ fn draw_overlay(
         egui::Id::new("mobile_overlay"),
     ));
 
-    // Movement joystick: only visible while a finger is on it.
-    if controls.move_touch.is_some() {
-        let base = egui::pos2(controls.move_origin.x, controls.move_origin.y);
-        painter.circle_stroke(
-            base,
-            layout.joystick_radius,
-            egui::Stroke::new(2.0, egui::Color32::from_white_alpha(90)),
-        );
-        let knob = egui::pos2(controls.move_knob.x, controls.move_knob.y);
-        painter.circle_filled(
-            knob,
-            layout.joystick_radius * 0.36,
-            egui::Color32::from_white_alpha(130),
-        );
-    }
+    // Movement joystick. While idle, show a faint hint at its home position so the
+    // left-half move zone is discoverable; while a finger is down, draw the live
+    // floating stick (ring at the touch origin + knob at the deflected position).
+    let (base, knob, ring_alpha, knob_alpha) = if controls.move_touch.is_some() {
+        (controls.move_origin, controls.move_knob, 90, 130)
+    } else {
+        // Idle hint: dimmer ring + centered knob at the resting position.
+        (layout.joystick_home, layout.joystick_home, 45, 60)
+    };
+    painter.circle_stroke(
+        egui::pos2(base.x, base.y),
+        layout.joystick_radius,
+        egui::Stroke::new(2.0, egui::Color32::from_white_alpha(ring_alpha)),
+    );
+    painter.circle_filled(
+        egui::pos2(knob.x, knob.y),
+        layout.joystick_radius * 0.36,
+        egui::Color32::from_white_alpha(knob_alpha),
+    );
+    painter.text(
+        egui::pos2(base.x, base.y - layout.joystick_radius - 10.0),
+        egui::Align2::CENTER_CENTER,
+        "MOVE",
+        egui::FontId::proportional(14.0),
+        egui::Color32::from_white_alpha(ring_alpha + 40),
+    );
 
     let r = layout.btn_r;
     draw_button(&painter, layout.jump, r, "JMP", controls.jump_touch.is_some());
