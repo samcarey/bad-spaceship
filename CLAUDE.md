@@ -854,6 +854,22 @@ only refreshed in PostUpdate propagation, so reading it in `Update` lags a frame
 `Transform` is the current world pose and the avatar then propagates in lockstep
 with the rendered character.
 
+**Shared part world (server-authoritative, slice 1).** The loose blocks are no
+longer two independent local sims — the server simulates them and replicates them
+so every client sees the same world. A replicated `NetPart { half_extents }` carries
+the cuboid shape; `replicate_parts` (server) tags each spawned part (`Holdable` +
+cuboid collider) with `NetPart` + `NetTransform` + `Replicate` + `InterpolationTarget`,
+and `sync_part_transforms` streams each part's authoritative pose into `NetTransform`
+(only on change, so settled parts go quiet). The client inserts a `SuppressLocalParts`
+marker resource (in `NetClientPlugin::build`) that gates off `PartPlugin`'s
+part-creation systems (`spawn_initial_parts`/`spawn_part`/`replace_fallen_parts`),
+and `draw_replicated_parts` renders the replicated parts as interpolated **visual
+ghosts** (cuboid mesh from `NetPart`, pose via the shared `apply_net_transform`). The
+authoritative server never inserts `SuppressLocalParts`, so it keeps simulating.
+*Limitations (next slices):* the ghosts are visual-only (no collider yet), and grab/
+attach is suppressed in multiplayer — networked grab/attach (so you can build) and
+collidable parts come next.
+
 **0.27 API gotchas worth remembering** (the published book lags the crate; the
 ground truth is the crate source in `~/.cargo/registry/src/.../lightyear*-0.27.0`):
 - Plugin groups are `ClientPlugins`/`ServerPlugins` structs with a `tick_duration`
@@ -887,12 +903,15 @@ replication (motion streamed over the wire) without a second device — necessar
 because mobile browsers suspend background tabs, so two tabs on one phone never hold
 simultaneous connections. Remove it once real player movement lands.
 
-**Remaining for real multiplayer** (needs live testing): exercising two real
-devices for genuine peer visibility (vs the single-device demo bot), parts/joints
-replication, and wiring the matchmaker to hand out real game-server endpoints.
-(Browser `wss://`, a faithful self-avatar — position + heading, driven from the
-real `Character` pose over networked input — **interpolation** of remote avatars,
-and zero-delay **prediction** of the owner's own avatar are **done**, verified
+**Remaining for real multiplayer** (needs live testing): networked grab/attach so
+players can *build* in multiplayer (the local hold/attach is suppressed by
+`SuppressLocalParts`) and collidable replicated parts (the ghosts are visual-only),
+joints replication, exercising two real devices for genuine peer visibility (vs the
+single-device demo bot), and wiring the matchmaker to hand out real game-server
+endpoints. (Browser `wss://`, a faithful self-avatar — position + heading, driven
+from the real `Character` pose over networked input — **interpolation** of remote
+avatars, zero-delay **prediction** of the owner's own avatar, and the
+server-authoritative **shared part world** (visual, slice 1) are **done**, verified
 live from mobile Safari.)
 
 ### Live test endpoint (Mac mini + Tailscale)
