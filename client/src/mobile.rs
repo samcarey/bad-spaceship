@@ -9,11 +9,13 @@
 //! same path keyboard/mouse take since the hand-rolled DOM input layer was
 //! removed), so no browser glue is needed and it compiles on native too.
 //!
-//! Layout: two fixed joysticks in the bottom corners — move (left) feeds the
-//! analog response curve. The look stick (right) is split: yaw (left/right) is
-//! rate-control (cumulative), while pitch (up/down) is absolute — the stick's
-//! vertical position maps straight to camera pitch. A vertical stack of three
-//! buttons sits centered between the sticks, anchored at the bottom: jump (bottom),
+//! Layout: two joysticks anchored in the bottom corners (move left, look right).
+//! Each floats to the touch-down point — its deflection is measured from where the
+//! thumb lands, not the fixed center — and shows a faint home ring when idle. Move
+//! feeds the analog response curve; look is rate-control (cumulative) on both axes
+//! (yaw + pitch). While moving and not actively looking, the pitch auto-levels back
+//! toward the default. A vertical stack of three buttons sits centered between the
+//! sticks, anchored at the bottom: jump (bottom),
 //! grab (DROP/GRAB), and the action button on top (Join Parts when holding / Delete
 //! Joints when empty-handed). A small pause sits top-right. Rotating a held part is
 //! done by dragging the free area (no rotate button); the delete zone is always
@@ -38,21 +40,20 @@ use crate::input::{get_look, get_modifying, process_keyboard_input};
 use crate::AppState;
 use bad_spaceship_shared::{
     Holding, InputEvents, KeyboardDirectionalInput, LookPitch, Modifying, MouseMotionDelta,
-    PlayerClick, UpdateJointsLabel,
+    PlayerClick, UpdateJointsLabel, INITIAL_CAMERA_PITCH,
 };
 use bevy::{input::touch::Touches, prelude::*, window::PrimaryWindow};
 use bevy_egui::{egui, EguiContexts, EguiPrimaryContextPass};
 
-/// Full-deflection look speed for the *yaw* (left/right) axis, as a per-frame look
-/// delta (`MouseMotionDelta`). With `look_sensitivity = 0.42` (player.player.ron)
-/// the look integrator turns at `delta * sensitivity` rad/s, so ~7 → ~2.9 rad/s
-/// (~165°/s) at the rim. Tunable.
+/// Full-deflection look speed (both axes), as a per-frame look delta
+/// (`MouseMotionDelta`). With `look_sensitivity = 0.42` (player.player.ron) the look
+/// integrator turns at `delta * sensitivity` rad/s, so ~7 → ~2.9 rad/s (~165°/s) at
+/// the rim. Tunable.
 const LOOK_SPEED: f32 = 7.0;
 
-/// Pitch (up/down) is *absolute*, not cumulative: the look stick's vertical
-/// position maps straight to camera pitch. This is the pitch at full deflection (a
-/// bit past the ±89° clamp in `player::mouse_motion` so the rim hits the extreme).
-const PITCH_AT_FULL: f32 = 1.6;
+/// Auto-level rate: while moving and not actively looking, the pitch eases back to
+/// the default at this fraction-per-second (exponential approach, ~1.4 s constant).
+const PITCH_DRIFT_RATE: f32 = 0.7;
 
 pub struct MobilePlugin;
 
@@ -117,21 +118,20 @@ fn mobile_active(active: Res<MobileActive>) -> bool {
 /// knob positions (for drawing), the stick outputs, and the latched modifier.
 #[derive(Resource, Default)]
 struct TouchControls {
-    /// Finger on the (fixed, bottom-left) movement stick + its knob position.
+    /// Finger on the movement stick, the touch-down point its deflection is measured
+    /// from (relative/floating, not the fixed center), and the knob position.
     move_touch: Option<u64>,
+    move_origin: Vec2,
     move_knob: Vec2,
     /// Stick output mapped to the movement basis (x = strafe, z = forward).
     move_dir: Vec3,
-    /// Finger on the (fixed, bottom-right) look stick + its knob position.
+    /// Finger on the look stick, its touch-down origin, and knob position.
     look_touch: Option<u64>,
+    look_origin: Vec2,
     look_knob: Vec2,
-    /// Look stick → yaw: per-frame rate delta (left/right), written to
-    /// `MouseMotionDelta` (cumulative). The y component is always 0 — pitch is
-    /// handled separately and absolutely.
+    /// Look stick → per-frame rate delta (both axes), written to `MouseMotionDelta`
+    /// (cumulative): x = yaw, y = pitch.
     look_vec: Vec2,
-    /// Look stick → pitch: absolute target pitch (up/down) while the stick is held,
-    /// `None` when released so the pitch holds. Written to `LookPitch`.
-    look_pitch_target: Option<f32>,
     /// Finger dragging the free area (anywhere not on a stick/button). While a part
     /// is held this trackball-rotates it; otherwise it's inert. Plus its per-frame
     /// delta (fed to the part-rotation path).
@@ -151,7 +151,6 @@ impl TouchControls {
         self.move_dir = Vec3::ZERO;
         self.look_touch = None;
         self.look_vec = Vec2::ZERO;
-        self.look_pitch_target = None;
         self.rotate_touch = None;
         self.rotate_delta = Vec2::ZERO;
         self.jump_touch = None;
@@ -274,7 +273,6 @@ fn classify_touches(
     if !is_active(controls.look_touch) {
         controls.look_touch = None;
         controls.look_vec = Vec2::ZERO;
-        controls.look_pitch_target = None;
     }
     if !is_active(controls.jump_touch) {
         controls.jump_touch = None;
@@ -313,11 +311,17 @@ fn classify_touches(
             clicks.write(PlayerClick);
             continue;
         }
-        // Fixed sticks: grab whichever zone the finger lands in (one finger each).
+        // Sticks: grab whichever zone the finger lands in (one finger each), and
+        // record the touch-down point as the deflection origin (the stick floats to
+        // where the thumb lands rather than measuring from the fixed center).
         if controls.move_touch.is_none() && layout.in_stick(layout.move_center, p) {
             controls.move_touch = Some(id);
+            controls.move_origin = p;
+            controls.move_knob = p;
         } else if controls.look_touch.is_none() && layout.in_stick(layout.look_center, p) {
             controls.look_touch = Some(id);
+            controls.look_origin = p;
+            controls.look_knob = p;
         } else if controls.rotate_touch.is_none() {
             // Anywhere else (the free area above the controls): a drag here
             // trackball-rotates a held part (see `apply_pointer`).
@@ -334,12 +338,13 @@ fn classify_touches(
             .unwrap_or(Vec2::ZERO);
     }
 
-    // Movement stick: deflection from the fixed center → curved analog speed.
+    // Movement stick: deflection measured from the touch-down origin (not the fixed
+    // center) → curved analog speed.
     if let Some(id) = controls.move_touch {
         if let Some(touch) = touches.iter().find(|t| t.id() == id) {
             let clamped =
-                (touch.position() - layout.move_center).clamp_length_max(layout.joystick_radius);
-            controls.move_knob = layout.move_center + clamped;
+                (touch.position() - controls.move_origin).clamp_length_max(layout.joystick_radius);
+            controls.move_knob = controls.move_origin + clamped;
             let speed = response_curve(clamped.length() / layout.joystick_radius);
             let dir2 = clamped.normalize_or_zero() * speed;
             // Screen y is downward, so forward (+z, "W") is -y; +x ("D") is +x.
@@ -347,19 +352,18 @@ fn classify_touches(
         }
     }
 
-    // Look stick: split axes. Yaw (left/right) is rate-control (cumulative) and
-    // feeds `MouseMotionDelta.x`. Pitch (up/down) is absolute — the stick's vertical
-    // position maps straight to camera pitch — so it goes through `look_pitch_target`
-    // (the y delta stays 0). Screen y is down, so stick up (norm.y < 0) → look up.
+    // Look stick: both axes are rate-control (cumulative) and feed `MouseMotionDelta`
+    // (x = yaw, y = pitch), measured from the touch-down origin. Screen y is down, so
+    // stick up (norm.y < 0) → look up, hence the y rate is negated.
     if let Some(id) = controls.look_touch {
         if let Some(touch) = touches.iter().find(|t| t.id() == id) {
             let clamped =
-                (touch.position() - layout.look_center).clamp_length_max(layout.joystick_radius);
-            controls.look_knob = layout.look_center + clamped;
+                (touch.position() - controls.look_origin).clamp_length_max(layout.joystick_radius);
+            controls.look_knob = controls.look_origin + clamped;
             let norm = clamped / layout.joystick_radius;
             let yaw_rate = response_curve(norm.x.abs()) * norm.x.signum() * LOOK_SPEED;
-            controls.look_vec = Vec2::new(yaw_rate, 0.0);
-            controls.look_pitch_target = Some(-norm.y * PITCH_AT_FULL);
+            let pitch_rate = response_curve(norm.y.abs()) * -norm.y.signum() * LOOK_SPEED;
+            controls.look_vec = Vec2::new(yaw_rate, pitch_rate);
         }
     }
 }
@@ -411,6 +415,7 @@ fn apply_movement(
 /// - otherwise empty-handed → modifier on → delete zone always visible
 /// - otherwise holding → modifier off → look stick turns the camera, drop ready
 fn apply_pointer(
+    time: Res<Time>,
     controls: Res<TouchControls>,
     holders: Query<&Holding>,
     mut deltas: Query<&mut MouseMotionDelta>,
@@ -427,14 +432,13 @@ fn apply_pointer(
     for mut d in deltas.iter_mut() {
         d.0 = delta;
     }
-    // Absolute pitch from the look stick (only while held — `mouse_motion` clamps it
-    // and, since the look delta's y is 0, won't accumulate over it). Skip while
-    // free-dragging a part so the rotate gesture doesn't also pitch the camera.
-    if !rotating {
-        if let Some(target) = controls.look_pitch_target {
-            for mut pitch in pitches.iter_mut() {
-                pitch.0 = target;
-            }
+    // Auto-level: while moving horizontally and not actively looking, ease the pitch
+    // back toward the default (so the view recenters as you walk). `mouse_motion`
+    // only adds the look delta's y (0 here) on top, so it won't fight this.
+    if controls.move_dir != Vec3::ZERO && controls.look_touch.is_none() {
+        let t = (PITCH_DRIFT_RATE * time.delta_secs()).min(1.0);
+        for mut pitch in pitches.iter_mut() {
+            pitch.0 += (INITIAL_CAMERA_PITCH - pitch.0) * t;
         }
     }
     let modify = if controls.grab_tap {
@@ -484,8 +488,8 @@ fn draw_button(painter: &egui::Painter, center: Vec2, r: f32, label: &str, activ
     }
 }
 
-/// Draws a fixed stick: an always-visible ring at `center` plus a knob (at the
-/// deflected position when held, recentered when idle) and a label above it.
+/// Draws a stick: a ring at `center` (the touch-down origin while held, or the home
+/// position when idle) plus a knob at the deflected position, and a label above it.
 fn draw_stick(painter: &egui::Painter, center: Vec2, radius: f32, knob: Vec2, label: &str) {
     let active = knob != center;
     let alpha = if active { 95 } else { 55 };
@@ -520,19 +524,20 @@ fn draw_overlay(
         egui::Id::new("mobile_overlay"),
     ));
 
-    // Fixed sticks (knob recenters when idle).
-    let move_knob = if controls.move_touch.is_some() {
-        controls.move_knob
+    // Sticks float to the touch-down origin while held (their deflection is measured
+    // from there); when idle they show a faint ring at the fixed home position.
+    let (move_center, move_knob) = if controls.move_touch.is_some() {
+        (controls.move_origin, controls.move_knob)
     } else {
-        layout.move_center
+        (layout.move_center, layout.move_center)
     };
-    let look_knob = if controls.look_touch.is_some() {
-        controls.look_knob
+    let (look_center, look_knob) = if controls.look_touch.is_some() {
+        (controls.look_origin, controls.look_knob)
     } else {
-        layout.look_center
+        (layout.look_center, layout.look_center)
     };
-    draw_stick(&painter, layout.move_center, layout.joystick_radius, move_knob, "MOVE");
-    draw_stick(&painter, layout.look_center, layout.joystick_radius, look_knob, "LOOK");
+    draw_stick(&painter, move_center, layout.joystick_radius, move_knob, "MOVE");
+    draw_stick(&painter, look_center, layout.joystick_radius, look_knob, "LOOK");
 
     // Context labels: the top action button joins (holding) or deletes (empty),
     // the grab button drops (holding) or grabs (empty).
