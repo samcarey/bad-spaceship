@@ -1,0 +1,336 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Bad Spaceship · Multiplayer</title>
+  <!-- Static lobby browser. Talks to the matchmaker service via fetch(); no
+       WASM is loaded until you actually enter a game (play.html). -->
+  <style>
+    :root {
+      --bg: #05070d;
+      --panel: #0b1322;
+      --panel2: #10203a;
+      --accent: #7fb3ff;
+      --accent-strong: #2f6fd0;
+      --border: #28466f;
+      --text: #cde3ff;
+      --muted: #6f86a8;
+      --danger: #ff5d5d;
+      --ok: #5ad18a;
+    }
+
+    html, body { height: 100%; margin: 0; }
+
+    body {
+      background: radial-gradient(circle at 50% 0%, #0a1426 0%, var(--bg) 70%);
+      color: var(--text);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      padding: 1.2rem;
+      box-sizing: border-box;
+      max-width: 760px;
+      margin: 0 auto;
+    }
+
+    header {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 1rem;
+      margin-bottom: 1.2rem;
+    }
+
+    h1 {
+      font-size: 1.3rem;
+      letter-spacing: 0.22em;
+      text-transform: uppercase;
+      color: var(--accent);
+      margin: 0;
+    }
+
+    a.back {
+      color: var(--muted);
+      text-decoration: none;
+      font-size: 0.85rem;
+      letter-spacing: 0.1em;
+    }
+    a.back:hover { color: var(--accent); }
+
+    .status {
+      font-size: 0.78rem;
+      letter-spacing: 0.06em;
+      color: var(--muted);
+      margin-bottom: 1rem;
+      min-height: 1.1em;
+    }
+    .status.err { color: var(--danger); }
+    .status.ok { color: var(--ok); }
+
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.7rem;
+      margin-bottom: 1.4rem;
+    }
+
+    input[type="text"] {
+      font: inherit;
+      color: var(--text);
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 0.7rem 0.8rem;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      width: 9rem;
+    }
+    input[type="text"]::placeholder { color: var(--muted); text-transform: none; letter-spacing: 0.04em; }
+
+    .btn {
+      appearance: none;
+      cursor: pointer;
+      font: inherit;
+      color: var(--text);
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 0.7rem 1rem;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      transition: border-color 0.15s, background 0.15s, transform 0.05s;
+    }
+    .btn:hover:not(:disabled) { border-color: var(--accent); background: var(--panel2); }
+    .btn:active:not(:disabled) { transform: translateY(1px); }
+    .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    .btn.primary {
+      background: linear-gradient(90deg, var(--accent-strong), var(--accent));
+      border-color: transparent;
+      color: #04101f;
+      font-weight: 600;
+    }
+
+    .row {
+      display: flex;
+      align-items: center;
+      gap: 0.9rem;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 0.8rem 1rem;
+      margin-bottom: 0.6rem;
+    }
+    .row .name { flex: 1; min-width: 0; }
+    .row .name b { display: block; font-size: 1rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .row .name small { color: var(--muted); font-size: 0.74rem; letter-spacing: 0.08em; }
+    .row .count { color: var(--muted); font-size: 0.82rem; white-space: nowrap; }
+
+    .empty { color: var(--muted); text-align: center; padding: 2rem 0; font-size: 0.9rem; }
+
+    /* Shareable-link panel shown after creating a match. */
+    #share {
+      display: none;
+      background: var(--panel2);
+      border: 1px solid var(--accent);
+      border-radius: 10px;
+      padding: 1rem;
+      margin-bottom: 1.4rem;
+    }
+    #share.show { display: block; }
+    #share .label { font-size: 0.78rem; color: var(--muted); letter-spacing: 0.08em; margin-bottom: 0.5rem; }
+    #share .linkrow { display: flex; gap: 0.5rem; }
+    #share input { flex: 1; width: auto; text-transform: none; letter-spacing: 0; }
+  </style>
+</head>
+
+<body>
+  <header>
+    <h1>Multiplayer</h1>
+    <a class="back" href="index.html">← Menu</a>
+  </header>
+
+  <div id="status" class="status">Connecting to matchmaker…</div>
+
+  <div id="share">
+    <div class="label">Match created — share this link to invite players:</div>
+    <div class="linkrow">
+      <input id="share-link" type="text" readonly />
+      <button class="btn" id="share-copy">Copy</button>
+      <button class="btn primary" id="share-enter">Enter</button>
+    </div>
+  </div>
+
+  <div class="actions">
+    <button class="btn primary" id="create">Create Match</button>
+    <input id="code" type="text" maxlength="6" placeholder="code" />
+    <button class="btn" id="join">Join by code</button>
+    <button class="btn" id="refresh" title="Refresh list">↻</button>
+  </div>
+
+  <div id="list"></div>
+
+  <script>
+    // The matchmaker base URL. Resolution order:
+    //   1. ?api=<url> query param (handy for testing against a local instance)
+    //   2. window.BS_MATCHMAKER_URL (set this for the deployed site)
+    //   3. localhost default (works out of the box for `cargo run -p ...matchmaker`)
+    // GitHub Pages can't host the matchmaker, so the deployed site must point at
+    // wherever it actually runs (e.g. the Mac box / a small VPS).
+    const params = new URLSearchParams(location.search);
+    const MATCHMAKER = (
+      params.get('api') ||
+      window.BS_MATCHMAKER_URL ||
+      'http://localhost:5000'
+    ).replace(/\/$/, '');
+
+    const statusEl = document.getElementById('status');
+    const listEl = document.getElementById('list');
+    const shareEl = document.getElementById('share');
+    const shareLink = document.getElementById('share-link');
+
+    function setStatus(msg, kind) {
+      statusEl.textContent = msg;
+      statusEl.className = 'status' + (kind ? ' ' + kind : '');
+    }
+
+    function api(path, opts) {
+      return fetch(MATCHMAKER + path, opts);
+    }
+
+    // Absolute, shareable game link for a room code.
+    function playLink(id) {
+      return new URL('play.html?room=' + encodeURIComponent(id), location.href).href;
+    }
+
+    function enterGame(id) {
+      location.href = 'play.html?room=' + encodeURIComponent(id);
+    }
+
+    function ago(unix) {
+      const s = Math.max(0, Math.floor(Date.now() / 1000) - unix);
+      if (s < 60) return s + 's ago';
+      if (s < 3600) return Math.floor(s / 60) + 'm ago';
+      return Math.floor(s / 3600) + 'h ago';
+    }
+
+    function renderList(lobbies) {
+      listEl.innerHTML = '';
+      if (!lobbies.length) {
+        const d = document.createElement('div');
+        d.className = 'empty';
+        d.textContent = 'No open matches yet — create one!';
+        listEl.appendChild(d);
+        return;
+      }
+      for (const m of lobbies) {
+        const full = m.players >= m.max_players;
+        const row = document.createElement('div');
+        row.className = 'row';
+
+        const name = document.createElement('div');
+        name.className = 'name';
+        const b = document.createElement('b');
+        b.textContent = m.name;
+        const small = document.createElement('small');
+        small.textContent = 'code ' + m.id + ' · ' + ago(m.created_unix);
+        name.appendChild(b);
+        name.appendChild(small);
+
+        const count = document.createElement('div');
+        count.className = 'count';
+        count.textContent = m.players + ' / ' + m.max_players;
+
+        const btn = document.createElement('button');
+        btn.className = 'btn primary';
+        btn.textContent = full ? 'Full' : 'Join';
+        btn.disabled = full;
+        btn.addEventListener('click', () => joinById(m.id));
+
+        row.appendChild(name);
+        row.appendChild(count);
+        row.appendChild(btn);
+        listEl.appendChild(row);
+      }
+    }
+
+    async function refresh() {
+      try {
+        const r = await api('/api/matches');
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const lobbies = await r.json();
+        renderList(lobbies);
+        setStatus(lobbies.length + ' open match' + (lobbies.length === 1 ? '' : 'es'), 'ok');
+      } catch (e) {
+        setStatus(
+          "Can't reach matchmaker at " + MATCHMAKER + ' — is it running? (' + e.message + ')',
+          'err'
+        );
+      }
+    }
+
+    async function createMatch() {
+      const name = prompt('Match name (optional):', '');
+      // Cancel leaves name === null; an empty string just uses the default name.
+      if (name === null) return;
+      try {
+        const r = await api('/api/matches', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name }),
+        });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const { id } = await r.json();
+        shareLink.value = playLink(id);
+        shareEl.classList.add('show');
+        document.getElementById('share-enter').onclick = () => enterGame(id);
+        setStatus('Match ' + id + ' created.', 'ok');
+        refresh();
+      } catch (e) {
+        setStatus('Failed to create match: ' + e.message, 'err');
+      }
+    }
+
+    async function joinById(id) {
+      id = (id || '').trim().toUpperCase();
+      if (!id) return;
+      try {
+        const r = await api('/api/matches/' + encodeURIComponent(id) + '/join', { method: 'POST' });
+        if (r.status === 404) { setStatus('No match with code ' + id + '.', 'err'); return; }
+        if (r.status === 409) { setStatus('Match ' + id + ' is full.', 'err'); return; }
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        enterGame(id);
+      } catch (e) {
+        setStatus('Failed to join: ' + e.message, 'err');
+      }
+    }
+
+    document.getElementById('create').addEventListener('click', createMatch);
+    document.getElementById('refresh').addEventListener('click', refresh);
+    document.getElementById('join').addEventListener('click', () =>
+      joinById(document.getElementById('code').value)
+    );
+    document.getElementById('code').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') joinById(e.target.value);
+    });
+    document.getElementById('share-copy').addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(shareLink.value);
+        document.getElementById('share-copy').textContent = 'Copied!';
+        setTimeout(() => (document.getElementById('share-copy').textContent = 'Copy'), 1500);
+      } catch (_) {
+        shareLink.select();
+      }
+    });
+
+    // A `?room=CODE` on the lobby URL is a shared invite that lands here first;
+    // pre-fill the code box so the player just hits Join.
+    if (params.get('room')) {
+      document.getElementById('code').value = params.get('room').toUpperCase();
+    }
+
+    refresh();
+    setInterval(refresh, 4000);
+  </script>
+</body>
+
+</html>

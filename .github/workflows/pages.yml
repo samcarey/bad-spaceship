@@ -71,7 +71,8 @@ jobs:
           # (client/index.html loads `./target/wasm.js`).
           wasm-bindgen --out-dir _site/target --out-name wasm --target web --no-typescript \
             target/wasm32-unknown-unknown/release/bad-spaceship-client.wasm
-          cp client/index.html _site/
+          # index.html (landing), play.html (game loader), lobby.html (lobby browser).
+          cp client/*.html _site/
           cp -r client/assets _site/assets
           # Publish any committed archive builds (e.g. the playable Bevy 0.12
           # build under legacy/v0.12) verbatim alongside the current site.

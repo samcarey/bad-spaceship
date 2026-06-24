@@ -1,0 +1,179 @@
+//! Bad Spaceship matchmaker — the lobby-coordination tier.
+//!
+//! A small standalone HTTP service (no bevy/lightyear) that tracks open
+//! multiplayer matches and hands out shareable join links. The static lobby
+//! browser (`client/lobby.html`) talks to it via `fetch()`. It is hosted
+//! separately from the static site (GitHub Pages can't run a server).
+//!
+//! Endpoints (all JSON):
+//!   GET  /api/health            -> "ok"
+//!   GET  /api/matches           -> [Lobby, ...]      (open lobbies, newest first)
+//!   POST /api/matches           -> { id, join_path } (create a lobby)
+//!   POST /api/matches/{id}/join -> Lobby             (claim a slot; 404/409 on miss/full)
+//!
+//! State is in-memory for now (a process restart clears lobbies). Swappable for
+//! Redis/a DB later without touching the front-end contract.
+//!
+//! Config via env:
+//!   BIND        listen addr (default 0.0.0.0:5000)
+//!   STATIC_DIR  if set, also serve this dir at `/` (local single-origin testing)
+
+use std::{
+    collections::HashMap,
+    net::SocketAddr,
+    sync::{Arc, Mutex},
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+use axum::{
+    extract::{Path, State},
+    http::StatusCode,
+    response::IntoResponse,
+    routing::{get, post},
+    Json, Router,
+};
+use rand::Rng;
+use serde::{Deserialize, Serialize};
+use tower_http::{cors::CorsLayer, services::ServeDir};
+
+/// One open multiplayer match, as the lobby browser sees it.
+#[derive(Clone, Serialize)]
+struct Lobby {
+    /// Short shareable code, also the join-link token.
+    id: String,
+    name: String,
+    players: u32,
+    max_players: u32,
+    /// Seconds since the Unix epoch.
+    created_unix: u64,
+    /// Where the game server for this match listens. Placeholder until the live
+    /// netcode tier (Phase 2b) provisions real game-server endpoints; the client
+    /// reads this off the join link to know who to connect to.
+    server: String,
+}
+
+#[derive(Deserialize)]
+struct CreateReq {
+    name: Option<String>,
+    max_players: Option<u32>,
+}
+
+#[derive(Serialize)]
+struct CreateResp {
+    id: String,
+    /// Relative link the front-end turns into a full shareable URL.
+    join_path: String,
+}
+
+type Db = Arc<Mutex<HashMap<String, Lobby>>>;
+
+fn now_unix() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Unambiguous lobby code: no 0/O/1/I/L, uppercase, 6 chars.
+fn gen_id() -> String {
+    const ALPHABET: &[u8] = b"ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+    let mut rng = rand::thread_rng();
+    (0..6)
+        .map(|_| ALPHABET[rng.gen_range(0..ALPHABET.len())] as char)
+        .collect()
+}
+
+async fn health() -> &'static str {
+    "ok"
+}
+
+async fn list_matches(State(db): State<Db>) -> Json<Vec<Lobby>> {
+    let db = db.lock().unwrap();
+    let mut lobbies: Vec<Lobby> = db.values().cloned().collect();
+    // Newest first.
+    lobbies.sort_by(|a, b| b.created_unix.cmp(&a.created_unix));
+    Json(lobbies)
+}
+
+async fn create_match(State(db): State<Db>, body: Option<Json<CreateReq>>) -> impl IntoResponse {
+    let req = body.map(|Json(b)| b).unwrap_or(CreateReq {
+        name: None,
+        max_players: None,
+    });
+
+    let mut db = db.lock().unwrap();
+    // Avoid the (astronomically unlikely) id collision.
+    let id = loop {
+        let candidate = gen_id();
+        if !db.contains_key(&candidate) {
+            break candidate;
+        }
+    };
+
+    let name = req
+        .name
+        .map(|n| n.trim().chars().take(40).collect::<String>())
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| format!("Match {id}"));
+    let max_players = req.max_players.unwrap_or(8).clamp(2, 32);
+
+    let lobby = Lobby {
+        id: id.clone(),
+        name,
+        players: 1,
+        max_players,
+        created_unix: now_unix(),
+        // Placeholder; the live netcode tier fills this with a real endpoint.
+        server: String::new(),
+    };
+    db.insert(id.clone(), lobby);
+
+    (
+        StatusCode::CREATED,
+        Json(CreateResp {
+            join_path: format!("play.html?room={id}"),
+            id,
+        }),
+    )
+}
+
+async fn join_match(State(db): State<Db>, Path(id): Path<String>) -> impl IntoResponse {
+    let id = id.to_uppercase();
+    let mut db = db.lock().unwrap();
+    match db.get_mut(&id) {
+        None => (StatusCode::NOT_FOUND, "no such match").into_response(),
+        Some(lobby) if lobby.players >= lobby.max_players => {
+            (StatusCode::CONFLICT, "match is full").into_response()
+        }
+        Some(lobby) => {
+            lobby.players += 1;
+            Json(lobby.clone()).into_response()
+        }
+    }
+}
+
+#[tokio::main]
+async fn main() {
+    let db: Db = Arc::new(Mutex::new(HashMap::new()));
+
+    let mut app = Router::new()
+        .route("/api/health", get(health))
+        .route("/api/matches", get(list_matches).post(create_match))
+        .route("/api/matches/{id}/join", post(join_match))
+        // Permissive CORS for now (the lobby page lives on a different origin).
+        // Lock this down to the deployed site origin before going public.
+        .layer(CorsLayer::permissive())
+        .with_state(db);
+
+    // Optional: serve the static client dir on the same origin for local
+    // end-to-end testing (no CORS needed). Off in production — Pages serves it.
+    if let Ok(dir) = std::env::var("STATIC_DIR") {
+        app = app.fallback_service(ServeDir::new(dir));
+    }
+
+    let bind = std::env::var("BIND").unwrap_or_else(|_| "0.0.0.0:5000".to_string());
+    let addr: SocketAddr = bind.parse().expect("BIND must be host:port");
+    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+    println!("matchmaker listening on http://{addr}");
+    axum::serve(listener, app).await.unwrap();
+}

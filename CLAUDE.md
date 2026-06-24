@@ -714,6 +714,44 @@ ending the turn (in order):
 4. **Monitor the PR until it is fully ready to merge** — subscribe to PR activity,
    keep CI green, and address review feedback until the PR is mergeable.
 
+## Multiplayer front-end & matchmaker
+
+The web front door is **plain static HTML** (no WASM until you actually play, so
+it paints instantly), split into three pages under `client/` — all published to
+the site root by the Pages CI (`cp client/*.html _site/`):
+
+- **`index.html`** — landing page. Two buttons: *Single Player* → `play.html`
+  (loads the game offline, exactly as before), *Multiplayer* → `lobby.html`.
+- **`play.html`** — the game loader (the old `index.html`: progress bar, WASM
+  streaming, `data-game-ready` handshake — unchanged). It additionally parses
+  `?room=CODE` / `?server=` off the URL into `window.__BS_NET__` *before* WASM
+  init, so the client can read who to connect to on boot (consumed by the live
+  netcode tier). No `room` ⇒ single-player.
+- **`lobby.html`** — the lobby browser. Lists open matches, *Create Match*
+  (→ shareable `play.html?room=CODE` link + Enter), *Join by code*, and join
+  buttons per row. Auto-refreshes every 4s. Talks to the matchmaker via
+  `fetch()`.
+
+**`matchmaker/`** (`bad-spaceship-matchmaker`, bin) is the lobby-coordination
+tier — a small **Axum** service, deliberately decoupled from the game (no
+bevy/lightyear/avian). In-memory lobby store; endpoints `GET /api/health`,
+`GET /api/matches`, `POST /api/matches`, `POST /api/matches/{id}/join`. Lobby
+codes are 6-char unambiguous (no 0/O/1/I/L). Run it with
+`cargo run -p bad-spaceship-matchmaker` (env: `BIND` default `0.0.0.0:5000`;
+`STATIC_DIR=client` to also serve the HTML on the same origin for local
+single-origin testing). CORS is `permissive()` for now — **lock it to the site
+origin before going public.**
+
+- **Hosting:** GitHub Pages serves the static HTML; it *cannot* run the
+  matchmaker (or the game server). The matchmaker must run somewhere with a
+  public endpoint (the Mac box / a small VPS).
+- **Pointing the deployed lobby at the matchmaker:** `lobby.html` resolves the
+  matchmaker base URL as `?api=<url>` (testing) → `window.BS_MATCHMAKER_URL`
+  (set this for the deployed site) → `http://localhost:5000` (default, so a
+  fresh `cargo run` works out of the box). Browsers also can't *host* a server,
+  so "Create Match" from the web provisions a server-side match — it never makes
+  the browser a host.
+
 ## Deployment
 
 `.github/workflows/pages.yml` builds the web client and publishes it to GitHub
