@@ -780,11 +780,18 @@ NetworkTarget::All)` player per client. Bind via `BS_SERVER_BIND` (default
 `multiplayer_target()` is `Some`): adds `ClientPlugins`, the protocol, spawns
 `(NetcodeClient::new(Authentication::Manual{..}, ..), WebSocketClientIo::from_url
 (..))` and triggers `Connect { entity }`; a system draws a cube on each
-replicated `NetPlayer` and applies `NetTransform`. `multiplayer_target()` reads
-`BS_CONNECT=host:port` on native; on **wasm it's always `None`** (so web stays
-single-player) — the connection spawn is `#[cfg(not(wasm))]` because it uses
-aeronet's native TLS config. **Web multiplayer is the next step** and needs
-`wss://` + reading the room off `window.__BS_NET__`.
+replicated `NetPlayer` and applies `NetTransform`. `multiplayer_target()` is
+cfg-split: **native** reads `BS_CONNECT=host:port` (plain `ws://`); **wasm** reads
+`window.__BS_NET__.server` — the `wss://host[:port]` URL `play.html` parses from
+the `?server=` query param (absent/empty ⇒ single-player). Both platforms build
+the client with `WebSocketClientIo::from_url(..)`; the only differences are the
+`ClientConfig` (native `builder().with_no_encryption()` vs wasm's unit struct, since
+the browser owns TLS) and the netcode token's `server_addr` (real on native; a
+`0.0.0.0:0` placeholder on wasm, because a `wss://` URL targets a hostname and the
+browser connects via the explicit URL, making `server_addr` a logical-only field).
+Reading the `__BS_NET__` global uses `js_sys::Reflect` (js-sys is in the `web`
+feature). **Web `wss://` multiplayer is verified live** end to end from mobile
+Safari — see "Live test endpoint" below.
 
 **0.27 API gotchas worth remembering** (the published book lags the crate; the
 ground truth is the crate source in `~/.cargo/registry/src/.../lightyear*-0.27.0`):
@@ -811,11 +818,56 @@ BS_MULTIPLAYER=1 cargo run -p bad-spaceship-server        # ws://0.0.0.0:5001
 cd client && BS_CONNECT=127.0.0.1:5001 cargo run --features native
 ```
 
+The server also spawns one **persistent "demo bot"** at startup (`spawn_demo_bot` /
+`move_demo_bot` in `server/src/net.rs`): a server-driven `NetPlayer` that orbits in
+a slow circle, its `NetTransform` rewritten every frame so the change replicates to
+every client. It exists purely so a **single** client can witness live position
+replication (motion streamed over the wire) without a second device — necessary
+because mobile browsers suspend background tabs, so two tabs on one phone never hold
+simultaneous connections. Remove it once real player movement lands.
+
 **Remaining for real multiplayer** (needs live testing): drive the replicated
 players from the actual `Character` sim (vs the placeholder pose), suppress the
 client's *local* authoritative sim in multiplayer mode, networked input +
-client-side prediction/interpolation, parts/joints replication, `wss://` for the
-browser, and wiring the matchmaker to hand out real game-server endpoints.
+client-side prediction/interpolation, parts/joints replication, and wiring the
+matchmaker to hand out real game-server endpoints. (Browser `wss://` is **done** —
+verified live.)
+
+### Live test endpoint (Mac mini + Tailscale)
+
+The public `wss://` slice was verified by standing up a throwaway test endpoint on
+the Mac box (`mini4`), reachable from a phone over Tailscale. The pieces, all on the
+Mac's Docker (Colima) daemon — the cmd-api reaches *inside* the container, but the
+`tailscale serve` and Colima port-forward bits are macOS-**host** steps the user runs:
+
+- **Two containers**, both `--restart unless-stopped`, published to host loopback
+  (Colima forwards `127.0.0.1:<port>` to the macOS host loopback):
+  - `bs-game-server` — the `BS_MULTIPLAYER=1` server binary in a minimal image
+    (`debian-slim` + the binary + `../client/assets`), `-p 127.0.0.1:5001:5001`.
+  - `bs-web` — `nginx:alpine` serving the web build's `_site` (the same layout the
+    Pages CI produces: `wasm-bindgen` output in `target/`, the three HTML files,
+    `assets/`, `loader-manifest.json`), `-p 127.0.0.1:8099:80`.
+- **The web build is produced on the Mac**, not in the sandbox (heavy `--release`
+  wasm). Gotcha: use the **aarch64** `wasm-bindgen` 0.2.125 (the box may have a
+  leftover **x86_64** one on `PATH` that segfaults with a bogus "capacity overflow"
+  under emulation inside the aarch64 container — exactly the emulation artifact the
+  toolchain notes warn about). The native aarch64 binary lives under
+  `/root/wasm-bindgen-0.2.125-aarch64-unknown-linux-gnu/`.
+- **Tailscale `serve`** on the macOS host bridges the loopback ports onto the tailnet
+  *with a valid MagicDNS HTTPS cert* (which is what makes `wss://` work with no
+  client certs — Tailscale terminates TLS and proxies the WS upgrade to the plain
+  `ws://` server):
+  ```
+  tailscale serve --bg --https=443  http://127.0.0.1:8099   # web → https://<node>.ts.net/
+  tailscale serve --bg --https=8443 http://127.0.0.1:5001   # game → wss://<node>.ts.net:8443
+  ```
+  (Serve must be enabled once per tailnet in the admin console; allowed HTTPS serve
+  ports are 443/8443/10000.) Phone test URL:
+  `https://<node>.ts.net/play.html?server=wss://<node>.ts.net:8443`.
+- **iOS gotcha:** Safari suspends background tabs, dropping the suspended tab's
+  WebSocket; on return the client clears its replicated entities (the cube vanishes).
+  So two *tabs* on one phone can't show two live players — use two *devices*, or rely
+  on the always-present demo bot for a single-device check.
 
 ## Deployment
 
