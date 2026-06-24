@@ -2,7 +2,7 @@
 //!
 //! The game's input is fully platform-agnostic: every control writes into a
 //! component or message on the player entity that `shared/` consumes — movement →
-//! `KeyboardDirectionalInput`, look → `MouseMotion`, pick-up/drop/attach/delete →
+//! `KeyboardDirectionalInput`, look → `MouseMotionDelta`, pick-up/drop/attach/delete →
 //! `PlayerClick`, the rotate/delete modifier → `Modifying`. This module feeds
 //! those exact sinks from
 //! `bevy::input::touch::Touches`. winit 0.30 delivers touch natively on web (the
@@ -11,7 +11,7 @@
 //!
 //! Layout: two fixed joysticks in the bottom corners — move (left) feeds the
 //! analog response curve, look (right) is rate-control (a held deflection keeps
-//! turning, emitting `MouseMotion` each frame). A jump button sits low-center
+//! turning, writing the look delta each frame). A jump button sits low-center
 //! between them; the click + shift buttons sit centered above them with
 //! context-specific labels (GRAB/DROP/ATTACH/DELETE and ROTATE/DELETE) keyed off
 //! the player's hold state and the latched modifier. A small pause sits top-right.
@@ -31,16 +31,13 @@
 
 use crate::input::{get_look, get_modifying, process_keyboard_input};
 use crate::AppState;
-use bad_spaceship_shared::{Holding, KeyboardDirectionalInput, Modifying, PlayerClick};
-use bevy::{
-    input::mouse::MouseMotion,
-    input::touch::Touches,
-    prelude::*,
-    window::PrimaryWindow,
+use bad_spaceship_shared::{
+    Holding, KeyboardDirectionalInput, Modifying, MouseMotionDelta, PlayerClick,
 };
+use bevy::{input::touch::Touches, prelude::*, window::PrimaryWindow};
 use bevy_egui::{egui, EguiContexts, EguiPrimaryContextPass};
 
-/// Full-deflection look speed, as a synthetic per-frame `MouseMotion` delta. With
+/// Full-deflection look speed, as a per-frame look delta (`MouseMotionDelta`). With
 /// `look_sensitivity = 0.42` (player.player.ron) the look integrator turns at
 /// `delta * sensitivity` rad/s, so ~7 → ~2.9 rad/s (~165°/s) at the rim. Tunable.
 const LOOK_SPEED: f32 = 7.0;
@@ -67,13 +64,13 @@ impl Plugin for MobilePlugin {
                         .after(process_keyboard_input)
                         .run_if(mobile_active)
                         .run_if(in_state(AppState::InGame)),
-                    apply_look
+                    // Drives the camera-look delta and the modifier directly
+                    // (replacing the winit `get_look` path, which is suppressed on
+                    // mobile), and routes a free-area drag into part rotation while
+                    // holding. Runs after the input systems it supersedes.
+                    apply_pointer
                         .after(classify_touches)
-                        .before(get_look)
-                        .run_if(mobile_active)
-                        .run_if(in_state(AppState::InGame)),
-                    apply_modify
-                        .after(classify_touches)
+                        .after(get_look)
                         .after(get_modifying)
                         .run_if(mobile_active)
                         .run_if(in_state(AppState::InGame)),
@@ -110,8 +107,13 @@ struct TouchControls {
     /// Finger on the (fixed, bottom-right) look stick + its knob position.
     look_touch: Option<u64>,
     look_knob: Vec2,
-    /// Per-frame synthetic `MouseMotion` delta the look stick emits (rate control).
+    /// Per-frame look-stick delta (rate control), written to `MouseMotionDelta`.
     look_vec: Vec2,
+    /// Finger dragging the free area (anywhere not on a stick/button). While a part
+    /// is held this trackball-rotates it; otherwise it's inert. Plus its per-frame
+    /// delta (fed to the part-rotation path).
+    rotate_touch: Option<u64>,
+    rotate_delta: Vec2,
     /// Finger held on the jump button.
     jump_touch: Option<u64>,
     /// Latched rotate/delete modifier (Shift equivalent), toggled by its button.
@@ -124,6 +126,8 @@ impl TouchControls {
         self.move_dir = Vec3::ZERO;
         self.look_touch = None;
         self.look_vec = Vec2::ZERO;
+        self.rotate_touch = None;
+        self.rotate_delta = Vec2::ZERO;
         self.jump_touch = None;
     }
 }
@@ -242,6 +246,10 @@ fn classify_touches(
     if !is_active(controls.jump_touch) {
         controls.jump_touch = None;
     }
+    if !is_active(controls.rotate_touch) {
+        controls.rotate_touch = None;
+        controls.rotate_delta = Vec2::ZERO;
+    }
 
     // Assign newly-pressed fingers. Buttons take priority over the stick zones, so
     // a finger landing on a button never grabs a stick.
@@ -272,7 +280,20 @@ fn classify_touches(
             controls.move_touch = Some(id);
         } else if controls.look_touch.is_none() && layout.in_stick(layout.look_center, p) {
             controls.look_touch = Some(id);
+        } else if controls.rotate_touch.is_none() {
+            // Anywhere else (the free area above the controls): a drag here
+            // trackball-rotates a held part (see `apply_pointer`).
+            controls.rotate_touch = Some(id);
         }
+    }
+
+    // Per-frame delta of the free-area finger (incremental trackball drag).
+    if let Some(id) = controls.rotate_touch {
+        controls.rotate_delta = touches
+            .iter()
+            .find(|t| t.id() == id)
+            .map(|t| t.delta())
+            .unwrap_or(Vec2::ZERO);
     }
 
     // Movement stick: deflection from the fixed center → curved analog speed.
@@ -290,7 +311,7 @@ fn classify_touches(
 
     // Look stick: deflection from the fixed center → rate-control look. The
     // deflection is in screen space (down = +y), which is exactly the convention
-    // the drag-look path used, so it feeds `MouseMotion` with no sign juggling.
+    // the drag-look path used, so it feeds `MouseMotionDelta` with no sign juggling.
     if let Some(id) = controls.look_touch {
         if let Some(touch) = touches.iter().find(|t| t.id() == id) {
             let clamped =
@@ -336,24 +357,35 @@ fn apply_movement(
     }
 }
 
-/// Emits the look stick's rate vector as a synthetic `MouseMotion` each frame; the
-/// existing `get_look` consumes it into `MouseMotionDelta` (which also drives
-/// held-part rotation while the modifier is on). Unlike drag-look, the stick keeps
-/// turning while held at deflection (rate control), not only while the finger moves.
-fn apply_look(controls: Res<TouchControls>, mut motion: MessageWriter<MouseMotion>) {
-    if controls.look_vec != Vec2::ZERO {
-        motion.write(MouseMotion {
-            delta: controls.look_vec,
-        });
+/// Single mobile writer of the look/rotate delta (`MouseMotionDelta`) and the
+/// modifier (`Modifying`), replacing the suppressed winit `get_look` path. The
+/// shared consumers downstream are: `player::mouse_motion` (turns the camera, but
+/// *skips* it while holding+modifying) and `player::set_part_rotation` (trackball-
+/// rotates the held part while modifying). So:
+/// - Holding a part + a free-area drag → feed that drag and force the modifier on:
+///   the part rotates (trackball) and the camera stays put.
+/// - Otherwise → feed the look stick and apply only the latched modifier: the
+///   camera turns (or, with the modifier toggled on, the look stick rotates the
+///   part — matching desktop shift+drag).
+fn apply_pointer(
+    controls: Res<TouchControls>,
+    holders: Query<&Holding>,
+    mut deltas: Query<&mut MouseMotionDelta>,
+    mut modifiers: Query<&mut Modifying>,
+) {
+    let holding = holders.iter().next().map(|h| h.0).unwrap_or(false);
+    let rotating = holding && controls.rotate_touch.is_some();
+    let delta = if rotating {
+        controls.rotate_delta
+    } else {
+        controls.look_vec
+    };
+    for mut d in deltas.iter_mut() {
+        d.0 = delta;
     }
-}
-
-/// ORs the latched modifier toggle into `Modifying` after `get_modifying` (which
-/// reads the absent Shift key and clears it every frame).
-fn apply_modify(controls: Res<TouchControls>, mut players: Query<&mut Modifying>) {
-    if controls.modify_on {
-        for mut modifying in players.iter_mut() {
-            modifying.0 = true;
+    if rotating || controls.modify_on {
+        for mut m in modifiers.iter_mut() {
+            m.0 = true;
         }
     }
 }
