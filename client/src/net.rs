@@ -86,14 +86,14 @@ fn mark_controlled_player(
     }
 }
 
-/// Our local character's render pose: its world translation plus a yaw-derived
+/// Build an avatar render pose from a world translation plus a yaw-derived
 /// rotation. The character ball is rotation-locked (its physics rotation is
 /// identity); the player's facing is the look `Yaw`. Match the movement basis,
 /// which yaws look directions by `-yaw` (see `move_character` in shared), so the
 /// avatar's +Z "nose" points where the player looks.
-fn character_pose(global: &GlobalTransform, yaw: &Yaw) -> Transform {
+fn avatar_pose(translation: Vec3, yaw: &Yaw) -> Transform {
     Transform {
-        translation: global.translation(),
+        translation,
         rotation: Quat::from_rotation_y(-yaw.0),
         ..default()
     }
@@ -111,7 +111,7 @@ fn write_player_pose(
     let Some((global, yaw)) = character.iter().next() else {
         return;
     };
-    let pose = character_pose(global, yaw);
+    let pose = avatar_pose(global.translation(), yaw);
     for mut state in &mut controlled {
         state.0.translation = pose.translation.to_array();
         state.0.rotation = pose.rotation.to_array();
@@ -144,17 +144,21 @@ fn mark_own_avatar(
 /// Render our own avatar from the live local character pose (zero round-trip),
 /// overriding the interpolated network echo. Because the client is authoritative
 /// over its own pose (it forwards it to the server), this "prediction" is exact —
-/// no rollback needed, unlike server-authoritative movement prediction.
+/// no rollback needed, unlike server-authoritative movement prediction. Reads the
+/// character's `Transform` (not `GlobalTransform`, which the engine only refreshes
+/// in PostUpdate and would lag a frame): the character is a root entity, so its
+/// `Transform` is the current world pose, and the avatar then propagates in lockstep
+/// with the rendered character the same frame.
 fn predict_own_avatar(
-    character: Query<(&GlobalTransform, &Yaw), With<Character>>,
-    mut own: Query<&mut Transform, With<OwnAvatar>>,
+    character: Query<(&Transform, &Yaw), (With<Character>, Without<OwnAvatar>)>,
+    mut own: Query<&mut Transform, (With<OwnAvatar>, Without<Character>)>,
 ) {
-    let Some((global, yaw)) = character.iter().next() else {
+    let Some((transform, yaw)) = character.iter().next() else {
         return;
     };
-    let pose = character_pose(global, yaw);
-    for mut transform in &mut own {
-        *transform = pose;
+    let pose = avatar_pose(transform.translation, yaw);
+    for mut own_transform in &mut own {
+        *own_transform = pose;
     }
 }
 
