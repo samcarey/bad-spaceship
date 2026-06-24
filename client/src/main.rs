@@ -23,15 +23,10 @@ mod mobile;
 mod platform;
 mod render_main_pass;
 mod render_secondary_pass;
-mod telemetry;
 mod ui;
 
 #[bevy_main]
 fn main() {
-    // Install the wasm panic hook / log sink first, before any other startup can
-    // panic (no-op on native). See `telemetry.rs`.
-    telemetry::init();
-
     let mut app = App::new();
 
     app.insert_resource(GlobalAmbientLight {
@@ -81,13 +76,7 @@ fn main() {
         ))
         .insert_resource(ClearColor(Color::srgb(0.99, 0.99, 0.95)))
         .add_systems(Startup, load_configs)
-        .add_systems(Update, add_camera_to_player)
-        // Telemetry breadcrumbs for live mobile debugging (no-op on native).
-        .add_systems(OnEnter(AppState::InGame), || crate::tlog!("state -> InGame"))
-        .add_systems(
-            OnEnter(AppState::InGameMenu),
-            || crate::tlog!("state -> InGameMenu"),
-        );
+        .add_systems(Update, add_camera_to_player);
 
     app.run();
 }
