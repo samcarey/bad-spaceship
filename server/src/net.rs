@@ -33,9 +33,14 @@ impl Plugin for NetServerPlugin {
         // Order matters: plugin group → protocol → spawn the server entity.
         app.add_plugins(ServerPlugins { tick_duration: TICK });
         app.add_plugins(ProtocolPlugin);
-        app.add_systems(Startup, start_server);
+        app.add_systems(Startup, (start_server, spawn_demo_bot));
         // One server-owned, replicated player per client that connects.
         app.add_observer(spawn_player_for_client);
+        // A persistent, server-driven player that orbits so a single client can
+        // see live replication (motion streamed over the wire) without a second
+        // device — useful because mobile browsers suspend background tabs, so two
+        // tabs on one phone never connect simultaneously.
+        app.add_systems(Update, move_demo_bot);
     }
 }
 
@@ -59,6 +64,31 @@ fn start_server(mut commands: Commands) {
         .id();
     commands.trigger(Start { entity: server });
     info!("multiplayer server listening on ws://{addr}");
+}
+
+/// Marks the always-present, server-driven demo player.
+#[derive(Component)]
+struct DemoBot;
+
+/// Spawn the orbiting demo player once at startup, replicated to everyone.
+fn spawn_demo_bot(mut commands: Commands) {
+    commands.spawn((
+        NetPlayer { client_id: 0 },
+        NetTransform::from_transform(&Transform::from_xyz(3.0, 2.0, 0.0)),
+        Replicate::to_clients(NetworkTarget::All),
+        DemoBot,
+    ));
+}
+
+/// Drive the demo player in a slow circle each frame; the changed `NetTransform`
+/// replicates to every connected client, so its cube visibly moves.
+fn move_demo_bot(time: Res<Time>, mut bot: Query<&mut NetTransform, With<DemoBot>>) {
+    let t = time.elapsed_secs();
+    let pose = Transform::from_xyz(t.cos() * 3.0, 2.0, t.sin() * 3.0)
+        .with_rotation(Quat::from_rotation_y(t));
+    for mut net in &mut bot {
+        *net = NetTransform::from_transform(&pose);
+    }
 }
 
 /// When a client finishes connecting (`Connected` added to its link entity),
