@@ -11,6 +11,7 @@
 //!
 //! For every player the server replicates, draw a cube at its `NetTransform`.
 
+use avian3d::prelude::{Collider, RigidBody};
 use bad_spaceship_shared::net::{NetPart, NetPlayer, NetTransform, PlayerInput, ProtocolPlugin, TICK};
 use bad_spaceship_shared::part::SuppressLocalParts;
 use bad_spaceship_shared::{Character, Yaw};
@@ -196,10 +197,11 @@ fn draw_replicated_players(
     }
 }
 
-/// Give each replicated part's `Interpolated` copy a cuboid mesh built from its
-/// `NetPart` shape. These are visual ghosts of the server's authoritative parts
-/// (no collider/physics on the client); `apply_net_transform` keeps their pose
-/// in sync via the interpolated `NetTransform`.
+/// Give each replicated part's `Interpolated` copy a cuboid mesh + a kinematic
+/// collider built from its `NetPart` shape. The pose is driven by the server via
+/// the interpolated `NetTransform` (`apply_net_transform`); a `Kinematic` body
+/// follows that pose and blocks the local dynamic character, so the player bumps
+/// the shared world (the part is never pushed back — the server is authoritative).
 fn draw_replicated_parts(
     mut commands: Commands,
     new_parts: Query<(Entity, &NetPart), (With<Interpolated>, Without<Mesh3d>)>,
@@ -211,6 +213,9 @@ fn draw_replicated_parts(
         commands.entity(entity).insert((
             Mesh3d(meshes.add(Cuboid::new(hx * 2.0, hy * 2.0, hz * 2.0))),
             MeshMaterial3d(materials.add(Color::srgb(0.55, 0.6, 0.72))),
+            RigidBody::Kinematic,
+            // Avian's `Collider::cuboid` takes FULL extents (= 2 × half_extents).
+            Collider::cuboid(hx * 2.0, hy * 2.0, hz * 2.0),
         ));
     }
 }
