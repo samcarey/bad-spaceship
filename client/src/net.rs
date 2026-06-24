@@ -14,7 +14,7 @@
 use core::time::Duration;
 
 use bad_spaceship_shared::net::{NetPlayer, NetTransform, PlayerInput, ProtocolPlugin};
-use bad_spaceship_shared::Character;
+use bad_spaceship_shared::{Character, Yaw};
 use bevy::prelude::*;
 use lightyear::prelude::client::input::InputSystems as ClientInputSystems;
 use lightyear::prelude::client::*;
@@ -89,16 +89,21 @@ fn mark_controlled_player(
 /// (the `Character` ball — `Player` and `Character` are the same entity), so its
 /// `GlobalTransform` is the player's true position/orientation on every platform.
 fn write_player_pose(
-    character: Query<&GlobalTransform, With<Character>>,
+    character: Query<(&GlobalTransform, &Yaw), With<Character>>,
     mut controlled: Query<&mut ActionState<PlayerInput>, With<InputMarker<PlayerInput>>>,
 ) {
-    let Some(global) = character.iter().next() else {
+    let Some((global, yaw)) = character.iter().next() else {
         return;
     };
-    let pose = global.compute_transform();
+    // The character ball is rotation-locked (its physics rotation is identity);
+    // the player's facing is the look `Yaw`. Match the movement basis, which
+    // yaws look directions by `-yaw` (see `move_character` in shared), so the
+    // avatar's +Z "nose" points where the player looks.
+    let translation = global.translation();
+    let rotation = Quat::from_rotation_y(-yaw.0);
     for mut state in &mut controlled {
-        state.0.translation = pose.translation.to_array();
-        state.0.rotation = pose.rotation.to_array();
+        state.0.translation = translation.to_array();
+        state.0.rotation = rotation.to_array();
     }
 }
 
@@ -110,10 +115,22 @@ fn draw_replicated_players(
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     for entity in &new_players {
-        commands.entity(entity).insert((
-            Mesh3d(meshes.add(Cuboid::new(1.0, 2.0, 1.0))),
-            MeshMaterial3d(materials.add(Color::srgb(0.9, 0.35, 0.35))),
-        ));
+        // A small contrasting "nose" on the front (+Z) so the avatar's facing is
+        // visible — the body's footprint alone can't show a yaw rotation.
+        let nose = commands
+            .spawn((
+                Mesh3d(meshes.add(Cuboid::new(0.3, 0.3, 0.6))),
+                MeshMaterial3d(materials.add(Color::srgb(1.0, 0.85, 0.2))),
+                Transform::from_xyz(0.0, 0.0, 0.9),
+            ))
+            .id();
+        commands
+            .entity(entity)
+            .insert((
+                Mesh3d(meshes.add(Cuboid::new(0.8, 1.2, 1.6))),
+                MeshMaterial3d(materials.add(Color::srgb(0.9, 0.35, 0.35))),
+            ))
+            .add_children(&[nose]);
     }
 }
 
