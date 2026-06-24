@@ -10,14 +10,16 @@
 //! removed), so no browser glue is needed and it compiles on native too.
 //!
 //! Layout: two fixed joysticks in the bottom corners — move (left) feeds the
-//! analog response curve, look (right) is rate-control (a held deflection keeps
-//! turning, writing the look delta each frame). A center vertical stack of three
-//! buttons: the action button (JOIN when holding / DELETE when empty-handed) sits
-//! at the screen-center "grab area" reticle, with grab (DROP/GRAB) and jump below
-//! it. A small pause sits top-right. Rotating a held part is done by dragging the
-//! free area (no rotate button); the delete zone is always live when empty-handed.
-//! `apply_pointer` derives the `Modifying` flag from hold state + per-tap intent,
-//! so one `PlayerClick` routes to pickup/drop/attach/delete without a toggle.
+//! analog response curve. The look stick (right) is split: yaw (left/right) is
+//! rate-control (cumulative), while pitch (up/down) is absolute — the stick's
+//! vertical position maps straight to camera pitch. A vertical stack of three
+//! buttons sits centered between the sticks, anchored at the bottom: jump (bottom),
+//! grab (DROP/GRAB), and the action button on top (Join Parts when holding / Delete
+//! Joints when empty-handed). A small pause sits top-right. Rotating a held part is
+//! done by dragging the free area (no rotate button); the delete zone is always
+//! live when empty-handed. `apply_pointer` derives the `Modifying` flag from hold
+//! state + per-tap intent, so one `PlayerClick` routes to pickup/drop/attach/delete
+//! without a toggle.
 //!
 //! Activation is auto-detected: `MobileActive` flips on the first touch, after
 //! which the on-screen overlay and the touch systems turn on. Desktop/mouse users
@@ -35,16 +37,22 @@
 use crate::input::{get_look, get_modifying, process_keyboard_input};
 use crate::AppState;
 use bad_spaceship_shared::{
-    Holding, InputEvents, KeyboardDirectionalInput, Modifying, MouseMotionDelta, PlayerClick,
-    UpdateJointsLabel,
+    Holding, InputEvents, KeyboardDirectionalInput, LookPitch, Modifying, MouseMotionDelta,
+    PlayerClick, UpdateJointsLabel,
 };
 use bevy::{input::touch::Touches, prelude::*, window::PrimaryWindow};
 use bevy_egui::{egui, EguiContexts, EguiPrimaryContextPass};
 
-/// Full-deflection look speed, as a per-frame look delta (`MouseMotionDelta`). With
-/// `look_sensitivity = 0.42` (player.player.ron) the look integrator turns at
-/// `delta * sensitivity` rad/s, so ~7 → ~2.9 rad/s (~165°/s) at the rim. Tunable.
+/// Full-deflection look speed for the *yaw* (left/right) axis, as a per-frame look
+/// delta (`MouseMotionDelta`). With `look_sensitivity = 0.42` (player.player.ron)
+/// the look integrator turns at `delta * sensitivity` rad/s, so ~7 → ~2.9 rad/s
+/// (~165°/s) at the rim. Tunable.
 const LOOK_SPEED: f32 = 7.0;
+
+/// Pitch (up/down) is *absolute*, not cumulative: the look stick's vertical
+/// position maps straight to camera pitch. This is the pitch at full deflection (a
+/// bit past the ±89° clamp in `player::mouse_motion` so the rim hits the extreme).
+const PITCH_AT_FULL: f32 = 1.6;
 
 pub struct MobilePlugin;
 
@@ -117,8 +125,13 @@ struct TouchControls {
     /// Finger on the (fixed, bottom-right) look stick + its knob position.
     look_touch: Option<u64>,
     look_knob: Vec2,
-    /// Per-frame look-stick delta (rate control), written to `MouseMotionDelta`.
+    /// Look stick → yaw: per-frame rate delta (left/right), written to
+    /// `MouseMotionDelta` (cumulative). The y component is always 0 — pitch is
+    /// handled separately and absolutely.
     look_vec: Vec2,
+    /// Look stick → pitch: absolute target pitch (up/down) while the stick is held,
+    /// `None` when released so the pitch holds. Written to `LookPitch`.
+    look_pitch_target: Option<f32>,
     /// Finger dragging the free area (anywhere not on a stick/button). While a part
     /// is held this trackball-rotates it; otherwise it's inert. Plus its per-frame
     /// delta (fed to the part-rotation path).
@@ -138,6 +151,7 @@ impl TouchControls {
         self.move_dir = Vec3::ZERO;
         self.look_touch = None;
         self.look_vec = Vec2::ZERO;
+        self.look_pitch_target = None;
         self.rotate_touch = None;
         self.rotate_delta = Vec2::ZERO;
         self.jump_touch = None;
@@ -178,15 +192,14 @@ impl ControlLayout {
         // Fixed sticks in the bottom corners.
         self.move_center = Vec2::new(jr + edge, h - jr - edge);
         self.look_center = Vec2::new(w - jr - edge, h - jr - edge);
-        // Vertical center stack: the action (join/delete) button sits at the center
-        // of the screen — the "grab area" reticle you aim with — and grab + jump
-        // stack below it.
+        // Vertical stack centered between the two sticks, anchored at the bottom and
+        // growing upward: jump at the bottom, grab above it, action (join/delete) on
+        // top.
         let cx = w * 0.5;
-        let cy = h * 0.5;
         let gap = 2.0 * r + 10.0;
-        self.action = Vec2::new(cx, cy);
-        self.grab = Vec2::new(cx, cy + gap);
-        self.jump = Vec2::new(cx, cy + 2.0 * gap);
+        self.jump = Vec2::new(cx, h - r - edge);
+        self.grab = Vec2::new(cx, self.jump.y - gap);
+        self.action = Vec2::new(cx, self.grab.y - gap);
         self.pause = Vec2::new(w - self.pause_r - 12.0, self.pause_r + 12.0);
     }
 
@@ -261,6 +274,7 @@ fn classify_touches(
     if !is_active(controls.look_touch) {
         controls.look_touch = None;
         controls.look_vec = Vec2::ZERO;
+        controls.look_pitch_target = None;
     }
     if !is_active(controls.jump_touch) {
         controls.jump_touch = None;
@@ -333,16 +347,19 @@ fn classify_touches(
         }
     }
 
-    // Look stick: deflection from the fixed center → rate-control look. The
-    // deflection is in screen space (down = +y), which is exactly the convention
-    // the drag-look path used, so it feeds `MouseMotionDelta` with no sign juggling.
+    // Look stick: split axes. Yaw (left/right) is rate-control (cumulative) and
+    // feeds `MouseMotionDelta.x`. Pitch (up/down) is absolute — the stick's vertical
+    // position maps straight to camera pitch — so it goes through `look_pitch_target`
+    // (the y delta stays 0). Screen y is down, so stick up (norm.y < 0) → look up.
     if let Some(id) = controls.look_touch {
         if let Some(touch) = touches.iter().find(|t| t.id() == id) {
             let clamped =
                 (touch.position() - layout.look_center).clamp_length_max(layout.joystick_radius);
             controls.look_knob = layout.look_center + clamped;
-            let rate = response_curve(clamped.length() / layout.joystick_radius) * LOOK_SPEED;
-            controls.look_vec = clamped.normalize_or_zero() * rate;
+            let norm = clamped / layout.joystick_radius;
+            let yaw_rate = response_curve(norm.x.abs()) * norm.x.signum() * LOOK_SPEED;
+            controls.look_vec = Vec2::new(yaw_rate, 0.0);
+            controls.look_pitch_target = Some(-norm.y * PITCH_AT_FULL);
         }
     }
 }
@@ -398,6 +415,7 @@ fn apply_pointer(
     holders: Query<&Holding>,
     mut deltas: Query<&mut MouseMotionDelta>,
     mut modifiers: Query<&mut Modifying>,
+    mut pitches: Query<&mut LookPitch>,
 ) {
     let holding = holders.iter().next().map(|h| h.0).unwrap_or(false);
     let rotating = holding && controls.rotate_touch.is_some();
@@ -408,6 +426,16 @@ fn apply_pointer(
     };
     for mut d in deltas.iter_mut() {
         d.0 = delta;
+    }
+    // Absolute pitch from the look stick (only while held — `mouse_motion` clamps it
+    // and, since the look delta's y is 0, won't accumulate over it). Skip while
+    // free-dragging a part so the rotate gesture doesn't also pitch the camera.
+    if !rotating {
+        if let Some(target) = controls.look_pitch_target {
+            for mut pitch in pitches.iter_mut() {
+                pitch.0 = target;
+            }
+        }
     }
     let modify = if controls.grab_tap {
         false
@@ -436,16 +464,24 @@ fn draw_button(painter: &egui::Painter, center: Vec2, r: f32, label: &str, activ
         fill,
         egui::Stroke::new(2.0, egui::Color32::from_white_alpha(170)),
     );
-    // Shrink the font for longer labels so words like "DELETE" fit inside the
-    // circle (roughly fit the label width to the diameter).
-    let font = (1.7 * r / label.len().max(1) as f32).clamp(11.0, r * 0.62);
-    painter.text(
-        c,
-        egui::Align2::CENTER_CENTER,
-        label,
-        egui::FontId::proportional(font),
-        egui::Color32::WHITE,
-    );
+    // Support multi-line labels (e.g. "Delete\nJoints"): size the font to the
+    // longest line's width and the line count's height so it fits the circle, then
+    // stack the lines centered.
+    let lines: Vec<&str> = label.split('\n').collect();
+    let n = lines.len().max(1) as f32;
+    let longest = lines.iter().map(|l| l.len()).max().unwrap_or(1).max(1) as f32;
+    let font = (1.7 * r / longest).min(1.4 * r / n).clamp(9.0, r * 0.62);
+    let line_h = font * 1.1;
+    for (i, line) in lines.iter().enumerate() {
+        let y = c.y - (n - 1.0) * 0.5 * line_h + i as f32 * line_h;
+        painter.text(
+            egui::pos2(c.x, y),
+            egui::Align2::CENTER_CENTER,
+            line,
+            egui::FontId::proportional(font),
+            egui::Color32::WHITE,
+        );
+    }
 }
 
 /// Draws a fixed stick: an always-visible ring at `center` plus a knob (at the
@@ -499,14 +535,13 @@ fn draw_overlay(
     draw_stick(&painter, layout.look_center, layout.joystick_radius, look_knob, "LOOK");
 
     // Context labels: the top action button joins (holding) or deletes (empty),
-    // the grab button drops (holding) or grabs (empty). The action button is
-    // highlighted when empty-handed since the delete zone is then always live.
+    // the grab button drops (holding) or grabs (empty).
     let holding = holders.iter().next().map(|h| h.0).unwrap_or(false);
-    let action_label = if holding { "JOIN" } else { "DELETE" };
+    let action_label = if holding { "Join\nParts" } else { "Delete\nJoints" };
     let grab_label = if holding { "DROP" } else { "GRAB" };
 
     let r = layout.btn_r;
-    draw_button(&painter, layout.action, r, action_label, !holding);
+    draw_button(&painter, layout.action, r, action_label, false);
     draw_button(&painter, layout.grab, r, grab_label, false);
     draw_button(&painter, layout.jump, r, "JUMP", controls.jump_touch.is_some());
     draw_button(&painter, layout.pause, layout.pause_r, "II", false);

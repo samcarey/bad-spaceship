@@ -170,4 +170,4 @@ pub struct PlayerInput {
 pub struct MouseWheelLabel;
 
 #[derive(Component)]
-pub struct LookPitch(f32);
+pub struct LookPitch(pub f32);
