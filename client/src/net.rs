@@ -51,10 +51,17 @@ impl Plugin for NetClientPlugin {
         app.add_plugins(ProtocolPlugin);
         app.add_systems(Startup, connect);
         // Give every replicated player a visible body, then keep its transform
-        // in sync with the replicated pose, and tag the player we control.
+        // in sync with the replicated pose, tag the player we control, and tag
+        // our own avatar so we can render it predicted (from the local pose).
         app.add_systems(
             Update,
-            (draw_replicated_players, apply_net_transform, mark_controlled_player),
+            (
+                draw_replicated_players,
+                apply_net_transform,
+                mark_controlled_player,
+                mark_own_avatar,
+                predict_own_avatar,
+            ),
         );
         // Forward our character pose each tick, in lightyear's input-writing set.
         app.add_systems(
@@ -79,6 +86,19 @@ fn mark_controlled_player(
     }
 }
 
+/// Build an avatar render pose from a world translation plus a yaw-derived
+/// rotation. The character ball is rotation-locked (its physics rotation is
+/// identity); the player's facing is the look `Yaw`. Match the movement basis,
+/// which yaws look directions by `-yaw` (see `move_character` in shared), so the
+/// avatar's +Z "nose" points where the player looks.
+fn avatar_pose(translation: Vec3, yaw: &Yaw) -> Transform {
+    Transform {
+        translation,
+        rotation: Quat::from_rotation_y(-yaw.0),
+        ..default()
+    }
+}
+
 /// Forward our local character's authoritative world pose into the controlled
 /// player's `ActionState` (lightyear sends it to the server, which mirrors it
 /// into the replicated `NetTransform`). The local character is a single body
@@ -91,15 +111,54 @@ fn write_player_pose(
     let Some((global, yaw)) = character.iter().next() else {
         return;
     };
-    // The character ball is rotation-locked (its physics rotation is identity);
-    // the player's facing is the look `Yaw`. Match the movement basis, which
-    // yaws look directions by `-yaw` (see `move_character` in shared), so the
-    // avatar's +Z "nose" points where the player looks.
-    let translation = global.translation();
-    let rotation = Quat::from_rotation_y(-yaw.0);
+    let pose = avatar_pose(global.translation(), yaw);
     for mut state in &mut controlled {
-        state.0.translation = translation.to_array();
-        state.0.rotation = rotation.to_array();
+        state.0.translation = pose.translation.to_array();
+        state.0.rotation = pose.rotation.to_array();
+    }
+}
+
+/// Marks our *own* avatar's `Interpolated` entity, so it can be rendered from
+/// the local character pose (prediction) rather than the network echo.
+#[derive(Component)]
+struct OwnAvatar;
+
+/// Tag our own avatar: the `Interpolated` entity whose `NetPlayer.client_id`
+/// matches the player we control. (Both the `Controlled`/`Confirmed` entity and
+/// its `Interpolated` copy replicate the same `NetPlayer`.)
+fn mark_own_avatar(
+    mut commands: Commands,
+    controlled: Query<&NetPlayer, With<Controlled>>,
+    candidates: Query<(Entity, &NetPlayer), (With<Interpolated>, Without<OwnAvatar>)>,
+) {
+    let Some(mine) = controlled.iter().next() else {
+        return;
+    };
+    for (entity, player) in &candidates {
+        if player.client_id == mine.client_id {
+            commands.entity(entity).insert(OwnAvatar);
+        }
+    }
+}
+
+/// Render our own avatar from the live local character pose (zero round-trip),
+/// overriding the interpolated network echo. Because the client is authoritative
+/// over its own pose (it forwards it to the server), this "prediction" is exact —
+/// no rollback needed, unlike server-authoritative movement prediction. Reads the
+/// character's `Transform` (not `GlobalTransform`, which the engine only refreshes
+/// in PostUpdate and would lag a frame): the character is a root entity, so its
+/// `Transform` is the current world pose, and the avatar then propagates in lockstep
+/// with the rendered character the same frame.
+fn predict_own_avatar(
+    character: Query<(&Transform, &Yaw), (With<Character>, Without<OwnAvatar>)>,
+    mut own: Query<&mut Transform, (With<OwnAvatar>, Without<Character>)>,
+) {
+    let Some((transform, yaw)) = character.iter().next() else {
+        return;
+    };
+    let pose = avatar_pose(transform.translation, yaw);
+    for mut own_transform in &mut own {
+        *own_transform = pose;
     }
 }
 
@@ -136,7 +195,10 @@ fn draw_replicated_players(
 /// eases the `NetTransform` on `Interpolated` entities each frame; mirror it onto
 /// the Bevy `Transform` we render.
 fn apply_net_transform(
-    mut q: Query<(&NetTransform, &mut Transform), (Changed<NetTransform>, With<Interpolated>)>,
+    mut q: Query<
+        (&NetTransform, &mut Transform),
+        (Changed<NetTransform>, With<Interpolated>, Without<OwnAvatar>),
+    >,
 ) {
     for (net, mut transform) in &mut q {
         *transform = net.to_transform();
