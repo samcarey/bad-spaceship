@@ -52,18 +52,23 @@ impl NetTransform {
     }
 }
 
-/// Per-tick player intent, sent client → server as a lightyear native input
-/// (registered via `InputPlugin::<PlayerInput>` in `ProtocolPlugin`). Native
-/// inputs must be `Serialize`/`Deserialize`/`Clone`/`PartialEq`/`Debug`/`Default`
-/// + `Reflect` + `MapEntities`.
+/// Per-tick client → server message carrying the controlling client's current
+/// character pose (world space). The client owns its local character sim, so
+/// rather than re-simulating movement on the server (which drifts and feels
+/// wrong vs the real physics character), the client forwards its authoritative
+/// pose and the server mirrors it into the replicated `NetTransform` — so every
+/// other client sees the avatar exactly track the character (offset only by
+/// network round-trip, smoothed later by interpolation).
+///
+/// Sent via lightyear's native-input channel (registered with
+/// `InputPlugin::<PlayerInput>` in `ProtocolPlugin`); native inputs must be
+/// `Serialize`/`Deserialize`/`Clone`/`PartialEq`/`Debug`/`Default` + `Reflect` +
+/// `MapEntities`.
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug, Default, Reflect)]
 pub struct PlayerInput {
-    pub move_dir: Vec2,
-    pub yaw: f32,
-    pub pitch: f32,
-    pub jump: bool,
-    pub grab: bool,
-    pub modifying: bool,
+    pub translation: [f32; 3],
+    /// Rotation quaternion, `[x, y, z, w]`.
+    pub rotation: [f32; 4],
 }
 
 // No entities are referenced by `PlayerInput`, so the mapping is a no-op — but

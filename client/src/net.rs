@@ -14,7 +14,7 @@
 use core::time::Duration;
 
 use bad_spaceship_shared::net::{NetPlayer, NetTransform, PlayerInput, ProtocolPlugin};
-use bad_spaceship_shared::KeyboardDirectionalInput;
+use bad_spaceship_shared::Character;
 use bevy::prelude::*;
 use lightyear::prelude::client::input::InputSystems as ClientInputSystems;
 use lightyear::prelude::client::*;
@@ -60,10 +60,10 @@ impl Plugin for NetClientPlugin {
             Update,
             (draw_replicated_players, apply_net_transform, mark_controlled_player),
         );
-        // Write our input each tick, in lightyear's input-writing set.
+        // Forward our character pose each tick, in lightyear's input-writing set.
         app.add_systems(
             FixedPreUpdate,
-            write_player_input.in_set(ClientInputSystems::WriteClientInputs),
+            write_player_pose.in_set(ClientInputSystems::WriteClientInputs),
         );
     }
 }
@@ -83,19 +83,22 @@ fn mark_controlled_player(
     }
 }
 
-/// Capture local movement intent and write it to the controlled player's
-/// `ActionState` (lightyear sends it to the server). Reads the unified
-/// `KeyboardDirectionalInput` — fed by keyboard, gamepad, *and* mobile touch —
-/// so the same path drives the player on desktop and phone.
-fn write_player_input(
-    intent: Query<&KeyboardDirectionalInput>,
+/// Forward our local character's authoritative world pose into the controlled
+/// player's `ActionState` (lightyear sends it to the server, which mirrors it
+/// into the replicated `NetTransform`). The local character is a single body
+/// (the `Character` ball — `Player` and `Character` are the same entity), so its
+/// `GlobalTransform` is the player's true position/orientation on every platform.
+fn write_player_pose(
+    character: Query<&GlobalTransform, With<Character>>,
     mut controlled: Query<&mut ActionState<PlayerInput>, With<InputMarker<PlayerInput>>>,
 ) {
-    let dir = intent.iter().next().map(|k| k.0).unwrap_or(Vec3::ZERO);
-    let move_dir = Vec2::new(dir.x, dir.z);
+    let Some(global) = character.iter().next() else {
+        return;
+    };
+    let pose = global.compute_transform();
     for mut state in &mut controlled {
-        state.0.move_dir = move_dir;
-        state.0.jump = dir.y > 0.5;
+        state.0.translation = pose.translation.to_array();
+        state.0.rotation = pose.rotation.to_array();
     }
 }
 

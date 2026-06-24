@@ -19,9 +19,6 @@ use lightyear::prelude::input::native::ActionState;
 use lightyear::prelude::*;
 use lightyear::prelude::server::*;
 
-/// Movement speed applied to player input, in world units per second.
-const PLAYER_SPEED: f32 = 6.0;
-
 /// 60 Hz, matching the server's fixed simulation loop.
 const TICK: Duration = Duration::from_millis(1000 / 60);
 
@@ -123,16 +120,17 @@ fn spawn_player_for_client(
     info!("client {client:?} connected — spawned replicated player at x={x}");
 }
 
-/// Integrate each player's current input into its authoritative pose. Runs in
-/// `FixedUpdate` (server tick); the changed `NetTransform` replicates to clients.
-fn apply_player_input(
-    time: Res<Time>,
-    mut players: Query<(&ActionState<PlayerInput>, &mut NetTransform)>,
-) {
-    let dt = time.delta_secs();
+/// Mirror each client's forwarded character pose into its authoritative
+/// `NetTransform`. Runs in `FixedUpdate` (server tick); the changed
+/// `NetTransform` then replicates to all clients.
+fn apply_player_input(mut players: Query<(&ActionState<PlayerInput>, &mut NetTransform)>) {
     for (state, mut net) in &mut players {
-        let dir = state.0.move_dir;
-        net.translation[0] += dir.x * PLAYER_SPEED * dt;
-        net.translation[2] += dir.y * PLAYER_SPEED * dt;
+        // Skip the all-zero default that exists before any input has arrived,
+        // so the player keeps its initial spawn pose until the client reports in.
+        if state.0 == PlayerInput::default() {
+            continue;
+        }
+        net.translation = state.0.translation;
+        net.rotation = state.0.rotation;
     }
 }
