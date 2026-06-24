@@ -56,6 +56,14 @@ default = [
     # `bevy::log::info!` calls in the pause menu fail to resolve. (It was implicitly
     # present under 0.15.)
     "bevy/bevy_log",
+    # Bevy 0.18 split `bevy_input`'s sources behind features. Unlike keyboard/mouse
+    # (auto-enabled by `bevy_winit`), nothing in the graph pulls `touch` — so without
+    # this the `Touches` resource is never inserted and `touch_screen_input_system`
+    # never runs, and `mobile.rs`'s `Res<Touches>` reads a non-existent resource at
+    # runtime (the touch *module* is ungated, so it still compiles — which is why a
+    # compile-only check missed it). The mobile touch controls need this on every
+    # build, hence `default`, not just `web`.
+    "bevy/touch",
 ]
 
 native = [
