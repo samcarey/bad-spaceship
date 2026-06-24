@@ -17,7 +17,10 @@ avian3d = { version = "0.7.0", default-features = false, features = ["3d", "f32"
 serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
 gloo = { version = "0.7", optional = true }
-web-sys = { version = "0.3.40", optional = true }
+# `Navigator`/`console` are for the wasm telemetry module (sendBeacon + console);
+# `Window` is already used by web.rs. Features are additive, so listing them
+# explicitly is safe even where bevy/winit pull web-sys transitively.
+web-sys = { version = "0.3.40", optional = true, features = ["Window", "Navigator", "console"] }
 # Disable bevy_egui's clipboard/hyperlink extras (the menu uses neither); this
 # drops the arboard→image and webbrowser→home native dep chains. Keep fonts, and
 # keep `render` — bevy_egui gates *all* egui drawing behind it, so dropping it

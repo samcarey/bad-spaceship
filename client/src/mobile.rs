@@ -169,6 +169,7 @@ impl ControlLayout {
 fn detect_touch(touches: Res<Touches>, mut active: ResMut<MobileActive>) {
     if !active.0 && touches.iter_just_pressed().next().is_some() {
         active.0 = true;
+        crate::tlog!("detect_touch: MobileActive on");
     }
 }
 
@@ -179,6 +180,7 @@ fn start_game_on_touch(
     mut next_state: ResMut<NextState<AppState>>,
 ) {
     if touches.iter_just_pressed().next().is_some() {
+        crate::tlog!("start_game_on_touch: first tap -> InGame");
         next_state.set(AppState::InGame);
     }
 }
@@ -234,20 +236,31 @@ fn classify_touches(
     for touch in touches.iter_just_pressed() {
         let p = touch.position();
         let id = touch.id();
+        crate::tlog!(
+            "press id={id} pos=({:.0},{:.0}) win=({:.0}x{:.0})",
+            p.x,
+            p.y,
+            layout.width,
+            layout.height
+        );
         if layout.hit(layout.pause, p) {
+            crate::tlog!("hit pause");
             next_state.set(AppState::InGameMenu);
             controls.clear_fingers();
             continue;
         }
         if layout.hit(layout.jump, p) {
+            crate::tlog!("hit jump");
             controls.jump_touch = Some(id);
             continue;
         }
         if layout.hit(layout.grab, p) {
+            crate::tlog!("hit grab");
             clicks.write(PlayerClick);
             continue;
         }
         if layout.hit(layout.modify, p) {
+            crate::tlog!("hit modify");
             controls.modify_on = !controls.modify_on;
             continue;
         }
@@ -263,12 +276,14 @@ fn classify_touches(
         // right half = look drag. One finger per role.
         if p.x < layout.width * 0.5 {
             if controls.move_touch.is_none() {
+                crate::tlog!("move start");
                 controls.move_touch = Some(id);
                 controls.move_origin = p;
                 controls.move_knob = p;
                 controls.move_dir = Vec3::ZERO;
             }
         } else if controls.look_touch.is_none() {
+            crate::tlog!("look start");
             controls.look_touch = Some(id);
         }
     }
