@@ -793,6 +793,36 @@ Reading the `__BS_NET__` global uses `js_sys::Reflect` (js-sys is in the `web`
 feature). **Web `wss://` multiplayer is verified live** end to end from mobile
 Safari — see "Live test endpoint" below.
 
+**Networked input → pose mirroring** (`PlayerInput`, `shared/src/net.rs`). The
+client controls its own player and the server mirrors that to everyone, using
+lightyear's **native message inputs** (the `input_native` feature; `InputPlugin::
+<PlayerInput>` registered once in `ProtocolPlugin`, role-agnostic — it adds the
+client half under lightyear's `client` feature and the server half under `server`,
+so one registration wires both binaries). Native inputs require `Serialize`/
+`Deserialize`/`Clone`/`PartialEq`/`Debug`/`Default` + `Reflect` + `MapEntities`
+(no-op here). The flow:
+- **Server**: each per-client player spawns with `ControlledBy { owner: client,
+  lifetime: SessionBased }` (binds that client's input to the entity; auto-despawns
+  on disconnect) + a seeded `ActionState::<PlayerInput>`. `apply_player_input`
+  (FixedUpdate) writes the received pose into the replicated `NetTransform`.
+- **Client**: the bound entity arrives carrying lightyear's `Controlled` marker;
+  `mark_controlled_player` tags it with `InputMarker<PlayerInput>` + `ActionState`.
+  `write_player_pose` (FixedPreUpdate, in the `WriteClientInputs` set) fills the
+  `ActionState`, and lightyear sends it.
+- **Why pose, not movement intent.** The player is a single rotation-locked Avian
+  sphere (`Player` and `Character` are the *same* entity), so a kinematic
+  re-simulation on the server drifts and feels wrong (tried first: inverted/world-
+  space direction, mismatched speed, floats). Instead the client forwards its
+  character's authoritative `GlobalTransform` translation + a yaw-derived rotation
+  (`Quat::from_rotation_y(-yaw)`, matching `move_character`'s look basis, since the
+  ball's own rotation is locked to identity), and the server just mirrors it. The
+  avatar then tracks position *and* heading exactly, offset only by network round-
+  trip — which is also what a second client should see. The replicated cube carries
+  a contrasting front "nose" child so the yaw is visible. (`ActionState`/
+  `InputMarker`/`Controlled` paths: `lightyear::prelude::input::native::*` and
+  `lightyear::prelude::{Controlled, ControlledBy, Lifetime}`; the client
+  write-set is `lightyear::prelude::client::input::InputSystems::WriteClientInputs`.)
+
 **0.27 API gotchas worth remembering** (the published book lags the crate; the
 ground truth is the crate source in `~/.cargo/registry/src/.../lightyear*-0.27.0`):
 - Plugin groups are `ClientPlugins`/`ServerPlugins` structs with a `tick_duration`
@@ -826,12 +856,13 @@ replication (motion streamed over the wire) without a second device — necessar
 because mobile browsers suspend background tabs, so two tabs on one phone never hold
 simultaneous connections. Remove it once real player movement lands.
 
-**Remaining for real multiplayer** (needs live testing): drive the replicated
-players from the actual `Character` sim (vs the placeholder pose), suppress the
-client's *local* authoritative sim in multiplayer mode, networked input +
-client-side prediction/interpolation, parts/joints replication, and wiring the
-matchmaker to hand out real game-server endpoints. (Browser `wss://` is **done** —
-verified live.)
+**Remaining for real multiplayer** (needs live testing): client-side
+interpolation/prediction to smooth the round-trip motion trail, exercising two
+real devices for genuine peer visibility (vs the single-device demo bot), parts/
+joints replication, and wiring the matchmaker to hand out real game-server
+endpoints. (Browser `wss://` and a faithful self-avatar — position + heading,
+driven from the real `Character` pose over networked input — are **done**,
+verified live from mobile Safari.)
 
 ### Live test endpoint (Mac mini + Tailscale)
 
