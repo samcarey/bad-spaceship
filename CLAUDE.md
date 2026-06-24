@@ -4,11 +4,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Bad Spaceship is a 3D game built on the **Bevy 0.19** engine (ECS), with
+Bad Spaceship is a 3D game built on the **Bevy 0.18** engine (ECS), with
 **Avian** (`avian3d`, an XPBD physics engine) for physics and `bevy_egui` for UI.
 It is a Cargo workspace with three crates that compiles both to a **native**
 binary and to a **WASM** web build playable in the browser. (Physics was migrated
 off `bevy_rapier3d` — see the "Migrating bevy_rapier3d → Avian" section below.)
+
+> **Engine version note:** the repo briefly ran on Bevy **0.19** but was stepped
+> back to **0.18** so the multiplayer netcode stack (`lightyear`) builds — see
+> "Temporarily on Bevy 0.18 for multiplayer" below. **Engine versions are now
+> pinned in one place:** `[workspace.dependencies]` in the root `Cargo.toml`.
 
 ## Toolchain & reproducibility (read first)
 
@@ -453,7 +458,39 @@ small, mostly-mechanical bump — only four code changes:
   changes (`#{MATERIAL_BIND_GROUP}` already tracks the engine). web-sys/wasm-bindgen stayed
   at 0.3.102 / 0.2.125, so the CI `WASM_BINDGEN_VERSION` pin is unchanged.
 
+### Temporarily on Bevy 0.18 for multiplayer (lightyear)
+
+The repo reached Bevy **0.19** (the "Bevy 0.19 migration gotchas" section below is
+that bump), then **stepped the engine back to 0.18** to add multiplayer. Reason:
+multiplayer uses **`lightyear`**, and as of this writing lightyear — and the rest
+of the Bevy netcode ecosystem (`bevy_replicon`, `bevy_ggrs`, `bevy_matchbox`) —
+targets Bevy **0.18**; none had a 0.19-compatible release yet (0.19 support is
+expected within weeks of the 0.19 engine release). Rather than wait, the engine was
+downgraded, *structured so the re-bump to 0.19 is near-trivial*:
+
+- **All engine-coupled version pins live in `[workspace.dependencies]` in the root
+  `Cargo.toml`** (`bevy`, `avian3d`, `bevy_egui`, and eventually `lightyear`). Member
+  crates inherit them via `{ workspace = true }` and only select *features* locally.
+  This is the single knob to turn on upgrade.
+- **The downgrade reversed exactly the commit-#35 bump** (`bevy 0.19→0.18`,
+  `avian3d 0.7.0→0.6.1`, `bevy_egui 0.40→0.39`) plus its two code changes. The
+  third change from #35 (the synthetic `MouseWheel { phase }` in `web.rs`) was
+  already gone — the winit-native input rewrite (#36) deleted that code path.
+- **The two code changes to re-apply on the 0.19 re-upgrade** are exactly the ones
+  the "Bevy 0.19 migration gotchas" section documents: `DirectionalLight`
+  `shadows_enabled` → `shadow_maps_enabled` (`render_main_pass.rs`), and the egui
+  zoom-factor handling in `update_ui_scale_factor` (`ui.rs`). That section is the
+  canonical list; the root `Cargo.toml` block has the step-by-step checklist.
+- **Toolchain/CLI pins are unchanged** across the downgrade and the eventual
+  re-upgrade: Rust `1.96.0` (above both 0.18's MSRV 1.89 and 0.19's 1.95) and
+  `wasm-bindgen`/`web-sys` `0.2.125`/`0.3.102` (both engine versions resolve them).
+
 ### Bevy 0.19 migration gotchas
+
+> **Currently reversed** — the repo is on Bevy 0.18 for multiplayer (see
+> "Temporarily on Bevy 0.18 for multiplayer" above). This section is retained as the
+> canonical record of the 0.18 → 0.19 changes to **re-apply** when lightyear ships a
+> 0.19-compatible release.
 
 The 0.18 → 0.19 bump (third-party deps: `avian3d` 0.6.1 → **0.7.0** — the Avian release
 targeting 0.19, parry3d 0.26 → 0.27; `bevy_egui` 0.39 → **0.40** — targets 0.19, bundles
