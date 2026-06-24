@@ -823,6 +823,23 @@ so one registration wires both binaries). Native inputs require `Serialize`/
   `lightyear::prelude::{Controlled, ControlledBy, Lifetime}`; the client
   write-set is `lightyear::prelude::client::input::InputSystems::WriteClientInputs`.)
 
+**Interpolation** smooths the replicated motion. `NetTransform` is registered with
+`add_interpolation_with(lerp_net_transform)` (a translation-lerp / rotation-slerp,
+since `NetTransform` isn't `Ease`), and both the per-client players and the demo
+bot carry `InterpolationTarget::to_clients(All)`. lightyear then maintains, on each
+receiving client, a separate **`Interpolated`** entity whose `NetTransform` it eases
+between confirmed snapshots every frame. The client renders the `Interpolated`
+copies (`draw_replicated_players`/`apply_net_transform` filter `With<Interpolated>`);
+the raw **`Confirmed`** entities stay invisible but still carry `Controlled`, so
+input/control is unaffected (`InterpolationTarget` and `ControlledBy` are
+orthogonal — the owner gets both a Confirmed entity it controls and an Interpolated
+copy it renders). Trade-off: a small fixed interpolation delay (needs two snapshots
+to blend) in exchange for smooth motion. (`Interpolated`, `InterpolationTarget`,
+and the `add_interpolation_with`/`LerpFn` registration are in `lightyear::prelude`
+under the `interpolation` feature.) Client-side **prediction** of the owner's own
+avatar (to remove the round-trip delay on the self-view) is the remaining smoothing
+step.
+
 **0.27 API gotchas worth remembering** (the published book lags the crate; the
 ground truth is the crate source in `~/.cargo/registry/src/.../lightyear*-0.27.0`):
 - Plugin groups are `ClientPlugins`/`ServerPlugins` structs with a `tick_duration`
@@ -857,12 +874,13 @@ because mobile browsers suspend background tabs, so two tabs on one phone never 
 simultaneous connections. Remove it once real player movement lands.
 
 **Remaining for real multiplayer** (needs live testing): client-side
-interpolation/prediction to smooth the round-trip motion trail, exercising two
-real devices for genuine peer visibility (vs the single-device demo bot), parts/
-joints replication, and wiring the matchmaker to hand out real game-server
-endpoints. (Browser `wss://` and a faithful self-avatar — position + heading,
-driven from the real `Character` pose over networked input — are **done**,
-verified live from mobile Safari.)
+**prediction** of the owner's own avatar (to remove the round-trip delay on the
+self-view that interpolation alone leaves), exercising two real devices for
+genuine peer visibility (vs the single-device demo bot), parts/joints
+replication, and wiring the matchmaker to hand out real game-server endpoints.
+(Browser `wss://`, a faithful self-avatar — position + heading, driven from the
+real `Character` pose over networked input — and **interpolation** smoothing are
+**done**, verified live from mobile Safari.)
 
 ### Live test endpoint (Mac mini + Tailscale)
 
