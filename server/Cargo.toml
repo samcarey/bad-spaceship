@@ -29,4 +29,7 @@ default = [
     # the `multi_threaded` feature on to function.
     "bevy/file_watcher",
     "bevy/multi_threaded",
+    # lightyear uses Bevy states internally; the headless server (MinimalPlugins)
+    # must add StatesPlugin, which needs the `bevy_state` crate/feature compiled in.
+    "bevy/bevy_state",
 ]

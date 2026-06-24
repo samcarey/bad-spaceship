@@ -25,6 +25,11 @@ pub struct NetServerPlugin;
 
 impl Plugin for NetServerPlugin {
     fn build(&self, app: &mut App) {
+        // lightyear uses Bevy states internally (`init_state`), which needs the
+        // `StateTransition` schedule. The client gets it from `DefaultPlugins`,
+        // but the headless server runs `MinimalPlugins`, so add `StatesPlugin`
+        // explicitly before the lightyear plugin group.
+        app.add_plugins(bevy::state::app::StatesPlugin);
         // Order matters: plugin group → protocol → spawn the server entity.
         app.add_plugins(ServerPlugins { tick_duration: TICK });
         app.add_plugins(ProtocolPlugin);
