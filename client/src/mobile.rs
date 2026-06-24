@@ -47,9 +47,8 @@ use bevy_egui::{egui, EguiContexts, EguiPrimaryContextPass};
 
 /// Full-deflection look speed (both axes), as a per-frame look delta
 /// (`MouseMotionDelta`). With `look_sensitivity = 0.42` (player.player.ron) the look
-/// integrator turns at `delta * sensitivity` rad/s, so ~7 → ~2.9 rad/s (~165°/s) at
-/// the rim. Tunable.
-const LOOK_SPEED: f32 = 7.0;
+/// integrator turns at `delta * sensitivity` rad/s. Tunable.
+const LOOK_SPEED: f32 = 4.5;
 
 /// Auto-level rate: while moving and not actively looking, the pitch eases back to
 /// the default at this fraction-per-second (exponential approach, ~1.4 s constant).
@@ -353,8 +352,8 @@ fn classify_touches(
     }
 
     // Look stick: both axes are rate-control (cumulative) and feed `MouseMotionDelta`
-    // (x = yaw, y = pitch), measured from the touch-down origin. Screen y is down, so
-    // stick up (norm.y < 0) → look up, hence the y rate is negated.
+    // (x = yaw, y = pitch), measured from the touch-down origin. Pitch is inverted
+    // (stick up → look down), so the y rate keeps screen-space sign.
     if let Some(id) = controls.look_touch {
         if let Some(touch) = touches.iter().find(|t| t.id() == id) {
             let clamped =
@@ -362,7 +361,7 @@ fn classify_touches(
             controls.look_knob = controls.look_origin + clamped;
             let norm = clamped / layout.joystick_radius;
             let yaw_rate = response_curve(norm.x.abs()) * norm.x.signum() * LOOK_SPEED;
-            let pitch_rate = response_curve(norm.y.abs()) * -norm.y.signum() * LOOK_SPEED;
+            let pitch_rate = response_curve(norm.y.abs()) * norm.y.signum() * LOOK_SPEED;
             controls.look_vec = Vec2::new(yaw_rate, pitch_rate);
         }
     }
