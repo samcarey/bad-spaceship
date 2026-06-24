@@ -21,6 +21,13 @@ bevy = { workspace = true }
 # move together — it must be re-added explicitly under `default-features = false`.
 # The native binary and server re-add `simd`/`parallel` for perf via their own lists.
 avian3d = { workspace = true }
+# Multiplayer protocol lives in `shared` so client and server register the exact
+# same components/messages/channels. `shared` only needs the protocol-building
+# APIs (register_component / register_message / add_channel / InputPlugin) plus
+# prediction/interpolation metadata — NOT the client or server runtime plugin
+# groups (those are enabled in the client/server crates). Version is pinned in the
+# root `[workspace.dependencies]`.
+lightyear = { workspace = true, features = ["replication", "prediction", "interpolation", "std"] }
 serde = { version = "1.0", features = ["derive"] }
 ron = "0.7"
 rand = "0.8"

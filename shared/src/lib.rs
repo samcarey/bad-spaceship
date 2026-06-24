@@ -14,6 +14,7 @@ use player::PlayerPlugin;
 pub mod character;
 pub mod config;
 pub mod map;
+pub mod net;
 pub mod part;
 pub mod player;
 pub mod utils;

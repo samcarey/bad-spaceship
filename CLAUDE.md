@@ -38,8 +38,11 @@ build errors (the deliberate Bevy bumps are the exception, done branch-by-branch
   `getrandom` *0.2* transitively, which on wasm needs *its* `js` feature — enabled via a
   renamed `getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }`
   optional dep wired into the `web` feature (feature unification covers the transitive
-  copy). Symptom if either is missing: `the wasm*-unknown-unknown targets are not
-  supported by default` at `getrandom` compile.
+  copy). `lightyear` (multiplayer) then pulls a *third* line, `getrandom` **0.4**, which
+  like 0.3 needs the `getrandom_backend="wasm_js"` cfg (already global) *plus* its `wasm_js`
+  feature — handled by the same trick (`getrandom_04 = { package = "getrandom", version =
+  "0.4", features = ["wasm_js"] }`, in the `web` feature). Symptom if any is missing: `the
+  wasm*-unknown-unknown targets are not supported by default` at `getrandom` compile.
 - The web build targets the **WebGL2 backend** via the `bevy/webgl2` feature (in the
   client's `web` feature): Bevy 0.17's wgpu 26 otherwise compiles the WebGPU backend
   on wasm, which needs `--cfg=web_sys_unstable_apis` and a WebGPU-capable browser. WebGL2

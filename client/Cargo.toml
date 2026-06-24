@@ -37,6 +37,11 @@ getrandom = { version = "0.3", features = ["wasm_js"], optional = true }
 # (the 0.3 `wasm_js` cfg doesn't apply to 0.2); enabling it here unifies the
 # feature across the graph so the transitive 0.2 builds for wasm.
 getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"], optional = true }
+# `lightyear` (multiplayer) pulls getrandom *0.4* transitively — a third major
+# line alongside 0.2 and 0.3. Like 0.3 it needs the `getrandom_backend="wasm_js"`
+# cfg (set globally for the wasm target in `.cargo/config.toml`) *and* the
+# matching `wasm_js` feature; enable it here and unify it into the `web` feature.
+getrandom_04 = { package = "getrandom", version = "0.4", features = ["wasm_js"], optional = true }
 shadow-rs = { version = "0.11", default-features = false }
 chrono = "0.4"
 rand = "0.8"
@@ -91,7 +96,7 @@ native = [
 # needs `--cfg=web_sys_unstable_apis` and only works in WebGPU-capable browsers).
 # Enable WebGL2 so wgpu builds the GLES backend instead — broad browser support,
 # matching the renderer the build has used on GitHub Pages all along.
-web = ["web-sys", "gloo", "bevy/webgl2", "getrandom", "getrandom_02"]
+web = ["web-sys", "gloo", "bevy/webgl2", "getrandom", "getrandom_02", "getrandom_04"]
 
 [build-dependencies]
 shadow-rs = { version = "0.8", default-features = false }
