@@ -91,7 +91,11 @@ fn combine_directional_inputs(
         directional_input.0.x = keyboard_directional_input.0.x + gamepad_directional_input.0.x;
         directional_input.0.y = keyboard_directional_input.0.y + gamepad_directional_input.0.y;
         directional_input.0.z = keyboard_directional_input.0.z + gamepad_directional_input.0.z;
-        directional_input.0 = directional_input.0.normalize_or_zero();
+        // Clamp (not normalize) so analog inputs keep their sub-unit magnitude for
+        // variable speed — the touch joystick's response curve relies on this.
+        // Keyboard and gamepad both arrive at unit length already, so capping the
+        // max leaves them (and diagonal WASD) exactly as before.
+        directional_input.0 = directional_input.0.clamp_length_max(1.0);
 
         // Now that we've read this, reset it so it can be summed up again next frame
         keyboard_directional_input.0 = Vec3::ZERO;
