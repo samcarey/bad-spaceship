@@ -13,10 +13,17 @@
 //! the Avian physics bodies (via `lightyear_avian3d`), and client-side
 //! prediction/interpolation come next, where they can be tested on real
 //! endpoints.
+use core::time::Duration;
+
 use bevy::ecs::entity::{EntityMapper, MapEntities};
 use bevy::prelude::*;
 use lightyear::prelude::*;
 use serde::{Deserialize, Serialize};
+
+/// The simulation tick interval (60 Hz). The client and server must agree on
+/// this, so it lives in the shared protocol — both pass it to their lightyear
+/// plugin group's `tick_duration`.
+pub const TICK: Duration = Duration::from_millis(1000 / 60);
 
 /// Identifies which connected client controls a replicated player entity.
 #[derive(Component, Serialize, Deserialize, Clone, Copy, PartialEq, Debug)]

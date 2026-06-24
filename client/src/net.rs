@@ -11,18 +11,14 @@
 //!
 //! For every player the server replicates, draw a cube at its `NetTransform`.
 
-use core::time::Duration;
-
-use bad_spaceship_shared::net::{NetPlayer, NetTransform, PlayerInput, ProtocolPlugin};
+use bad_spaceship_shared::net::{NetPlayer, NetTransform, PlayerInput, ProtocolPlugin, TICK};
 use bad_spaceship_shared::{Character, Yaw};
 use bevy::prelude::*;
 use lightyear::prelude::client::input::InputSystems as ClientInputSystems;
 use lightyear::prelude::client::*;
 use lightyear::prelude::input::native::{ActionState, InputMarker};
-use lightyear::prelude::Controlled;
-
-/// 60 Hz, matching the server tick.
-const TICK: Duration = Duration::from_millis(1000 / 60);
+use lightyear::prelude::{Authentication, Controlled};
+use std::net::SocketAddr;
 
 /// The server to connect to, or `None` for single-player.
 /// Native reads `BS_CONNECT` (e.g. `127.0.0.1:5001`).
@@ -141,11 +137,28 @@ fn apply_net_transform(mut q: Query<(&NetTransform, &mut Transform), Changed<Net
     }
 }
 
+/// Build the dev netcode client for `server_addr`. Dev auth uses a fixed
+/// protocol id + the all-zero key, matching the server's `NetcodeConfig::
+/// default()`; production would issue a real ConnectToken from the matchmaker
+/// instead of `Manual`.
+fn build_netcode_client(server_addr: SocketAddr) -> Option<NetcodeClient> {
+    let auth = Authentication::Manual {
+        server_addr,
+        client_id: rand::random::<u64>(),
+        private_key: [0u8; 32],
+        protocol_id: 0,
+    };
+    match NetcodeClient::new(auth, NetcodeConfig::default()) {
+        Ok(n) => Some(n),
+        Err(e) => {
+            error!("failed to build netcode client: {e:?}");
+            None
+        }
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn connect(mut commands: Commands) {
-    use lightyear::prelude::Authentication;
-    use std::net::SocketAddr;
-
     let Some(addr_str) = multiplayer_target() else {
         return;
     };
@@ -156,24 +169,8 @@ fn connect(mut commands: Commands) {
             return;
         }
     };
-
-    // Dev auth: a fixed protocol id + zero key, matching the server's
-    // `NetcodeConfig::default()`. Production issues a real ConnectToken from the
-    // matchmaker instead of `Manual`.
-    let auth = Authentication::Manual {
-        server_addr,
-        client_id: rand::random::<u64>(),
-        // The netcode private key (`Key = [u8; 32]`). Dev/loopback uses the
-        // all-zero key, matching the server's `NetcodeConfig::default()`.
-        private_key: [0u8; 32],
-        protocol_id: 0,
-    };
-    let netcode = match NetcodeClient::new(auth, NetcodeConfig::default()) {
-        Ok(n) => n,
-        Err(e) => {
-            error!("failed to build netcode client: {e:?}");
-            return;
-        }
+    let Some(netcode) = build_netcode_client(server_addr) else {
+        return;
     };
 
     let url = format!("ws://{server_addr}");
@@ -185,9 +182,6 @@ fn connect(mut commands: Commands) {
 
 #[cfg(target_arch = "wasm32")]
 fn connect(mut commands: Commands) {
-    use lightyear::prelude::Authentication;
-    use std::net::SocketAddr;
-
     let Some(url) = multiplayer_target() else {
         return;
     };
@@ -196,18 +190,8 @@ fn connect(mut commands: Commands) {
     // connects via the explicit URL (`from_url`), so the netcode token's
     // `server_addr` is only a logical field — a placeholder is fine.
     let server_addr: SocketAddr = "0.0.0.0:0".parse().unwrap();
-    let auth = Authentication::Manual {
-        server_addr,
-        client_id: rand::random::<u64>(),
-        private_key: [0u8; 32],
-        protocol_id: 0,
-    };
-    let netcode = match NetcodeClient::new(auth, NetcodeConfig::default()) {
-        Ok(n) => n,
-        Err(e) => {
-            error!("failed to build netcode client: {e:?}");
-            return;
-        }
+    let Some(netcode) = build_netcode_client(server_addr) else {
+        return;
     };
 
     // On wasm aeronet's `ClientConfig` is a unit struct (the browser owns TLS).

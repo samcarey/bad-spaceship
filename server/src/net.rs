@@ -10,17 +10,13 @@
 //! needs no TLS certs. Production / browser clients need `wss://` — swap in a
 //! real `Identity` (see `with_identity`) behind a public TLS endpoint.
 
-use core::time::Duration;
 use std::net::SocketAddr;
 
-use bad_spaceship_shared::net::{NetPlayer, NetTransform, PlayerInput, ProtocolPlugin};
+use bad_spaceship_shared::net::{NetPlayer, NetTransform, PlayerInput, ProtocolPlugin, TICK};
 use bevy::prelude::*;
 use lightyear::prelude::input::native::ActionState;
 use lightyear::prelude::*;
 use lightyear::prelude::server::*;
-
-/// 60 Hz, matching the server's fixed simulation loop.
-const TICK: Duration = Duration::from_millis(1000 / 60);
 
 pub struct NetServerPlugin;
 
@@ -95,20 +91,15 @@ fn move_demo_bot(time: Res<Time>, mut bot: Query<&mut NetTransform, With<DemoBot
 }
 
 /// When a client finishes connecting (`Connected` added to its link entity),
-/// spawn a player entity owned by the server and replicated to everyone.
-fn spawn_player_for_client(
-    trigger: On<Add, Connected>,
-    mut commands: Commands,
-    mut count: Local<u32>,
-) {
+/// spawn a player entity owned by the server and replicated to everyone. The
+/// initial pose is a placeholder — the client's first `PlayerInput` (its real
+/// character pose) overwrites it within a tick, so distinct clients separate
+/// naturally without any per-connection fan-out.
+fn spawn_player_for_client(trigger: On<Add, Connected>, mut commands: Commands) {
     let client = trigger.entity;
-    // Fan players out along x so distinct clients are visibly separate (until
-    // input/real Character positions drive them in a later phase).
-    let x = (*count as f32) * 2.5 - 2.5;
-    *count += 1;
     commands.spawn((
         NetPlayer { client_id: client.to_bits() },
-        NetTransform::from_transform(&Transform::from_xyz(x, 2.0, 0.0)),
+        NetTransform::from_transform(&Transform::from_xyz(0.0, 2.0, 0.0)),
         Replicate::to_clients(NetworkTarget::All),
         // Bind this player to the connecting client so that client's networked
         // input drives it. The server auto-adds the `InputBuffer`/`ActionState`
@@ -117,7 +108,7 @@ fn spawn_player_for_client(
         ControlledBy { owner: client, lifetime: Lifetime::SessionBased },
         ActionState::<PlayerInput>::default(),
     ));
-    info!("client {client:?} connected — spawned replicated player at x={x}");
+    info!("client {client:?} connected — spawned replicated player");
 }
 
 /// Mirror each client's forwarded character pose into its authoritative
@@ -125,8 +116,9 @@ fn spawn_player_for_client(
 /// `NetTransform` then replicates to all clients.
 fn apply_player_input(mut players: Query<(&ActionState<PlayerInput>, &mut NetTransform)>) {
     for (state, mut net) in &mut players {
-        // Skip the all-zero default that exists before any input has arrived,
-        // so the player keeps its initial spawn pose until the client reports in.
+        // The all-zero default is the unsent seed, not a real pose (a real pose's
+        // rotation is a unit quaternion, never `[0,0,0,0]`), so skip it and keep
+        // the spawn pose until the client's first input arrives.
         if state.0 == PlayerInput::default() {
             continue;
         }
