@@ -7,18 +7,30 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-bevy = { version = "0.19", default-features = false }
-# Avian (XPBD physics) replaces bevy_rapier3d. avian3d 0.7.0 is the release that
-# targets Bevy 0.19 (parry3d 0.27 under the hood). `default-features = false` with
-# just `3d`/`f32`/`parry-f32`/`xpbd_joints` keeps the headless server and the wasm
-# client off Avian's `debug-plugin` (which pulls `bevy_render`) and `parallel`
-# (which pulls `multi_threaded`); `parry-f32` brings in the parry-backed `Collider`.
-# `xpbd_joints` is a *default* Avian feature that gates the joint *solver*
-# (`XpbdSolverPlugin`): without it the joint types (`SphericalJoint`, …) still
-# compile and spawn, but nothing enforces them, so attached parts never move
-# together — it must be re-added explicitly under `default-features = false`. The
-# native binary and server re-add `simd`/`parallel` for perf via their own lists.
-avian3d = { version = "0.7.0", default-features = false, features = ["3d", "f32", "parry-f32", "xpbd_joints"] }
+# Version + base features come from `[workspace.dependencies]` in the root
+# Cargo.toml (the single place engine versions are pinned — see that file for the
+# 0.18-vs-0.19 rationale and the upgrade checklist).
+bevy = { workspace = true }
+# Avian (XPBD physics) replaces bevy_rapier3d. The workspace pin sets the base
+# feature set `3d`/`f32`/`parry-f32`/`xpbd_joints`, chosen to keep the headless
+# server and the wasm client off Avian's `debug-plugin` (which pulls `bevy_render`)
+# and `parallel` (which pulls `multi_threaded`); `parry-f32` brings in the
+# parry-backed `Collider`. `xpbd_joints` is a *default* Avian feature that gates the
+# joint *solver* (`XpbdSolverPlugin`): without it the joint types (`SphericalJoint`,
+# …) still compile and spawn, but nothing enforces them, so attached parts never
+# move together — it must be re-added explicitly under `default-features = false`.
+# The native binary and server re-add `simd`/`parallel` for perf via their own lists.
+avian3d = { workspace = true }
+# Multiplayer protocol lives in `shared` so client and server register the exact
+# same components/messages/channels. `shared` only needs the protocol-building
+# APIs (register_component / register_message / add_channel / InputPlugin) plus
+# prediction/interpolation metadata — NOT the client or server runtime plugin
+# groups (those are enabled in the client/server crates). Version is pinned in the
+# root `[workspace.dependencies]`.
+# `input_native` adds the message-based native-input framework (used to network
+# `PlayerInput`); registered once in `ProtocolPlugin` (cfg-gated to the client or
+# server input plugin per binary by lightyear's own `client`/`server` features).
+lightyear = { workspace = true, features = ["replication", "prediction", "interpolation", "std", "input_native"] }
 serde = { version = "1.0", features = ["derive"] }
 ron = "0.7"
 rand = "0.8"

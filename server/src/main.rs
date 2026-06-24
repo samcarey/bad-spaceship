@@ -3,8 +3,11 @@ use std::time::Duration;
 use bad_spaceship_shared::{character, player, CommonPlugins};
 use bevy::{app::ScheduleRunnerPlugin, asset::AssetPlugin, prelude::*};
 
+mod net;
+
 fn main() {
-    App::new()
+    let mut app = App::new();
+    app
         // Bevy 0.11 merged ScheduleRunnerSettings into ScheduleRunnerPlugin;
         // override the one MinimalPlugins adds to keep the fixed 60 Hz loop.
         .add_plugins(MinimalPlugins.set(ScheduleRunnerPlugin::run_loop(
@@ -19,8 +22,15 @@ fn main() {
             ..default()
         })
         .add_plugins(CommonPlugins)
-        .add_systems(Startup, load_configs)
-        .run();
+        .add_systems(Startup, load_configs);
+
+    // Opt-in multiplayer host: set BS_MULTIPLAYER to run as the authoritative
+    // netcode server. Unset → the headless single-player sim, unchanged.
+    if std::env::var("BS_MULTIPLAYER").is_ok() {
+        app.add_plugins(net::NetServerPlugin);
+    }
+
+    app.run();
 }
 
 fn load_configs(

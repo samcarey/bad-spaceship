@@ -1,0 +1,22 @@
+[package]
+name = "bad-spaceship-matchmaker"
+version = "0.1.0"
+authors = ["Sam Carey <sam@samcarey.com>"]
+edition = "2021"
+
+# The matchmaker is the lobby-coordination tier: it tracks open multiplayer
+# matches and hands out shareable join links. It is intentionally decoupled from
+# the game (no bevy / lightyear / avian) — a small standalone HTTP service that
+# the static lobby browser (client/lobby.html) talks to via fetch(). Hosted
+# separately from the static site (GitHub Pages can't run a server).
+
+[dependencies]
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
+# CORS so the lobby page (served from the Pages origin) can call this service on
+# its own origin; `fs` to optionally serve the static client dir for local
+# end-to-end testing on a single origin. (tower-http 0.6 pairs with axum 0.8 / http 1.)
+tower-http = { version = "0.6", features = ["cors", "fs"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rand = "0.8"

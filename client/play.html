@@ -1,0 +1,328 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport"
+    content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0" />
+  <title>Bad Spaceship</title>
+  <style>
+    /* Full-viewport reset so FullViewportPlugin's
+       document.documentElement.clientHeight reads the whole browser view. */
+    html,
+    body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      padding: 0;
+      background: #05070d;
+      overflow: hidden;
+    }
+
+    /* Bevy 0.13 removed `Window::fit_canvas_to_parent`; size the canvas to fill
+       the viewport via CSS instead (the renderer tracks the canvas's CSS size). */
+    canvas {
+      display: block;
+      touch-action: none;
+      width: 100% !important;
+      height: 100% !important;
+      /* Newer winit (pulled in by the Bevy bumps) gives the canvas a `tabindex`
+         so it can receive keyboard focus, which makes the browser paint its
+         default blue focus ring around the viewport when clicked. The 0.12
+         build's older winit left the canvas non-focusable, so no ring. Suppress
+         it — pointer lock / our DOM listeners drive input, not the focus ring. */
+      outline: none;
+    }
+
+    /* Lightweight loading overlay shown instantly while the heavy WASM game
+       binary (and startup assets) stream in. Pure inline CSS, no external
+       requests, so it paints before anything heavy is fetched. */
+    #loader {
+      position: fixed;
+      inset: 0;
+      z-index: 10;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 1.1rem;
+      background: #05070d;
+      color: #cde3ff;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      transition: opacity 0.45s ease;
+    }
+
+    #loader.hidden {
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    #title {
+      font-size: 1.5rem;
+      letter-spacing: 0.32em;
+      text-transform: uppercase;
+      color: #7fb3ff;
+    }
+
+    #bar-outer {
+      width: min(70vw, 440px);
+      height: 14px;
+      border: 1px solid #28466f;
+      border-radius: 8px;
+      background: #0b1322;
+      overflow: hidden;
+    }
+
+    #bar-inner {
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, #2f6fd0, #7fb3ff);
+      transition: width 0.15s linear;
+    }
+
+    /* Used when the total size is unknown (no manifest / no content-length):
+       sweep the bar instead of reporting a bogus percentage. */
+    #bar-inner.indeterminate {
+      width: 35% !important;
+      transition: none;
+      animation: sweep 1.1s ease-in-out infinite alternate;
+    }
+
+    @keyframes sweep {
+      from {
+        margin-left: 0%;
+      }
+
+      to {
+        margin-left: 65%;
+      }
+    }
+
+    #status {
+      font-size: 0.95rem;
+      min-height: 1.2em;
+    }
+
+    #eta {
+      font-size: 0.8rem;
+      color: #6f86a8;
+      min-height: 1.1em;
+    }
+
+    /* Shown when joining a multiplayer match, so the player knows which room
+       this game launched into. Hidden for single-player. */
+    #room {
+      font-size: 0.8rem;
+      color: #6f86a8;
+      min-height: 1.1em;
+      letter-spacing: 0.08em;
+    }
+  </style>
+</head>
+
+<body>
+  <div id="loader">
+    <div id="title">Bad Spaceship</div>
+    <div id="bar-outer">
+      <div id="bar-inner"></div>
+    </div>
+    <div id="status">Loading…</div>
+    <div id="eta">estimating…</div>
+    <div id="room"></div>
+  </div>
+
+  <script>
+    // Connection info for multiplayer, parsed from the join link (set by the
+    // lobby browser, e.g. `play.html?room=ABC123`). The WASM client reads this
+    // on boot to know whether to connect and to whom (wired up in the live
+    // netcode tier). An absent/empty `room` means single-player (offline).
+    (function () {
+      const p = new URLSearchParams(location.search);
+      window.__BS_NET__ = {
+        room: p.get('room') || '',
+        server: p.get('server') || '',
+      };
+      if (window.__BS_NET__.room) {
+        document.getElementById('room').textContent =
+          'multiplayer · room ' + window.__BS_NET__.room;
+      }
+    })();
+  </script>
+
+  <script type="module">
+    import init from './target/wasm.js';
+
+    const loader = document.getElementById('loader');
+    const barInner = document.getElementById('bar-inner');
+    const statusEl = document.getElementById('status');
+    const etaEl = document.getElementById('eta');
+
+    // Heavy resources to download up front, with combined progress. The WASM
+    // game binary dominates; the grass texture is prefetched so it lands in the
+    // HTTP cache and the in-game asset load is instant.
+    const WASM_URL = './target/wasm_bg.wasm';
+    const RESOURCES = [WASM_URL, './assets/textures/grass.png'];
+
+    const fmtBytes = (n) => {
+      if (n >= 1048576) return (n / 1048576).toFixed(1) + ' MB';
+      if (n >= 1024) return (n / 1024).toFixed(0) + ' KB';
+      return n + ' B';
+    };
+
+    const fmtTime = (s) => {
+      if (!isFinite(s) || s < 0) return '—';
+      s = Math.ceil(s);
+      if (s < 60) return s + 's';
+      return Math.floor(s / 60) + 'm ' + (s % 60).toString().padStart(2, '0') + 's';
+    };
+
+    // Authoritative *uncompressed* sizes, emitted by the Pages CI. Streaming a
+    // gzip/br-compressed response yields decompressed bytes while Content-Length
+    // reports the compressed size, so the manifest is what keeps the percentage
+    // and ETA honest. Falls back to Content-Length when the manifest is absent
+    // (e.g. local builds).
+    async function loadManifest() {
+      try {
+        const r = await fetch('./loader-manifest.json', { cache: 'no-cache' });
+        if (!r.ok) return null;
+        const m = await r.json();
+        const sizes = {};
+        for (const e of m.resources) sizes[e.url] = e.bytes;
+        return sizes;
+      } catch (_) {
+        return null;
+      }
+    }
+
+    async function run() {
+      // Kick off the manifest and the heavy downloads together so the WASM
+      // binary starts streaming immediately rather than waiting a round-trip
+      // for the tiny manifest.
+      const [manifest, ...responses] = await Promise.all([
+        loadManifest(),
+        ...RESOURCES.map((u) => fetch(u)),
+      ]);
+      responses.forEach((r, i) => {
+        if (!r.ok) throw new Error(`${RESOURCES[i]} → HTTP ${r.status}`);
+      });
+
+      let total = 0;
+      let known = true;
+      RESOURCES.forEach((u, i) => {
+        let size = manifest ? manifest[u] : null;
+        if (size == null) {
+          const cl = responses[i].headers.get('content-length');
+          size = cl ? parseInt(cl, 10) : null;
+        }
+        if (size == null) known = false;
+        else total += size;
+      });
+
+      const start = performance.now();
+      let loaded = 0;
+
+      const render = () => {
+        const determinate = known && total > 0;
+        barInner.classList.toggle('indeterminate', !determinate);
+        if (determinate) {
+          const frac = Math.min(loaded / total, 1);
+          const pct = Math.floor(frac * 100);
+          barInner.style.width = pct + '%';
+          statusEl.textContent =
+            `Loading… ${pct}%  (${fmtBytes(Math.min(loaded, total))} / ${fmtBytes(total)})`;
+          const elapsed = (performance.now() - start) / 1000;
+          if (frac >= 1) {
+            etaEl.textContent = 'starting engine…';
+          } else if (frac > 0.005 && elapsed > 0.3) {
+            etaEl.textContent = `ETA ${fmtTime(elapsed * (1 - frac) / frac)}`;
+          } else {
+            etaEl.textContent = 'estimating…';
+          }
+        } else {
+          statusEl.textContent = `Loading… ${fmtBytes(loaded)}`;
+          etaEl.textContent = '';
+        }
+      };
+
+      // Coalesce per-chunk progress into at most one DOM update per frame so a
+      // burst of small chunks doesn't thrash layout.
+      let renderQueued = false;
+      const scheduleRender = () => {
+        if (renderQueued) return;
+        renderQueued = true;
+        requestAnimationFrame(() => {
+          renderQueued = false;
+          render();
+        });
+      };
+      render();
+
+      const blobs = await Promise.all(
+        responses.map(async (r) => {
+          const reader = r.body.getReader();
+          const chunks = [];
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            chunks.push(value);
+            loaded += value.byteLength;
+            scheduleRender();
+          }
+          return new Blob(chunks);
+        })
+      );
+
+      loaded = total;
+      render();
+
+      // Compile the downloaded module and hand it to wasm-bindgen's init so it
+      // skips its own fetch and reuses the bytes we already streamed.
+      const wasmBlob = blobs[RESOURCES.indexOf(WASM_URL)];
+      const wasmModule = await WebAssembly.compile(await wasmBlob.arrayBuffer());
+      try {
+        await init(wasmModule);
+      } catch (e) {
+        // Bevy's winit event loop escapes init() by throwing a sentinel
+        // exception to unwind the Rust stack while leaving the app running in
+        // the background. It is not a real error — the game keeps rendering —
+        // so swallow it and let the loader hide. Anything else is a genuine
+        // failure and should surface.
+        const msg = (e && e.message) || '';
+        if (!msg.startsWith('Using exceptions for control flow')) throw e;
+      }
+
+      barInner.style.width = '100%';
+
+      // `init()` returns as soon as the WASM module starts; Bevy then spends a
+      // few seconds loading assets and compiling render pipelines before the
+      // first frame is actually drawn. Hiding the loader now would cut to a blank
+      // screen, so wait until the game tags <body data-game-ready> (set by the
+      // web platform once the ground mesh has been drawn). Fall back to a timeout
+      // so the loader can never get stuck if that signal never arrives.
+      statusEl.textContent = 'Starting…';
+      etaEl.textContent = '';
+      const readyStart = performance.now();
+      function hideWhenReady() {
+        const ready = document.body.getAttribute('data-game-ready') === '1';
+        if (ready || performance.now() - readyStart > 20000) {
+          loader.classList.add('hidden');
+          setTimeout(() => loader.remove(), 500);
+        } else {
+          requestAnimationFrame(hideWhenReady);
+        }
+      }
+      hideWhenReady();
+    }
+
+    run().catch((e) => {
+      console.error(e);
+      barInner.classList.remove('indeterminate');
+      barInner.style.background = '#ff5d5d';
+      barInner.style.width = '100%';
+      statusEl.textContent = 'Failed to load';
+      etaEl.textContent = String((e && e.message) || e);
+    });
+  </script>
+</body>
+
+</html>

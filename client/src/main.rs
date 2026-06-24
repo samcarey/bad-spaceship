@@ -20,6 +20,7 @@ use ui::UiPlugin;
 
 mod input;
 mod mobile;
+mod net;
 mod platform;
 mod render_main_pass;
 mod render_secondary_pass;
@@ -77,6 +78,12 @@ fn main() {
         .insert_resource(ClearColor(Color::srgb(0.99, 0.99, 0.95)))
         .add_systems(Startup, load_configs)
         .add_systems(Update, add_camera_to_player);
+
+    // Opt-in multiplayer: when a connect target is configured, add the netcode
+    // client. Otherwise the app is the unchanged single-player game.
+    if net::multiplayer_target().is_some() {
+        app.add_plugins(net::NetClientPlugin);
+    }
 
     app.run();
 }

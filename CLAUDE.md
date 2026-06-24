@@ -4,11 +4,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Bad Spaceship is a 3D game built on the **Bevy 0.19** engine (ECS), with
+Bad Spaceship is a 3D game built on the **Bevy 0.18** engine (ECS), with
 **Avian** (`avian3d`, an XPBD physics engine) for physics and `bevy_egui` for UI.
 It is a Cargo workspace with three crates that compiles both to a **native**
 binary and to a **WASM** web build playable in the browser. (Physics was migrated
 off `bevy_rapier3d` — see the "Migrating bevy_rapier3d → Avian" section below.)
+
+> **Engine version note:** the repo briefly ran on Bevy **0.19** but was stepped
+> back to **0.18** so the multiplayer netcode stack (`lightyear`) builds — see
+> "Temporarily on Bevy 0.18 for multiplayer" below. **Engine versions are now
+> pinned in one place:** `[workspace.dependencies]` in the root `Cargo.toml`.
 
 ## Toolchain & reproducibility (read first)
 
@@ -33,8 +38,11 @@ build errors (the deliberate Bevy bumps are the exception, done branch-by-branch
   `getrandom` *0.2* transitively, which on wasm needs *its* `js` feature — enabled via a
   renamed `getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }`
   optional dep wired into the `web` feature (feature unification covers the transitive
-  copy). Symptom if either is missing: `the wasm*-unknown-unknown targets are not
-  supported by default` at `getrandom` compile.
+  copy). `lightyear` (multiplayer) then pulls a *third* line, `getrandom` **0.4**, which
+  like 0.3 needs the `getrandom_backend="wasm_js"` cfg (already global) *plus* its `wasm_js`
+  feature — handled by the same trick (`getrandom_04 = { package = "getrandom", version =
+  "0.4", features = ["wasm_js"] }`, in the `web` feature). Symptom if any is missing: `the
+  wasm*-unknown-unknown targets are not supported by default` at `getrandom` compile.
 - The web build targets the **WebGL2 backend** via the `bevy/webgl2` feature (in the
   client's `web` feature): Bevy 0.17's wgpu 26 otherwise compiles the WebGPU backend
   on wasm, which needs `--cfg=web_sys_unstable_apis` and a WebGPU-capable browser. WebGL2
@@ -453,7 +461,39 @@ small, mostly-mechanical bump — only four code changes:
   changes (`#{MATERIAL_BIND_GROUP}` already tracks the engine). web-sys/wasm-bindgen stayed
   at 0.3.102 / 0.2.125, so the CI `WASM_BINDGEN_VERSION` pin is unchanged.
 
+### Temporarily on Bevy 0.18 for multiplayer (lightyear)
+
+The repo reached Bevy **0.19** (the "Bevy 0.19 migration gotchas" section below is
+that bump), then **stepped the engine back to 0.18** to add multiplayer. Reason:
+multiplayer uses **`lightyear`**, and as of this writing lightyear — and the rest
+of the Bevy netcode ecosystem (`bevy_replicon`, `bevy_ggrs`, `bevy_matchbox`) —
+targets Bevy **0.18**; none had a 0.19-compatible release yet (0.19 support is
+expected within weeks of the 0.19 engine release). Rather than wait, the engine was
+downgraded, *structured so the re-bump to 0.19 is near-trivial*:
+
+- **All engine-coupled version pins live in `[workspace.dependencies]` in the root
+  `Cargo.toml`** (`bevy`, `avian3d`, `bevy_egui`, and eventually `lightyear`). Member
+  crates inherit them via `{ workspace = true }` and only select *features* locally.
+  This is the single knob to turn on upgrade.
+- **The downgrade reversed exactly the commit-#35 bump** (`bevy 0.19→0.18`,
+  `avian3d 0.7.0→0.6.1`, `bevy_egui 0.40→0.39`) plus its two code changes. The
+  third change from #35 (the synthetic `MouseWheel { phase }` in `web.rs`) was
+  already gone — the winit-native input rewrite (#36) deleted that code path.
+- **The two code changes to re-apply on the 0.19 re-upgrade** are exactly the ones
+  the "Bevy 0.19 migration gotchas" section documents: `DirectionalLight`
+  `shadows_enabled` → `shadow_maps_enabled` (`render_main_pass.rs`), and the egui
+  zoom-factor handling in `update_ui_scale_factor` (`ui.rs`). That section is the
+  canonical list; the root `Cargo.toml` block has the step-by-step checklist.
+- **Toolchain/CLI pins are unchanged** across the downgrade and the eventual
+  re-upgrade: Rust `1.96.0` (above both 0.18's MSRV 1.89 and 0.19's 1.95) and
+  `wasm-bindgen`/`web-sys` `0.2.125`/`0.3.102` (both engine versions resolve them).
+
 ### Bevy 0.19 migration gotchas
+
+> **Currently reversed** — the repo is on Bevy 0.18 for multiplayer (see
+> "Temporarily on Bevy 0.18 for multiplayer" above). This section is retained as the
+> canonical record of the 0.18 → 0.19 changes to **re-apply** when lightyear ships a
+> 0.19-compatible release.
 
 The 0.18 → 0.19 bump (third-party deps: `avian3d` 0.6.1 → **0.7.0** — the Avian release
 targeting 0.19, parry3d 0.26 → 0.27; `bevy_egui` 0.39 → **0.40** — targets 0.19, bundles
@@ -673,6 +713,210 @@ ending the turn (in order):
    origin/master`), resolving any conflicts, before pushing.
 4. **Monitor the PR until it is fully ready to merge** — subscribe to PR activity,
    keep CI green, and address review feedback until the PR is mergeable.
+
+## Multiplayer front-end & matchmaker
+
+The web front door is **plain static HTML** (no WASM until you actually play, so
+it paints instantly), split into three pages under `client/` — all published to
+the site root by the Pages CI (`cp client/*.html _site/`):
+
+- **`index.html`** — landing page. Two buttons: *Single Player* → `play.html`
+  (loads the game offline, exactly as before), *Multiplayer* → `lobby.html`.
+- **`play.html`** — the game loader (the old `index.html`: progress bar, WASM
+  streaming, `data-game-ready` handshake — unchanged). It additionally parses
+  `?room=CODE` / `?server=` off the URL into `window.__BS_NET__` *before* WASM
+  init, so the client can read who to connect to on boot (consumed by the live
+  netcode tier). No `room` ⇒ single-player.
+- **`lobby.html`** — the lobby browser. Lists open matches, *Create Match*
+  (→ shareable `play.html?room=CODE` link + Enter), *Join by code*, and join
+  buttons per row. Auto-refreshes every 4s. Talks to the matchmaker via
+  `fetch()`.
+
+**`matchmaker/`** (`bad-spaceship-matchmaker`, bin) is the lobby-coordination
+tier — a small **Axum** service, deliberately decoupled from the game (no
+bevy/lightyear/avian). In-memory lobby store; endpoints `GET /api/health`,
+`GET /api/matches`, `POST /api/matches`, `POST /api/matches/{id}/join`. Lobby
+codes are 6-char unambiguous (no 0/O/1/I/L). Run it with
+`cargo run -p bad-spaceship-matchmaker` (env: `BIND` default `0.0.0.0:5000`;
+`STATIC_DIR=client` to also serve the HTML on the same origin for local
+single-origin testing). CORS is `permissive()` for now — **lock it to the site
+origin before going public.**
+
+- **Hosting:** GitHub Pages serves the static HTML; it *cannot* run the
+  matchmaker (or the game server). The matchmaker must run somewhere with a
+  public endpoint (the Mac box / a small VPS).
+- **Pointing the deployed lobby at the matchmaker:** `lobby.html` resolves the
+  matchmaker base URL as `?api=<url>` (testing) → `window.BS_MATCHMAKER_URL`
+  (set this for the deployed site) → `http://localhost:5000` (default, so a
+  fresh `cargo run` works out of the box). Browsers also can't *host* a server,
+  so "Create Match" from the web provisions a server-side match — it never makes
+  the browser a host.
+
+## Multiplayer netcode (lightyear 0.27)
+
+Server-authoritative netcode over **lightyear 0.27** (the release targeting Bevy
+0.18 — the reason the engine is held at 0.18). Current state is a **thin vertical
+slice**: a dedicated server accepts WebSocket clients and replicates a player
+entity per connection; the client draws each replicated player. It is **gated
+off by default** (env vars below) so single-player is byte-identical, and the
+live connection is **compile-verified on native + wasm** but the end-to-end
+session still needs real endpoints to exercise.
+
+**Protocol** (`shared/src/net.rs`, `ProtocolPlugin`): registered with the 0.27
+builder API `app.component::<C>().replicate()` (the old `register_component` is
+deprecated). Replicates `NetPlayer` (owner id) and **`NetTransform`** — a plain
+`[f32;3]`+`[f32;4]` pose mirror, because Bevy's `Transform` isn't `Serialize` and
+`.replicate()` requires it; map it to/from `Transform` on each side.
+
+**Server** (`server/src/net.rs`, `NetServerPlugin`, added only when
+`BS_MULTIPLAYER` is set): adds `ServerPlugins { tick_duration }`, then the
+protocol, then spawns the server entity `(NetcodeServer::new(NetcodeConfig::
+default()), LocalAddr(addr), WebSocketServerIo { config })` and triggers `Start {
+entity }`. An `On<Add, Connected>` observer spawns a `Replicate::to_clients(
+NetworkTarget::All)` player per client. Bind via `BS_SERVER_BIND` (default
+`0.0.0.0:5001`).
+
+**Client** (`client/src/net.rs`, `NetClientPlugin`, added only when
+`multiplayer_target()` is `Some`): adds `ClientPlugins`, the protocol, spawns
+`(NetcodeClient::new(Authentication::Manual{..}, ..), WebSocketClientIo::from_url
+(..))` and triggers `Connect { entity }`; a system draws a cube on each
+replicated `NetPlayer` and applies `NetTransform`. `multiplayer_target()` is
+cfg-split: **native** reads `BS_CONNECT=host:port` (plain `ws://`); **wasm** reads
+`window.__BS_NET__.server` — the `wss://host[:port]` URL `play.html` parses from
+the `?server=` query param (absent/empty ⇒ single-player). Both platforms build
+the client with `WebSocketClientIo::from_url(..)`; the only differences are the
+`ClientConfig` (native `builder().with_no_encryption()` vs wasm's unit struct, since
+the browser owns TLS) and the netcode token's `server_addr` (real on native; a
+`0.0.0.0:0` placeholder on wasm, because a `wss://` URL targets a hostname and the
+browser connects via the explicit URL, making `server_addr` a logical-only field).
+Reading the `__BS_NET__` global uses `js_sys::Reflect` (js-sys is in the `web`
+feature). **Web `wss://` multiplayer is verified live** end to end from mobile
+Safari — see "Live test endpoint" below.
+
+**Networked input → pose mirroring** (`PlayerInput`, `shared/src/net.rs`). The
+client controls its own player and the server mirrors that to everyone, using
+lightyear's **native message inputs** (the `input_native` feature; `InputPlugin::
+<PlayerInput>` registered once in `ProtocolPlugin`, role-agnostic — it adds the
+client half under lightyear's `client` feature and the server half under `server`,
+so one registration wires both binaries). Native inputs require `Serialize`/
+`Deserialize`/`Clone`/`PartialEq`/`Debug`/`Default` + `Reflect` + `MapEntities`
+(no-op here). The flow:
+- **Server**: each per-client player spawns with `ControlledBy { owner: client,
+  lifetime: SessionBased }` (binds that client's input to the entity; auto-despawns
+  on disconnect) + a seeded `ActionState::<PlayerInput>`. `apply_player_input`
+  (FixedUpdate) writes the received pose into the replicated `NetTransform`.
+- **Client**: the bound entity arrives carrying lightyear's `Controlled` marker;
+  `mark_controlled_player` tags it with `InputMarker<PlayerInput>` + `ActionState`.
+  `write_player_pose` (FixedPreUpdate, in the `WriteClientInputs` set) fills the
+  `ActionState`, and lightyear sends it.
+- **Why pose, not movement intent.** The player is a single rotation-locked Avian
+  sphere (`Player` and `Character` are the *same* entity), so a kinematic
+  re-simulation on the server drifts and feels wrong (tried first: inverted/world-
+  space direction, mismatched speed, floats). Instead the client forwards its
+  character's authoritative `GlobalTransform` translation + a yaw-derived rotation
+  (`Quat::from_rotation_y(-yaw)`, matching `move_character`'s look basis, since the
+  ball's own rotation is locked to identity), and the server just mirrors it. The
+  avatar then tracks position *and* heading exactly, offset only by network round-
+  trip — which is also what a second client should see. The replicated cube carries
+  a contrasting front "nose" child so the yaw is visible. (`ActionState`/
+  `InputMarker`/`Controlled` paths: `lightyear::prelude::input::native::*` and
+  `lightyear::prelude::{Controlled, ControlledBy, Lifetime}`; the client
+  write-set is `lightyear::prelude::client::input::InputSystems::WriteClientInputs`.)
+
+**Interpolation** smooths the replicated motion. `NetTransform` is registered with
+`add_interpolation_with(lerp_net_transform)` (a translation-lerp / rotation-slerp,
+since `NetTransform` isn't `Ease`), and both the per-client players and the demo
+bot carry `InterpolationTarget::to_clients(All)`. lightyear then maintains, on each
+receiving client, a separate **`Interpolated`** entity whose `NetTransform` it eases
+between confirmed snapshots every frame. The client renders the `Interpolated`
+copies (`draw_replicated_players`/`apply_net_transform` filter `With<Interpolated>`);
+the raw **`Confirmed`** entities stay invisible but still carry `Controlled`, so
+input/control is unaffected (`InterpolationTarget` and `ControlledBy` are
+orthogonal — the owner gets both a Confirmed entity it controls and an Interpolated
+copy it renders). Trade-off: a small fixed interpolation delay (needs two snapshots
+to blend) in exchange for smooth motion. (`Interpolated`, `InterpolationTarget`,
+and the `add_interpolation_with`/`LerpFn` registration are in `lightyear::prelude`
+under the `interpolation` feature.) Client-side **prediction** of the owner's own
+avatar (to remove the round-trip delay on the self-view) is the remaining smoothing
+step.
+
+**0.27 API gotchas worth remembering** (the published book lags the crate; the
+ground truth is the crate source in `~/.cargo/registry/src/.../lightyear*-0.27.0`):
+- Plugin groups are `ClientPlugins`/`ServerPlugins` structs with a `tick_duration`
+  field (Default 1/60s); add the group *before* the protocol *before* spawning the
+  connection entity.
+- Replication is built on **bevy_replicon** under the hood.
+- Connection is **entity/component-based**: `NetcodeClient`/`NetcodeServer`
+  components (require `Link`/`Client`), IO components (`WebSocketClientIo` /
+  `WebSocketServerIo`), triggered by `Connect`/`Start` (EntityEvents with an
+  `entity` field). Observers read the target via `trigger.entity` (a field, not
+  `.target()`).
+- **Dev transport is plain `ws://` via `with_no_encryption()`** on both
+  `ServerConfig::builder()` and `ClientConfig::builder()` — no TLS certs needed
+  for a native loopback test. Production / browsers need `wss://` (server
+  `with_identity(Identity::self_signed([..]))` or a real cert).
+- `Entity` → `u64` is `entity.to_bits()` (`.index()` returns `EntityIndex` now).
+- wasm note: aeronet's `ClientConfig` is a unit struct on wasm (the browser owns
+  TLS), so the `builder().with_no_encryption()` path is native-only.
+
+**Run the native loopback slice** (two terminals):
+```bash
+BS_MULTIPLAYER=1 cargo run -p bad-spaceship-server        # ws://0.0.0.0:5001
+cd client && BS_CONNECT=127.0.0.1:5001 cargo run --features native
+```
+
+The server also spawns one **persistent "demo bot"** at startup (`spawn_demo_bot` /
+`move_demo_bot` in `server/src/net.rs`): a server-driven `NetPlayer` that orbits in
+a slow circle, its `NetTransform` rewritten every frame so the change replicates to
+every client. It exists purely so a **single** client can witness live position
+replication (motion streamed over the wire) without a second device — necessary
+because mobile browsers suspend background tabs, so two tabs on one phone never hold
+simultaneous connections. Remove it once real player movement lands.
+
+**Remaining for real multiplayer** (needs live testing): client-side
+**prediction** of the owner's own avatar (to remove the round-trip delay on the
+self-view that interpolation alone leaves), exercising two real devices for
+genuine peer visibility (vs the single-device demo bot), parts/joints
+replication, and wiring the matchmaker to hand out real game-server endpoints.
+(Browser `wss://`, a faithful self-avatar — position + heading, driven from the
+real `Character` pose over networked input — and **interpolation** smoothing are
+**done**, verified live from mobile Safari.)
+
+### Live test endpoint (Mac mini + Tailscale)
+
+The public `wss://` slice was verified by standing up a throwaway test endpoint on
+the Mac box (`mini4`), reachable from a phone over Tailscale. The pieces, all on the
+Mac's Docker (Colima) daemon — the cmd-api reaches *inside* the container, but the
+`tailscale serve` and Colima port-forward bits are macOS-**host** steps the user runs:
+
+- **Two containers**, both `--restart unless-stopped`, published to host loopback
+  (Colima forwards `127.0.0.1:<port>` to the macOS host loopback):
+  - `bs-game-server` — the `BS_MULTIPLAYER=1` server binary in a minimal image
+    (`debian-slim` + the binary + `../client/assets`), `-p 127.0.0.1:5001:5001`.
+  - `bs-web` — `nginx:alpine` serving the web build's `_site` (the same layout the
+    Pages CI produces: `wasm-bindgen` output in `target/`, the three HTML files,
+    `assets/`, `loader-manifest.json`), `-p 127.0.0.1:8099:80`.
+- **The web build is produced on the Mac**, not in the sandbox (heavy `--release`
+  wasm). Gotcha: use the **aarch64** `wasm-bindgen` 0.2.125 (the box may have a
+  leftover **x86_64** one on `PATH` that segfaults with a bogus "capacity overflow"
+  under emulation inside the aarch64 container — exactly the emulation artifact the
+  toolchain notes warn about). The native aarch64 binary lives under
+  `/root/wasm-bindgen-0.2.125-aarch64-unknown-linux-gnu/`.
+- **Tailscale `serve`** on the macOS host bridges the loopback ports onto the tailnet
+  *with a valid MagicDNS HTTPS cert* (which is what makes `wss://` work with no
+  client certs — Tailscale terminates TLS and proxies the WS upgrade to the plain
+  `ws://` server):
+  ```
+  tailscale serve --bg --https=443  http://127.0.0.1:8099   # web → https://<node>.ts.net/
+  tailscale serve --bg --https=8443 http://127.0.0.1:5001   # game → wss://<node>.ts.net:8443
+  ```
+  (Serve must be enabled once per tailnet in the admin console; allowed HTTPS serve
+  ports are 443/8443/10000.) Phone test URL:
+  `https://<node>.ts.net/play.html?server=wss://<node>.ts.net:8443`.
+- **iOS gotcha:** Safari suspends background tabs, dropping the suspended tab's
+  WebSocket; on return the client clears its replicated entities (the cube vanishes).
+  So two *tabs* on one phone can't show two live players — use two *devices*, or rely
+  on the always-present demo bot for a single-device check.
 
 ## Deployment
 

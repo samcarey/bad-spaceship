@@ -8,12 +8,17 @@ edition = "2021"
 
 [dependencies]
 bad-spaceship-shared = { path = "../shared" }
-bevy = { version = "0.19", default-features = false }
+# Version + base features inherited from `[workspace.dependencies]` (root Cargo.toml).
+bevy = { workspace = true }
 # Avian replaces bevy_rapier3d (see shared/Cargo.toml). The headless server only
-# runs the shared simulation, but declares Avian directly to turn on the perf
-# features below; `default-features = false` keeps the render-pulling `debug-plugin`
-# out of the headless build. `xpbd_joints` is re-added so the joint solver runs.
-avian3d = { version = "0.7.0", default-features = false, features = ["3d", "f32", "parry-f32", "xpbd_joints"] }
+# runs the shared simulation; it declares Avian directly to turn on the perf
+# features in `[features]` below (the workspace pin's `default-features = false`
+# keeps the render-pulling `debug-plugin` out of the headless build).
+avian3d = { workspace = true }
+# Server-side netcode: the dedicated authoritative host. `server` runtime group +
+# WebSocket transport (browsers connect over WSS) + netcode connection layer +
+# replication. Version pinned in the root `[workspace.dependencies]`.
+lightyear = { workspace = true, features = ["server", "replication", "interpolation", "websocket", "netcode", "std", "input_native"] }
 
 [features]
 default = [
@@ -24,4 +29,7 @@ default = [
     # the `multi_threaded` feature on to function.
     "bevy/file_watcher",
     "bevy/multi_threaded",
+    # lightyear uses Bevy states internally; the headless server (MinimalPlugins)
+    # must add StatesPlugin, which needs the `bevy_state` crate/feature compiled in.
+    "bevy/bevy_state",
 ]

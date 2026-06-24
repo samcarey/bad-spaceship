@@ -20,11 +20,13 @@ concurrency:
 
 env:
   # Toolchain is also pinned in rust-toolchain.toml; kept here for clarity.
-  # Bevy 0.19's MSRV is 1.95; this pins a recent stable comfortably above it.
+  # Bevy 0.18's MSRV is 1.89; this pins a recent stable comfortably above it.
+  # (Temporarily on Bevy 0.18 for the lightyear netcode stack — see the root
+  # Cargo.toml `[workspace.dependencies]` block for the 0.19 re-upgrade checklist.)
   RUST_TOOLCHAIN: "1.96.0"
-  # Must match the `wasm-bindgen` crate version resolved in Cargo.lock. bevy 0.19 /
-  # wgpu 29's web-sys 0.3.102 still resolves wasm-bindgen 0.2.125 (the client also
-  # pins `=0.2.125`), so this is unchanged from 0.18. Bump in lockstep with the lock.
+  # Must match the `wasm-bindgen` crate version resolved in Cargo.lock. bevy 0.18 /
+  # wgpu 27's web-sys 0.3.102 still resolves wasm-bindgen 0.2.125 (the client also
+  # pins `=0.2.125`), so this is unchanged. Bump in lockstep with the lock.
   WASM_BINDGEN_VERSION: "0.2.125"
 
 jobs:
@@ -69,7 +71,8 @@ jobs:
           # (client/index.html loads `./target/wasm.js`).
           wasm-bindgen --out-dir _site/target --out-name wasm --target web --no-typescript \
             target/wasm32-unknown-unknown/release/bad-spaceship-client.wasm
-          cp client/index.html _site/
+          # index.html (landing), play.html (game loader), lobby.html (lobby browser).
+          cp client/*.html _site/
           cp -r client/assets _site/assets
           # Publish any committed archive builds (e.g. the playable Bevy 0.12
           # build under legacy/v0.12) verbatim alongside the current site.
