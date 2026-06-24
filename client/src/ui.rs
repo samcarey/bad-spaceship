@@ -198,14 +198,32 @@ Hold deletion zone over existing joint to highlight it in red.
 Click while joint is highlighted red to delete it.
 ";
 
-fn show_instructions(mut contexts: EguiContexts) -> Result {
+const TOUCH_INSTRUCTIONS: &str = "Instructions:
+Left stick to move, right stick to look (drag from where you touch).
+Aim a block within range and tap GRAB to pick it up; tap again to drop.
+Carry a block to touch another to show potential joints (yellow),
+then tap Join Parts to make them real (blue).
+Drag the open area while carrying to rotate the held block.
+Empty-handed, aim at a joint until it highlights red,
+then tap Delete Joints to remove it. Tap pause (top-right) for the menu.
+";
+
+fn show_instructions(
+    mut contexts: EguiContexts,
+    mobile: Res<crate::mobile::MobileActive>,
+) -> Result {
+    let text = if mobile.0 {
+        TOUCH_INSTRUCTIONS
+    } else {
+        INSTRUCTIONS
+    };
     egui::TopBottomPanel::top("top_panel")
         .frame(Frame::default().multiply_with_opacity(0.0))
         // Drop the hairline divider egui draws at the panel's edge.
         .show_separator_line(false)
         .show(contexts.ctx_mut()?, |ui| {
             ui.horizontal(|ui| {
-                ui.colored_label(Color32::from_rgb(255, 0, 0), INSTRUCTIONS);
+                ui.colored_label(Color32::from_rgb(255, 0, 0), text);
             });
         });
     Ok(())

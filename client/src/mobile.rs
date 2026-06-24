@@ -216,7 +216,6 @@ impl ControlLayout {
 fn detect_touch(touches: Res<Touches>, mut active: ResMut<MobileActive>) {
     if !active.0 && touches.iter_just_pressed().next().is_some() {
         active.0 = true;
-        crate::tlog!("detect_touch: MobileActive on");
     }
 }
 
@@ -227,7 +226,6 @@ fn start_game_on_touch(
     mut next_state: ResMut<NextState<AppState>>,
 ) {
     if touches.iter_just_pressed().next().is_some() {
-        crate::tlog!("start_game_on_touch: first tap -> InGame");
         next_state.set(AppState::InGame);
     }
 }
@@ -299,13 +297,11 @@ fn classify_touches(
         // `apply_pointer` (from these tap flags) routes it to grab/drop vs
         // join/delete.
         if layout.hit(layout.grab, p) {
-            crate::tlog!("hit grab");
             controls.grab_tap = true;
             clicks.write(PlayerClick);
             continue;
         }
         if layout.hit(layout.action, p) {
-            crate::tlog!("hit action");
             controls.action_tap = true;
             clicks.write(PlayerClick);
             continue;
