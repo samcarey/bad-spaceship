@@ -17,7 +17,7 @@ use bevy::prelude::*;
 use lightyear::prelude::client::input::InputSystems as ClientInputSystems;
 use lightyear::prelude::client::*;
 use lightyear::prelude::input::native::{ActionState, InputMarker};
-use lightyear::prelude::{Authentication, Controlled};
+use lightyear::prelude::{Authentication, Controlled, Interpolated};
 use std::net::SocketAddr;
 
 /// The server to connect to, or `None` for single-player.
@@ -103,10 +103,12 @@ fn write_player_pose(
     }
 }
 
-/// Attach a mesh to any replicated player that doesn't have one yet.
+/// Attach a mesh to each player's `Interpolated` copy (the smoothed visual
+/// entity) that doesn't have one yet. The raw `Confirmed` entities stay
+/// invisible; input/control still rides on them (they carry `Controlled`).
 fn draw_replicated_players(
     mut commands: Commands,
-    new_players: Query<Entity, (With<NetPlayer>, Without<Mesh3d>)>,
+    new_players: Query<Entity, (With<NetPlayer>, With<Interpolated>, Without<Mesh3d>)>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
@@ -130,8 +132,12 @@ fn draw_replicated_players(
     }
 }
 
-/// Apply the replicated pose to the rendered transform.
-fn apply_net_transform(mut q: Query<(&NetTransform, &mut Transform), Changed<NetTransform>>) {
+/// Apply the (interpolated) replicated pose to the rendered transform. Lightyear
+/// eases the `NetTransform` on `Interpolated` entities each frame; mirror it onto
+/// the Bevy `Transform` we render.
+fn apply_net_transform(
+    mut q: Query<(&NetTransform, &mut Transform), (Changed<NetTransform>, With<Interpolated>)>,
+) {
     for (net, mut transform) in &mut q {
         *transform = net.to_transform();
     }

@@ -75,6 +75,8 @@ fn spawn_demo_bot(mut commands: Commands) {
         NetPlayer { client_id: 0 },
         NetTransform::from_transform(&Transform::from_xyz(3.0, 2.0, 0.0)),
         Replicate::to_clients(NetworkTarget::All),
+        // Clients render an interpolated copy, smoothing the orbit motion.
+        InterpolationTarget::to_clients(NetworkTarget::All),
         DemoBot,
     ));
 }
@@ -101,6 +103,9 @@ fn spawn_player_for_client(trigger: On<Add, Connected>, mut commands: Commands) 
         NetPlayer { client_id: client.to_bits() },
         NetTransform::from_transform(&Transform::from_xyz(0.0, 2.0, 0.0)),
         Replicate::to_clients(NetworkTarget::All),
+        // Clients (including the owner) render an interpolated copy, smoothing
+        // the replicated pose between confirmed snapshots.
+        InterpolationTarget::to_clients(NetworkTarget::All),
         // Bind this player to the connecting client so that client's networked
         // input drives it. The server auto-adds the `InputBuffer`/`ActionState`
         // when input arrives; seeding `ActionState` here lets `apply_player_input`

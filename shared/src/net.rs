@@ -84,6 +84,18 @@ impl MapEntities for PlayerInput {
     fn map_entities<M: EntityMapper>(&mut self, _entity_mapper: &mut M) {}
 }
 
+/// Interpolate between two replicated poses: lerp the translation, slerp the
+/// rotation. Used by lightyear's interpolation for `NetTransform`.
+fn lerp_net_transform(start: NetTransform, other: NetTransform, t: f32) -> NetTransform {
+    let translation = Vec3::from_array(start.translation)
+        .lerp(Vec3::from_array(other.translation), t)
+        .to_array();
+    let rotation = Quat::from_array(start.rotation)
+        .slerp(Quat::from_array(other.rotation), t)
+        .to_array();
+    NetTransform { translation, rotation }
+}
+
 /// Registers the shared protocol. Add to BOTH the client and server apps, AFTER
 /// their respective lightyear plugin group.
 pub struct ProtocolPlugin;
@@ -94,7 +106,13 @@ impl Plugin for ProtocolPlugin {
         // deprecated). `.replicate()` marks the component for World replication.
         // Thin slice: replicate the player marker + its transform, server → client.
         app.component::<NetPlayer>().replicate();
-        app.component::<NetTransform>().replicate();
+        // Replicate the pose and register linear interpolation for it: the client
+        // renders `Interpolated` copies whose `NetTransform` lightyear eases
+        // between confirmed snapshots each frame, smoothing the round-trip motion
+        // trail. `NetTransform` isn't `Ease`, so supply a custom lerp.
+        app.component::<NetTransform>()
+            .replicate()
+            .add_interpolation_with(lerp_net_transform);
 
         // Register `PlayerInput` as a networked native input. `InputPlugin` is
         // role-agnostic: it adds the client input plugin under lightyear's
