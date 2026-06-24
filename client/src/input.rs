@@ -8,6 +8,7 @@ use bevy::{
     prelude::*,
 };
 
+use crate::mobile::MobileActive;
 use crate::AppState;
 
 pub struct InputPlugin;
@@ -18,7 +19,14 @@ impl Plugin for InputPlugin {
             Update,
             (
                 process_keyboard_input.in_set(InputEvents),
-                get_look.in_set(InputEvents),
+                // On touch, winit also emits `MouseMotion` from drags, which would
+                // turn the camera on *any* drag (move stick, empty space, …). In
+                // mobile mode the look stick is the sole camera-look source (it
+                // writes `MouseMotionDelta` directly via `mobile::apply_pointer`),
+                // so suppress the winit-driven look here.
+                get_look
+                    .in_set(InputEvents)
+                    .run_if(|m: Res<MobileActive>| !m.0),
                 process_mouse_clicks
                     .in_set(InputEvents)
                     .run_if(in_state(AppState::InGame)),
