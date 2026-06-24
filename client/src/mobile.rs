@@ -9,6 +9,13 @@
 //! same path keyboard/mouse take since the hand-rolled DOM input layer was
 //! removed), so no browser glue is needed and it compiles on native too.
 //!
+//! Layout: two fixed joysticks in the bottom corners — move (left) feeds the
+//! analog response curve, look (right) is rate-control (a held deflection keeps
+//! turning, emitting `MouseMotion` each frame). A jump button sits low-center
+//! between them; the click + shift buttons sit centered above them with
+//! context-specific labels (GRAB/DROP/ATTACH/DELETE and ROTATE/DELETE) keyed off
+//! the player's hold state and the latched modifier. A small pause sits top-right.
+//!
 //! Activation is auto-detected: `MobileActive` flips on the first touch, after
 //! which the on-screen overlay and the touch systems turn on. Desktop/mouse users
 //! never see it. Two desktop assumptions don't hold on touch and are handled here:
@@ -24,7 +31,7 @@
 
 use crate::input::{get_look, get_modifying, process_keyboard_input};
 use crate::AppState;
-use bad_spaceship_shared::{KeyboardDirectionalInput, Modifying, PlayerClick};
+use bad_spaceship_shared::{Holding, KeyboardDirectionalInput, Modifying, PlayerClick};
 use bevy::{
     input::mouse::MouseMotion,
     input::touch::Touches,
@@ -32,6 +39,11 @@ use bevy::{
     window::PrimaryWindow,
 };
 use bevy_egui::{egui, EguiContexts, EguiPrimaryContextPass};
+
+/// Full-deflection look speed, as a synthetic per-frame `MouseMotion` delta. With
+/// `look_sensitivity = 0.42` (player.player.ron) the look integrator turns at
+/// `delta * sensitivity` rad/s, so ~7 → ~2.9 rad/s (~165°/s) at the rim. Tunable.
+const LOOK_SPEED: f32 = 7.0;
 
 pub struct MobilePlugin;
 
@@ -86,19 +98,20 @@ fn mobile_active(active: Res<MobileActive>) -> bool {
     active.0
 }
 
-/// Per-frame touch state: which finger owns which role, the joystick geometry,
-/// and the latched modifier toggle.
+/// Per-frame touch state: which finger owns which fixed stick/button, the stick
+/// knob positions (for drawing), the stick outputs, and the latched modifier.
 #[derive(Resource, Default)]
 struct TouchControls {
-    /// Finger driving the movement joystick, plus its origin (touch-down point)
-    /// and current knob position (origin + clamped offset, for drawing).
+    /// Finger on the (fixed, bottom-left) movement stick + its knob position.
     move_touch: Option<u64>,
-    move_origin: Vec2,
     move_knob: Vec2,
-    /// Joystick output mapped to the movement basis (x = strafe, z = forward).
+    /// Stick output mapped to the movement basis (x = strafe, z = forward).
     move_dir: Vec3,
-    /// Finger driving look (right-half drag).
+    /// Finger on the (fixed, bottom-right) look stick + its knob position.
     look_touch: Option<u64>,
+    look_knob: Vec2,
+    /// Per-frame synthetic `MouseMotion` delta the look stick emits (rate control).
+    look_vec: Vec2,
     /// Finger held on the jump button.
     jump_touch: Option<u64>,
     /// Latched rotate/delete modifier (Shift equivalent), toggled by its button.
@@ -110,12 +123,15 @@ impl TouchControls {
         self.move_touch = None;
         self.move_dir = Vec3::ZERO;
         self.look_touch = None;
+        self.look_vec = Vec2::ZERO;
         self.jump_touch = None;
     }
 }
 
-/// Button centers + radii in window-logical pixels, recomputed each frame from the
-/// window size so the layout tracks rotation/resize.
+/// Fixed-position control geometry in window-logical pixels, recomputed each frame
+/// from the window size so the layout tracks rotation/resize. Two fixed joysticks
+/// in the bottom corners (move left, look right), a jump button low-center between
+/// them, the click + shift buttons centered above them, and a small pause top-right.
 #[derive(Resource, Default)]
 struct ControlLayout {
     width: f32,
@@ -123,43 +139,47 @@ struct ControlLayout {
     btn_r: f32,
     pause_r: f32,
     joystick_radius: f32,
-    /// Resting position of the move-stick hint (drawn when no finger is on it, so
-    /// the player can see the left-half move zone exists). The live stick still
-    /// floats to wherever the finger lands.
-    joystick_home: Vec2,
+    move_center: Vec2,
+    look_center: Vec2,
     jump: Vec2,
-    grab: Vec2,
-    modify: Vec2,
+    click: Vec2,
+    shift: Vec2,
     pause: Vec2,
 }
 
 impl ControlLayout {
     fn recompute(&mut self, w: f32, h: f32) {
         let small = w.min(h);
-        let r = (small * 0.07).clamp(28.0, 56.0);
-        let gap = 2.0 * r + 18.0;
+        let jr = (small * 0.18).clamp(60.0, 130.0);
+        let r = (small * 0.075).clamp(30.0, 56.0);
+        let edge = 20.0;
         self.width = w;
         self.height = h;
+        self.joystick_radius = jr;
         self.btn_r = r;
         self.pause_r = r * 0.7;
-        self.joystick_radius = (small * 0.18).clamp(60.0, 140.0);
-        // Move-stick hint anchored bottom-left (thumb reach), mirroring the
-        // action cluster on the right.
-        self.joystick_home = Vec2::new(
-            self.joystick_radius + 24.0,
-            h - self.joystick_radius - 24.0,
-        );
-        let margin = r + 16.0;
-        // Action cluster anchored bottom-right (thumb reach), Pause top-right.
-        self.jump = Vec2::new(w - margin, h - margin);
-        self.grab = Vec2::new(self.jump.x - gap, self.jump.y);
-        self.modify = Vec2::new(self.jump.x, self.jump.y - gap);
+        // Fixed sticks in the bottom corners.
+        self.move_center = Vec2::new(jr + edge, h - jr - edge);
+        self.look_center = Vec2::new(w - jr - edge, h - jr - edge);
+        // Jump low-center, between the sticks.
+        self.jump = Vec2::new(w * 0.5, h - r - edge);
+        // Click + shift centered above the sticks, flanking the centerline.
+        let pair_dx = r + 14.0;
+        let cluster_y = (self.move_center.y - jr - r - 12.0).max(r + edge);
+        self.click = Vec2::new(w * 0.5 - pair_dx, cluster_y);
+        self.shift = Vec2::new(w * 0.5 + pair_dx, cluster_y);
         self.pause = Vec2::new(w - self.pause_r - 12.0, self.pause_r + 12.0);
     }
 
     /// Generous circular hit-test (touch target a bit larger than the drawn circle).
     fn hit(&self, center: Vec2, p: Vec2) -> bool {
         p.distance(center) <= self.btn_r + 8.0
+    }
+
+    /// Whether a touch falls in a fixed stick's grab zone (a bit larger than the
+    /// drawn ring, so the thumb doesn't have to land dead-center).
+    fn in_stick(&self, center: Vec2, p: Vec2) -> bool {
+        p.distance(center) <= self.joystick_radius * 1.15
     }
 }
 
@@ -217,76 +237,67 @@ fn classify_touches(
     }
     if !is_active(controls.look_touch) {
         controls.look_touch = None;
+        controls.look_vec = Vec2::ZERO;
     }
     if !is_active(controls.jump_touch) {
         controls.jump_touch = None;
     }
 
-    // Assign newly-pressed fingers. Button hits take priority over the
-    // move/look zones, so a finger landing on a corner button never moves or looks.
+    // Assign newly-pressed fingers. Buttons take priority over the stick zones, so
+    // a finger landing on a button never grabs a stick.
     for touch in touches.iter_just_pressed() {
         let p = touch.position();
         let id = touch.id();
-        crate::tlog!(
-            "press id={id} pos=({:.0},{:.0}) win=({:.0}x{:.0})",
-            p.x,
-            p.y,
-            layout.width,
-            layout.height
-        );
         if layout.hit(layout.pause, p) {
-            crate::tlog!("hit pause");
             next_state.set(AppState::InGameMenu);
             controls.clear_fingers();
             continue;
         }
         if layout.hit(layout.jump, p) {
-            crate::tlog!("hit jump");
             controls.jump_touch = Some(id);
             continue;
         }
-        if layout.hit(layout.grab, p) {
-            crate::tlog!("hit grab");
+        if layout.hit(layout.click, p) {
+            crate::tlog!("hit click");
             clicks.write(PlayerClick);
             continue;
         }
-        if layout.hit(layout.modify, p) {
-            crate::tlog!("hit modify");
+        if layout.hit(layout.shift, p) {
             controls.modify_on = !controls.modify_on;
+            crate::tlog!("hit shift -> {}", controls.modify_on);
             continue;
         }
-        // Left half = movement joystick (originating where the finger lands),
-        // right half = look drag. One finger per role.
-        if p.x < layout.width * 0.5 {
-            if controls.move_touch.is_none() {
-                crate::tlog!("move start");
-                controls.move_touch = Some(id);
-                controls.move_origin = p;
-                controls.move_knob = p;
-                controls.move_dir = Vec3::ZERO;
-            }
-        } else if controls.look_touch.is_none() {
-            crate::tlog!("look start");
+        // Fixed sticks: grab whichever zone the finger lands in (one finger each).
+        if controls.move_touch.is_none() && layout.in_stick(layout.move_center, p) {
+            controls.move_touch = Some(id);
+        } else if controls.look_touch.is_none() && layout.in_stick(layout.look_center, p) {
             controls.look_touch = Some(id);
         }
     }
 
-    // Recompute the joystick vector from the active move finger.
+    // Movement stick: deflection from the fixed center → curved analog speed.
     if let Some(id) = controls.move_touch {
         if let Some(touch) = touches.iter().find(|t| t.id() == id) {
-            let offset = touch.position() - controls.move_origin;
-            let clamped = offset.clamp_length_max(layout.joystick_radius);
-            controls.move_knob = controls.move_origin + clamped;
-            // Analog speed with a response curve: keep the *direction* of the
-            // deflection but map its 0..1 magnitude through a deadzone + expo
-            // curve so small pushes give small speeds (the raw linear mapping
-            // jumped to full speed the instant you left the deadzone, because the
-            // magnitude was normalized away downstream — that's now preserved).
-            let deflection = clamped.length() / layout.joystick_radius;
-            let speed = response_curve(deflection);
+            let clamped =
+                (touch.position() - layout.move_center).clamp_length_max(layout.joystick_radius);
+            controls.move_knob = layout.move_center + clamped;
+            let speed = response_curve(clamped.length() / layout.joystick_radius);
             let dir2 = clamped.normalize_or_zero() * speed;
             // Screen y is downward, so forward (+z, "W") is -y; +x ("D") is +x.
             controls.move_dir = Vec3::new(dir2.x, 0.0, -dir2.y);
+        }
+    }
+
+    // Look stick: deflection from the fixed center → rate-control look. The
+    // deflection is in screen space (down = +y), which is exactly the convention
+    // the drag-look path used, so it feeds `MouseMotion` with no sign juggling.
+    if let Some(id) = controls.look_touch {
+        if let Some(touch) = touches.iter().find(|t| t.id() == id) {
+            let clamped =
+                (touch.position() - layout.look_center).clamp_length_max(layout.joystick_radius);
+            controls.look_knob = layout.look_center + clamped;
+            let rate = response_curve(clamped.length() / layout.joystick_radius) * LOOK_SPEED;
+            controls.look_vec = clamped.normalize_or_zero() * rate;
         }
     }
 }
@@ -325,21 +336,15 @@ fn apply_movement(
     }
 }
 
-/// Emits a synthetic `MouseMotion` from the look finger's per-frame delta; the
+/// Emits the look stick's rate vector as a synthetic `MouseMotion` each frame; the
 /// existing `get_look` consumes it into `MouseMotionDelta` (which also drives
-/// held-part rotation while the modifier is on).
-fn apply_look(
-    controls: Res<TouchControls>,
-    touches: Res<Touches>,
-    mut motion: MessageWriter<MouseMotion>,
-) {
-    if let Some(id) = controls.look_touch {
-        if let Some(touch) = touches.iter().find(|t| t.id() == id) {
-            let delta = touch.delta();
-            if delta != Vec2::ZERO {
-                motion.write(MouseMotion { delta });
-            }
-        }
+/// held-part rotation while the modifier is on). Unlike drag-look, the stick keeps
+/// turning while held at deflection (rate control), not only while the finger moves.
+fn apply_look(controls: Res<TouchControls>, mut motion: MessageWriter<MouseMotion>) {
+    if controls.look_vec != Vec2::ZERO {
+        motion.write(MouseMotion {
+            delta: controls.look_vec,
+        });
     }
 }
 
@@ -366,12 +371,39 @@ fn draw_button(painter: &egui::Painter, center: Vec2, r: f32, label: &str, activ
         fill,
         egui::Stroke::new(2.0, egui::Color32::from_white_alpha(170)),
     );
+    // Shrink the font for longer labels so words like "ATTACH"/"ROTATE" fit inside
+    // the circle (roughly fit the label width to the diameter).
+    let font = (1.7 * r / label.len().max(1) as f32).clamp(11.0, r * 0.62);
     painter.text(
         c,
         egui::Align2::CENTER_CENTER,
         label,
-        egui::FontId::proportional(r * 0.62),
+        egui::FontId::proportional(font),
         egui::Color32::WHITE,
+    );
+}
+
+/// Draws a fixed stick: an always-visible ring at `center` plus a knob (at the
+/// deflected position when held, recentered when idle) and a label above it.
+fn draw_stick(painter: &egui::Painter, center: Vec2, radius: f32, knob: Vec2, label: &str) {
+    let active = knob != center;
+    let alpha = if active { 95 } else { 55 };
+    painter.circle_stroke(
+        egui::pos2(center.x, center.y),
+        radius,
+        egui::Stroke::new(2.0, egui::Color32::from_white_alpha(alpha)),
+    );
+    painter.circle_filled(
+        egui::pos2(knob.x, knob.y),
+        radius * 0.36,
+        egui::Color32::from_white_alpha(alpha + 45),
+    );
+    painter.text(
+        egui::pos2(center.x, center.y - radius - 10.0),
+        egui::Align2::CENTER_CENTER,
+        label,
+        egui::FontId::proportional(14.0),
+        egui::Color32::from_white_alpha(alpha + 50),
     );
 }
 
@@ -379,6 +411,7 @@ fn draw_overlay(
     mut contexts: EguiContexts,
     layout: Res<ControlLayout>,
     controls: Res<TouchControls>,
+    holders: Query<&Holding>,
 ) -> Result {
     let ctx = contexts.ctx_mut()?;
     let painter = ctx.layer_painter(egui::LayerId::new(
@@ -386,37 +419,36 @@ fn draw_overlay(
         egui::Id::new("mobile_overlay"),
     ));
 
-    // Movement joystick. While idle, show a faint hint at its home position so the
-    // left-half move zone is discoverable; while a finger is down, draw the live
-    // floating stick (ring at the touch origin + knob at the deflected position).
-    let (base, knob, ring_alpha, knob_alpha) = if controls.move_touch.is_some() {
-        (controls.move_origin, controls.move_knob, 90, 130)
+    // Fixed sticks (knob recenters when idle).
+    let move_knob = if controls.move_touch.is_some() {
+        controls.move_knob
     } else {
-        // Idle hint: dimmer ring + centered knob at the resting position.
-        (layout.joystick_home, layout.joystick_home, 45, 60)
+        layout.move_center
     };
-    painter.circle_stroke(
-        egui::pos2(base.x, base.y),
-        layout.joystick_radius,
-        egui::Stroke::new(2.0, egui::Color32::from_white_alpha(ring_alpha)),
-    );
-    painter.circle_filled(
-        egui::pos2(knob.x, knob.y),
-        layout.joystick_radius * 0.36,
-        egui::Color32::from_white_alpha(knob_alpha),
-    );
-    painter.text(
-        egui::pos2(base.x, base.y - layout.joystick_radius - 10.0),
-        egui::Align2::CENTER_CENTER,
-        "MOVE",
-        egui::FontId::proportional(14.0),
-        egui::Color32::from_white_alpha(ring_alpha + 40),
-    );
+    let look_knob = if controls.look_touch.is_some() {
+        controls.look_knob
+    } else {
+        layout.look_center
+    };
+    draw_stick(&painter, layout.move_center, layout.joystick_radius, move_knob, "MOVE");
+    draw_stick(&painter, layout.look_center, layout.joystick_radius, look_knob, "LOOK");
+
+    // Context-specific labels for the click + shift buttons. `holding` and the
+    // latched `modify_on` select what a click does and what shift toggles into.
+    let holding = holders.iter().next().map(|h| h.0).unwrap_or(false);
+    let modifying = controls.modify_on;
+    let click_label = match (holding, modifying) {
+        (true, true) => "ATTACH",
+        (true, false) => "DROP",
+        (false, true) => "DELETE",
+        (false, false) => "GRAB",
+    };
+    let shift_label = if holding { "ROTATE" } else { "DELETE" };
 
     let r = layout.btn_r;
-    draw_button(&painter, layout.jump, r, "JMP", controls.jump_touch.is_some());
-    draw_button(&painter, layout.grab, r, "GRAB", false);
-    draw_button(&painter, layout.modify, r, "ROT", controls.modify_on);
+    draw_button(&painter, layout.jump, r, "JUMP", controls.jump_touch.is_some());
+    draw_button(&painter, layout.click, r, click_label, false);
+    draw_button(&painter, layout.shift, r, shift_label, modifying);
     draw_button(&painter, layout.pause, layout.pause_r, "II", false);
 
     Ok(())
