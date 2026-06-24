@@ -12,12 +12,14 @@ use bevy::prelude::*;
 
 use highlight::HighlightPlugin;
 use input::InputPlugin;
+use mobile::MobilePlugin;
 use platform::PlatformPlugin;
 use render_main_pass::RenderMainPassPlugin;
 use render_secondary_pass::RenderSecondaryPassPlugin;
 use ui::UiPlugin;
 
 mod input;
+mod mobile;
 mod platform;
 mod render_main_pass;
 mod render_secondary_pass;
@@ -65,6 +67,7 @@ fn main() {
         .add_plugins((
             UiPlugin,
             InputPlugin,
+            MobilePlugin,
             PlatformPlugin,
             HighlightPlugin,
             RenderMainPassPlugin,

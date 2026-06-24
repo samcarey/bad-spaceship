@@ -1,3 +1,4 @@
+use crate::mobile::MobileActive;
 use crate::AppState;
 use bad_spaceship_shared::Grass;
 use bevy::prelude::*;
@@ -27,7 +28,14 @@ impl Plugin for PlatformPlugin {
             .add_systems(OnEnter(AppState::InGame), hide_cursor)
             .add_systems(
                 Update,
-                (toggle_menu_on_pointer_lock, signal_game_ready),
+                (
+                    // Touch devices never acquire pointer lock, so this toggle would
+                    // immediately bounce the player back to the menu on every frame
+                    // in mobile mode — gate it off once touch input is active. The
+                    // mobile Pause button drives the menu instead (see `mobile.rs`).
+                    toggle_menu_on_pointer_lock.run_if(|m: Res<MobileActive>| !m.0),
+                    signal_game_ready,
+                ),
             );
     }
 }
