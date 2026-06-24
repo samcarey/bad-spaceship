@@ -13,6 +13,7 @@
 //! the Avian physics bodies (via `lightyear_avian3d`), and client-side
 //! prediction/interpolation come next, where they can be tested on real
 //! endpoints.
+use bevy::ecs::entity::{EntityMapper, MapEntities};
 use bevy::prelude::*;
 use lightyear::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -51,9 +52,11 @@ impl NetTransform {
     }
 }
 
-/// Per-tick player intent, sent client → server. Registered as a networked
-/// input once the client/server input plugins are wired up (Phase 2b).
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug, Default)]
+/// Per-tick player intent, sent client → server as a lightyear native input
+/// (registered via `InputPlugin::<PlayerInput>` in `ProtocolPlugin`). Native
+/// inputs must be `Serialize`/`Deserialize`/`Clone`/`PartialEq`/`Debug`/`Default`
+/// + `Reflect` + `MapEntities`.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug, Default, Reflect)]
 pub struct PlayerInput {
     pub move_dir: Vec2,
     pub yaw: f32,
@@ -61,6 +64,12 @@ pub struct PlayerInput {
     pub jump: bool,
     pub grab: bool,
     pub modifying: bool,
+}
+
+// No entities are referenced by `PlayerInput`, so the mapping is a no-op — but
+// the trait is a required bound for native inputs.
+impl MapEntities for PlayerInput {
+    fn map_entities<M: EntityMapper>(&mut self, _entity_mapper: &mut M) {}
 }
 
 /// Registers the shared protocol. Add to BOTH the client and server apps, AFTER
@@ -74,5 +83,11 @@ impl Plugin for ProtocolPlugin {
         // Thin slice: replicate the player marker + its transform, server → client.
         app.component::<NetPlayer>().replicate();
         app.component::<NetTransform>().replicate();
+
+        // Register `PlayerInput` as a networked native input. `InputPlugin` is
+        // role-agnostic: it adds the client input plugin under lightyear's
+        // `client` feature and the server one under `server`, so a single
+        // registration here wires both binaries (each compiles only its half).
+        app.add_plugins(input::native::InputPlugin::<PlayerInput>::default());
     }
 }

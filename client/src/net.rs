@@ -13,9 +13,13 @@
 
 use core::time::Duration;
 
-use bad_spaceship_shared::net::{NetPlayer, NetTransform, ProtocolPlugin};
+use bad_spaceship_shared::net::{NetPlayer, NetTransform, PlayerInput, ProtocolPlugin};
+use bad_spaceship_shared::KeyboardDirectionalInput;
 use bevy::prelude::*;
+use lightyear::prelude::client::input::InputSystems as ClientInputSystems;
 use lightyear::prelude::client::*;
+use lightyear::prelude::input::native::{ActionState, InputMarker};
+use lightyear::prelude::Controlled;
 
 /// 60 Hz, matching the server tick.
 const TICK: Duration = Duration::from_millis(1000 / 60);
@@ -51,8 +55,47 @@ impl Plugin for NetClientPlugin {
         app.add_plugins(ProtocolPlugin);
         app.add_systems(Startup, connect);
         // Give every replicated player a visible body, then keep its transform
-        // in sync with the replicated pose.
-        app.add_systems(Update, (draw_replicated_players, apply_net_transform));
+        // in sync with the replicated pose, and tag the player we control.
+        app.add_systems(
+            Update,
+            (draw_replicated_players, apply_net_transform, mark_controlled_player),
+        );
+        // Write our input each tick, in lightyear's input-writing set.
+        app.add_systems(
+            FixedPreUpdate,
+            write_player_input.in_set(ClientInputSystems::WriteClientInputs),
+        );
+    }
+}
+
+/// The server binds a player to us via `ControlledBy`; on the client that entity
+/// arrives carrying the `Controlled` marker. Tag it with `InputMarker` (and seed
+/// its `ActionState`) so our input is written to and sent for that entity.
+fn mark_controlled_player(
+    mut commands: Commands,
+    new: Query<Entity, (With<Controlled>, Without<InputMarker<PlayerInput>>)>,
+) {
+    for entity in &new {
+        commands.entity(entity).insert((
+            InputMarker::<PlayerInput>::default(),
+            ActionState::<PlayerInput>::default(),
+        ));
+    }
+}
+
+/// Capture local movement intent and write it to the controlled player's
+/// `ActionState` (lightyear sends it to the server). Reads the unified
+/// `KeyboardDirectionalInput` — fed by keyboard, gamepad, *and* mobile touch —
+/// so the same path drives the player on desktop and phone.
+fn write_player_input(
+    intent: Query<&KeyboardDirectionalInput>,
+    mut controlled: Query<&mut ActionState<PlayerInput>, With<InputMarker<PlayerInput>>>,
+) {
+    let dir = intent.iter().next().map(|k| k.0).unwrap_or(Vec3::ZERO);
+    let move_dir = Vec2::new(dir.x, dir.z);
+    for mut state in &mut controlled {
+        state.0.move_dir = move_dir;
+        state.0.jump = dir.y > 0.5;
     }
 }
 

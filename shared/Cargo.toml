@@ -27,7 +27,10 @@ avian3d = { workspace = true }
 # prediction/interpolation metadata — NOT the client or server runtime plugin
 # groups (those are enabled in the client/server crates). Version is pinned in the
 # root `[workspace.dependencies]`.
-lightyear = { workspace = true, features = ["replication", "prediction", "interpolation", "std"] }
+# `input_native` adds the message-based native-input framework (used to network
+# `PlayerInput`); registered once in `ProtocolPlugin` (cfg-gated to the client or
+# server input plugin per binary by lightyear's own `client`/`server` features).
+lightyear = { workspace = true, features = ["replication", "prediction", "interpolation", "std", "input_native"] }
 serde = { version = "1.0", features = ["derive"] }
 ron = "0.7"
 rand = "0.8"

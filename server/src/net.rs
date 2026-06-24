@@ -13,10 +13,14 @@
 use core::time::Duration;
 use std::net::SocketAddr;
 
-use bad_spaceship_shared::net::{NetPlayer, NetTransform, ProtocolPlugin};
+use bad_spaceship_shared::net::{NetPlayer, NetTransform, PlayerInput, ProtocolPlugin};
 use bevy::prelude::*;
+use lightyear::prelude::input::native::ActionState;
 use lightyear::prelude::*;
 use lightyear::prelude::server::*;
+
+/// Movement speed applied to player input, in world units per second.
+const PLAYER_SPEED: f32 = 6.0;
 
 /// 60 Hz, matching the server's fixed simulation loop.
 const TICK: Duration = Duration::from_millis(1000 / 60);
@@ -41,6 +45,8 @@ impl Plugin for NetServerPlugin {
         // device — useful because mobile browsers suspend background tabs, so two
         // tabs on one phone never connect simultaneously.
         app.add_systems(Update, move_demo_bot);
+        // Apply each client's replicated input to its player, authoritatively.
+        app.add_systems(FixedUpdate, apply_player_input);
     }
 }
 
@@ -107,6 +113,26 @@ fn spawn_player_for_client(
         NetPlayer { client_id: client.to_bits() },
         NetTransform::from_transform(&Transform::from_xyz(x, 2.0, 0.0)),
         Replicate::to_clients(NetworkTarget::All),
+        // Bind this player to the connecting client so that client's networked
+        // input drives it. The server auto-adds the `InputBuffer`/`ActionState`
+        // when input arrives; seeding `ActionState` here lets `apply_player_input`
+        // match the entity immediately. `SessionBased` despawns it on disconnect.
+        ControlledBy { owner: client, lifetime: Lifetime::SessionBased },
+        ActionState::<PlayerInput>::default(),
     ));
     info!("client {client:?} connected — spawned replicated player at x={x}");
+}
+
+/// Integrate each player's current input into its authoritative pose. Runs in
+/// `FixedUpdate` (server tick); the changed `NetTransform` replicates to clients.
+fn apply_player_input(
+    time: Res<Time>,
+    mut players: Query<(&ActionState<PlayerInput>, &mut NetTransform)>,
+) {
+    let dt = time.delta_secs();
+    for (state, mut net) in &mut players {
+        let dir = state.0.move_dir;
+        net.translation[0] += dir.x * PLAYER_SPEED * dt;
+        net.translation[2] += dir.y * PLAYER_SPEED * dt;
+    }
 }
