@@ -33,7 +33,7 @@ impl Plugin for InputPlugin {
     }
 }
 
-fn process_keyboard_input(
+pub fn process_keyboard_input(
     input: Res<ButtonInput<KeyCode>>,
     mut query: Query<&mut KeyboardDirectionalInput>,
     state: Res<State<AppState>>,
@@ -125,7 +125,7 @@ fn get_left_click(
     }
 }
 
-fn get_modifying(
+pub fn get_modifying(
     input: Res<ButtonInput<KeyCode>>,
     mut players: Query<&mut Modifying>,
     state: Res<State<AppState>>,
@@ -175,7 +175,7 @@ fn gamepad_system(
     }
 }
 
-fn mouse_wheel(
+pub fn mouse_wheel(
     mut mouse_wheel_events: MessageReader<MouseWheel>,
     mut players: Query<&mut MouseWheelDelta>,
 ) {
