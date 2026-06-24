@@ -64,7 +64,16 @@ impl PointerLockTracker {
     }
 }
 
-fn hide_cursor() {
+fn hide_cursor(mobile: Res<MobileActive>) {
+    // iOS / touch WebKit doesn't implement the Pointer Lock API, so
+    // `request_pointer_lock()` throws a JS exception there — and because it's a JS
+    // throw (not a Rust panic) it unwinds out of the winit rAF callback and stops
+    // the loop, freezing the canvas with no panic logged. Touch devices never use
+    // pointer lock anyway (the menu toggle above is gated off too), so skip it
+    // entirely in mobile mode. This is what froze the game on the first tap.
+    if mobile.0 {
+        return;
+    }
     // Lock the *canvas*, not `<body>`. winit's mouse-button and scroll-wheel
     // listeners live on the canvas, and under pointer lock the browser routes
     // mouse events only to the lock element — locking `<body>` meant winit never
