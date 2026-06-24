@@ -637,6 +637,7 @@ dependencies = [
  "getrandom 0.3.4",
  "getrandom 0.4.3",
  "gloo",
+ "js-sys",
  "lightyear",
  "log",
  "once_cell",

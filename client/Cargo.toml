@@ -21,6 +21,10 @@ serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
 gloo = { version = "0.7", optional = true }
 web-sys = { version = "0.3.40", optional = true }
+# Read the `window.__BS_NET__` config (set by play.html) on the web build to
+# decide the multiplayer server URL. js-sys is already in the graph via web-sys;
+# declared explicitly so `js_sys::Reflect` can be used directly.
+js-sys = { version = "0.3", optional = true }
 # Version + features inherited from `[workspace.dependencies]` (root Cargo.toml).
 # That pin disables bevy_egui's clipboard/hyperlink extras (the menu uses neither;
 # drops the arboard→image and webbrowser→home native dep chains) while keeping
@@ -101,7 +105,7 @@ native = [
 # needs `--cfg=web_sys_unstable_apis` and only works in WebGPU-capable browsers).
 # Enable WebGL2 so wgpu builds the GLES backend instead — broad browser support,
 # matching the renderer the build has used on GitHub Pages all along.
-web = ["web-sys", "gloo", "bevy/webgl2", "getrandom", "getrandom_02", "getrandom_04"]
+web = ["web-sys", "gloo", "js-sys", "bevy/webgl2", "getrandom", "getrandom_02", "getrandom_04"]
 
 [build-dependencies]
 shadow-rs = { version = "0.8", default-features = false }

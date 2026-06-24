@@ -1,14 +1,15 @@
 //! Client-side netcode (lightyear) — connects to the dedicated server and
 //! renders the players it replicates.
 //!
-//! Added only when a connect target is configured (`BS_CONNECT=host:port` on
-//! native); otherwise the client is the unchanged single-player game. On wasm
-//! `std::env::var` is always `Err`, so the web build stays single-player for
-//! now — web multiplayer needs `wss://` (a TLS endpoint) and reading the room
-//! off `window.__BS_NET__`, which is the next step after this native slice.
+//! Added only when a connect target is configured; otherwise the client is the
+//! unchanged single-player game. The target comes from:
+//! - **native**: `BS_CONNECT=host:port` → connects over plain `ws://` (no TLS),
+//!   for the local loopback slice.
+//! - **web/wasm**: `window.__BS_NET__.server` (set by `play.html` from the
+//!   `?server=` query param) → a full `wss://host[:port]` URL. The browser owns
+//!   TLS, so no certs are configured client-side.
 //!
-//! Thin slice: connect over plain `ws://` (no TLS), then for every player the
-//! server replicates, draw a cube at its replicated `NetTransform`.
+//! For every player the server replicates, draw a cube at its `NetTransform`.
 
 use core::time::Duration;
 
@@ -19,10 +20,26 @@ use lightyear::prelude::client::*;
 /// 60 Hz, matching the server tick.
 const TICK: Duration = Duration::from_millis(1000 / 60);
 
-/// The server to connect to, or `None` for single-player. Native reads
-/// `BS_CONNECT` (e.g. `127.0.0.1:5001`); always `None` on wasm for now.
+/// The server to connect to, or `None` for single-player.
+/// Native reads `BS_CONNECT` (e.g. `127.0.0.1:5001`).
+#[cfg(not(target_arch = "wasm32"))]
 pub fn multiplayer_target() -> Option<String> {
     std::env::var("BS_CONNECT").ok()
+}
+
+/// Web reads `window.__BS_NET__.server` (a `wss://…` URL set by play.html from
+/// the `?server=` query param). Absent/empty ⇒ single-player.
+#[cfg(target_arch = "wasm32")]
+pub fn multiplayer_target() -> Option<String> {
+    use wasm_bindgen::JsValue;
+    let window = web_sys::window()?;
+    let bs_net = js_sys::Reflect::get(&window, &JsValue::from_str("__BS_NET__")).ok()?;
+    if bs_net.is_undefined() || bs_net.is_null() {
+        return None;
+    }
+    let server = js_sys::Reflect::get(&bs_net, &JsValue::from_str("server")).ok()?;
+    let url = server.as_string()?;
+    (!url.is_empty()).then_some(url)
 }
 
 pub struct NetClientPlugin;
@@ -104,9 +121,35 @@ fn connect(mut commands: Commands) {
 }
 
 #[cfg(target_arch = "wasm32")]
-fn connect() {
-    // Reached only if `multiplayer_target()` returns Some on wasm, which it
-    // currently never does. Web multiplayer (wss:// + window.__BS_NET__) lands
-    // in the next step.
-    warn!("web multiplayer is not wired up yet (needs a wss:// endpoint)");
+fn connect(mut commands: Commands) {
+    use lightyear::prelude::Authentication;
+    use std::net::SocketAddr;
+
+    let Some(url) = multiplayer_target() else {
+        return;
+    };
+
+    // A `wss://` URL points at a hostname, not a SocketAddr; the browser
+    // connects via the explicit URL (`from_url`), so the netcode token's
+    // `server_addr` is only a logical field — a placeholder is fine.
+    let server_addr: SocketAddr = "0.0.0.0:0".parse().unwrap();
+    let auth = Authentication::Manual {
+        server_addr,
+        client_id: rand::random::<u64>(),
+        private_key: [0u8; 32],
+        protocol_id: 0,
+    };
+    let netcode = match NetcodeClient::new(auth, NetcodeConfig::default()) {
+        Ok(n) => n,
+        Err(e) => {
+            error!("failed to build netcode client: {e:?}");
+            return;
+        }
+    };
+
+    // On wasm aeronet's `ClientConfig` is a unit struct (the browser owns TLS).
+    let io = WebSocketClientIo::from_url(ClientConfig::default(), url.clone());
+    let client = commands.spawn((netcode, io)).id();
+    commands.trigger(Connect { entity: client });
+    info!("connecting to multiplayer server at {url}");
 }
