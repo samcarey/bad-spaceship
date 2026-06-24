@@ -3,8 +3,8 @@
 //! The game's input is fully platform-agnostic: every control writes into a
 //! component or message on the player entity that `shared/` consumes — movement →
 //! `KeyboardDirectionalInput`, look → `MouseMotion`, pick-up/drop/attach/delete →
-//! `PlayerClick`, the rotate/delete modifier → `Modifying`, zoom/roll →
-//! `MouseWheel`. This module feeds those exact sinks from
+//! `PlayerClick`, the rotate/delete modifier → `Modifying`. This module feeds
+//! those exact sinks from
 //! `bevy::input::touch::Touches`. winit 0.30 delivers touch natively on web (the
 //! same path keyboard/mouse take since the hand-rolled DOM input layer was
 //! removed), so no browser glue is needed and it compiles on native too.
@@ -22,12 +22,12 @@
 //! the same space egui points use. So one layout in logical pixels serves both
 //! hit-testing (`classify_touches`) and drawing (`draw_overlay`).
 
-use crate::input::{get_look, get_modifying, mouse_wheel, process_keyboard_input};
+use crate::input::{get_look, get_modifying, process_keyboard_input};
 use crate::AppState;
 use bad_spaceship_shared::{KeyboardDirectionalInput, Modifying, PlayerClick};
 use bevy::{
-    input::mouse::{MouseMotion, MouseScrollUnit, MouseWheel},
-    input::touch::{TouchPhase, Touches},
+    input::mouse::MouseMotion,
+    input::touch::Touches,
     prelude::*,
     window::PrimaryWindow,
 };
@@ -65,11 +65,6 @@ impl Plugin for MobilePlugin {
                         .after(get_modifying)
                         .run_if(mobile_active)
                         .run_if(in_state(AppState::InGame)),
-                    apply_zoom
-                        .after(classify_touches)
-                        .before(mouse_wheel)
-                        .run_if(mobile_active)
-                        .run_if(in_state(AppState::InGame)),
                 ),
             )
             .add_systems(
@@ -104,10 +99,8 @@ struct TouchControls {
     move_dir: Vec3,
     /// Finger driving look (right-half drag).
     look_touch: Option<u64>,
-    /// Fingers held on the continuous buttons.
+    /// Finger held on the jump button.
     jump_touch: Option<u64>,
-    zoom_in_touch: Option<u64>,
-    zoom_out_touch: Option<u64>,
     /// Latched rotate/delete modifier (Shift equivalent), toggled by its button.
     modify_on: bool,
 }
@@ -118,8 +111,6 @@ impl TouchControls {
         self.move_dir = Vec3::ZERO;
         self.look_touch = None;
         self.jump_touch = None;
-        self.zoom_in_touch = None;
-        self.zoom_out_touch = None;
     }
 }
 
@@ -135,8 +126,6 @@ struct ControlLayout {
     jump: Vec2,
     grab: Vec2,
     modify: Vec2,
-    zoom_in: Vec2,
-    zoom_out: Vec2,
     pause: Vec2,
 }
 
@@ -155,8 +144,6 @@ impl ControlLayout {
         self.jump = Vec2::new(w - margin, h - margin);
         self.grab = Vec2::new(self.jump.x - gap, self.jump.y);
         self.modify = Vec2::new(self.jump.x, self.jump.y - gap);
-        self.zoom_in = Vec2::new(self.grab.x, self.grab.y - gap);
-        self.zoom_out = Vec2::new(self.zoom_in.x - gap, self.zoom_in.y);
         self.pause = Vec2::new(w - self.pause_r - 12.0, self.pause_r + 12.0);
     }
 
@@ -224,12 +211,6 @@ fn classify_touches(
     if !is_active(controls.jump_touch) {
         controls.jump_touch = None;
     }
-    if !is_active(controls.zoom_in_touch) {
-        controls.zoom_in_touch = None;
-    }
-    if !is_active(controls.zoom_out_touch) {
-        controls.zoom_out_touch = None;
-    }
 
     // Assign newly-pressed fingers. Button hits take priority over the
     // move/look zones, so a finger landing on a corner button never moves or looks.
@@ -262,14 +243,6 @@ fn classify_touches(
         if layout.hit(layout.modify, p) {
             crate::tlog!("hit modify");
             controls.modify_on = !controls.modify_on;
-            continue;
-        }
-        if layout.hit(layout.zoom_in, p) {
-            controls.zoom_in_touch = Some(id);
-            continue;
-        }
-        if layout.hit(layout.zoom_out, p) {
-            controls.zoom_out_touch = Some(id);
             continue;
         }
         // Left half = movement joystick (originating where the finger lands),
@@ -352,36 +325,6 @@ fn apply_modify(controls: Res<TouchControls>, mut players: Query<&mut Modifying>
     }
 }
 
-/// Emits a synthetic `MouseWheel` while a zoom button is held; `mouse_wheel`
-/// turns it into `MouseWheelDelta` (camera zoom, or part roll while modifying).
-fn apply_zoom(
-    controls: Res<TouchControls>,
-    windows: Query<Entity, With<PrimaryWindow>>,
-    mut wheel: MessageWriter<MouseWheel>,
-) {
-    let Ok(window) = windows.single() else {
-        return;
-    };
-    let mut y = 0.0;
-    if controls.zoom_in_touch.is_some() {
-        y += 1.0;
-    }
-    if controls.zoom_out_touch.is_some() {
-        y -= 1.0;
-    }
-    if y != 0.0 {
-        wheel.write(MouseWheel {
-            unit: MouseScrollUnit::Line,
-            x: 0.0,
-            y,
-            window,
-            // Bevy 0.19 added a touch phase to `MouseWheel`; synthetic scroll is a
-            // continuous `Moved` (the value mouse wheels always report).
-            phase: TouchPhase::Moved,
-        });
-    }
-}
-
 fn draw_button(painter: &egui::Painter, center: Vec2, r: f32, label: &str, active: bool) {
     let c = egui::pos2(center.x, center.y);
     let fill = if active {
@@ -435,14 +378,6 @@ fn draw_overlay(
     draw_button(&painter, layout.jump, r, "JMP", controls.jump_touch.is_some());
     draw_button(&painter, layout.grab, r, "GRAB", false);
     draw_button(&painter, layout.modify, r, "ROT", controls.modify_on);
-    draw_button(&painter, layout.zoom_in, r, "+", controls.zoom_in_touch.is_some());
-    draw_button(
-        &painter,
-        layout.zoom_out,
-        r,
-        "\u{2212}",
-        controls.zoom_out_touch.is_some(),
-    );
     draw_button(&painter, layout.pause, layout.pause_r, "II", false);
 
     Ok(())
