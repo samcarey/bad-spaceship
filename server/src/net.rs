@@ -12,13 +12,20 @@
 
 use std::net::SocketAddr;
 
-use avian3d::prelude::Collider;
+use avian3d::prelude::{Collider, LinearVelocity};
 use bad_spaceship_shared::net::{NetPart, NetPlayer, NetTransform, PlayerInput, ProtocolPlugin, TICK};
 use bad_spaceship_shared::part::Holdable;
 use bevy::prelude::*;
 use lightyear::prelude::input::native::ActionState;
 use lightyear::prelude::*;
 use lightyear::prelude::server::*;
+
+/// Held-part control tuning.
+const HOLD_DISTANCE: f32 = 5.0; // hold point distance in front of the player
+const HOLD_HEIGHT: f32 = 1.0; // hold point height above the player's pose
+const GRAB_RANGE: f32 = 7.0; // max distance from the hold point to grab a part
+const HOLD_STIFFNESS: f32 = 8.0; // proportional velocity toward the hold point
+const MAX_HOLD_SPEED: f32 = 30.0; // clamp on the hold velocity
 
 pub struct NetServerPlugin;
 
@@ -43,8 +50,69 @@ impl Plugin for NetServerPlugin {
         // Replicate the authoritative shared part world: tag new parts for
         // replication, then stream their poses to clients each frame.
         app.add_systems(Update, (replicate_parts, sync_part_transforms));
-        // Apply each client's replicated input to its player, authoritatively.
-        app.add_systems(FixedUpdate, apply_player_input);
+        // Apply each client's replicated input to its player, then resolve their
+        // grab intent and hold the grabbed part — all server-authoritative.
+        app.add_systems(
+            FixedUpdate,
+            (apply_player_input, server_grab, server_hold).chain(),
+        );
+    }
+}
+
+/// The part a networked player is currently holding (server-authoritative).
+#[derive(Component, Default)]
+struct HeldPart(Option<Entity>);
+
+/// The hold point in front of a player, from its forwarded pose (translation +
+/// yaw-derived rotation). Matches the client avatar's facing (+Z nose).
+fn hold_point(input: &PlayerInput) -> Vec3 {
+    let pos = Vec3::from_array(input.translation);
+    let rot = Quat::from_array(input.rotation);
+    pos + rot * Vec3::Z * HOLD_DISTANCE + Vec3::Y * HOLD_HEIGHT
+}
+
+/// Resolve each player's grab intent: on grab, latch the nearest part within
+/// `GRAB_RANGE` of the hold point; on release, let go.
+fn server_grab(
+    mut players: Query<(&ActionState<PlayerInput>, &mut HeldPart)>,
+    parts: Query<(Entity, &Transform), With<NetPart>>,
+) {
+    for (state, mut held) in &mut players {
+        if !state.0.grab {
+            held.0 = None;
+            continue;
+        }
+        if held.0.is_some() {
+            continue;
+        }
+        let target = hold_point(&state.0);
+        let mut best: Option<(Entity, f32)> = None;
+        for (entity, transform) in &parts {
+            let dist = transform.translation.distance(target);
+            if dist <= GRAB_RANGE && best.is_none_or(|(_, b)| dist < b) {
+                best = Some((entity, dist));
+            }
+        }
+        held.0 = best.map(|(entity, _)| entity);
+    }
+}
+
+/// Drive each held part toward its holder's hold point by setting its velocity
+/// (proportional approach), overriding gravity so it hovers and follows. The
+/// changed pose replicates to all clients via `sync_part_transforms`.
+fn server_hold(
+    players: Query<(&ActionState<PlayerInput>, &HeldPart)>,
+    mut parts: Query<(&Transform, &mut LinearVelocity), With<NetPart>>,
+) {
+    for (state, held) in &players {
+        let Some(part_entity) = held.0 else {
+            continue;
+        };
+        let Ok((transform, mut velocity)) = parts.get_mut(part_entity) else {
+            continue;
+        };
+        let to_target = hold_point(&state.0) - transform.translation;
+        velocity.0 = (to_target * HOLD_STIFFNESS).clamp_length_max(MAX_HOLD_SPEED);
     }
 }
 
@@ -150,6 +218,7 @@ fn spawn_player_for_client(trigger: On<Add, Connected>, mut commands: Commands) 
         // match the entity immediately. `SessionBased` despawns it on disconnect.
         ControlledBy { owner: client, lifetime: Lifetime::SessionBased },
         ActionState::<PlayerInput>::default(),
+        HeldPart::default(),
     ));
     info!("client {client:?} connected — spawned replicated player");
 }

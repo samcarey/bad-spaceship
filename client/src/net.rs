@@ -14,7 +14,7 @@
 use avian3d::prelude::{Collider, RigidBody};
 use bad_spaceship_shared::net::{NetPart, NetPlayer, NetTransform, PlayerInput, ProtocolPlugin, TICK};
 use bad_spaceship_shared::part::SuppressLocalParts;
-use bad_spaceship_shared::{Character, Yaw};
+use bad_spaceship_shared::{Character, Modifying, Player, PlayerClick, Yaw};
 use bevy::prelude::*;
 use lightyear::prelude::client::input::InputSystems as ClientInputSystems;
 use lightyear::prelude::client::*;
@@ -54,7 +54,10 @@ impl Plugin for NetClientPlugin {
         // In multiplayer the parts are server-authoritative: suppress the local
         // part sim and render the server's replicated parts instead.
         app.insert_resource(SuppressLocalParts);
+        app.init_resource::<WantHold>();
         app.add_systems(Startup, connect);
+        // Toggle the grab intent on each (non-modifier) click; sent in PlayerInput.
+        app.add_systems(Update, read_grab_intent);
         // Give every replicated player a visible body, then keep its transform
         // in sync with the replicated pose, tag the player we control, and tag
         // our own avatar so we can render it predicted (from the local pose).
@@ -112,6 +115,7 @@ fn avatar_pose(translation: Vec3, yaw: &Yaw) -> Transform {
 /// `GlobalTransform` is the player's true position/orientation on every platform.
 fn write_player_pose(
     character: Query<(&GlobalTransform, &Yaw), With<Character>>,
+    want_hold: Res<WantHold>,
     mut controlled: Query<&mut ActionState<PlayerInput>, With<InputMarker<PlayerInput>>>,
 ) {
     let Some((global, yaw)) = character.iter().next() else {
@@ -121,6 +125,30 @@ fn write_player_pose(
     for mut state in &mut controlled {
         state.0.translation = pose.translation.to_array();
         state.0.rotation = pose.rotation.to_array();
+        state.0.grab = want_hold.0;
+    }
+}
+
+/// The client's grab intent: toggled on each non-modifier click. The local
+/// hold mechanic (`toggle_holding`) is inert in multiplayer (no local parts to
+/// focus), so the grab toggle is tracked here and sent to the server instead.
+#[derive(Resource, Default)]
+struct WantHold(bool);
+
+/// Toggle `WantHold` on each plain (non-`Modifying`) click — the same gesture
+/// that grabs/drops in single-player, sourced from desktop clicks and the mobile
+/// grab button alike (both emit `PlayerClick`). Modifier clicks (attach) are a
+/// later slice.
+fn read_grab_intent(
+    mut clicks: MessageReader<PlayerClick>,
+    modifying: Query<&Modifying, With<Player>>,
+    mut want_hold: ResMut<WantHold>,
+) {
+    let modding = modifying.iter().next().is_some_and(|m| m.0);
+    for _ in clicks.read() {
+        if !modding {
+            want_hold.0 = !want_hold.0;
+        }
     }
 }
 

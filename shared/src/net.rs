@@ -76,6 +76,9 @@ pub struct PlayerInput {
     pub translation: [f32; 3],
     /// Rotation quaternion, `[x, y, z, w]`.
     pub rotation: [f32; 4],
+    /// The client's intent to be holding a part: while true the server grabs the
+    /// nearest part in front of the player and holds it at the player's hold point.
+    pub grab: bool,
 }
 
 // No entities are referenced by `PlayerInput`, so the mapping is a no-op — but
