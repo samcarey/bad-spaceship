@@ -12,7 +12,9 @@
 
 use std::net::SocketAddr;
 
-use bad_spaceship_shared::net::{NetPlayer, NetTransform, PlayerInput, ProtocolPlugin, TICK};
+use avian3d::prelude::Collider;
+use bad_spaceship_shared::net::{NetPart, NetPlayer, NetTransform, PlayerInput, ProtocolPlugin, TICK};
+use bad_spaceship_shared::part::Holdable;
 use bevy::prelude::*;
 use lightyear::prelude::input::native::ActionState;
 use lightyear::prelude::*;
@@ -38,8 +40,44 @@ impl Plugin for NetServerPlugin {
         // device — useful because mobile browsers suspend background tabs, so two
         // tabs on one phone never connect simultaneously.
         app.add_systems(Update, move_demo_bot);
+        // Replicate the authoritative shared part world: tag new parts for
+        // replication, then stream their poses to clients each frame.
+        app.add_systems(Update, (replicate_parts, sync_part_transforms));
         // Apply each client's replicated input to its player, authoritatively.
         app.add_systems(FixedUpdate, apply_player_input);
+    }
+}
+
+/// Tag each newly-spawned part (a `Holdable` body with a cuboid collider) for
+/// replication: its shape via `NetPart`, its pose via `NetTransform`, replicated
+/// and interpolated to all clients.
+fn replicate_parts(
+    mut commands: Commands,
+    new_parts: Query<(Entity, &Collider), (With<Holdable>, Without<NetPart>)>,
+) {
+    for (entity, collider) in &new_parts {
+        let Some(cuboid) = collider.shape().as_cuboid() else {
+            continue;
+        };
+        let half = cuboid.half_extents;
+        commands.entity(entity).insert((
+            NetPart { half_extents: [half[0], half[1], half[2]] },
+            NetTransform::default(),
+            Replicate::to_clients(NetworkTarget::All),
+            InterpolationTarget::to_clients(NetworkTarget::All),
+        ));
+    }
+}
+
+/// Mirror each replicated part's authoritative physics pose into its
+/// `NetTransform` so the change replicates to clients. Only writes on an actual
+/// change, so settled (motionless) parts stop generating replication traffic.
+fn sync_part_transforms(mut parts: Query<(&Transform, &mut NetTransform), With<NetPart>>) {
+    for (transform, mut net) in &mut parts {
+        let updated = NetTransform::from_transform(transform);
+        if *net != updated {
+            *net = updated;
+        }
     }
 }
 

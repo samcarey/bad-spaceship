@@ -18,13 +18,23 @@ use std::f32;
 
 pub struct PartPlugin;
 
+/// Marker resource inserted by the client in multiplayer mode. While present,
+/// the local part *creation* systems are skipped: the client renders the
+/// server's replicated parts instead of simulating its own. The authoritative
+/// server (which never inserts this) keeps simulating the shared part world.
+#[derive(Resource)]
+pub struct SuppressLocalParts;
+
 impl Plugin for PartPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_initial_parts)
+        app.add_systems(
+            Startup,
+            spawn_initial_parts.run_if(not(resource_exists::<SuppressLocalParts>)),
+        )
             .add_systems(
                 Update,
                 (
-                    replace_fallen_parts,
+                    replace_fallen_parts.run_if(not(resource_exists::<SuppressLocalParts>)),
                     update_focused,
                     // Avian's `Forces` helper auto-clears after the physics step, so
                     // the old per-frame `zero_part_external_forces` system is gone.
@@ -32,7 +42,7 @@ impl Plugin for PartPlugin {
                     // order them to avoid an ambiguous double-write.
                     position_held_part,
                     orient_held_part.after(position_held_part),
-                    spawn_part,
+                    spawn_part.run_if(not(resource_exists::<SuppressLocalParts>)),
                     update_attachable,
                     (update_active_joints, update_predelete_joints)
                         .in_set(UpdateJointsLabel)

@@ -84,6 +84,14 @@ impl MapEntities for PlayerInput {
     fn map_entities<M: EntityMapper>(&mut self, _entity_mapper: &mut M) {}
 }
 
+/// Replicated cuboid shape of a part (full extents = 2 × `half_extents`). The
+/// server replicates this once per part so a client that doesn't simulate parts
+/// can rebuild the render mesh; the part's live pose rides on `NetTransform`.
+#[derive(Component, Serialize, Deserialize, Clone, Copy, PartialEq, Debug, Default)]
+pub struct NetPart {
+    pub half_extents: [f32; 3],
+}
+
 /// Interpolate between two replicated poses: lerp the translation, slerp the
 /// rotation. Used by lightyear's interpolation for `NetTransform`.
 fn lerp_net_transform(start: NetTransform, other: NetTransform, t: f32) -> NetTransform {
@@ -113,6 +121,8 @@ impl Plugin for ProtocolPlugin {
         app.component::<NetTransform>()
             .replicate()
             .add_interpolation_with(lerp_net_transform);
+        // The part shape is constant, so it only needs replicating (no interp).
+        app.component::<NetPart>().replicate();
 
         // Register `PlayerInput` as a networked native input. `InputPlugin` is
         // role-agnostic: it adds the client input plugin under lightyear's

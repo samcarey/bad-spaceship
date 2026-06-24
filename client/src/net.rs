@@ -11,7 +11,8 @@
 //!
 //! For every player the server replicates, draw a cube at its `NetTransform`.
 
-use bad_spaceship_shared::net::{NetPlayer, NetTransform, PlayerInput, ProtocolPlugin, TICK};
+use bad_spaceship_shared::net::{NetPart, NetPlayer, NetTransform, PlayerInput, ProtocolPlugin, TICK};
+use bad_spaceship_shared::part::SuppressLocalParts;
 use bad_spaceship_shared::{Character, Yaw};
 use bevy::prelude::*;
 use lightyear::prelude::client::input::InputSystems as ClientInputSystems;
@@ -49,6 +50,9 @@ impl Plugin for NetClientPlugin {
         // Order matters: plugin group → protocol → spawn the client entity.
         app.add_plugins(ClientPlugins { tick_duration: TICK });
         app.add_plugins(ProtocolPlugin);
+        // In multiplayer the parts are server-authoritative: suppress the local
+        // part sim and render the server's replicated parts instead.
+        app.insert_resource(SuppressLocalParts);
         app.add_systems(Startup, connect);
         // Give every replicated player a visible body, then keep its transform
         // in sync with the replicated pose, tag the player we control, and tag
@@ -57,6 +61,7 @@ impl Plugin for NetClientPlugin {
             Update,
             (
                 draw_replicated_players,
+                draw_replicated_parts,
                 apply_net_transform,
                 mark_controlled_player,
                 mark_own_avatar,
@@ -188,6 +193,25 @@ fn draw_replicated_players(
                 MeshMaterial3d(materials.add(Color::srgb(0.9, 0.35, 0.35))),
             ))
             .add_children(&[nose]);
+    }
+}
+
+/// Give each replicated part's `Interpolated` copy a cuboid mesh built from its
+/// `NetPart` shape. These are visual ghosts of the server's authoritative parts
+/// (no collider/physics on the client); `apply_net_transform` keeps their pose
+/// in sync via the interpolated `NetTransform`.
+fn draw_replicated_parts(
+    mut commands: Commands,
+    new_parts: Query<(Entity, &NetPart), (With<Interpolated>, Without<Mesh3d>)>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    for (entity, part) in &new_parts {
+        let [hx, hy, hz] = part.half_extents;
+        commands.entity(entity).insert((
+            Mesh3d(meshes.add(Cuboid::new(hx * 2.0, hy * 2.0, hz * 2.0))),
+            MeshMaterial3d(materials.add(Color::srgb(0.55, 0.6, 0.72))),
+        ));
     }
 }
 
