@@ -1,5 +1,5 @@
 use bad_spaceship_shared::{
-    part::{Holdable, TargetOrientation, TargetPosition, DELETE_RADIUS},
+    part::{Holdable, SuppressLocalParts, TargetOrientation, TargetPosition, DELETE_RADIUS},
     player::get_hold_point_entity,
     DisplayableJoint, ExistingJoints, HoldPoint, Holding, Modifying, PotentialJoints,
     PredeleteJoint, PredeleteJoints, UpdateJointsLabel,
@@ -35,12 +35,16 @@ impl Plugin for RenderSecondaryPassPlugin {
                 Update,
                 (
                     position_gizmo,
-                    add_hold_point_delete_zone_visualization,
+                    // The hold-point delete-zone sphere is a local-build UI; in
+                    // multiplayer the local hold is suppressed, so skip it.
+                    add_hold_point_delete_zone_visualization
+                        .run_if(not(resource_exists::<SuppressLocalParts>)),
                     (
                         display_potential_joints,
                         display_existing_joints,
                         display_predelete_joints,
-                        delete_zone_visibility,
+                        delete_zone_visibility
+                            .run_if(not(resource_exists::<SuppressLocalParts>)),
                     )
                         .after(UpdateJointsLabel),
                 ),
@@ -63,6 +67,9 @@ fn position_gizmo(
     hold_points: Query<&GlobalTransform, (With<HoldPoint>, Without<GizmoHub>)>,
     mut gizmo_hubs: Query<(&mut Transform, &mut Visibility, &Children), With<GizmoHub>>,
     mut gizmo_pieces: Query<&mut Visibility, (With<GizmoPiece>, Without<GizmoHub>)>,
+    // In multiplayer the local hold is suppressed (no `TargetOrientation`/
+    // `TargetPosition`), so there's nothing to drive the gizmo from `helds`.
+    multiplayer: Option<Res<SuppressLocalParts>>,
 ) {
     let mut translation = None;
     let mut rotation = None;
@@ -72,6 +79,14 @@ fn position_gizmo(
             Err(_) => None,
         };
         rotation = Some(target_orientation.quat);
+    } else if multiplayer.is_some() {
+        // Multiplayer: show the gizmo at the hold point (the server-authoritative
+        // grab target), oriented to the orbit-center look basis.
+        if let Some(transform) = hold_points.iter().next() {
+            let (_, rot, trans) = transform.to_scale_rotation_translation();
+            translation = Some(trans);
+            rotation = Some(rot);
+        }
     }
 
     let mut childs = Vec::new();

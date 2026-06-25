@@ -73,9 +73,59 @@ impl NetTransform {
 /// `MapEntities`.
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug, Default, Reflect)]
 pub struct PlayerInput {
+    /// Character world position (drives the avatar body).
     pub translation: [f32; 3],
-    /// Rotation quaternion, `[x, y, z, w]`.
+    /// Avatar facing, yaw-only quaternion `[x, y, z, w]`.
     pub rotation: [f32; 4],
+    /// Camera-orbit-center world position — the origin of the grab look-ray,
+    /// matching single-player's focus (which casts from the orbit center).
+    pub grab_origin: [f32; 3],
+    /// Hold-point world position — where a grabbed part floats to. Forwarded
+    /// from the client's real `HoldPoint` entity so it matches single-player
+    /// exactly (it hangs off the orbit center, above the character).
+    pub hold_target: [f32; 3],
+    /// The client's intent to be holding a part.
+    pub grab: bool,
+}
+
+/// Focus range / look-angle for selecting a part to grab — matches the
+/// single-player `update_focused` (`MAX_INTERACT_DISTANCE` / `MAX_INTERACT_ANGLE`
+/// in `part.rs`).
+const MAX_INTERACT_DISTANCE: f32 = 7.5;
+const MAX_INTERACT_ANGLE: f32 = 20.0 * core::f32::consts::PI / 180.0;
+/// Positioning-spring stiffness for the held-part hold (matches `part.rs`).
+const POSITIONING_STIFFNESS: f32 = 30.0;
+
+/// The part the player is most directly looking at (smallest look-angle within
+/// range) — the same focus rule as single-player. `look` is the grab ray
+/// direction (hold_target − grab_origin). `parts` yields `(entity,
+/// world_position)`.
+pub fn focused_part(
+    origin: Vec3,
+    look: Vec3,
+    parts: impl Iterator<Item = (Entity, Vec3)>,
+) -> Option<Entity> {
+    let mut best = None;
+    let mut smallest_angle = MAX_INTERACT_ANGLE;
+    for (entity, pos) in parts {
+        let between = pos - origin;
+        if between.length_squared() < MAX_INTERACT_DISTANCE * MAX_INTERACT_DISTANCE {
+            let angle = look.angle_between(between);
+            if angle < smallest_angle {
+                smallest_angle = angle;
+                best = Some(entity);
+            }
+        }
+    }
+    best
+}
+
+/// Critically-damped positioning acceleration that floats a held part to the
+/// hold point (matches `position_held_part`'s oscillator). The caller subtracts
+/// gravity to cancel the part's weight.
+pub fn hold_acceleration(displacement: Vec3, velocity: Vec3) -> Vec3 {
+    let damping = 2.0 * POSITIONING_STIFFNESS.sqrt();
+    displacement * POSITIONING_STIFFNESS - velocity * damping
 }
 
 // No entities are referenced by `PlayerInput`, so the mapping is a no-op — but

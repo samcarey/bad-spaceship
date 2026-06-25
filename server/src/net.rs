@@ -12,8 +12,13 @@
 
 use std::net::SocketAddr;
 
-use avian3d::prelude::Collider;
-use bad_spaceship_shared::net::{NetPart, NetPlayer, NetTransform, PlayerInput, ProtocolPlugin, TICK};
+use avian3d::prelude::{
+    Collider, Forces, Gravity, ReadRigidBodyForces, WriteRigidBodyForces,
+};
+use bad_spaceship_shared::net::{
+    focused_part, hold_acceleration, NetPart, NetPlayer, NetTransform, PlayerInput, ProtocolPlugin,
+    TICK,
+};
 use bad_spaceship_shared::part::Holdable;
 use bevy::prelude::*;
 use lightyear::prelude::input::native::ActionState;
@@ -43,8 +48,64 @@ impl Plugin for NetServerPlugin {
         // Replicate the authoritative shared part world: tag new parts for
         // replication, then stream their poses to clients each frame.
         app.add_systems(Update, (replicate_parts, sync_part_transforms));
-        // Apply each client's replicated input to its player, authoritatively.
+        // Apply each client's replicated input to its player (FixedUpdate, the
+        // sim tick). Grab/hold run in Update where Avian's `Forces` helper
+        // accumulates (matching the single-player `position_held_part`).
         app.add_systems(FixedUpdate, apply_player_input);
+        app.add_systems(Update, (server_grab, server_hold).chain());
+    }
+}
+
+/// The part a networked player is currently holding (server-authoritative).
+#[derive(Component, Default)]
+struct HeldPart(Option<Entity>);
+
+/// Resolve each player's grab intent: on grab, latch the part the player is most
+/// directly looking at (within focus range/angle) — the same selection as
+/// single-player, cast from the forwarded orbit-center origin along the ray to
+/// the hold target. On release, let go. The part stays dynamic throughout.
+fn server_grab(
+    mut players: Query<(&ActionState<PlayerInput>, &mut HeldPart)>,
+    parts: Query<(Entity, &Transform), With<NetPart>>,
+) {
+    for (state, mut held) in &mut players {
+        if !state.0.grab {
+            held.0 = None;
+            continue;
+        }
+        if held.0.is_some() {
+            continue;
+        }
+        let origin = Vec3::from_array(state.0.grab_origin);
+        let look = (Vec3::from_array(state.0.hold_target) - origin).normalize_or_zero();
+        held.0 = focused_part(
+            origin,
+            look,
+            parts.iter().map(|(entity, t)| (entity, t.translation)),
+        );
+    }
+}
+
+/// Float each held part to its holder's hold point with a critically-damped
+/// anti-gravity force (matches single-player `position_held_part`): the part
+/// stays dynamic, so it still collides (no tunneling), but its weight is
+/// cancelled so it floats to and follows the hold point. The changed pose
+/// replicates to all clients via `sync_part_transforms`.
+fn server_hold(
+    players: Query<(&ActionState<PlayerInput>, &HeldPart)>,
+    mut parts: Query<(&Transform, Forces), With<NetPart>>,
+    gravity: Res<Gravity>,
+) {
+    for (state, held) in &players {
+        let Some(part_entity) = held.0 else {
+            continue;
+        };
+        let Ok((transform, mut forces)) = parts.get_mut(part_entity) else {
+            continue;
+        };
+        let displacement = Vec3::from_array(state.0.hold_target) - transform.translation;
+        let velocity = forces.linear_velocity();
+        forces.apply_linear_acceleration(hold_acceleration(displacement, velocity) - gravity.0);
     }
 }
 
@@ -150,6 +211,7 @@ fn spawn_player_for_client(trigger: On<Add, Connected>, mut commands: Commands) 
         // match the entity immediately. `SessionBased` despawns it on disconnect.
         ControlledBy { owner: client, lifetime: Lifetime::SessionBased },
         ActionState::<PlayerInput>::default(),
+        HeldPart::default(),
     ));
     info!("client {client:?} connected — spawned replicated player");
 }

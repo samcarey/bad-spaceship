@@ -12,9 +12,13 @@
 //! For every player the server replicates, draw a cube at its `NetTransform`.
 
 use avian3d::prelude::{Collider, RigidBody};
-use bad_spaceship_shared::net::{NetPart, NetPlayer, NetTransform, PlayerInput, ProtocolPlugin, TICK};
+use bad_spaceship_shared::net::{
+    focused_part, NetPart, NetPlayer, NetTransform, PlayerInput, ProtocolPlugin, TICK,
+};
 use bad_spaceship_shared::part::SuppressLocalParts;
-use bad_spaceship_shared::{Character, Yaw};
+use bad_spaceship_shared::{
+    CameraOrbitCenter, Character, HoldPoint, Modifying, Player, PlayerClick, Yaw,
+};
 use bevy::prelude::*;
 use lightyear::prelude::client::input::InputSystems as ClientInputSystems;
 use lightyear::prelude::client::*;
@@ -54,7 +58,10 @@ impl Plugin for NetClientPlugin {
         // In multiplayer the parts are server-authoritative: suppress the local
         // part sim and render the server's replicated parts instead.
         app.insert_resource(SuppressLocalParts);
+        app.init_resource::<WantHold>();
         app.add_systems(Startup, connect);
+        // Toggle the grab intent on each (non-modifier) click; sent in PlayerInput.
+        app.add_systems(Update, read_grab_intent);
         // Give every replicated player a visible body, then keep its transform
         // in sync with the replicated pose, tag the player we control, and tag
         // our own avatar so we can render it predicted (from the local pose).
@@ -67,6 +74,7 @@ impl Plugin for NetClientPlugin {
                 mark_controlled_player,
                 mark_own_avatar,
                 predict_own_avatar,
+                highlight_grabbable,
             ),
         );
         // Forward our character pose each tick, in lightyear's input-writing set.
@@ -112,15 +120,87 @@ fn avatar_pose(translation: Vec3, yaw: &Yaw) -> Transform {
 /// `GlobalTransform` is the player's true position/orientation on every platform.
 fn write_player_pose(
     character: Query<(&GlobalTransform, &Yaw), With<Character>>,
+    orbit: Query<&GlobalTransform, With<CameraOrbitCenter>>,
+    hold: Query<&GlobalTransform, With<HoldPoint>>,
+    want_hold: Res<WantHold>,
     mut controlled: Query<&mut ActionState<PlayerInput>, With<InputMarker<PlayerInput>>>,
 ) {
     let Some((global, yaw)) = character.iter().next() else {
         return;
     };
     let pose = avatar_pose(global.translation(), yaw);
+    // The grab ray origin and hold point come from the real camera-orbit/hold
+    // entities (above the character), so the networked hold matches single-player.
+    let grab_origin = orbit.iter().next().map(|g| g.translation());
+    let hold_target = hold.iter().next().map(|g| g.translation());
     for mut state in &mut controlled {
         state.0.translation = pose.translation.to_array();
         state.0.rotation = pose.rotation.to_array();
+        match (grab_origin, hold_target) {
+            (Some(origin), Some(target)) => {
+                state.0.grab_origin = origin.to_array();
+                state.0.hold_target = target.to_array();
+                state.0.grab = want_hold.0;
+            }
+            // No hold point yet (camera orbit not attached) — can't grab.
+            _ => state.0.grab = false,
+        }
+    }
+}
+
+/// Highlight the part the player is looking at (the same look-ray focus the
+/// server uses, cast from the orbit center toward the hold point) in
+/// single-player's yellow focus colour, so the player can tell when to grab.
+fn highlight_grabbable(
+    orbit: Query<&GlobalTransform, With<CameraOrbitCenter>>,
+    hold: Query<&GlobalTransform, With<HoldPoint>>,
+    parts: Query<(Entity, &Transform, &MeshMaterial3d<StandardMaterial>), With<NetPart>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    let (Some(orbit), Some(hold)) = (orbit.iter().next(), hold.iter().next()) else {
+        return;
+    };
+    let origin = orbit.translation();
+    let look = (hold.translation() - origin).normalize_or_zero();
+    let grabbable = focused_part(
+        origin,
+        look,
+        parts.iter().map(|(entity, t, _)| (entity, t.translation)),
+    );
+    // Base colour for everything; the focused part glows yellow.
+    for (entity, _, material) in &parts {
+        if let Some(mat) = materials.get_mut(&material.0) {
+            if Some(entity) == grabbable {
+                mat.base_color = Color::srgb(1.0, 1.0, 0.0);
+                mat.emissive = LinearRgba::rgb(0.6, 0.6, 0.0);
+            } else {
+                mat.base_color = Color::srgb(0.55, 0.6, 0.72);
+                mat.emissive = LinearRgba::BLACK;
+            }
+        }
+    }
+}
+
+/// The client's grab intent: toggled on each non-modifier click. The local
+/// hold mechanic (`toggle_holding`) is inert in multiplayer (no local parts to
+/// focus), so the grab toggle is tracked here and sent to the server instead.
+#[derive(Resource, Default)]
+struct WantHold(bool);
+
+/// Toggle `WantHold` on each plain (non-`Modifying`) click — the same gesture
+/// that grabs/drops in single-player, sourced from desktop clicks and the mobile
+/// grab button alike (both emit `PlayerClick`). Modifier clicks (attach) are a
+/// later slice.
+fn read_grab_intent(
+    mut clicks: MessageReader<PlayerClick>,
+    modifying: Query<&Modifying, With<Player>>,
+    mut want_hold: ResMut<WantHold>,
+) {
+    let modding = modifying.iter().next().is_some_and(|m| m.0);
+    for _ in clicks.read() {
+        if !modding {
+            want_hold.0 = !want_hold.0;
+        }
     }
 }
 
