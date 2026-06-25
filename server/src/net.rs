@@ -16,8 +16,8 @@ use avian3d::prelude::{
     Collider, Forces, Gravity, ReadRigidBodyForces, WriteRigidBodyForces,
 };
 use bad_spaceship_shared::net::{
-    focused_part, hold_acceleration, hold_point, look_forward, NetPart, NetPlayer, NetTransform,
-    PlayerInput, ProtocolPlugin, TICK,
+    focused_part, hold_acceleration, NetPart, NetPlayer, NetTransform, PlayerInput, ProtocolPlugin,
+    TICK,
 };
 use bad_spaceship_shared::part::Holdable;
 use bevy::prelude::*;
@@ -60,14 +60,10 @@ impl Plugin for NetServerPlugin {
 #[derive(Component, Default)]
 struct HeldPart(Option<Entity>);
 
-/// The hold point in front of a player, from its forwarded pose.
-fn player_hold_point(input: &PlayerInput) -> Vec3 {
-    hold_point(input.translation, input.rotation, input.pitch)
-}
-
 /// Resolve each player's grab intent: on grab, latch the part the player is most
 /// directly looking at (within focus range/angle) — the same selection as
-/// single-player. On release, let go. The part stays dynamic throughout.
+/// single-player, cast from the forwarded orbit-center origin along the ray to
+/// the hold target. On release, let go. The part stays dynamic throughout.
 fn server_grab(
     mut players: Query<(&ActionState<PlayerInput>, &mut HeldPart)>,
     parts: Query<(Entity, &Transform), With<NetPart>>,
@@ -80,10 +76,10 @@ fn server_grab(
         if held.0.is_some() {
             continue;
         }
-        let player_pos = Vec3::from_array(state.0.translation);
-        let look = look_forward(state.0.rotation, state.0.pitch);
+        let origin = Vec3::from_array(state.0.grab_origin);
+        let look = (Vec3::from_array(state.0.hold_target) - origin).normalize_or_zero();
         held.0 = focused_part(
-            player_pos,
+            origin,
             look,
             parts.iter().map(|(entity, t)| (entity, t.translation)),
         );
@@ -107,7 +103,7 @@ fn server_hold(
         let Ok((transform, mut forces)) = parts.get_mut(part_entity) else {
             continue;
         };
-        let displacement = player_hold_point(&state.0) - transform.translation;
+        let displacement = Vec3::from_array(state.0.hold_target) - transform.translation;
         let velocity = forces.linear_velocity();
         forces.apply_linear_acceleration(hold_acceleration(displacement, velocity) - gravity.0);
     }

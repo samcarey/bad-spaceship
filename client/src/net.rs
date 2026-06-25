@@ -13,11 +13,12 @@
 
 use avian3d::prelude::{Collider, RigidBody};
 use bad_spaceship_shared::net::{
-    focused_part, hold_point, look_forward, NetPart, NetPlayer, NetTransform, PlayerInput,
-    ProtocolPlugin, TICK,
+    focused_part, NetPart, NetPlayer, NetTransform, PlayerInput, ProtocolPlugin, TICK,
 };
 use bad_spaceship_shared::part::SuppressLocalParts;
-use bad_spaceship_shared::{Character, LookPitch, Modifying, Player, PlayerClick, Yaw};
+use bad_spaceship_shared::{
+    CameraOrbitCenter, Character, HoldPoint, Modifying, Player, PlayerClick, Yaw,
+};
 use bevy::prelude::*;
 use lightyear::prelude::client::input::InputSystems as ClientInputSystems;
 use lightyear::prelude::client::*;
@@ -119,46 +120,51 @@ fn avatar_pose(translation: Vec3, yaw: &Yaw) -> Transform {
 /// (the `Character` ball — `Player` and `Character` are the same entity), so its
 /// `GlobalTransform` is the player's true position/orientation on every platform.
 fn write_player_pose(
-    character: Query<(&GlobalTransform, &Yaw, &LookPitch), With<Character>>,
+    character: Query<(&GlobalTransform, &Yaw), With<Character>>,
+    orbit: Query<&GlobalTransform, With<CameraOrbitCenter>>,
+    hold: Query<&GlobalTransform, With<HoldPoint>>,
     want_hold: Res<WantHold>,
     mut controlled: Query<&mut ActionState<PlayerInput>, With<InputMarker<PlayerInput>>>,
 ) {
-    let Some((global, yaw, pitch)) = character.iter().next() else {
+    let Some((global, yaw)) = character.iter().next() else {
         return;
     };
     let pose = avatar_pose(global.translation(), yaw);
+    // The grab ray origin and hold point come from the real camera-orbit/hold
+    // entities (above the character), so the networked hold matches single-player.
+    let grab_origin = orbit.iter().next().map(|g| g.translation());
+    let hold_target = hold.iter().next().map(|g| g.translation());
     for mut state in &mut controlled {
         state.0.translation = pose.translation.to_array();
         state.0.rotation = pose.rotation.to_array();
-        // Pitch is sent separately so the server's hold point follows the look
-        // (lifting a held part) while the avatar body stays yaw-only.
-        state.0.pitch = pitch.0;
-        state.0.grab = want_hold.0;
+        match (grab_origin, hold_target) {
+            (Some(origin), Some(target)) => {
+                state.0.grab_origin = origin.to_array();
+                state.0.hold_target = target.to_array();
+                state.0.grab = want_hold.0;
+            }
+            // No hold point yet (camera orbit not attached) — can't grab.
+            _ => state.0.grab = false,
+        }
     }
 }
 
-/// The local player's hold point (where a grabbed part is pulled to), mirroring
-/// the server's computation from the same shared helper.
-fn local_hold_point(global: &GlobalTransform, yaw: &Yaw, pitch: &LookPitch) -> Vec3 {
-    let facing = Quat::from_rotation_y(-yaw.0);
-    hold_point(global.translation().to_array(), facing.to_array(), pitch.0)
-}
-
 /// Highlight the part the player is looking at (the same look-ray focus the
-/// server uses to pick a grab target, and matching single-player's yellow
-/// focus colour) so the player can tell when to grab. Once grabbed the held
-/// part stays in front, so it reads as "held" too.
+/// server uses, cast from the orbit center toward the hold point) in
+/// single-player's yellow focus colour, so the player can tell when to grab.
 fn highlight_grabbable(
-    character: Query<(&GlobalTransform, &Yaw, &LookPitch), With<Character>>,
+    orbit: Query<&GlobalTransform, With<CameraOrbitCenter>>,
+    hold: Query<&GlobalTransform, With<HoldPoint>>,
     parts: Query<(Entity, &Transform, &MeshMaterial3d<StandardMaterial>), With<NetPart>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    let Some((global, yaw, pitch)) = character.iter().next() else {
+    let (Some(orbit), Some(hold)) = (orbit.iter().next(), hold.iter().next()) else {
         return;
     };
-    let look = look_forward(Quat::from_rotation_y(-yaw.0).to_array(), pitch.0);
+    let origin = orbit.translation();
+    let look = (hold.translation() - origin).normalize_or_zero();
     let grabbable = focused_part(
-        global.translation(),
+        origin,
         look,
         parts.iter().map(|(entity, t, _)| (entity, t.translation)),
     );
@@ -176,12 +182,13 @@ fn highlight_grabbable(
     }
 }
 
-/// Marks the hold-point marker entity (a small emissive sphere).
+/// Marks the hold-point marker entity (an emissive sphere).
 #[derive(Component)]
 struct HoldMarker;
 
-/// Spawn the hold-point marker once (a real mesh, so it renders in this app's
-/// custom render passes — Bevy's immediate-mode gizmos don't).
+/// Spawn the hold-point marker once. `Mesh3d` doesn't auto-add a `Transform`
+/// here, so include `Transform`/`Visibility` explicitly (otherwise it never
+/// renders or moves).
 fn spawn_hold_marker(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -195,21 +202,22 @@ fn spawn_hold_marker(
             emissive: LinearRgba::rgb(1.0, 0.7, 0.0),
             ..default()
         })),
+        Transform::default(),
+        Visibility::default(),
     ));
 }
 
-/// Move the hold-point marker to the local hold point each frame, so the player
-/// can see where a grabbed part is being pulled to.
+/// Move the hold-point marker to the real hold point each frame, so the player
+/// can see where a grabbed part is pulled to.
 fn move_hold_marker(
-    character: Query<(&GlobalTransform, &Yaw, &LookPitch), With<Character>>,
+    hold: Query<&GlobalTransform, With<HoldPoint>>,
     mut marker: Query<&mut Transform, With<HoldMarker>>,
 ) {
-    let Some((global, yaw, pitch)) = character.iter().next() else {
+    let Some(hold) = hold.iter().next() else {
         return;
     };
-    let target = local_hold_point(global, yaw, pitch);
     for mut transform in &mut marker {
-        transform.translation = target;
+        transform.translation = hold.translation();
     }
 }
 

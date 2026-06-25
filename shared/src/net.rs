@@ -73,20 +73,21 @@ impl NetTransform {
 /// `MapEntities`.
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug, Default, Reflect)]
 pub struct PlayerInput {
+    /// Character world position (drives the avatar body).
     pub translation: [f32; 3],
-    /// Rotation quaternion, `[x, y, z, w]` (yaw-only — the avatar's facing).
+    /// Avatar facing, yaw-only quaternion `[x, y, z, w]`.
     pub rotation: [f32; 4],
-    /// Look pitch, applied on top of yaw for the hold direction (so looking up
-    /// lifts a held part). Separate from `rotation` since the avatar body doesn't
-    /// pitch.
-    pub pitch: f32,
-    /// The client's intent to be holding a part: while true the server grabs the
-    /// nearest part in front of the player and holds it at the player's hold point.
+    /// Camera-orbit-center world position — the origin of the grab look-ray,
+    /// matching single-player's focus (which casts from the orbit center).
+    pub grab_origin: [f32; 3],
+    /// Hold-point world position — where a grabbed part floats to. Forwarded
+    /// from the client's real `HoldPoint` entity so it matches single-player
+    /// exactly (it hangs off the orbit center, above the character).
+    pub hold_target: [f32; 3],
+    /// The client's intent to be holding a part.
     pub grab: bool,
 }
 
-/// Distance in front of the player to the hold point.
-pub const HOLD_DISTANCE: f32 = 5.0;
 /// Focus range / look-angle for selecting a part to grab — matches the
 /// single-player `update_focused` (`MAX_INTERACT_DISTANCE` / `MAX_INTERACT_ANGLE`
 /// in `part.rs`).
@@ -95,31 +96,19 @@ const MAX_INTERACT_ANGLE: f32 = 20.0 * core::f32::consts::PI / 180.0;
 /// Positioning-spring stiffness for the held-part hold (matches `part.rs`).
 const POSITIONING_STIFFNESS: f32 = 30.0;
 
-/// The player's look direction (`Ry(-yaw) * Rx(pitch) * +Z`, the camera orbit
-/// center's `back()`). `rotation` already encodes `Ry(-yaw)`; `pitch` adds the
-/// vertical tilt. Shared so the server's grab and the client's highlight agree.
-pub fn look_forward(rotation: [f32; 4], pitch: f32) -> Vec3 {
-    (Quat::from_array(rotation) * Quat::from_rotation_x(pitch)) * Vec3::Z
-}
-
-/// The world-space hold point in front of a player, along its look direction —
-/// so looking up/down lifts/lowers a held part.
-pub fn hold_point(translation: [f32; 3], rotation: [f32; 4], pitch: f32) -> Vec3 {
-    Vec3::from_array(translation) + look_forward(rotation, pitch) * HOLD_DISTANCE
-}
-
 /// The part the player is most directly looking at (smallest look-angle within
-/// range) — the same focus rule as single-player. `parts` yields `(entity,
+/// range) — the same focus rule as single-player. `look` is the grab ray
+/// direction (hold_target − grab_origin). `parts` yields `(entity,
 /// world_position)`.
 pub fn focused_part(
-    player_pos: Vec3,
+    origin: Vec3,
     look: Vec3,
     parts: impl Iterator<Item = (Entity, Vec3)>,
 ) -> Option<Entity> {
     let mut best = None;
     let mut smallest_angle = MAX_INTERACT_ANGLE;
     for (entity, pos) in parts {
-        let between = pos - player_pos;
+        let between = pos - origin;
         if between.length_squared() < MAX_INTERACT_DISTANCE * MAX_INTERACT_DISTANCE {
             let angle = look.angle_between(between);
             if angle < smallest_angle {
