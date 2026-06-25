@@ -748,11 +748,12 @@ for now — **lock it to the site origin before going public.**
   create/join/list. `lobby.html` threads it into the play link as `?server=…`,
   which `play.html` parses into `window.__BS_NET__.server` for the client to
   connect. **Unset ⇒ empty ⇒ the join link is single-player** (no dead links), so
-  the var is the single switch that turns the lobby flow "live". *Single shared
-  server for now:* every match points at the same endpoint and shares one world —
-  the room code is cosmetic until the game server gets per-room world isolation (a
-  later slice). Verified live from a phone: lobby create/join → connected to the
-  dedicated server (demo bot visible).
+  the var is the single switch that turns the lobby flow "live". *One server,
+  many isolated rooms:* every match points at the same endpoint, but the lobby
+  **code is no longer cosmetic** — the server isolates each code into its own
+  world (see "Per-room world isolation" below), so two matches on the one server
+  no longer share a world. Verified live from a phone: lobby create/join →
+  connected to the dedicated server (demo bot visible).
 - **Hosting:** GitHub Pages serves the static HTML; it *cannot* run the
   matchmaker (or the game server). The matchmaker must run somewhere with a
   public endpoint (the Mac box / a small VPS). On the Mac test box it runs as the
@@ -987,24 +988,81 @@ BS_MULTIPLAYER=1 cargo run -p bad-spaceship-server        # ws://0.0.0.0:5001
 cd client && BS_CONNECT=127.0.0.1:5001 cargo run --features native
 ```
 
-The server also spawns one **persistent "demo bot"** at startup (`spawn_demo_bot` /
-`move_demo_bot` in `server/src/net.rs`): a server-driven `NetPlayer` that orbits in
-a slow circle, its `NetTransform` rewritten every frame so the change replicates to
-every client. It exists purely so a **single** client can witness live position
+The server spawns one **per-room "demo bot"** (`spawn_room_world` / `move_demo_bot`
+in `server/src/net.rs`): a server-driven `NetPlayer` that orbits in a slow circle,
+its `NetTransform` rewritten every frame so the change replicates to every client
+in that room. It exists purely so a **single** client can witness live position
 replication (motion streamed over the wire) without a second device — necessary
 because mobile browsers suspend background tabs, so two tabs on one phone never hold
-simultaneous connections. Remove it once real player movement lands.
+simultaneous connections. Remove it once two-device testing is routine.
+
+### Per-room world isolation (rooms slice)
+
+One game server now hosts **many lobby rooms**, kept separate via lightyear's
+**room visibility** (`Rooms`): an entity is only replicated to clients that share
+a room with it. So two matches on the same server endpoint (the only deployment
+mode — see the matchmaker section) no longer share a world. The pieces:
+
+- **Room transport (`PlayerInput::room: [u8;6]`).** The client forwards its lobby
+  code (the 6-char matchmaker code as raw bytes, zero-padded; all-zero = the
+  default room) on the already-reliable input channel rather than a separate
+  connect message. Native reads `BS_ROOM`; wasm reads `window.__BS_NET__.room`
+  (which `play.html` already parses from `?room=`). `multiplayer_room()` /
+  `room_code_bytes` / `MyRoom` live in `client/src/net.rs`.
+- **Server room registry.** `RoomRegistry` (`server/src/net.rs`) maps each code to
+  a lightyear `RoomId` (allocated via `RoomAllocator`, from `RoomPlugin`) **and** a
+  distinct Avian collision-layer bit. `assign_rooms` waits for a client's first
+  real input, then tags both the avatar (`RoomMember`) and the client connection
+  entity with `Rooms::single(id)`, lazily creating the room's world on first
+  sighting of a code.
+- **Bootstrap (why the avatar starts un-roomed).** replicon visibility filters
+  only *hide* entities that **have** the filter component; an entity with no
+  `Rooms` is visible by default. The avatar is spawned (on `Connected`) without
+  `Rooms` so it's visible to its own client — which is what lets the
+  `Controlled → InputMarker` input loop start; only then does the first input
+  reveal the room and `assign_rooms` scope it. The placeholder pose is parked far
+  underground (`y -1000`) so the ~1-RTT pre-assignment window doesn't flash the
+  avatar into other rooms (the owner never sees it — prediction overrides its own
+  avatar's pose).
+- **Per-room part worlds + physics isolation.** The server **owns** the parts (it
+  inserts `SuppressLocalParts`, gating off `PartPlugin`'s shared spawner) and
+  spawns `NUM_PARTS` parts per room in `spawn_room_world`, each tagged with the
+  room's `Rooms` + a `CollisionLayers::from_bits(room_bit, room_bit | 1)`. The one
+  shared Avian world keeps rooms from physically interacting: a room's parts
+  collide only with same-room parts and the **ground** (Avian's default layer is
+  **bit 0**, `memberships: DEFAULT(1), filters: ALL`, and the ground has no
+  `CollisionLayers`, so part filters include bit 0 to still hit it). Rooms use bits
+  **1..=31** → **31 concurrent rooms** (bit 0 reserved); the registry wraps after
+  that (parts in two rooms sharing a recycled bit would cross-collide — the
+  documented cap for this slice). `spawn_random_part` is a `pub` helper in
+  `shared/src/part.rs` (returns entity + half-extents; owns its RNG so the server
+  needs no `rand` dep) shared by the single-player spawner and the server.
+- **Grab/attach/joints are room-scoped for free.** `server_grab` filters candidate
+  parts by the player's `RoomMember`; `server_attach` uses Avian contacts
+  (`collisions_with`), which collision layers already keep within a room; the
+  replicated `NetJoint` marker and per-room demo bot carry the room's `Rooms`.
+  `replace_fallen_room_parts` restocks a fallen part into the same room/layer (the
+  per-room equivalent of the suppressed `replace_fallen_parts`).
+
+**Run two isolated rooms locally** (server + two native clients):
+```bash
+BS_MULTIPLAYER=1 cargo run -p bad-spaceship-server                       # ws://0.0.0.0:5001
+cd client && BS_CONNECT=127.0.0.1:5001 BS_ROOM=ALPHA cargo run --features native
+cd client && BS_CONNECT=127.0.0.1:5001 BS_ROOM=BRAVO cargo run --features native
+```
+The two clients share the endpoint but see separate worlds (different blocks,
+each other invisible). Omitting `BS_ROOM` puts a client in the shared default room.
 
 **Remaining for real multiplayer** (needs live testing): exercising **two real
-devices** for genuine peer visibility (vs the single-device demo bot), and wiring
-the **matchmaker** to hand out real game-server endpoints. (Browser `wss://`, a
-faithful self-avatar — position + heading, driven from the real `Character` pose
-over networked input — **interpolation** of remote avatars, zero-delay
-**prediction** of the owner's own avatar, the server-authoritative **shared part
-world** — replicated *and* collidable (slices 1–2) — **networked grab/hold** of a
-part (slice 3), and **networked rotate + attach** so players can *build*, with the
-real joint previews/gizmo/button visuals (slice 4) are **done**, verified live from
-mobile Safari.)
+devices** for genuine peer visibility (vs the single-device demo bot). (Browser
+`wss://`, a faithful self-avatar — position + heading, driven from the real
+`Character` pose over networked input — **interpolation** of remote avatars,
+zero-delay **prediction** of the owner's own avatar, the server-authoritative
+**shared part world** — replicated *and* collidable (slices 1–2) — **networked
+grab/hold** of a part (slice 3), **networked rotate + attach** so players can
+*build* with the real joint previews/gizmo/button visuals (slice 4), the
+**matchmaker** handing out real game-server endpoints, and **per-room world
+isolation** (rooms slice) are **done**, verified live from mobile Safari.)
 
 ### Live test endpoint (Mac mini + Tailscale)
 
