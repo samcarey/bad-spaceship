@@ -874,6 +874,32 @@ attach is suppressed in multiplayer (`SuppressLocalParts`), so building over the
 network — and the networked *dynamic* interaction that would let a player shove a
 block — is the remaining piece.
 
+**Networked grab/hold (slice 3).** A player can now pick up a shared block over
+the network, server-authoritative. `PlayerInput` carries `grab` plus the real
+`grab_origin` (camera-orbit-center) and `hold_target` (HoldPoint) world positions
+— forwarded from the client's actual entities (`write_player_pose`) rather than
+recomputed, so the hold matches single-player exactly (the hold point hangs off
+the orbit center, *above* the character — recomputing it as `char + look×5` put it
+too low). The grab intent is a client-side toggle (`WantHold`, flipped on each
+non-`Modifying` `PlayerClick` in `read_grab_intent` — works on desktop click and
+the mobile grab button alike, since the local `toggle_holding` is inert with no
+local parts to focus). On the server, each player avatar carries a `HeldPart`;
+`server_grab` latches the part the player is most directly looking at
+(`focused_part` — smallest look-angle within `MAX_INTERACT_DISTANCE`/`ANGLE`,
+matching `update_focused`), and `server_hold` floats it to the hold point with the
+*same* critically-damped **anti-gravity force** as `position_held_part`
+(`hold_acceleration` via Avian's `Forces`, `apply_linear_acceleration(accel −
+gravity)`) — keeping the part **dynamic** so it still collides (an earlier
+kinematic version tunnelled through the floor). The selection/hold helpers live in
+`shared/src/net.rs` so client highlight and server agree. Client feedback reuses
+the **real** game gizmo: `highlight_grabbable` tints the focused part yellow (the
+single-player focus colour), and `position_gizmo` (secondary pass) was extended to
+place the existing `GizmoHub` (RGB axes) at the hold point in multiplayer (the
+local hold that normally drives it is suppressed). The delete-zone sphere overlay
+is gated off under `SuppressLocalParts`. *Remaining:* networked part **orientation**
+control (only position is held so far) and **attach** (joints) so players can
+build — see below.
+
 **0.27 API gotchas worth remembering** (the published book lags the crate; the
 ground truth is the crate source in `~/.cargo/registry/src/.../lightyear*-0.27.0`):
 - Plugin groups are `ClientPlugins`/`ServerPlugins` structs with a `tick_duration`
@@ -907,15 +933,17 @@ replication (motion streamed over the wire) without a second device — necessar
 because mobile browsers suspend background tabs, so two tabs on one phone never hold
 simultaneous connections. Remove it once real player movement lands.
 
-**Remaining for real multiplayer** (needs live testing): networked grab/attach so
-players can *build* in multiplayer (the local hold/attach is suppressed by
-`SuppressLocalParts`), joints replication, exercising two real devices for genuine
-peer visibility (vs the single-device demo bot), and wiring the matchmaker to hand
-out real game-server endpoints. (Browser `wss://`, a faithful self-avatar — position
+**Remaining for real multiplayer** (needs live testing): networked part
+**orientation** control + **attach** (joints) so players can *build* in
+multiplayer (grab/hold of a single part works; attach is still suppressed), joints
+replication, exercising two real devices for genuine peer visibility (vs the
+single-device demo bot), and wiring the matchmaker to hand out real game-server
+endpoints. (Browser `wss://`, a faithful self-avatar — position
 + heading, driven from the real `Character` pose over networked input —
 **interpolation** of remote avatars, zero-delay **prediction** of the owner's own
-avatar, and the server-authoritative **shared part world** — replicated *and*
-collidable (slices 1–2) — are **done**, verified live from mobile Safari.)
+avatar, the server-authoritative **shared part world** — replicated *and*
+collidable (slices 1–2) — and **networked grab/hold** of a part (slice 3) are
+**done**, verified live from mobile Safari.)
 
 ### Live test endpoint (Mac mini + Tailscale)
 
