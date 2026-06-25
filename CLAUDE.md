@@ -739,12 +739,28 @@ bevy/lightyear/avian). In-memory lobby store; endpoints `GET /api/health`,
 codes are 6-char unambiguous (no 0/O/1/I/L). Run it with
 `cargo run -p bad-spaceship-matchmaker` (env: `BIND` default `0.0.0.0:5000`;
 `STATIC_DIR=client` to also serve the HTML on the same origin for local
-single-origin testing). CORS is `permissive()` for now — **lock it to the site
-origin before going public.**
+single-origin testing; `BS_GAME_SERVER_URL` — see below). CORS is `permissive()`
+for now — **lock it to the site origin before going public.**
 
+- **Real endpoints (lobby → game actually connects).** The matchmaker reads the
+  dedicated game server's public `wss://host[:port]` from **`BS_GAME_SERVER_URL`**,
+  stores it on each created match, and returns it (`server` field) from
+  create/join/list. `lobby.html` threads it into the play link as `?server=…`,
+  which `play.html` parses into `window.__BS_NET__.server` for the client to
+  connect. **Unset ⇒ empty ⇒ the join link is single-player** (no dead links), so
+  the var is the single switch that turns the lobby flow "live". *Single shared
+  server for now:* every match points at the same endpoint and shares one world —
+  the room code is cosmetic until the game server gets per-room world isolation (a
+  later slice). Verified live from a phone: lobby create/join → connected to the
+  dedicated server (demo bot visible).
 - **Hosting:** GitHub Pages serves the static HTML; it *cannot* run the
   matchmaker (or the game server). The matchmaker must run somewhere with a
-  public endpoint (the Mac box / a small VPS).
+  public endpoint (the Mac box / a small VPS). On the Mac test box it runs as the
+  `bs-matchmaker` Docker container (`-e BS_GAME_SERVER_URL=wss://<node>.ts.net:8443`,
+  `-p 127.0.0.1:5000:5000`) bridged onto the tailnet with
+  `tailscale serve --bg --https=10000 http://127.0.0.1:5000` (the third allowed
+  HTTPS serve port after 443=web / 8443=game). Phone test:
+  `https://<node>.ts.net/lobby.html?api=https://<node>.ts.net:10000`.
 - **Pointing the deployed lobby at the matchmaker:** `lobby.html` resolves the
   matchmaker base URL as `?api=<url>` (testing) → `window.BS_MATCHMAKER_URL`
   (set this for the deployed site) → `http://localhost:5000` (default, so a

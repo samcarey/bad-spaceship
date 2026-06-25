@@ -197,13 +197,17 @@
       return fetch(MATCHMAKER + path, opts);
     }
 
-    // Absolute, shareable game link for a room code.
-    function playLink(id) {
-      return new URL('play.html?room=' + encodeURIComponent(id), location.href).href;
+    // Absolute, shareable game link for a room code. The matchmaker hands out the
+    // game server's wss:// endpoint per match; thread it in as `?server=` so the
+    // client connects to it (absent ⇒ play.html boots single-player).
+    function playLink(id, server) {
+      let path = 'play.html?room=' + encodeURIComponent(id);
+      if (server) path += '&server=' + encodeURIComponent(server);
+      return new URL(path, location.href).href;
     }
 
-    function enterGame(id) {
-      location.href = 'play.html?room=' + encodeURIComponent(id);
+    function enterGame(id, server) {
+      location.href = playLink(id, server);
     }
 
     function ago(unix) {
@@ -279,10 +283,10 @@
           body: JSON.stringify({ name }),
         });
         if (!r.ok) throw new Error('HTTP ' + r.status);
-        const { id } = await r.json();
-        shareLink.value = playLink(id);
+        const { id, server } = await r.json();
+        shareLink.value = playLink(id, server);
         shareEl.classList.add('show');
-        document.getElementById('share-enter').onclick = () => enterGame(id);
+        document.getElementById('share-enter').onclick = () => enterGame(id, server);
         setStatus('Match ' + id + ' created.', 'ok');
         refresh();
       } catch (e) {
@@ -298,7 +302,8 @@
         if (r.status === 404) { setStatus('No match with code ' + id + '.', 'err'); return; }
         if (r.status === 409) { setStatus('Match ' + id + ' is full.', 'err'); return; }
         if (!r.ok) throw new Error('HTTP ' + r.status);
-        enterGame(id);
+        const lobby = await r.json();
+        enterGame(id, lobby.server);
       } catch (e) {
         setStatus('Failed to join: ' + e.message, 'err');
       }

@@ -15,8 +15,15 @@
 //! Redis/a DB later without touching the front-end contract.
 //!
 //! Config via env:
-//!   BIND        listen addr (default 0.0.0.0:5000)
-//!   STATIC_DIR  if set, also serve this dir at `/` (local single-origin testing)
+//!   BIND                 listen addr (default 0.0.0.0:5000)
+//!   STATIC_DIR           if set, also serve this dir at `/` (local single-origin testing)
+//!   BS_GAME_SERVER_URL   the dedicated game server's public `wss://host[:port]`
+//!                        endpoint, handed out with every match so the lobby's
+//!                        join link actually connects the client to it. Unset ⇒
+//!                        empty ⇒ the join link is single-player (offline). A
+//!                        single shared server for now: every match points at it
+//!                        and shares one world (per-room world isolation is a
+//!                        later slice).
 
 use std::{
     collections::HashMap,
@@ -46,9 +53,10 @@ struct Lobby {
     max_players: u32,
     /// Seconds since the Unix epoch.
     created_unix: u64,
-    /// Where the game server for this match listens. Placeholder until the live
-    /// netcode tier (Phase 2b) provisions real game-server endpoints; the client
-    /// reads this off the join link to know who to connect to.
+    /// The game server's public `wss://` endpoint for this match (from
+    /// `BS_GAME_SERVER_URL`). The front-end threads it into the join link as
+    /// `?server=…`, which the WASM client reads on boot to know who to connect
+    /// to. Empty ⇒ single-player (no server configured).
     server: String,
 }
 
@@ -61,11 +69,24 @@ struct CreateReq {
 #[derive(Serialize)]
 struct CreateResp {
     id: String,
-    /// Relative link the front-end turns into a full shareable URL.
+    /// Relative room link (`play.html?room=ID`); the front-end appends the
+    /// `&server=…` (it already builds the absolute, shareable URL and owns the
+    /// query encoding).
     join_path: String,
+    /// The game server endpoint for the new match (echoes `Lobby.server`), so
+    /// the front-end can thread it into the join link.
+    server: String,
 }
 
 type Db = Arc<Mutex<HashMap<String, Lobby>>>;
+
+/// Shared handler state: the in-memory lobby store plus the configured game
+/// server endpoint handed out with every match.
+#[derive(Clone)]
+struct AppState {
+    db: Db,
+    game_server: Arc<str>,
+}
 
 fn now_unix() -> u64 {
     SystemTime::now()
@@ -87,21 +108,24 @@ async fn health() -> &'static str {
     "ok"
 }
 
-async fn list_matches(State(db): State<Db>) -> Json<Vec<Lobby>> {
-    let db = db.lock().unwrap();
+async fn list_matches(State(state): State<AppState>) -> Json<Vec<Lobby>> {
+    let db = state.db.lock().unwrap();
     let mut lobbies: Vec<Lobby> = db.values().cloned().collect();
     // Newest first.
     lobbies.sort_by(|a, b| b.created_unix.cmp(&a.created_unix));
     Json(lobbies)
 }
 
-async fn create_match(State(db): State<Db>, body: Option<Json<CreateReq>>) -> impl IntoResponse {
+async fn create_match(
+    State(state): State<AppState>,
+    body: Option<Json<CreateReq>>,
+) -> impl IntoResponse {
     let req = body.map(|Json(b)| b).unwrap_or(CreateReq {
         name: None,
         max_players: None,
     });
 
-    let mut db = db.lock().unwrap();
+    let mut db = state.db.lock().unwrap();
     // Avoid the (astronomically unlikely) id collision.
     let id = loop {
         let candidate = gen_id();
@@ -116,6 +140,7 @@ async fn create_match(State(db): State<Db>, body: Option<Json<CreateReq>>) -> im
         .filter(|n| !n.is_empty())
         .unwrap_or_else(|| format!("Match {id}"));
     let max_players = req.max_players.unwrap_or(8).clamp(2, 32);
+    let server = state.game_server.to_string();
 
     let lobby = Lobby {
         id: id.clone(),
@@ -123,8 +148,7 @@ async fn create_match(State(db): State<Db>, body: Option<Json<CreateReq>>) -> im
         players: 1,
         max_players,
         created_unix: now_unix(),
-        // Placeholder; the live netcode tier fills this with a real endpoint.
-        server: String::new(),
+        server: server.clone(),
     };
     db.insert(id.clone(), lobby);
 
@@ -133,13 +157,14 @@ async fn create_match(State(db): State<Db>, body: Option<Json<CreateReq>>) -> im
         Json(CreateResp {
             join_path: format!("play.html?room={id}"),
             id,
+            server,
         }),
     )
 }
 
-async fn join_match(State(db): State<Db>, Path(id): Path<String>) -> impl IntoResponse {
+async fn join_match(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
     let id = id.to_uppercase();
-    let mut db = db.lock().unwrap();
+    let mut db = state.db.lock().unwrap();
     match db.get_mut(&id) {
         None => (StatusCode::NOT_FOUND, "no such match").into_response(),
         Some(lobby) if lobby.players >= lobby.max_players => {
@@ -155,6 +180,21 @@ async fn join_match(State(db): State<Db>, Path(id): Path<String>) -> impl IntoRe
 #[tokio::main]
 async fn main() {
     let db: Db = Arc::new(Mutex::new(HashMap::new()));
+    // The dedicated game server endpoint handed out with every match. Empty when
+    // unset, so the lobby flow degrades to single-player rather than a dead link.
+    let game_server: Arc<str> = std::env::var("BS_GAME_SERVER_URL")
+        .unwrap_or_default()
+        .trim()
+        .into();
+    if game_server.is_empty() {
+        println!(
+            "warning: BS_GAME_SERVER_URL is unset — matches will have no server \
+             (single-player join links). Set it to the game server's wss:// URL."
+        );
+    } else {
+        println!("handing out game server endpoint: {game_server}");
+    }
+    let state = AppState { db, game_server };
 
     let mut app = Router::new()
         .route("/api/health", get(health))
@@ -163,7 +203,7 @@ async fn main() {
         // Permissive CORS for now (the lobby page lives on a different origin).
         // Lock this down to the deployed site origin before going public.
         .layer(CorsLayer::permissive())
-        .with_state(db);
+        .with_state(state);
 
     // Optional: serve the static client dir on the same origin for local
     // end-to-end testing (no CORS needed). Off in production — Pages serves it.
