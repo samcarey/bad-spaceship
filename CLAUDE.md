@@ -996,6 +996,28 @@ replication (motion streamed over the wire) without a second device — necessar
 because mobile browsers suspend background tabs, so two tabs on one phone never hold
 simultaneous connections. Remove it once two-device testing is routine.
 
+**Auto-reconnect on tab foreground** (`reconnect_dropped`, `client/src/net.rs`).
+A browser suspends a backgrounded tab, which kills the WebSocket; lightyear then
+marks the client `Disconnected` and **clears the replicated world**, so the scene
+goes blank and *stayed* blank until a manual reload. The whole wasm app is frozen
+while suspended, so a plain `Update` system is all that's needed: it next runs the
+instant the tab returns to the foreground, sees the client is `Disconnected` with
+nothing mid-connect, despawns the dead client, and spawns a fresh one — which the
+server treats as a new client joining its room (`On<Add, Connected>` →
+`spawn_player_for_client`; the room is re-revealed by the first input). The room
+code lives in a resource, not on the connection entity, so it survives the rebuild.
+Two subtleties: (1) reconnect must build a **fresh `NetcodeClient`** rather than
+re-`Connect` the same entity, because the default connect token expires after 30 s
+(`NetcodeConfig::token_expire_secs`) — long gone by the time a real backgrounding
+ends; re-`Connect` would fail `ConnectTokenExpired`. (2) the connect logic is
+factored into `spawn_client` (cfg-split native/wasm), called by both the `Startup`
+`connect` and `reconnect_dropped`; a short cooldown keeps a genuinely-unreachable
+server from being hammered. *Inherent limitation:* a part the player was **holding**
+when the tab suspended is dropped — the server is authoritative and releases the
+`SessionBased` avatar's `HeldPart` the instant the session ends; after reconnect the
+part is simply where it fell. Carrying a hold across a disconnect would need a
+server-side disconnect-grace window (not done).
+
 ### Per-room world isolation (rooms slice)
 
 One game server now hosts **many lobby rooms**, kept separate via lightyear's
@@ -1097,8 +1119,11 @@ Mac's Docker (Colima) daemon — the cmd-api reaches *inside* the container, but
   `https://<node>.ts.net/play.html?server=wss://<node>.ts.net:8443`.
 - **iOS gotcha:** Safari suspends background tabs, dropping the suspended tab's
   WebSocket; on return the client clears its replicated entities (the cube vanishes).
-  So two *tabs* on one phone can't show two live players — use two *devices*, or rely
-  on the always-present demo bot for a single-device check.
+  The client now **auto-reconnects on foreground** (`reconnect_dropped`, see the
+  netcode section) so the world reappears on its own — no manual reload — but two
+  *tabs* on one phone still can't show two live players simultaneously (only the
+  foreground tab holds a live connection). Use two *devices*, or rely on the
+  always-present demo bot for a single-device check.
 
 ## Deployment
 

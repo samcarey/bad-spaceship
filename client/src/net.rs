@@ -109,6 +109,9 @@ impl Plugin for NetClientPlugin {
         app.init_resource::<WantAttach>();
         app.init_resource::<HeldRotation>();
         app.add_systems(Startup, connect);
+        // Recover from a dropped link (e.g. a suspended/backgrounded tab) by
+        // reconnecting when the tab returns to the foreground.
+        app.add_systems(Update, reconnect_dropped);
         // Toggle the grab intent on each (non-modifier) click; sent in PlayerInput.
         // After `InputEvents` (mobile `apply_pointer` / desktop `get_modifying`)
         // so `Modifying` is current when classifying a click as grab vs attach.
@@ -535,8 +538,51 @@ fn build_netcode_client(server_addr: SocketAddr) -> Option<NetcodeClient> {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+/// Startup: open the initial connection.
 fn connect(mut commands: Commands) {
+    spawn_client(&mut commands);
+}
+
+/// Auto-reconnect after the link drops. iOS (and any browser) suspends a
+/// backgrounded tab, which kills the WebSocket; lightyear then marks the client
+/// `Disconnected` and clears the replicated world, so the scene goes blank and
+/// stays blank until a manual reload. The whole wasm app is *frozen* while the
+/// tab is suspended, so this system next runs the instant the tab returns to the
+/// foreground: if the client is `Disconnected` and nothing is mid-connect, it
+/// despawns the dead client and spawns a fresh one, which re-replicates the room
+/// cleanly. A short cooldown keeps a genuinely-unreachable server from being
+/// hammered. (Reconnect must build a *fresh* `NetcodeClient` rather than re-
+/// `Connect` the same entity, because the default connect token expires after
+/// 30s — long gone by the time a real backgrounding ends.)
+fn reconnect_dropped(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut cooldown: Local<f32>,
+    dropped: Query<Entity, (With<NetcodeClient>, With<Disconnected>)>,
+    pending: Query<(), (With<NetcodeClient>, Or<(With<Connecting>, With<Connected>)>)>,
+) {
+    *cooldown = (*cooldown - time.delta_secs()).max(0.0);
+    // A connect is already established or in progress, or we're still cooling
+    // down from the last attempt — nothing to do.
+    if !pending.is_empty() || *cooldown > 0.0 {
+        return;
+    }
+    if dropped.is_empty() {
+        return;
+    }
+    for entity in &dropped {
+        commands.entity(entity).despawn();
+    }
+    spawn_client(&mut commands);
+    *cooldown = 2.0;
+}
+
+/// (Re)spawn the netcode client entity and start connecting. Called at startup
+/// and again by `reconnect_dropped`; each call builds a fresh `NetcodeClient`
+/// (new token + client id), so it survives connect-token expiry across a long
+/// background.
+#[cfg(not(target_arch = "wasm32"))]
+fn spawn_client(commands: &mut Commands) {
     let Some(addr_str) = multiplayer_target() else {
         return;
     };
@@ -558,8 +604,9 @@ fn connect(mut commands: Commands) {
     info!("connecting to multiplayer server at {url}");
 }
 
+/// See the native counterpart.
 #[cfg(target_arch = "wasm32")]
-fn connect(mut commands: Commands) {
+fn spawn_client(commands: &mut Commands) {
     let Some(url) = multiplayer_target() else {
         return;
     };
