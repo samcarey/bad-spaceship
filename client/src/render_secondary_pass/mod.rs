@@ -1,7 +1,7 @@
 use bad_spaceship_shared::{
     part::{Holdable, SuppressLocalParts, TargetOrientation, TargetPosition, DELETE_RADIUS},
     player::get_hold_point_entity,
-    DisplayableJoint, ExistingJoints, HoldPoint, Holding, Modifying, PotentialJoints,
+    DisplayableJoint, ExistingJoints, HoldPoint, Holding, Modifying, Player, PotentialJoints,
     PredeleteJoint, PredeleteJoints, UpdateJointsLabel,
 };
 // Bevy 0.17 moved `NotShadowCaster` from `bevy_pbr` to `bevy_light` (`bevy::light`).
@@ -10,7 +10,7 @@ use normalization::*;
 
 use self::gizmo_material::GizmoMaterial;
 
-mod gizmo_material;
+pub mod gizmo_material;
 
 mod cone;
 mod normalization;
@@ -70,6 +70,10 @@ fn position_gizmo(
     // In multiplayer the local hold is suppressed (no `TargetOrientation`/
     // `TargetPosition`), so there's nothing to drive the gizmo from `helds`.
     multiplayer: Option<Res<SuppressLocalParts>>,
+    // Multiplayer: the held part's target orientation (tracked client-side, sent
+    // to the server) and the mirrored `Holding` flag drive the gizmo instead.
+    held_rotation: Option<Res<crate::net::HeldRotation>>,
+    holding: Query<&Holding, With<Player>>,
 ) {
     let mut translation = None;
     let mut rotation = None;
@@ -80,12 +84,16 @@ fn position_gizmo(
         };
         rotation = Some(target_orientation.quat);
     } else if multiplayer.is_some() {
-        // Multiplayer: show the gizmo at the hold point (the server-authoritative
-        // grab target), oriented to the orbit-center look basis.
-        if let Some(transform) = hold_points.iter().next() {
-            let (_, rot, trans) = transform.to_scale_rotation_translation();
-            translation = Some(trans);
-            rotation = Some(rot);
+        // Multiplayer: while holding, place the gizmo at the hold point and orient
+        // it to the held part's *target* orientation (the same value forwarded to
+        // the server), so it indicates the orientation the part is driven toward —
+        // matching the single-player gizmo. Hidden when not holding.
+        let is_holding = holding.iter().next().is_some_and(|h| h.0);
+        if let (true, Some(transform), Some(held_rotation)) =
+            (is_holding, hold_points.iter().next(), held_rotation)
+        {
+            translation = Some(transform.translation());
+            rotation = Some(held_rotation.0);
         }
     }
 
@@ -235,10 +243,11 @@ fn build_gizmo(
 }
 
 #[derive(Default, Resource)]
-struct JointAppearance {
-    mesh: Option<Handle<Mesh>>,
+pub struct JointAppearance {
+    pub mesh: Option<Handle<Mesh>>,
     valid_material: Option<Handle<GizmoMaterial>>,
-    invalid_material: Option<Handle<GizmoMaterial>>,
+    /// The material single-player draws *existing* joints with.
+    pub invalid_material: Option<Handle<GizmoMaterial>>,
     predelete_material: Option<Handle<GizmoMaterial>>,
 }
 

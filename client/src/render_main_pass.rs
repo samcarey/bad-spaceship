@@ -1,4 +1,8 @@
-use bad_spaceship_shared::{map::PLATFORM_WIDTH_M, part::Holdable, Character, Grass};
+use bad_spaceship_shared::{
+    map::PLATFORM_WIDTH_M,
+    part::{Holdable, SuppressLocalParts},
+    Character, Grass,
+};
 // Bevy 0.17's render-crate split relocated several types out of `bevy_render`:
 // `CascadeShadowConfigBuilder` → `bevy_light` (`bevy::light`), `Indices` /
 // `VertexAttributeValues` → `bevy_mesh` (`bevy::mesh`), and `RenderAssetUsages`
@@ -17,7 +21,17 @@ pub struct RenderMainPassPlugin;
 impl Plugin for RenderMainPassPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, add_lighting)
-            .add_systems(Update, (assign_parts, assign_grass, assign_characters));
+            .add_systems(
+                Update,
+                (
+                    // In multiplayer the replicated parts are drawn by the netcode
+                    // (and marked Holdable for joint display), so skip the local
+                    // part renderer to avoid double meshes.
+                    assign_parts.run_if(not(resource_exists::<SuppressLocalParts>)),
+                    assign_grass,
+                    assign_characters,
+                ),
+            );
     }
 }
 

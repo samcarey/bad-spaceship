@@ -13,13 +13,15 @@
 use std::net::SocketAddr;
 
 use avian3d::prelude::{
-    Collider, Forces, Gravity, ReadRigidBodyForces, WriteRigidBodyForces,
+    Collider, Collisions, ComputedCenterOfMass, Forces, Gravity, ReadRigidBodyForces, SphericalJoint,
+    WriteRigidBodyForces,
 };
 use bad_spaceship_shared::net::{
-    focused_part, hold_acceleration, NetPart, NetPlayer, NetTransform, PlayerInput, ProtocolPlugin,
-    TICK,
+    focused_part, hold_acceleration, orient_acceleration, NetJoint, NetPart, NetPlayer,
+    NetTransform, PlayerInput, ProtocolPlugin, TICK,
 };
 use bad_spaceship_shared::part::Holdable;
+use bad_spaceship_shared::utils::QuatExt;
 use bevy::prelude::*;
 use lightyear::prelude::input::native::ActionState;
 use lightyear::prelude::*;
@@ -46,13 +48,16 @@ impl Plugin for NetServerPlugin {
         // tabs on one phone never connect simultaneously.
         app.add_systems(Update, move_demo_bot);
         // Replicate the authoritative shared part world: tag new parts for
-        // replication, then stream their poses to clients each frame.
-        app.add_systems(Update, (replicate_parts, sync_part_transforms));
+        // replication, then stream their (and the joints') poses each frame.
+        app.add_systems(
+            Update,
+            (replicate_parts, sync_part_transforms, sync_joint_transforms),
+        );
         // Apply each client's replicated input to its player (FixedUpdate, the
         // sim tick). Grab/hold run in Update where Avian's `Forces` helper
         // accumulates (matching the single-player `position_held_part`).
         app.add_systems(FixedUpdate, apply_player_input);
-        app.add_systems(Update, (server_grab, server_hold).chain());
+        app.add_systems(Update, (server_grab, server_hold, server_attach).chain());
     }
 }
 
@@ -86,11 +91,11 @@ fn server_grab(
     }
 }
 
-/// Float each held part to its holder's hold point with a critically-damped
-/// anti-gravity force (matches single-player `position_held_part`): the part
-/// stays dynamic, so it still collides (no tunneling), but its weight is
-/// cancelled so it floats to and follows the hold point. The changed pose
-/// replicates to all clients via `sync_part_transforms`.
+/// Float each held part to its holder's hold point (critically-damped
+/// anti-gravity force, matching `position_held_part`) AND orient it toward the
+/// hold rotation (critically-damped angular acceleration, matching
+/// `orient_held_part`). The part stays dynamic, so it still collides. Both forces
+/// go through the one `Forces` accessor to avoid an ambiguous double-write.
 fn server_hold(
     players: Query<(&ActionState<PlayerInput>, &HeldPart)>,
     mut parts: Query<(&Transform, Forces), With<NetPart>>,
@@ -103,9 +108,80 @@ fn server_hold(
         let Ok((transform, mut forces)) = parts.get_mut(part_entity) else {
             continue;
         };
+        // Position.
         let displacement = Vec3::from_array(state.0.hold_target) - transform.translation;
-        let velocity = forces.linear_velocity();
-        forces.apply_linear_acceleration(hold_acceleration(displacement, velocity) - gravity.0);
+        let lin_vel = forces.linear_velocity();
+        forces.apply_linear_acceleration(hold_acceleration(displacement, lin_vel) - gravity.0);
+        // Orientation: drive toward the target rotation (the client tracks it,
+        // starting at the part's pickup orientation and folding in the rotate
+        // gesture). Skip the unsent seed (the all-zero default quat is never a
+        // real rotation). `to_rotation_vector` takes the shortest-path error,
+        // exactly as the single-player `orient_held_part`.
+        let target = Quat::from_array(state.0.hold_rotation);
+        if target.length_squared() > 0.5 {
+            let error = (target * transform.rotation.conjugate()).to_rotation_vector();
+            let ang_vel = forces.angular_velocity();
+            forces.apply_angular_acceleration(orient_acceleration(error, ang_vel));
+        }
+    }
+}
+
+/// On the attach intent, joint the held part to whatever (other) replicated part
+/// it's touching, at the contact anchors — then release it (it's now part of the
+/// assembly). Ports single-player's `update_active_joints`/`attach`: Avian's
+/// contact anchors are world-space, COM-relative, so recover each body-local
+/// anchor with `rot⁻¹ · anchor + com`. Joints are server physics, so the joined
+/// parts move together and their replicated poses tell the story (no joint
+/// replication needed).
+fn server_attach(
+    mut commands: Commands,
+    collisions: Collisions,
+    transforms: Query<&Transform>,
+    coms: Query<&ComputedCenterOfMass>,
+    net_parts: Query<(), With<NetPart>>,
+    mut players: Query<(&ActionState<PlayerInput>, &mut HeldPart)>,
+) {
+    for (state, mut held) in &mut players {
+        if !state.0.attach {
+            continue;
+        }
+        let Some(held_entity) = held.0 else {
+            continue;
+        };
+        let mut attached = false;
+        for pair in collisions.collisions_with(held_entity) {
+            if !pair.is_touching() {
+                continue;
+            }
+            let (c1, c2) = (pair.collider1, pair.collider2);
+            // Only attach to another replicated part (not the ground/character).
+            let other = if c1 == held_entity { c2 } else { c1 };
+            if net_parts.get(other).is_err() {
+                continue;
+            }
+            let rot = |e| transforms.get(e).map(|t| t.rotation).unwrap_or(Quat::IDENTITY);
+            let com = |e| coms.get(e).map(|c| c.0).unwrap_or(Vec3::ZERO);
+            for manifold in &pair.manifolds {
+                for contact in &manifold.points {
+                    let p1 = rot(c1).inverse() * contact.anchor1 + com(c1);
+                    let p2 = rot(c2).inverse() * contact.anchor2 + com(c2);
+                    commands.spawn((
+                        SphericalJoint::new(c2, c1)
+                            .with_local_anchor1(p2)
+                            .with_local_anchor2(p1),
+                        // Replicate a marker at the joint so clients can draw it.
+                        NetJoint,
+                        NetTransform::default(),
+                        Replicate::to_clients(NetworkTarget::All),
+                        InterpolationTarget::to_clients(NetworkTarget::All),
+                    ));
+                    attached = true;
+                }
+            }
+        }
+        if attached {
+            held.0 = None;
+        }
     }
 }
 
@@ -136,6 +212,25 @@ fn replicate_parts(
 fn sync_part_transforms(mut parts: Query<(&Transform, &mut NetTransform), With<NetPart>>) {
     for (transform, mut net) in &mut parts {
         let updated = NetTransform::from_transform(transform);
+        if *net != updated {
+            *net = updated;
+        }
+    }
+}
+
+/// Stream each replicated joint's world anchor point into its `NetTransform`
+/// (body1's transform applied to local anchor1), so the client's joint marker
+/// tracks the moving assembly.
+fn sync_joint_transforms(
+    mut joints: Query<(&SphericalJoint, &mut NetTransform), With<NetJoint>>,
+    bodies: Query<&Transform, Without<NetJoint>>,
+) {
+    for (joint, mut net) in &mut joints {
+        let (Ok(body), Some(anchor)) = (bodies.get(joint.body1), joint.local_anchor1()) else {
+            continue;
+        };
+        let world = body.translation + body.rotation * anchor;
+        let updated = NetTransform::from_transform(&Transform::from_translation(world));
         if *net != updated {
             *net = updated;
         }

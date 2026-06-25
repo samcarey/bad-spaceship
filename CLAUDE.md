@@ -896,9 +896,55 @@ the **real** game gizmo: `highlight_grabbable` tints the focused part yellow (th
 single-player focus colour), and `position_gizmo` (secondary pass) was extended to
 place the existing `GizmoHub` (RGB axes) at the hold point in multiplayer (the
 local hold that normally drives it is suppressed). The delete-zone sphere overlay
-is gated off under `SuppressLocalParts`. *Remaining:* networked part **orientation**
-control (only position is held so far) and **attach** (joints) so players can
-build — see below.
+is gated off under `SuppressLocalParts`.
+
+**Networked attach + orientation + joint visuals (slice 4).** Players can now
+*build* over the network — rotate a held block to a target orientation and attach
+it to another, server-authoritative, with the single-player visuals (joint
+previews, the orientation gizmo, the context button) all lit up. The key tactic
+is **mirroring the networked grab back into the local single-player state** so the
+game's own systems engage instead of being re-implemented:
+- **`mirror_grab_state`** (client) writes the networked grab into the local
+  Player's `Holding` + `FocusedInteractable` (latching the looked-at part with the
+  same `focused_part` rule the server grabs by, over the `Interpolated` parts — the
+  copies that carry the collider Avian reports contacts on). That single mirror
+  re-engages: the **mobile button label** (keys on `Holding` → "Join Parts" vs
+  "Delete Joints"), **`update_active_joints`** → `PotentialJoints` →
+  **`display_potential_joints`** (the violet potential-joint preview, rendered with
+  the real `JointAppearance` assets), and the **rotate gesture** (mobile
+  `apply_pointer` keys rotate-mode on `Holding`, so it feeds `Modifying` +
+  `MouseMotionDelta` → `set_part_rotation` computes the player's `PartRotation`).
+  `toggle_holding` (player.rs) and `assign_parts` (render_main_pass.rs) are gated
+  off under `SuppressLocalParts` so the local path doesn't fight the mirror.
+- **Orientation** is client-tracked and server-driven, mirroring single-player's
+  `TargetOrientation` accumulation but over the wire. `HeldRotation` (client
+  resource) is **seeded to the part's orientation at pickup** and each frame folds
+  in the rotate gesture (`target = PartRotation * target`, exactly
+  `apply_part_rotation`); `write_player_pose` forwards it as
+  `PlayerInput::hold_rotation`, and `server_hold` drives the (still dynamic) part
+  toward it with `orient_acceleration` (the softer `ORIENTING_STIFFNESS = 5`,
+  matching `orient_held_part`, via `to_rotation_vector`'s shortest-path error).
+  This intentionally follows the same **client-forwards-a-target / server-springs**
+  shape as the *position* hold (the client doesn't carry a real `TargetOrientation`
+  entity, so `HeldRotation` is the minimal carrier).
+- **Attach** (`server_attach`): on the `attach` intent (modifier click →
+  `WantAttach`), joint the held part to whatever other `NetPart` it's touching, at
+  the contact anchors — porting single-player's `update_active_joints`/`attach`
+  anchor math (`rot⁻¹ · anchor + com`), then release it. Joints are server physics,
+  so the joined parts move together and their replicated `NetTransform`s tell the
+  story.
+- **Joint visuals**: rather than replicate the joint constraint, the server spawns
+  a lightweight **`NetJoint`** marker entity at the joint's world anchor and streams
+  its pose (`sync_joint_transforms`: `body1.translation + body1.rotation · anchor1`).
+  The client draws each replicated `NetJoint` with the game's **real**
+  `JointAppearance` mesh + `GizmoMaterial` (`draw_replicated_joints`), so existing
+  joints look identical to single-player and draw on top via the secondary pass.
+- **Sticky highlight + target gizmo**: `highlight_grabbable` keeps the *held* part
+  lit while holding (the latched `FocusedInteractable`) instead of jumping to
+  whatever you look at, and only recolours on change (mutating a material flags a
+  GPU re-upload). `position_gizmo`'s multiplayer branch orients the `GizmoHub` to
+  `HeldRotation` (the target orientation), shown only while holding — so the RGB
+  axes indicate the orientation the part is being rotated toward, like single-player.
 
 **0.27 API gotchas worth remembering** (the published book lags the crate; the
 ground truth is the crate source in `~/.cargo/registry/src/.../lightyear*-0.27.0`):
@@ -933,17 +979,16 @@ replication (motion streamed over the wire) without a second device — necessar
 because mobile browsers suspend background tabs, so two tabs on one phone never hold
 simultaneous connections. Remove it once real player movement lands.
 
-**Remaining for real multiplayer** (needs live testing): networked part
-**orientation** control + **attach** (joints) so players can *build* in
-multiplayer (grab/hold of a single part works; attach is still suppressed), joints
-replication, exercising two real devices for genuine peer visibility (vs the
-single-device demo bot), and wiring the matchmaker to hand out real game-server
-endpoints. (Browser `wss://`, a faithful self-avatar — position
-+ heading, driven from the real `Character` pose over networked input —
-**interpolation** of remote avatars, zero-delay **prediction** of the owner's own
-avatar, the server-authoritative **shared part world** — replicated *and*
-collidable (slices 1–2) — and **networked grab/hold** of a part (slice 3) are
-**done**, verified live from mobile Safari.)
+**Remaining for real multiplayer** (needs live testing): exercising **two real
+devices** for genuine peer visibility (vs the single-device demo bot), and wiring
+the **matchmaker** to hand out real game-server endpoints. (Browser `wss://`, a
+faithful self-avatar — position + heading, driven from the real `Character` pose
+over networked input — **interpolation** of remote avatars, zero-delay
+**prediction** of the owner's own avatar, the server-authoritative **shared part
+world** — replicated *and* collidable (slices 1–2) — **networked grab/hold** of a
+part (slice 3), and **networked rotate + attach** so players can *build*, with the
+real joint previews/gizmo/button visuals (slice 4) are **done**, verified live from
+mobile Safari.)
 
 ### Live test endpoint (Mac mini + Tailscale)
 
