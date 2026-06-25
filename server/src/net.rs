@@ -12,19 +12,18 @@
 
 use std::net::SocketAddr;
 
-use avian3d::prelude::{Collider, LinearVelocity, RigidBody};
+use avian3d::prelude::{
+    Collider, Forces, Gravity, ReadRigidBodyForces, WriteRigidBodyForces,
+};
 use bad_spaceship_shared::net::{
-    hold_point, NetPart, NetPlayer, NetTransform, PlayerInput, ProtocolPlugin, GRAB_RANGE, TICK,
+    focused_part, hold_acceleration, hold_point, look_forward, NetPart, NetPlayer, NetTransform,
+    PlayerInput, ProtocolPlugin, TICK,
 };
 use bad_spaceship_shared::part::Holdable;
 use bevy::prelude::*;
 use lightyear::prelude::input::native::ActionState;
 use lightyear::prelude::*;
 use lightyear::prelude::server::*;
-
-/// Held-part control tuning.
-const HOLD_STIFFNESS: f32 = 12.0; // proportional velocity toward the hold point
-const MAX_HOLD_SPEED: f32 = 40.0; // clamp on the hold velocity
 
 pub struct NetServerPlugin;
 
@@ -49,12 +48,11 @@ impl Plugin for NetServerPlugin {
         // Replicate the authoritative shared part world: tag new parts for
         // replication, then stream their poses to clients each frame.
         app.add_systems(Update, (replicate_parts, sync_part_transforms));
-        // Apply each client's replicated input to its player, then resolve their
-        // grab intent and hold the grabbed part — all server-authoritative.
-        app.add_systems(
-            FixedUpdate,
-            (apply_player_input, server_grab, server_hold).chain(),
-        );
+        // Apply each client's replicated input to its player (FixedUpdate, the
+        // sim tick). Grab/hold run in Update where Avian's `Forces` helper
+        // accumulates (matching the single-player `position_held_part`).
+        app.add_systems(FixedUpdate, apply_player_input);
+        app.add_systems(Update, (server_grab, server_hold).chain());
     }
 }
 
@@ -67,56 +65,51 @@ fn player_hold_point(input: &PlayerInput) -> Vec3 {
     hold_point(input.translation, input.rotation, input.pitch)
 }
 
-/// Resolve each player's grab intent: on grab, latch the nearest part within
-/// `GRAB_RANGE` of the hold point and make it kinematic (so it ignores gravity
-/// and follows the hold cleanly); on release, return it to dynamic so it falls.
+/// Resolve each player's grab intent: on grab, latch the part the player is most
+/// directly looking at (within focus range/angle) — the same selection as
+/// single-player. On release, let go. The part stays dynamic throughout.
 fn server_grab(
-    mut commands: Commands,
     mut players: Query<(&ActionState<PlayerInput>, &mut HeldPart)>,
     parts: Query<(Entity, &Transform), With<NetPart>>,
 ) {
     for (state, mut held) in &mut players {
         if !state.0.grab {
-            if let Some(part) = held.0.take() {
-                commands.entity(part).insert(RigidBody::Dynamic);
-            }
+            held.0 = None;
             continue;
         }
         if held.0.is_some() {
             continue;
         }
-        let target = player_hold_point(&state.0);
-        let mut best: Option<(Entity, f32)> = None;
-        for (entity, transform) in &parts {
-            let dist = transform.translation.distance(target);
-            if dist <= GRAB_RANGE && best.is_none_or(|(_, b)| dist < b) {
-                best = Some((entity, dist));
-            }
-        }
-        if let Some((part, _)) = best {
-            held.0 = Some(part);
-            commands.entity(part).insert(RigidBody::Kinematic);
-        }
+        let player_pos = Vec3::from_array(state.0.translation);
+        let look = look_forward(state.0.rotation, state.0.pitch);
+        held.0 = focused_part(
+            player_pos,
+            look,
+            parts.iter().map(|(entity, t)| (entity, t.translation)),
+        );
     }
 }
 
-/// Drive each held (kinematic) part toward its holder's hold point by setting its
-/// velocity (proportional approach). A kinematic body has no gravity, so it
-/// hovers and follows cleanly. The changed pose replicates to all clients via
-/// `sync_part_transforms`.
+/// Float each held part to its holder's hold point with a critically-damped
+/// anti-gravity force (matches single-player `position_held_part`): the part
+/// stays dynamic, so it still collides (no tunneling), but its weight is
+/// cancelled so it floats to and follows the hold point. The changed pose
+/// replicates to all clients via `sync_part_transforms`.
 fn server_hold(
     players: Query<(&ActionState<PlayerInput>, &HeldPart)>,
-    mut parts: Query<(&Transform, &mut LinearVelocity), With<NetPart>>,
+    mut parts: Query<(&Transform, Forces), With<NetPart>>,
+    gravity: Res<Gravity>,
 ) {
     for (state, held) in &players {
         let Some(part_entity) = held.0 else {
             continue;
         };
-        let Ok((transform, mut velocity)) = parts.get_mut(part_entity) else {
+        let Ok((transform, mut forces)) = parts.get_mut(part_entity) else {
             continue;
         };
-        let to_target = player_hold_point(&state.0) - transform.translation;
-        velocity.0 = (to_target * HOLD_STIFFNESS).clamp_length_max(MAX_HOLD_SPEED);
+        let displacement = player_hold_point(&state.0) - transform.translation;
+        let velocity = forces.linear_velocity();
+        forces.apply_linear_acceleration(hold_acceleration(displacement, velocity) - gravity.0);
     }
 }
 

@@ -87,17 +87,56 @@ pub struct PlayerInput {
 
 /// Distance in front of the player to the hold point.
 pub const HOLD_DISTANCE: f32 = 5.0;
-/// Max distance from the hold point at which a part can be grabbed.
-pub const GRAB_RANGE: f32 = 7.0;
+/// Focus range / look-angle for selecting a part to grab — matches the
+/// single-player `update_focused` (`MAX_INTERACT_DISTANCE` / `MAX_INTERACT_ANGLE`
+/// in `part.rs`).
+const MAX_INTERACT_DISTANCE: f32 = 7.5;
+const MAX_INTERACT_ANGLE: f32 = 20.0 * core::f32::consts::PI / 180.0;
+/// Positioning-spring stiffness for the held-part hold (matches `part.rs`).
+const POSITIONING_STIFFNESS: f32 = 30.0;
 
-/// The world-space hold point in front of a player, from its forwarded pose. The
-/// look basis matches the camera (`Ry(-yaw) * Rx(pitch)`, see `mouse_motion` in
-/// shared `player.rs`): `rotation` already encodes `Ry(-yaw)`, and `pitch` adds
-/// `Rx(pitch)`, so looking up/down moves the hold point up/down. Shared so the
-/// server's grab/hold and the client's grabbable highlight agree.
+/// The player's look direction (`Ry(-yaw) * Rx(pitch) * +Z`, the camera orbit
+/// center's `back()`). `rotation` already encodes `Ry(-yaw)`; `pitch` adds the
+/// vertical tilt. Shared so the server's grab and the client's highlight agree.
+pub fn look_forward(rotation: [f32; 4], pitch: f32) -> Vec3 {
+    (Quat::from_array(rotation) * Quat::from_rotation_x(pitch)) * Vec3::Z
+}
+
+/// The world-space hold point in front of a player, along its look direction —
+/// so looking up/down lifts/lowers a held part.
 pub fn hold_point(translation: [f32; 3], rotation: [f32; 4], pitch: f32) -> Vec3 {
-    let look = Quat::from_array(rotation) * Quat::from_rotation_x(pitch);
-    Vec3::from_array(translation) + look * Vec3::Z * HOLD_DISTANCE
+    Vec3::from_array(translation) + look_forward(rotation, pitch) * HOLD_DISTANCE
+}
+
+/// The part the player is most directly looking at (smallest look-angle within
+/// range) — the same focus rule as single-player. `parts` yields `(entity,
+/// world_position)`.
+pub fn focused_part(
+    player_pos: Vec3,
+    look: Vec3,
+    parts: impl Iterator<Item = (Entity, Vec3)>,
+) -> Option<Entity> {
+    let mut best = None;
+    let mut smallest_angle = MAX_INTERACT_ANGLE;
+    for (entity, pos) in parts {
+        let between = pos - player_pos;
+        if between.length_squared() < MAX_INTERACT_DISTANCE * MAX_INTERACT_DISTANCE {
+            let angle = look.angle_between(between);
+            if angle < smallest_angle {
+                smallest_angle = angle;
+                best = Some(entity);
+            }
+        }
+    }
+    best
+}
+
+/// Critically-damped positioning acceleration that floats a held part to the
+/// hold point (matches `position_held_part`'s oscillator). The caller subtracts
+/// gravity to cancel the part's weight.
+pub fn hold_acceleration(displacement: Vec3, velocity: Vec3) -> Vec3 {
+    let damping = 2.0 * POSITIONING_STIFFNESS.sqrt();
+    displacement * POSITIONING_STIFFNESS - velocity * damping
 }
 
 // No entities are referenced by `PlayerInput`, so the mapping is a no-op — but

@@ -13,7 +13,8 @@
 
 use avian3d::prelude::{Collider, RigidBody};
 use bad_spaceship_shared::net::{
-    hold_point, NetPart, NetPlayer, NetTransform, PlayerInput, ProtocolPlugin, GRAB_RANGE, TICK,
+    focused_part, hold_point, look_forward, NetPart, NetPlayer, NetTransform, PlayerInput,
+    ProtocolPlugin, TICK,
 };
 use bad_spaceship_shared::part::SuppressLocalParts;
 use bad_spaceship_shared::{Character, LookPitch, Modifying, Player, PlayerClick, Yaw};
@@ -143,10 +144,10 @@ fn local_hold_point(global: &GlobalTransform, yaw: &Yaw, pitch: &LookPitch) -> V
     hold_point(global.translation().to_array(), facing.to_array(), pitch.0)
 }
 
-/// Tint the part that's currently grabbable (nearest replicated part within
-/// `GRAB_RANGE` of the local hold point) so the player can tell when to grab.
-/// Mirrors the server's grab selection; once grabbed the held part stays in
-/// range, so it reads as "held" too.
+/// Highlight the part the player is looking at (the same look-ray focus the
+/// server uses to pick a grab target, and matching single-player's yellow
+/// focus colour) so the player can tell when to grab. Once grabbed the held
+/// part stays in front, so it reads as "held" too.
 fn highlight_grabbable(
     character: Query<(&GlobalTransform, &Yaw, &LookPitch), With<Character>>,
     parts: Query<(Entity, &Transform, &MeshMaterial3d<StandardMaterial>), With<NetPart>>,
@@ -155,22 +156,18 @@ fn highlight_grabbable(
     let Some((global, yaw, pitch)) = character.iter().next() else {
         return;
     };
-    let target = local_hold_point(global, yaw, pitch);
-    // Pick the nearest part within range.
-    let mut grabbable: Option<(Entity, f32)> = None;
-    for (entity, transform, _) in &parts {
-        let dist = transform.translation.distance(target);
-        if dist <= GRAB_RANGE && grabbable.is_none_or(|(_, b)| dist < b) {
-            grabbable = Some((entity, dist));
-        }
-    }
-    let grabbable = grabbable.map(|(e, _)| e);
-    // Base colour for everything; the grabbable one glows green.
+    let look = look_forward(Quat::from_rotation_y(-yaw.0).to_array(), pitch.0);
+    let grabbable = focused_part(
+        global.translation(),
+        look,
+        parts.iter().map(|(entity, t, _)| (entity, t.translation)),
+    );
+    // Base colour for everything; the focused part glows yellow.
     for (entity, _, material) in &parts {
         if let Some(mat) = materials.get_mut(&material.0) {
             if Some(entity) == grabbable {
-                mat.base_color = Color::srgb(0.3, 0.9, 0.4);
-                mat.emissive = LinearRgba::rgb(0.0, 0.6, 0.1);
+                mat.base_color = Color::srgb(1.0, 1.0, 0.0);
+                mat.emissive = LinearRgba::rgb(0.6, 0.6, 0.0);
             } else {
                 mat.base_color = Color::srgb(0.55, 0.6, 0.72);
                 mat.emissive = LinearRgba::BLACK;
@@ -192,7 +189,7 @@ fn spawn_hold_marker(
 ) {
     commands.spawn((
         HoldMarker,
-        Mesh3d(meshes.add(Sphere::new(0.35))),
+        Mesh3d(meshes.add(Sphere::new(0.6))),
         MeshMaterial3d(materials.add(StandardMaterial {
             base_color: Color::srgb(1.0, 0.85, 0.2),
             emissive: LinearRgba::rgb(1.0, 0.7, 0.0),
