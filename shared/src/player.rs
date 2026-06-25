@@ -36,7 +36,10 @@ impl Plugin for PlayerPlugin {
                     mouse_motion.after(EaseLabel),
                     toggle_holding
                         .in_set(ToggleHoldingSystemLabel)
-                        .after(InputEvents),
+                        .after(InputEvents)
+                        // In multiplayer the netcode owns grab/attach; the local
+                        // toggle would fight the mirrored Holding state.
+                        .run_if(not(resource_exists::<crate::part::SuppressLocalParts>)),
                     despawn,
                     attach_camera_orbit.in_set(AttachCameraOrbitSystem),
                     apply_part_rotation,

@@ -13,11 +13,13 @@
 
 use avian3d::prelude::{Collider, RigidBody};
 use bad_spaceship_shared::net::{
-    focused_part, NetPart, NetPlayer, NetTransform, PlayerInput, ProtocolPlugin, TICK,
+    focused_part, NetJoint, NetPart, NetPlayer, NetTransform, PlayerInput, ProtocolPlugin, TICK,
 };
-use bad_spaceship_shared::part::SuppressLocalParts;
+use bad_spaceship_shared::part::{Holdable, SuppressLocalParts};
+use crate::render_secondary_pass::JointAppearance;
 use bad_spaceship_shared::{
-    CameraOrbitCenter, Character, HoldPoint, Modifying, Player, PlayerClick, Yaw,
+    CameraOrbitCenter, Character, FocusedInteractable, HoldPoint, Holding, InputEvents, Modifying,
+    PartRotation, Player, PlayerClick, Yaw,
 };
 use bevy::prelude::*;
 use lightyear::prelude::client::input::InputSystems as ClientInputSystems;
@@ -59,9 +61,13 @@ impl Plugin for NetClientPlugin {
         // part sim and render the server's replicated parts instead.
         app.insert_resource(SuppressLocalParts);
         app.init_resource::<WantHold>();
+        app.init_resource::<WantAttach>();
+        app.init_resource::<HeldRotation>();
         app.add_systems(Startup, connect);
         // Toggle the grab intent on each (non-modifier) click; sent in PlayerInput.
-        app.add_systems(Update, read_grab_intent);
+        // After `InputEvents` (mobile `apply_pointer` / desktop `get_modifying`)
+        // so `Modifying` is current when classifying a click as grab vs attach.
+        app.add_systems(Update, read_grab_intent.after(InputEvents));
         // Give every replicated player a visible body, then keep its transform
         // in sync with the replicated pose, tag the player we control, and tag
         // our own avatar so we can render it predicted (from the local pose).
@@ -70,11 +76,18 @@ impl Plugin for NetClientPlugin {
             (
                 draw_replicated_players,
                 draw_replicated_parts,
+                draw_replicated_joints,
                 apply_net_transform,
                 mark_controlled_player,
                 mark_own_avatar,
                 predict_own_avatar,
-                highlight_grabbable,
+                // Mirror the networked grab into local `Holding`/`FocusedInteractable`
+                // (after the intent is read), then track the held part's target
+                // orientation, then highlight it — in that order so each reads the
+                // previous one's freshly-written state this frame.
+                (mirror_grab_state, track_hold_rotation, highlight_grabbable)
+                    .chain()
+                    .after(read_grab_intent),
             ),
         );
         // Forward our character pose each tick, in lightyear's input-writing set.
@@ -123,62 +136,96 @@ fn write_player_pose(
     orbit: Query<&GlobalTransform, With<CameraOrbitCenter>>,
     hold: Query<&GlobalTransform, With<HoldPoint>>,
     want_hold: Res<WantHold>,
+    mut want_attach: ResMut<WantAttach>,
+    held_rotation: Res<HeldRotation>,
     mut controlled: Query<&mut ActionState<PlayerInput>, With<InputMarker<PlayerInput>>>,
 ) {
     let Some((global, yaw)) = character.iter().next() else {
         return;
     };
     let pose = avatar_pose(global.translation(), yaw);
-    // The grab ray origin and hold point come from the real camera-orbit/hold
-    // entities (above the character), so the networked hold matches single-player.
+    // The grab ray origin and hold-point position come from the real
+    // camera-orbit/hold entities (above the character), so the networked hold
+    // matches single-player. The held part's *orientation* target is tracked
+    // separately (`track_hold_rotation`): it starts at the part's pickup
+    // orientation and accumulates the rotate gesture.
     let grab_origin = orbit.iter().next().map(|g| g.translation());
-    let hold_target = hold.iter().next().map(|g| g.translation());
+    let hold_pos = hold.iter().next().map(|g| g.translation());
+    let attach = want_attach.0;
     for mut state in &mut controlled {
         state.0.translation = pose.translation.to_array();
         state.0.rotation = pose.rotation.to_array();
-        match (grab_origin, hold_target) {
-            (Some(origin), Some(target)) => {
+        state.0.attach = attach;
+        match (grab_origin, hold_pos) {
+            (Some(origin), Some(hold_pos)) => {
                 state.0.grab_origin = origin.to_array();
-                state.0.hold_target = target.to_array();
+                state.0.hold_target = hold_pos.to_array();
+                state.0.hold_rotation = held_rotation.0.to_array();
                 state.0.grab = want_hold.0;
             }
             // No hold point yet (camera orbit not attached) — can't grab.
             _ => state.0.grab = false,
         }
     }
+    // One-shot attach intent: consumed after forwarding.
+    want_attach.0 = false;
 }
 
-/// Highlight the part the player is looking at (the same look-ray focus the
-/// server uses, cast from the orbit center toward the hold point) in
-/// single-player's yellow focus colour, so the player can tell when to grab.
+/// Highlight the part the player is interacting with in single-player's yellow
+/// focus colour. While holding, the *held* part stays highlighted (the latched
+/// `FocusedInteractable`), so the glow doesn't jump to whatever you look at next.
+/// While empty-handed, highlight the grab preview — the part the look-ray is
+/// most directly aimed at (same rule the server grabs by).
 fn highlight_grabbable(
+    want_hold: Res<WantHold>,
+    player: Query<&FocusedInteractable, With<Player>>,
     orbit: Query<&GlobalTransform, With<CameraOrbitCenter>>,
     hold: Query<&GlobalTransform, With<HoldPoint>>,
     parts: Query<(Entity, &Transform, &MeshMaterial3d<StandardMaterial>), With<NetPart>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    // The previously-highlighted part, so we only re-colour on change. Mutating a
+    // material flags it for GPU re-upload, so recolouring every part every frame
+    // (when nothing moved) would needlessly re-upload all of them.
+    mut lit: Local<Option<Entity>>,
 ) {
-    let (Some(orbit), Some(hold)) = (orbit.iter().next(), hold.iter().next()) else {
-        return;
+    let highlighted = if want_hold.0 {
+        // Keep the grabbed part lit (mirror_grab_state latched it).
+        player.iter().next().and_then(|f| f.0)
+    } else {
+        let (Some(orbit), Some(hold)) = (orbit.iter().next(), hold.iter().next()) else {
+            return;
+        };
+        let origin = orbit.translation();
+        let look = (hold.translation() - origin).normalize_or_zero();
+        focused_part(
+            origin,
+            look,
+            parts.iter().map(|(entity, t, _)| (entity, t.translation)),
+        )
     };
-    let origin = orbit.translation();
-    let look = (hold.translation() - origin).normalize_or_zero();
-    let grabbable = focused_part(
-        origin,
-        look,
-        parts.iter().map(|(entity, t, _)| (entity, t.translation)),
-    );
-    // Base colour for everything; the focused part glows yellow.
-    for (entity, _, material) in &parts {
-        if let Some(mat) = materials.get_mut(&material.0) {
-            if Some(entity) == grabbable {
-                mat.base_color = Color::srgb(1.0, 1.0, 0.0);
-                mat.emissive = LinearRgba::rgb(0.6, 0.6, 0.0);
-            } else {
-                mat.base_color = Color::srgb(0.55, 0.6, 0.72);
-                mat.emissive = LinearRgba::BLACK;
+    if *lit == highlighted {
+        return;
+    }
+    let recolour = |entity, materials: &mut Assets<StandardMaterial>, lit: bool| {
+        if let Ok((_, _, material)) = parts.get(entity) {
+            if let Some(mat) = materials.get_mut(&material.0) {
+                (mat.base_color, mat.emissive) = if lit {
+                    (Color::srgb(1.0, 1.0, 0.0), LinearRgba::rgb(0.6, 0.6, 0.0))
+                } else {
+                    (Color::srgb(0.55, 0.6, 0.72), LinearRgba::BLACK)
+                };
             }
         }
+    };
+    // Reset the part that just lost focus, light the one that gained it. (Newly
+    // replicated parts already spawn with the base colour, so they need no reset.)
+    if let Some(prev) = *lit {
+        recolour(prev, &mut materials, false);
     }
+    if let Some(now) = highlighted {
+        recolour(now, &mut materials, true);
+    }
+    *lit = highlighted;
 }
 
 /// The client's grab intent: toggled on each non-modifier click. The local
@@ -187,18 +234,66 @@ fn highlight_grabbable(
 #[derive(Resource, Default)]
 struct WantHold(bool);
 
-/// Toggle `WantHold` on each plain (non-`Modifying`) click — the same gesture
-/// that grabs/drops in single-player, sourced from desktop clicks and the mobile
-/// grab button alike (both emit `PlayerClick`). Modifier clicks (attach) are a
-/// later slice.
+/// One-shot attach intent, set on a modifier click (the join gesture), consumed
+/// by `write_player_pose` after it's forwarded.
+#[derive(Resource, Default)]
+struct WantAttach(bool);
+
+/// The held part's target orientation, tracked client-side and forwarded to the
+/// server as `PlayerInput::hold_rotation`. `Quat::default()` is the identity, so
+/// the derived `Default` seeds it correctly. Mirrors single-player's
+/// `TargetOrientation`: it's seeded to the part's orientation at pickup and
+/// accumulates the rotate gesture (`track_hold_rotation`). Public so the
+/// secondary-pass gizmo can orient itself to it (indicating the target).
+#[derive(Resource, Default)]
+pub struct HeldRotation(pub Quat);
+
+/// Track the target orientation of the held part the way single-player does:
+/// seed it to the part's orientation the moment it's grabbed, then each frame
+/// fold in the rotate gesture (`PartRotation`, computed locally by
+/// `set_part_rotation` from the modifier + look delta — identity when not
+/// rotating). The server drives the part toward this in `server_hold`.
+fn track_hold_rotation(
+    want_hold: Res<WantHold>,
+    mut was_holding: Local<bool>,
+    mut held_rotation: ResMut<HeldRotation>,
+    player: Query<(&FocusedInteractable, &PartRotation), With<Player>>,
+    parts: Query<&Transform, (With<NetPart>, With<Interpolated>)>,
+) {
+    let Ok((focused, part_rotation)) = player.single() else {
+        return;
+    };
+    let just_grabbed = want_hold.0 && !*was_holding;
+    *was_holding = want_hold.0;
+    if !want_hold.0 {
+        return;
+    }
+    if just_grabbed {
+        // Seed to the pickup orientation (the part's current pose).
+        if let Some(t) = focused.0.and_then(|e| parts.get(e).ok()) {
+            held_rotation.0 = t.rotation;
+        }
+    } else {
+        // Accumulate the rotate gesture, matching `apply_part_rotation`.
+        held_rotation.0 = part_rotation.0 * held_rotation.0;
+    }
+}
+
+/// A plain (non-`Modifying`) click toggles grab/drop; a modifier click (the
+/// join/action gesture) requests attach. Same gestures as single-player, sourced
+/// from desktop clicks and the mobile grab/action buttons (both emit
+/// `PlayerClick`; `Modifying` distinguishes them).
 fn read_grab_intent(
     mut clicks: MessageReader<PlayerClick>,
     modifying: Query<&Modifying, With<Player>>,
     mut want_hold: ResMut<WantHold>,
+    mut want_attach: ResMut<WantAttach>,
 ) {
     let modding = modifying.iter().next().is_some_and(|m| m.0);
     for _ in clicks.read() {
-        if !modding {
+        if modding {
+            want_attach.0 = true;
+        } else {
             want_hold.0 = !want_hold.0;
         }
     }
@@ -296,7 +391,65 @@ fn draw_replicated_parts(
             RigidBody::Kinematic,
             // Avian's `Collider::cuboid` takes FULL extents (= 2 × half_extents).
             Collider::cuboid(hx * 2.0, hy * 2.0, hz * 2.0),
+            // Marked Holdable so the real joint-display systems (which query
+            // Holdable transforms) can render potential/existing joints on them.
+            Holdable,
         ));
+    }
+}
+
+/// Mirror the networked grab into the local `Holding`/`FocusedInteractable`
+/// state, so the game's real systems light up in multiplayer: the join/delete
+/// button label (keyed on `Holding`), and `update_active_joints` +
+/// `display_potential_joints` (keyed on the focused held part). The local
+/// `toggle_holding` is gated off in MP so it doesn't fight this.
+fn mirror_grab_state(
+    want_hold: Res<WantHold>,
+    orbit: Query<&GlobalTransform, With<CameraOrbitCenter>>,
+    hold: Query<&GlobalTransform, With<HoldPoint>>,
+    // Only the `Interpolated` copies carry the collider/Holdable that Avian's
+    // `Collisions` (read by `update_active_joints`) reports against, so focus must
+    // latch one of those — not the invisible `Confirmed` originals.
+    parts: Query<(Entity, &Transform), (With<NetPart>, With<Interpolated>)>,
+    mut player: Query<(&mut Holding, &mut FocusedInteractable), With<Player>>,
+) {
+    let Ok((mut holding, mut focused)) = player.single_mut() else {
+        return;
+    };
+    holding.0 = want_hold.0;
+    if !want_hold.0 {
+        focused.0 = None;
+        return;
+    }
+    // Latch the focused part once (the server latches its grab the same way).
+    if focused.0.is_none() {
+        if let (Some(orbit), Some(hold)) = (orbit.iter().next(), hold.iter().next()) {
+            let look = (hold.translation() - orbit.translation()).normalize_or_zero();
+            focused.0 = focused_part(
+                orbit.translation(),
+                look,
+                parts.iter().map(|(entity, t)| (entity, t.translation)),
+            );
+        }
+    }
+}
+
+/// Draw each replicated joint marker using the game's *real* joint visuals — the
+/// `JointAppearance` mesh + `GizmoMaterial` that single-player uses for existing
+/// joints (so it looks identical and draws on top via the secondary pass) —
+/// positioned via the interpolated `NetTransform`.
+fn draw_replicated_joints(
+    mut commands: Commands,
+    new_joints: Query<Entity, (With<NetJoint>, With<Interpolated>, Without<Mesh3d>)>,
+    appearance: Res<JointAppearance>,
+) {
+    let (Some(mesh), Some(material)) = (&appearance.mesh, &appearance.invalid_material) else {
+        return;
+    };
+    for entity in &new_joints {
+        commands
+            .entity(entity)
+            .insert((Mesh3d(mesh.clone()), MeshMaterial3d(material.clone())));
     }
 }
 

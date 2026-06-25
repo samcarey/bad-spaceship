@@ -77,24 +77,25 @@ pub struct PlayerInput {
     pub translation: [f32; 3],
     /// Avatar facing, yaw-only quaternion `[x, y, z, w]`.
     pub rotation: [f32; 4],
-    /// Camera-orbit-center world position — the origin of the grab look-ray,
-    /// matching single-player's focus (which casts from the orbit center).
+    /// Camera-orbit-center world position — the origin of the grab look-ray.
     pub grab_origin: [f32; 3],
-    /// Hold-point world position — where a grabbed part floats to. Forwarded
-    /// from the client's real `HoldPoint` entity so it matches single-player
-    /// exactly (it hangs off the orbit center, above the character).
+    /// Hold-point world position — where a grabbed part floats to.
     pub hold_target: [f32; 3],
+    /// Target orientation for a held part (the orbit-center look basis, plus any
+    /// rotate-gesture adjustment), so the held part doesn't tumble.
+    pub hold_rotation: [f32; 4],
     /// The client's intent to be holding a part.
     pub grab: bool,
+    /// One-shot intent to attach (joint) the held part to whatever it's touching.
+    pub attach: bool,
 }
 
-/// Focus range / look-angle for selecting a part to grab — matches the
-/// single-player `update_focused` (`MAX_INTERACT_DISTANCE` / `MAX_INTERACT_ANGLE`
-/// in `part.rs`).
-const MAX_INTERACT_DISTANCE: f32 = 7.5;
-const MAX_INTERACT_ANGLE: f32 = 20.0 * core::f32::consts::PI / 180.0;
-/// Positioning-spring stiffness for the held-part hold (matches `part.rs`).
-const POSITIONING_STIFFNESS: f32 = 30.0;
+// Focus range / look-angle and the held-part spring stiffnesses are defined once
+// in `part.rs` (the single-player gameplay tunables) and reused here so the
+// multiplayer selection/hold matches single-player exactly.
+use crate::part::{
+    MAX_INTERACT_ANGLE, MAX_INTERACT_DISTANCE, ORIENTING_STIFFNESS, POSITIONING_STIFFNESS,
+};
 
 /// The part the player is most directly looking at (smallest look-angle within
 /// range) — the same focus rule as single-player. `look` is the grab ray
@@ -128,6 +129,14 @@ pub fn hold_acceleration(displacement: Vec3, velocity: Vec3) -> Vec3 {
     displacement * POSITIONING_STIFFNESS - velocity * damping
 }
 
+/// Critically-damped angular acceleration that drives a held part toward its
+/// target orientation (matches `orient_held_part`'s oscillator). `rotation_vector`
+/// is the axis-angle error (axis · angle) between the target and current rotation.
+pub fn orient_acceleration(rotation_vector: Vec3, angular_velocity: Vec3) -> Vec3 {
+    let damping = 2.0 * ORIENTING_STIFFNESS.sqrt();
+    rotation_vector * ORIENTING_STIFFNESS - angular_velocity * damping
+}
+
 // No entities are referenced by `PlayerInput`, so the mapping is a no-op — but
 // the trait is a required bound for native inputs.
 impl MapEntities for PlayerInput {
@@ -141,6 +150,11 @@ impl MapEntities for PlayerInput {
 pub struct NetPart {
     pub half_extents: [f32; 3],
 }
+
+/// Marks a replicated joint marker entity — a server joint's world anchor point,
+/// streamed via `NetTransform` so clients can draw the joint like single-player.
+#[derive(Component, Serialize, Deserialize, Clone, Copy, PartialEq, Debug, Default)]
+pub struct NetJoint;
 
 /// Interpolate between two replicated poses: lerp the translation, slerp the
 /// rotation. Used by lightyear's interpolation for `NetTransform`.
@@ -173,6 +187,7 @@ impl Plugin for ProtocolPlugin {
             .add_interpolation_with(lerp_net_transform);
         // The part shape is constant, so it only needs replicating (no interp).
         app.component::<NetPart>().replicate();
+        app.component::<NetJoint>().replicate();
 
         // Register `PlayerInput` as a networked native input. `InputPlugin` is
         // role-agnostic: it adds the client input plugin under lightyear's

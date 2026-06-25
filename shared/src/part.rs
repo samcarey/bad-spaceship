@@ -67,8 +67,11 @@ pub const MAX_PART_SIZE: f32 = 10.0;
 const MIN_PART_SIZE: f32 = 0.1;
 const MIN_PART_VOLUME: f32 = 1.0;
 const MAX_PART_VOLUME: f32 = 2.0;
-const POSITIONING_STIFFNESS: f32 = 30.0;
-const ORIENTING_STIFFNESS: f32 = 5.0;
+// Held-part spring stiffnesses — also used by the multiplayer hold helpers in
+// `net.rs` (the server runs the same critically-damped springs), so they're
+// `pub` to keep a single definition rather than duplicated magic numbers.
+pub const POSITIONING_STIFFNESS: f32 = 30.0;
+pub const ORIENTING_STIFFNESS: f32 = 5.0;
 const MIN_JOINT_SPACING: f32 = MIN_PART_SIZE / 2.0;
 pub const DELETE_RADIUS: f32 = 1.0;
 
@@ -216,10 +219,12 @@ fn replace_fallen_parts(
     }
 }
 
-const MAX_INTERACT_DISTANCE: f32 = 7.5;
+// Focus range / look-angle for selecting a part — also used by the multiplayer
+// `focused_part` helper in `net.rs`, so they're `pub` (single definition).
+pub const MAX_INTERACT_DISTANCE: f32 = 7.5;
 const MAX_INTERACT_DISTANCE_SQUARED: f32 = MAX_INTERACT_DISTANCE * MAX_INTERACT_DISTANCE;
 const MAX_INTERACT_ANGLE_DEGREES: f32 = 20.0;
-const MAX_INTERACT_ANGLE: f32 = MAX_INTERACT_ANGLE_DEGREES * utils::DEG_TO_RADIANS;
+pub const MAX_INTERACT_ANGLE: f32 = MAX_INTERACT_ANGLE_DEGREES * utils::DEG_TO_RADIANS;
 
 fn update_focused(
     mut commands: Commands,
