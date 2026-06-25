@@ -105,7 +105,12 @@ native = [
 # needs `--cfg=web_sys_unstable_apis` and only works in WebGPU-capable browsers).
 # Enable WebGL2 so wgpu builds the GLES backend instead — broad browser support,
 # matching the renderer the build has used on GitHub Pages all along.
-web = ["web-sys", "gloo", "js-sys", "bevy/webgl2", "getrandom", "getrandom_02", "getrandom_04"]
+#
+# `bevy_gilrs` brings gamepad support to the wasm build too: gilrs-core 0.6.8 has a
+# `web-sys`-based backend over the browser Gamepad API, so a controller (e.g. a PS5
+# DualSense paired to a phone) is read on web exactly like native. Without it the
+# `Gamepad` entities are never spawned on web and `gamepad.rs` reads nothing.
+web = ["web-sys", "gloo", "js-sys", "bevy/webgl2", "bevy/bevy_gilrs", "getrandom", "getrandom_02", "getrandom_04"]
 
 [build-dependencies]
 shadow-rs = { version = "0.8", default-features = false }

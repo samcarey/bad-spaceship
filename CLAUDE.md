@@ -700,6 +700,54 @@ both platforms.
   `MouseMovementTracker` DOM shim (movementX/Y) for motion while keeping everything
   else on the winit-native path.
 
+## Gamepad / controller support (`gamepad.rs`)
+
+A standard controller (e.g. a PS5 DualSense) drives the **whole** game on both
+native *and* the web build — including a controller-only session with no keyboard,
+mouse, or touch, the motivating case being a DualSense paired to an **iPhone**
+(Firefox/any iOS browser is WebKit, which exposes the controller through the
+browser Gamepad API). The logic lives in `client/src/gamepad.rs` (`GamepadPlugin`)
+and feeds the same platform-agnostic sinks `mobile.rs` does, so the three input
+methods (keyboard+mouse, touch, gamepad) compose without special-casing.
+
+- **`bevy_gilrs` is enabled on web, not just native.** Bevy reads gamepads via
+  `bevy_gilrs`; `gilrs-core` 0.6.8 has a `web-sys` backend over the browser Gamepad
+  API, so the *only* thing the wasm build needed was adding `bevy/bevy_gilrs` to the
+  client's `web` feature (it was already in `native`). Without it the `Gamepad`
+  entities never spawn on web and the gamepad systems read nothing. (Runtime caveat:
+  Firefox's `getGamepads` throws in a non-`https` context — a non-issue on Pages /
+  the `wss://` test box, both `https`.)
+- **Mapping mirrors desktop mouse+Shift** so the two stay in sync: left stick =
+  move (analog, radial dead zone), right stick = look / trackball-rotate a held part
+  while the modifier is held (it just writes `MouseMotionDelta`, and the existing
+  `mouse_motion`/`set_part_rotation` route on `Modifying` exactly as for the mouse),
+  South [✕] = jump, **right trigger = click** (`PlayerClick` → pickup/drop/attach/
+  delete), **left trigger = modifier** (`Modifying`, i.e. "hold Shift"), Start
+  [Options] = toggle the pause menu.
+- **Composition / ordering.** Movement writes its own `GameStickDirectionalInput`
+  sink (no conflict). The look/modifier/click system (`gamepad_pointer`) composes
+  *additively on top of* the winit `get_look`/`get_modifying` writers (which read
+  zero with no mouse/keyboard), so it's ordered `.after(get_look).after(get_modifying)
+  .before(UpdateJointsLabel)` inside `InputEvents` — the same slot `mobile::
+  apply_pointer` uses. A controller-only iPhone session never touches the screen, so
+  `MobileActive` stays false and `apply_pointer` doesn't run; the two never fight.
+- **Two desktop assumptions break for a controller-only session** and are handled
+  like `mobile.rs` handles them for touch (both keyed off a `GamepadActive` flag that
+  flips on first controller input, mirroring `MobileActive`):
+  - *No mouse click to enter the game* → any button drives `Initial → InGame`
+    (`start_game_on_button`), the gamepad analogue of the first tap / first click.
+  - *No pointer lock on iOS WebKit* → `web.rs` reads `GamepadActive` and skips both
+    the throwing `request_pointer_lock` (`hide_cursor`) **and** the pointer-lock menu
+    toggle, exactly as it already does for `MobileActive`. Without this, entering the
+    game on iPhone hits the same JS-throw-freezes-the-canvas bug touch already
+    sidesteps. `GamepadActive` is set in the `Update` *before* the `InGame` state
+    transition is applied, so `hide_cursor`'s `OnEnter` sees it true. The Start button
+    drives the menu both ways (the controller player has no pointer to click Resume).
+- **Verify by play-testing** (clean compile, but feel is tuning): look speed
+  (`LOOK_SPEED`, the full-deflection `MouseMotionDelta` rate, ~216°/s at 0.42
+  sensitivity) and the stick dead zone (`STICK_DEADZONE`). Pitch is non-inverted
+  (stick up → look up); flip the `-ry` in `gamepad_pointer` for inverted.
+
 ## Pull request workflow
 
 Whenever the user asks to open a pull request, do all of the following before
