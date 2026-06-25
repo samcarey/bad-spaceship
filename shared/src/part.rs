@@ -62,7 +62,9 @@ impl Plugin for PartPlugin {
     }
 }
 
-const NUM_PARTS: i32 = 10;
+// Number of parts in a world. `pub` so the server can spawn one set per room
+// (multiplayer per-room world isolation) rather than a single shared set.
+pub const NUM_PARTS: i32 = 10;
 pub const MAX_PART_SIZE: f32 = 10.0;
 const MIN_PART_SIZE: f32 = 0.1;
 const MIN_PART_VOLUME: f32 = 1.0;
@@ -167,37 +169,58 @@ fn get_random_shape(rng: &mut ThreadRng) -> Collider {
 }
 
 fn spawn_part(mut commands: Commands, mut new_part_events: MessageReader<NewPart>) {
-    let mut rng = rand::thread_rng();
     for _ in new_part_events.read() {
-        let collider = get_random_shape(&mut rng);
-        // Bounding radius from the parry shape, before the collider is moved in.
-        let bounding_radius = collider.shape().compute_local_bounding_sphere().radius;
-        commands
-            .spawn_empty()
-            .insert(BoundingRadius(bounding_radius))
-            .insert(RigidBody::Dynamic)
-            // Bevy 0.15: bare `Transform` (it now requires `GlobalTransform`).
-            .insert(Transform::from_xyz(
-                rng.gen_range(-SPAWN_ZONE_HALF_WIDTH..=SPAWN_ZONE_HALF_WIDTH),
-                rng.gen_range(5.0..=15.0),
-                rng.gen_range(-SPAWN_ZONE_HALF_WIDTH..=SPAWN_ZONE_HALF_WIDTH),
-            ))
-            .insert(collider)
-            // rapier's `ColliderMassProperties::Density` / `Friction::coefficient` /
-            // `Restitution::coefficient` → Avian's `ColliderDensity` / `Friction::new`
-            // / `Restitution::new`. Avian tracks contacts in its graph by default, so
-            // rapier's `ActiveEvents::COLLISION_EVENTS` opt-in is no longer needed.
-            .insert(ColliderDensity(2.0))
-            .insert(Friction::new(1.0))
-            .insert(Restitution::new(0.1))
-            // Blocks spawn high (y 5..15) and hit the thin trimesh ground fast.
-            // Without continuous collision detection a fast impact can penetrate
-            // deeply in a single solver step and the soft-contact recovery leaves
-            // the block partially embedded. CCD catches the fast impact so blocks
-            // rest flush. (rapier's `Ccd::enabled()` → Avian's `SweptCcd`.)
-            .insert(SweptCcd::default())
-            .insert(PartBundle::default());
+        spawn_random_part(&mut commands);
     }
+}
+
+/// Spawn one random dynamic part (the standard collider + physics props) at a
+/// random spawn-zone position, returning its entity and the cuboid's
+/// half-extents. Shared by the single-player spawner and the multiplayer server's
+/// per-room spawner; the caller adds any extra tagging (replication, room
+/// membership, collision layers). The half-extents let the server fill `NetPart`
+/// without re-reading the collider after the spawn flushes. Owns its RNG so the
+/// server doesn't need to depend on `rand` (a `ThreadRng` is a cheap thread-local
+/// handle).
+pub fn spawn_random_part(commands: &mut Commands) -> (Entity, Vec3) {
+    let mut rng = rand::thread_rng();
+    let collider = get_random_shape(&mut rng);
+    // Every random shape is a cuboid (see `get_random_shape`); recover its
+    // half-extents for `NetPart`. Falls back to a unit box if that ever changes.
+    let half_extents = collider
+        .shape()
+        .as_cuboid()
+        .map(|c| Vec3::new(c.half_extents[0], c.half_extents[1], c.half_extents[2]))
+        .unwrap_or(Vec3::ONE);
+    // Bounding radius from the parry shape, before the collider is moved in.
+    let bounding_radius = collider.shape().compute_local_bounding_sphere().radius;
+    let entity = commands
+        .spawn_empty()
+        .insert(BoundingRadius(bounding_radius))
+        .insert(RigidBody::Dynamic)
+        // Bevy 0.15: bare `Transform` (it now requires `GlobalTransform`).
+        .insert(Transform::from_xyz(
+            rng.gen_range(-SPAWN_ZONE_HALF_WIDTH..=SPAWN_ZONE_HALF_WIDTH),
+            rng.gen_range(5.0..=15.0),
+            rng.gen_range(-SPAWN_ZONE_HALF_WIDTH..=SPAWN_ZONE_HALF_WIDTH),
+        ))
+        .insert(collider)
+        // rapier's `ColliderMassProperties::Density` / `Friction::coefficient` /
+        // `Restitution::coefficient` → Avian's `ColliderDensity` / `Friction::new`
+        // / `Restitution::new`. Avian tracks contacts in its graph by default, so
+        // rapier's `ActiveEvents::COLLISION_EVENTS` opt-in is no longer needed.
+        .insert(ColliderDensity(2.0))
+        .insert(Friction::new(1.0))
+        .insert(Restitution::new(0.1))
+        // Blocks spawn high (y 5..15) and hit the thin trimesh ground fast.
+        // Without continuous collision detection a fast impact can penetrate
+        // deeply in a single solver step and the soft-contact recovery leaves
+        // the block partially embedded. CCD catches the fast impact so blocks
+        // rest flush. (rapier's `Ccd::enabled()` → Avian's `SweptCcd`.)
+        .insert(SweptCcd::default())
+        .insert(PartBundle::default())
+        .id();
+    (entity, half_extents)
 }
 
 fn spawn_initial_parts(mut new_part_events: MessageWriter<NewPart>) {
