@@ -67,6 +67,9 @@ fn position_gizmo(
     hold_points: Query<&GlobalTransform, (With<HoldPoint>, Without<GizmoHub>)>,
     mut gizmo_hubs: Query<(&mut Transform, &mut Visibility, &Children), With<GizmoHub>>,
     mut gizmo_pieces: Query<&mut Visibility, (With<GizmoPiece>, Without<GizmoHub>)>,
+    // In multiplayer the local hold is suppressed (no `TargetOrientation`/
+    // `TargetPosition`), so there's nothing to drive the gizmo from `helds`.
+    multiplayer: Option<Res<SuppressLocalParts>>,
 ) {
     let mut translation = None;
     let mut rotation = None;
@@ -76,6 +79,14 @@ fn position_gizmo(
             Err(_) => None,
         };
         rotation = Some(target_orientation.quat);
+    } else if multiplayer.is_some() {
+        // Multiplayer: show the gizmo at the hold point (the server-authoritative
+        // grab target), oriented to the orbit-center look basis.
+        if let Some(transform) = hold_points.iter().next() {
+            let (_, rot, trans) = transform.to_scale_rotation_translation();
+            translation = Some(trans);
+            rotation = Some(rot);
+        }
     }
 
     let mut childs = Vec::new();
