@@ -13,7 +13,9 @@
 use std::net::SocketAddr;
 
 use avian3d::prelude::{Collider, LinearVelocity};
-use bad_spaceship_shared::net::{NetPart, NetPlayer, NetTransform, PlayerInput, ProtocolPlugin, TICK};
+use bad_spaceship_shared::net::{
+    hold_point, NetPart, NetPlayer, NetTransform, PlayerInput, ProtocolPlugin, GRAB_RANGE, TICK,
+};
 use bad_spaceship_shared::part::Holdable;
 use bevy::prelude::*;
 use lightyear::prelude::input::native::ActionState;
@@ -21,11 +23,8 @@ use lightyear::prelude::*;
 use lightyear::prelude::server::*;
 
 /// Held-part control tuning.
-const HOLD_DISTANCE: f32 = 5.0; // hold point distance in front of the player
-const HOLD_HEIGHT: f32 = 1.0; // hold point height above the player's pose
-const GRAB_RANGE: f32 = 7.0; // max distance from the hold point to grab a part
-const HOLD_STIFFNESS: f32 = 8.0; // proportional velocity toward the hold point
-const MAX_HOLD_SPEED: f32 = 30.0; // clamp on the hold velocity
+const HOLD_STIFFNESS: f32 = 12.0; // proportional velocity toward the hold point
+const MAX_HOLD_SPEED: f32 = 40.0; // clamp on the hold velocity
 
 pub struct NetServerPlugin;
 
@@ -63,12 +62,9 @@ impl Plugin for NetServerPlugin {
 #[derive(Component, Default)]
 struct HeldPart(Option<Entity>);
 
-/// The hold point in front of a player, from its forwarded pose (translation +
-/// yaw-derived rotation). Matches the client avatar's facing (+Z nose).
-fn hold_point(input: &PlayerInput) -> Vec3 {
-    let pos = Vec3::from_array(input.translation);
-    let rot = Quat::from_array(input.rotation);
-    pos + rot * Vec3::Z * HOLD_DISTANCE + Vec3::Y * HOLD_HEIGHT
+/// The hold point in front of a player, from its forwarded pose.
+fn player_hold_point(input: &PlayerInput) -> Vec3 {
+    hold_point(input.translation, input.rotation, input.pitch)
 }
 
 /// Resolve each player's grab intent: on grab, latch the nearest part within
@@ -85,7 +81,7 @@ fn server_grab(
         if held.0.is_some() {
             continue;
         }
-        let target = hold_point(&state.0);
+        let target = player_hold_point(&state.0);
         let mut best: Option<(Entity, f32)> = None;
         for (entity, transform) in &parts {
             let dist = transform.translation.distance(target);
@@ -111,7 +107,7 @@ fn server_hold(
         let Ok((transform, mut velocity)) = parts.get_mut(part_entity) else {
             continue;
         };
-        let to_target = hold_point(&state.0) - transform.translation;
+        let to_target = player_hold_point(&state.0) - transform.translation;
         velocity.0 = (to_target * HOLD_STIFFNESS).clamp_length_max(MAX_HOLD_SPEED);
     }
 }

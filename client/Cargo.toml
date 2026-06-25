@@ -66,6 +66,9 @@ default = [
     "bevy/bevy_winit",
     "bevy/bevy_pbr",
     "bevy/bevy_core_pipeline",
+    # Bevy's immediate-mode `Gizmos` (used to draw the multiplayer hold-point
+    # marker). Distinct from the project's custom `GizmoMaterial` overlay pass.
+    "bevy/bevy_gizmos",
     # The state machine lives in a separate `bevy_state` crate gated behind this
     # feature; with `default-features = false` it must be re-enabled or
     # `init_state`/`NextState`/`OnEnter` disappear.

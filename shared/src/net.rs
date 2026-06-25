@@ -74,11 +74,30 @@ impl NetTransform {
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug, Default, Reflect)]
 pub struct PlayerInput {
     pub translation: [f32; 3],
-    /// Rotation quaternion, `[x, y, z, w]`.
+    /// Rotation quaternion, `[x, y, z, w]` (yaw-only — the avatar's facing).
     pub rotation: [f32; 4],
+    /// Look pitch, applied on top of yaw for the hold direction (so looking up
+    /// lifts a held part). Separate from `rotation` since the avatar body doesn't
+    /// pitch.
+    pub pitch: f32,
     /// The client's intent to be holding a part: while true the server grabs the
     /// nearest part in front of the player and holds it at the player's hold point.
     pub grab: bool,
+}
+
+/// Distance in front of the player to the hold point.
+pub const HOLD_DISTANCE: f32 = 5.0;
+/// Max distance from the hold point at which a part can be grabbed.
+pub const GRAB_RANGE: f32 = 7.0;
+
+/// The world-space hold point in front of a player, from its forwarded pose. The
+/// look basis matches the camera (`Ry(-yaw) * Rx(pitch)`, see `mouse_motion` in
+/// shared `player.rs`): `rotation` already encodes `Ry(-yaw)`, and `pitch` adds
+/// `Rx(pitch)`, so looking up/down moves the hold point up/down. Shared so the
+/// server's grab/hold and the client's grabbable highlight agree.
+pub fn hold_point(translation: [f32; 3], rotation: [f32; 4], pitch: f32) -> Vec3 {
+    let look = Quat::from_array(rotation) * Quat::from_rotation_x(pitch);
+    Vec3::from_array(translation) + look * Vec3::Z * HOLD_DISTANCE
 }
 
 // No entities are referenced by `PlayerInput`, so the mapping is a no-op — but

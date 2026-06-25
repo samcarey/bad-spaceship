@@ -12,9 +12,11 @@
 //! For every player the server replicates, draw a cube at its `NetTransform`.
 
 use avian3d::prelude::{Collider, RigidBody};
-use bad_spaceship_shared::net::{NetPart, NetPlayer, NetTransform, PlayerInput, ProtocolPlugin, TICK};
+use bad_spaceship_shared::net::{
+    hold_point, NetPart, NetPlayer, NetTransform, PlayerInput, ProtocolPlugin, GRAB_RANGE, TICK,
+};
 use bad_spaceship_shared::part::SuppressLocalParts;
-use bad_spaceship_shared::{Character, Modifying, Player, PlayerClick, Yaw};
+use bad_spaceship_shared::{Character, LookPitch, Modifying, Player, PlayerClick, Yaw};
 use bevy::prelude::*;
 use lightyear::prelude::client::input::InputSystems as ClientInputSystems;
 use lightyear::prelude::client::*;
@@ -70,6 +72,8 @@ impl Plugin for NetClientPlugin {
                 mark_controlled_player,
                 mark_own_avatar,
                 predict_own_avatar,
+                highlight_grabbable,
+                draw_hold_gizmo,
             ),
         );
         // Forward our character pose each tick, in lightyear's input-writing set.
@@ -114,19 +118,76 @@ fn avatar_pose(translation: Vec3, yaw: &Yaw) -> Transform {
 /// (the `Character` ball — `Player` and `Character` are the same entity), so its
 /// `GlobalTransform` is the player's true position/orientation on every platform.
 fn write_player_pose(
-    character: Query<(&GlobalTransform, &Yaw), With<Character>>,
+    character: Query<(&GlobalTransform, &Yaw, &LookPitch), With<Character>>,
     want_hold: Res<WantHold>,
     mut controlled: Query<&mut ActionState<PlayerInput>, With<InputMarker<PlayerInput>>>,
 ) {
-    let Some((global, yaw)) = character.iter().next() else {
+    let Some((global, yaw, pitch)) = character.iter().next() else {
         return;
     };
     let pose = avatar_pose(global.translation(), yaw);
     for mut state in &mut controlled {
         state.0.translation = pose.translation.to_array();
         state.0.rotation = pose.rotation.to_array();
+        // Pitch is sent separately so the server's hold point follows the look
+        // (lifting a held part) while the avatar body stays yaw-only.
+        state.0.pitch = pitch.0;
         state.0.grab = want_hold.0;
     }
+}
+
+/// The local player's hold point (where a grabbed part is pulled to), mirroring
+/// the server's computation from the same shared helper.
+fn local_hold_point(global: &GlobalTransform, yaw: &Yaw, pitch: &LookPitch) -> Vec3 {
+    let facing = Quat::from_rotation_y(-yaw.0);
+    hold_point(global.translation().to_array(), facing.to_array(), pitch.0)
+}
+
+/// Tint the part that's currently grabbable (nearest replicated part within
+/// `GRAB_RANGE` of the local hold point) so the player can tell when to grab.
+/// Mirrors the server's grab selection; once grabbed the held part stays in
+/// range, so it reads as "held" too.
+fn highlight_grabbable(
+    character: Query<(&GlobalTransform, &Yaw, &LookPitch), With<Character>>,
+    parts: Query<(Entity, &Transform, &MeshMaterial3d<StandardMaterial>), With<NetPart>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    let Some((global, yaw, pitch)) = character.iter().next() else {
+        return;
+    };
+    let target = local_hold_point(global, yaw, pitch);
+    // Pick the nearest part within range.
+    let mut grabbable: Option<(Entity, f32)> = None;
+    for (entity, transform, _) in &parts {
+        let dist = transform.translation.distance(target);
+        if dist <= GRAB_RANGE && grabbable.is_none_or(|(_, b)| dist < b) {
+            grabbable = Some((entity, dist));
+        }
+    }
+    let grabbable = grabbable.map(|(e, _)| e);
+    // Base colour for everything; highlight the grabbable one green.
+    for (entity, _, material) in &parts {
+        if let Some(mat) = materials.get_mut(&material.0) {
+            mat.base_color = if Some(entity) == grabbable {
+                Color::srgb(0.3, 0.9, 0.4)
+            } else {
+                Color::srgb(0.55, 0.6, 0.72)
+            };
+        }
+    }
+}
+
+/// Draw a gizmo sphere at the local hold point so the player can see where a
+/// grabbed part is being pulled to.
+fn draw_hold_gizmo(
+    mut gizmos: Gizmos,
+    character: Query<(&GlobalTransform, &Yaw, &LookPitch), With<Character>>,
+) {
+    let Some((global, yaw, pitch)) = character.iter().next() else {
+        return;
+    };
+    let target = local_hold_point(global, yaw, pitch);
+    gizmos.sphere(Isometry3d::from_translation(target), 0.4, Color::srgb(1.0, 0.85, 0.2));
 }
 
 /// The client's grab intent: toggled on each non-modifier click. The local
