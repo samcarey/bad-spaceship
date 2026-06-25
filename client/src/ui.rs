@@ -168,7 +168,7 @@ fn show_bottom_panel(
                     Color32::from_rgb(255, 0, 0),
                     format!(
                         "Commit: {}, Built: {} ({} ago)",
-                        env!("SHORT_GIT_HASH"),
+                        bad_spaceship_shared::net::BS_VERSION,
                         build::BUILD_TIME_2822,
                         commit_age(),
                     ),

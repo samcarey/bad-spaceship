@@ -316,10 +316,11 @@ async fn resolve_match(State(state): State<AppState>, Path(id): Path<String>) ->
 
 #[tokio::main]
 async fn main() {
+    let home = std::env::var("HOME").unwrap_or_default();
     let registry_path = std::env::var("BS_REGISTRY")
-        .unwrap_or_else(|_| "/Users/sccarey/bs-mac/versions/registry.json".into());
+        .unwrap_or_else(|_| format!("{home}/bs-mac/versions/registry.json"));
     let rooms_path = std::env::var("BS_ROOMS_STATE")
-        .unwrap_or_else(|_| "/Users/sccarey/bs-mac/versions/rooms.json".into());
+        .unwrap_or_else(|_| format!("{home}/bs-mac/versions/rooms.json"));
     let game_origin: Arc<str> = std::env::var("BS_GAME_ORIGIN")
         .unwrap_or_else(|_| "game.badspaceship.com:7443".into())
         .into();

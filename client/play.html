@@ -194,6 +194,9 @@
           { cache: 'no-cache' }
         );
         if (r.status === 410 || r.status === 404) { showEnded(); return false; }
+        // Let the matchmaker be the source of truth for the server URL; the
+        // path-derived value above is just the synchronous fallback.
+        if (r.ok) { const j = await r.json(); if (j && j.server) window.__BS_NET__.server = j.server; }
         return true;
       } catch (_) {
         return true;
