@@ -1,3 +1,4 @@
+use crate::gamepad::GamepadActive;
 use crate::mobile::MobileActive;
 use crate::AppState;
 use bad_spaceship_shared::Grass;
@@ -31,9 +32,12 @@ impl Plugin for PlatformPlugin {
                 (
                     // Touch devices never acquire pointer lock, so this toggle would
                     // immediately bounce the player back to the menu on every frame
-                    // in mobile mode — gate it off once touch input is active. The
-                    // mobile Pause button drives the menu instead (see `mobile.rs`).
-                    toggle_menu_on_pointer_lock.run_if(|m: Res<MobileActive>| !m.0),
+                    // in mobile mode — gate it off once touch input is active. A
+                    // controller-only session (e.g. iPhone web) is in the same boat:
+                    // iOS WebKit has no Pointer Lock API, so gate it off there too and
+                    // let the Start button drive the menu (see `gamepad.rs`).
+                    toggle_menu_on_pointer_lock
+                        .run_if(|m: Res<MobileActive>, g: Res<GamepadActive>| !m.0 && !g.0),
                     signal_game_ready,
                 ),
             );
@@ -64,14 +68,16 @@ impl PointerLockTracker {
     }
 }
 
-fn hide_cursor(mobile: Res<MobileActive>) {
+fn hide_cursor(mobile: Res<MobileActive>, gamepad: Res<GamepadActive>) {
     // iOS / touch WebKit doesn't implement the Pointer Lock API, so
     // `request_pointer_lock()` throws a JS exception there — and because it's a JS
     // throw (not a Rust panic) it unwinds out of the winit rAF callback and stops
     // the loop, freezing the canvas with no panic logged. Touch devices never use
     // pointer lock anyway (the menu toggle above is gated off too), so skip it
-    // entirely in mobile mode. This is what froze the game on the first tap.
-    if mobile.0 {
+    // entirely in mobile mode. This is what froze the game on the first tap. A
+    // controller-only iPhone session never touches the screen (so `MobileActive`
+    // stays false) but hits the same iOS pointer-lock throw — skip it there too.
+    if mobile.0 || gamepad.0 {
         return;
     }
     // Lock the *canvas*, not `<body>`. winit's mouse-button and scroll-wheel

@@ -10,6 +10,7 @@ use bad_spaceship_shared::player;
 use bevy::light::GlobalAmbientLight;
 use bevy::prelude::*;
 
+use gamepad::GamepadPlugin;
 use highlight::HighlightPlugin;
 use input::InputPlugin;
 use mobile::MobilePlugin;
@@ -18,6 +19,7 @@ use render_main_pass::RenderMainPassPlugin;
 use render_secondary_pass::RenderSecondaryPassPlugin;
 use ui::UiPlugin;
 
+mod gamepad;
 mod input;
 mod mobile;
 mod net;
@@ -69,6 +71,7 @@ fn main() {
             UiPlugin,
             InputPlugin,
             MobilePlugin,
+            GamepadPlugin,
             PlatformPlugin,
             HighlightPlugin,
             RenderMainPassPlugin,

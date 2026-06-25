@@ -1,6 +1,6 @@
 use bad_spaceship_shared::{
-    player, GameStickDirectionalInput, InputEvents, KeyboardDirectionalInput, LeftClicked,
-    Modifying, MouseMotionDelta, MouseWheelDelta, MouseWheelLabel, OrbitingCamera, PlayerClick,
+    player, InputEvents, KeyboardDirectionalInput, LeftClicked, Modifying, MouseMotionDelta,
+    MouseWheelDelta, MouseWheelLabel, OrbitingCamera, PlayerClick,
 };
 use bevy::{
     input::mouse::MouseMotion,
@@ -32,7 +32,6 @@ impl Plugin for InputPlugin {
                     .run_if(in_state(AppState::InGame)),
                 get_left_click,
                 get_modifying,
-                gamepad_system,
                 mouse_wheel.in_set(MouseWheelLabel).after(InputEvents),
                 zoom_camera.after(MouseWheelLabel),
             ),
@@ -141,45 +140,6 @@ pub fn get_modifying(
     if let Some(mut modifying) = players.iter_mut().next() {
         modifying.0 = (*state.get() == AppState::InGame)
             && (input.pressed(KeyCode::ShiftLeft) | input.pressed(KeyCode::ShiftRight));
-    }
-}
-
-fn gamepad_system(
-    // Bevy 0.15 reworked gamepads into entities: each connected pad is an entity
-    // carrying a `Gamepad` component (with `.get`/`.just_pressed` accessors), so
-    // the old `GamepadLobby` resource + connection-tracking system are gone.
-    gamepads: Query<&Gamepad>,
-    mut query: Query<&mut GameStickDirectionalInput>,
-) {
-    for mut gamepad_directional_input in query.iter_mut() {
-        // Initialize gamepad direction to zero every frame then overwrite below if we have gamepad inputs
-        gamepad_directional_input.0 = Vec3::ZERO;
-
-        for gamepad in gamepads.iter() {
-            // Left stick controls movement
-            //  NOTE: Gamepad Stick X axis => left/right => movement x-component
-            //                      Y axis => forward/backward => movement z-component
-            if let Some(left_stick_x) = gamepad.get(GamepadAxis::LeftStickX) {
-                if left_stick_x.abs() > 0.01 {
-                    gamepad_directional_input.0.x = left_stick_x;
-                }
-            }
-            if let Some(left_stick_y) = gamepad.get(GamepadAxis::LeftStickY) {
-                if left_stick_y.abs() > 0.01 {
-                    gamepad_directional_input.0.z = left_stick_y;
-                }
-            }
-
-            // "South" button [PS4 "X"] designates "jump"
-            //  NOTE: Jump => movement y-component
-            if gamepad.just_pressed(GamepadButton::South) {
-                gamepad_directional_input.0.y += 1.0;
-            }
-        }
-
-        // Check here to see if any keypresses were registered.
-        // If so, then normalize the vector components.
-        gamepad_directional_input.0 = gamepad_directional_input.0.normalize_or_zero();
     }
 }
 
