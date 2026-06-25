@@ -28,6 +28,47 @@ use lightyear::prelude::input::native::{ActionState, InputMarker};
 use lightyear::prelude::{Authentication, Controlled, Interpolated};
 use std::net::SocketAddr;
 
+/// The lobby room this client is in, forwarded to the server (which scopes our
+/// replicated world to it). Constant for the session.
+#[derive(Resource)]
+struct MyRoom([u8; 6]);
+
+/// Pack a lobby code into the fixed 6-byte field the server keys rooms by: the
+/// matchmaker hands out 6 uppercase chars, so uppercase, take up to 6 bytes,
+/// zero-pad. An empty code (no room / native loopback) maps to all-zero — the
+/// shared default room, so a roomless connect still works.
+fn room_code_bytes(code: &str) -> [u8; 6] {
+    let mut out = [0u8; 6];
+    for (slot, byte) in out.iter_mut().zip(code.to_ascii_uppercase().bytes()) {
+        *slot = byte;
+    }
+    out
+}
+
+/// The room code to report. Native reads `BS_ROOM`; wasm reads
+/// `window.__BS_NET__.room` (set by `play.html` from the `?room=` query param).
+#[cfg(not(target_arch = "wasm32"))]
+fn multiplayer_room() -> [u8; 6] {
+    room_code_bytes(std::env::var("BS_ROOM").ok().as_deref().unwrap_or(""))
+}
+
+/// See the native counterpart. Absent/empty ⇒ all-zero (default room).
+#[cfg(target_arch = "wasm32")]
+fn multiplayer_room() -> [u8; 6] {
+    use wasm_bindgen::JsValue;
+    let code = (|| {
+        let window = web_sys::window()?;
+        let bs_net = js_sys::Reflect::get(&window, &JsValue::from_str("__BS_NET__")).ok()?;
+        if bs_net.is_undefined() || bs_net.is_null() {
+            return None;
+        }
+        let room = js_sys::Reflect::get(&bs_net, &JsValue::from_str("room")).ok()?;
+        room.as_string()
+    })()
+    .unwrap_or_default();
+    room_code_bytes(&code)
+}
+
 /// The server to connect to, or `None` for single-player.
 /// Native reads `BS_CONNECT` (e.g. `127.0.0.1:5001`).
 #[cfg(not(target_arch = "wasm32"))]
@@ -60,10 +101,17 @@ impl Plugin for NetClientPlugin {
         // In multiplayer the parts are server-authoritative: suppress the local
         // part sim and render the server's replicated parts instead.
         app.insert_resource(SuppressLocalParts);
+        // The lobby room this client is in, forwarded to the server so it scopes
+        // our world. Read once at plugin build (after `play.html` has populated
+        // `window.__BS_NET__`); constant for the session.
+        app.insert_resource(MyRoom(multiplayer_room()));
         app.init_resource::<WantHold>();
         app.init_resource::<WantAttach>();
         app.init_resource::<HeldRotation>();
         app.add_systems(Startup, connect);
+        // Recover from a dropped link (e.g. a suspended/backgrounded tab) by
+        // reconnecting when the tab returns to the foreground.
+        app.add_systems(Update, reconnect_dropped);
         // Toggle the grab intent on each (non-modifier) click; sent in PlayerInput.
         // After `InputEvents` (mobile `apply_pointer` / desktop `get_modifying`)
         // so `Modifying` is current when classifying a click as grab vs attach.
@@ -138,6 +186,7 @@ fn write_player_pose(
     want_hold: Res<WantHold>,
     mut want_attach: ResMut<WantAttach>,
     held_rotation: Res<HeldRotation>,
+    my_room: Res<MyRoom>,
     mut controlled: Query<&mut ActionState<PlayerInput>, With<InputMarker<PlayerInput>>>,
 ) {
     let Some((global, yaw)) = character.iter().next() else {
@@ -156,6 +205,8 @@ fn write_player_pose(
         state.0.translation = pose.translation.to_array();
         state.0.rotation = pose.rotation.to_array();
         state.0.attach = attach;
+        // The room is constant for the session; the server keys our world on it.
+        state.0.room = my_room.0;
         match (grab_origin, hold_pos) {
             (Some(origin), Some(hold_pos)) => {
                 state.0.grab_origin = origin.to_array();
@@ -487,8 +538,51 @@ fn build_netcode_client(server_addr: SocketAddr) -> Option<NetcodeClient> {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+/// Startup: open the initial connection.
 fn connect(mut commands: Commands) {
+    spawn_client(&mut commands);
+}
+
+/// Auto-reconnect after the link drops. iOS (and any browser) suspends a
+/// backgrounded tab, which kills the WebSocket; lightyear then marks the client
+/// `Disconnected` and clears the replicated world, so the scene goes blank and
+/// stays blank until a manual reload. The whole wasm app is *frozen* while the
+/// tab is suspended, so this system next runs the instant the tab returns to the
+/// foreground: if the client is `Disconnected` and nothing is mid-connect, it
+/// despawns the dead client and spawns a fresh one, which re-replicates the room
+/// cleanly. A short cooldown keeps a genuinely-unreachable server from being
+/// hammered. (Reconnect must build a *fresh* `NetcodeClient` rather than re-
+/// `Connect` the same entity, because the default connect token expires after
+/// 30s — long gone by the time a real backgrounding ends.)
+fn reconnect_dropped(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut cooldown: Local<f32>,
+    dropped: Query<Entity, (With<NetcodeClient>, With<Disconnected>)>,
+    pending: Query<(), (With<NetcodeClient>, Or<(With<Connecting>, With<Connected>)>)>,
+) {
+    *cooldown = (*cooldown - time.delta_secs()).max(0.0);
+    // A connect is already established or in progress, or we're still cooling
+    // down from the last attempt — nothing to do.
+    if !pending.is_empty() || *cooldown > 0.0 {
+        return;
+    }
+    if dropped.is_empty() {
+        return;
+    }
+    for entity in &dropped {
+        commands.entity(entity).despawn();
+    }
+    spawn_client(&mut commands);
+    *cooldown = 2.0;
+}
+
+/// (Re)spawn the netcode client entity and start connecting. Called at startup
+/// and again by `reconnect_dropped`; each call builds a fresh `NetcodeClient`
+/// (new token + client id), so it survives connect-token expiry across a long
+/// background.
+#[cfg(not(target_arch = "wasm32"))]
+fn spawn_client(commands: &mut Commands) {
     let Some(addr_str) = multiplayer_target() else {
         return;
     };
@@ -510,8 +604,9 @@ fn connect(mut commands: Commands) {
     info!("connecting to multiplayer server at {url}");
 }
 
+/// See the native counterpart.
 #[cfg(target_arch = "wasm32")]
-fn connect(mut commands: Commands) {
+fn spawn_client(commands: &mut Commands) {
     let Some(url) = multiplayer_target() else {
         return;
     };

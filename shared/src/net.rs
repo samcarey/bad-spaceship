@@ -88,6 +88,12 @@ pub struct PlayerInput {
     pub grab: bool,
     /// One-shot intent to attach (joint) the held part to whatever it's touching.
     pub attach: bool,
+    /// The lobby room code the client is in (the 6-char matchmaker code as raw
+    /// bytes, zero-padded; all-zero = no code / default room). Constant for the
+    /// session — carried on the already-reliable input channel rather than a
+    /// separate connect message, so the server learns each client's room from its
+    /// first input and scopes that client's world to it.
+    pub room: [u8; 6],
 }
 
 // Focus range / look-angle and the held-part spring stiffnesses are defined once
