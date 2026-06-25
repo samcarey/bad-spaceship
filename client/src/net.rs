@@ -57,7 +57,7 @@ impl Plugin for NetClientPlugin {
         // part sim and render the server's replicated parts instead.
         app.insert_resource(SuppressLocalParts);
         app.init_resource::<WantHold>();
-        app.add_systems(Startup, connect);
+        app.add_systems(Startup, (connect, spawn_hold_marker));
         // Toggle the grab intent on each (non-modifier) click; sent in PlayerInput.
         app.add_systems(Update, read_grab_intent);
         // Give every replicated player a visible body, then keep its transform
@@ -73,7 +73,7 @@ impl Plugin for NetClientPlugin {
                 mark_own_avatar,
                 predict_own_avatar,
                 highlight_grabbable,
-                draw_hold_gizmo,
+                move_hold_marker,
             ),
         );
         // Forward our character pose each tick, in lightyear's input-writing set.
@@ -165,29 +165,55 @@ fn highlight_grabbable(
         }
     }
     let grabbable = grabbable.map(|(e, _)| e);
-    // Base colour for everything; highlight the grabbable one green.
+    // Base colour for everything; the grabbable one glows green.
     for (entity, _, material) in &parts {
         if let Some(mat) = materials.get_mut(&material.0) {
-            mat.base_color = if Some(entity) == grabbable {
-                Color::srgb(0.3, 0.9, 0.4)
+            if Some(entity) == grabbable {
+                mat.base_color = Color::srgb(0.3, 0.9, 0.4);
+                mat.emissive = LinearRgba::rgb(0.0, 0.6, 0.1);
             } else {
-                Color::srgb(0.55, 0.6, 0.72)
-            };
+                mat.base_color = Color::srgb(0.55, 0.6, 0.72);
+                mat.emissive = LinearRgba::BLACK;
+            }
         }
     }
 }
 
-/// Draw a gizmo sphere at the local hold point so the player can see where a
-/// grabbed part is being pulled to.
-fn draw_hold_gizmo(
-    mut gizmos: Gizmos,
+/// Marks the hold-point marker entity (a small emissive sphere).
+#[derive(Component)]
+struct HoldMarker;
+
+/// Spawn the hold-point marker once (a real mesh, so it renders in this app's
+/// custom render passes — Bevy's immediate-mode gizmos don't).
+fn spawn_hold_marker(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    commands.spawn((
+        HoldMarker,
+        Mesh3d(meshes.add(Sphere::new(0.35))),
+        MeshMaterial3d(materials.add(StandardMaterial {
+            base_color: Color::srgb(1.0, 0.85, 0.2),
+            emissive: LinearRgba::rgb(1.0, 0.7, 0.0),
+            ..default()
+        })),
+    ));
+}
+
+/// Move the hold-point marker to the local hold point each frame, so the player
+/// can see where a grabbed part is being pulled to.
+fn move_hold_marker(
     character: Query<(&GlobalTransform, &Yaw, &LookPitch), With<Character>>,
+    mut marker: Query<&mut Transform, With<HoldMarker>>,
 ) {
     let Some((global, yaw, pitch)) = character.iter().next() else {
         return;
     };
     let target = local_hold_point(global, yaw, pitch);
-    gizmos.sphere(Isometry3d::from_translation(target), 0.4, Color::srgb(1.0, 0.85, 0.2));
+    for mut transform in &mut marker {
+        transform.translation = target;
+    }
 }
 
 /// The client's grab intent: toggled on each non-modifier click. The local

@@ -12,7 +12,7 @@
 
 use std::net::SocketAddr;
 
-use avian3d::prelude::{Collider, LinearVelocity};
+use avian3d::prelude::{Collider, LinearVelocity, RigidBody};
 use bad_spaceship_shared::net::{
     hold_point, NetPart, NetPlayer, NetTransform, PlayerInput, ProtocolPlugin, GRAB_RANGE, TICK,
 };
@@ -68,14 +68,18 @@ fn player_hold_point(input: &PlayerInput) -> Vec3 {
 }
 
 /// Resolve each player's grab intent: on grab, latch the nearest part within
-/// `GRAB_RANGE` of the hold point; on release, let go.
+/// `GRAB_RANGE` of the hold point and make it kinematic (so it ignores gravity
+/// and follows the hold cleanly); on release, return it to dynamic so it falls.
 fn server_grab(
+    mut commands: Commands,
     mut players: Query<(&ActionState<PlayerInput>, &mut HeldPart)>,
     parts: Query<(Entity, &Transform), With<NetPart>>,
 ) {
     for (state, mut held) in &mut players {
         if !state.0.grab {
-            held.0 = None;
+            if let Some(part) = held.0.take() {
+                commands.entity(part).insert(RigidBody::Dynamic);
+            }
             continue;
         }
         if held.0.is_some() {
@@ -89,13 +93,17 @@ fn server_grab(
                 best = Some((entity, dist));
             }
         }
-        held.0 = best.map(|(entity, _)| entity);
+        if let Some((part, _)) = best {
+            held.0 = Some(part);
+            commands.entity(part).insert(RigidBody::Kinematic);
+        }
     }
 }
 
-/// Drive each held part toward its holder's hold point by setting its velocity
-/// (proportional approach), overriding gravity so it hovers and follows. The
-/// changed pose replicates to all clients via `sync_part_transforms`.
+/// Drive each held (kinematic) part toward its holder's hold point by setting its
+/// velocity (proportional approach). A kinematic body has no gravity, so it
+/// hovers and follows cleanly. The changed pose replicates to all clients via
+/// `sync_part_transforms`.
 fn server_hold(
     players: Query<(&ActionState<PlayerInput>, &HeldPart)>,
     mut parts: Query<(&Transform, &mut LinearVelocity), With<NetPart>>,
