@@ -182,33 +182,45 @@ fn highlight_grabbable(
     }
 }
 
-/// Marks the hold-point marker entity (an emissive sphere).
+/// Marks the hold-point gizmo hub (parent of the RGB axis arms).
 #[derive(Component)]
 struct HoldMarker;
 
-/// Spawn the hold-point marker once. `Mesh3d` doesn't auto-add a `Transform`
-/// here, so include `Transform`/`Visibility` explicitly (otherwise it never
-/// renders or moves).
+/// Spawn the hold-point gizmo once: an RGB axes marker (red X / green Y / blue Z)
+/// so the player sees the hold point *and* its orientation. `Mesh3d` doesn't
+/// auto-add a `Transform` here, so each piece includes one explicitly.
 fn spawn_hold_marker(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    commands.spawn((
-        HoldMarker,
-        Mesh3d(meshes.add(Sphere::new(0.6))),
-        MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgb(1.0, 0.85, 0.2),
-            emissive: LinearRgba::rgb(1.0, 0.7, 0.0),
-            ..default()
-        })),
-        Transform::default(),
-        Visibility::default(),
-    ));
+    const LEN: f32 = 1.2;
+    const THICK: f32 = 0.06;
+    let mut arm = |size: Vec3, offset: Vec3, color: Color| {
+        commands
+            .spawn((
+                Mesh3d(meshes.add(Cuboid::new(size.x, size.y, size.z))),
+                MeshMaterial3d(materials.add(StandardMaterial {
+                    base_color: color,
+                    emissive: color.to_linear() * 0.6,
+                    unlit: true,
+                    ..default()
+                })),
+                Transform::from_translation(offset),
+            ))
+            .id()
+    };
+    let x = arm(Vec3::new(LEN, THICK, THICK), Vec3::new(LEN / 2.0, 0.0, 0.0), Color::srgb(1.0, 0.1, 0.1));
+    let y = arm(Vec3::new(THICK, LEN, THICK), Vec3::new(0.0, LEN / 2.0, 0.0), Color::srgb(0.1, 1.0, 0.1));
+    let z = arm(Vec3::new(THICK, THICK, LEN), Vec3::new(0.0, 0.0, LEN / 2.0), Color::srgb(0.2, 0.4, 1.0));
+    commands
+        .spawn((HoldMarker, Transform::default(), Visibility::default()))
+        .add_children(&[x, y, z]);
 }
 
-/// Move the hold-point marker to the real hold point each frame, so the player
-/// can see where a grabbed part is pulled to.
+/// Move the gizmo to the real hold point each frame, matching its orientation
+/// (the orbit-center look basis), so the player sees where and how a grabbed
+/// part is held.
 fn move_hold_marker(
     hold: Query<&GlobalTransform, With<HoldPoint>>,
     mut marker: Query<&mut Transform, With<HoldMarker>>,
@@ -216,8 +228,10 @@ fn move_hold_marker(
     let Some(hold) = hold.iter().next() else {
         return;
     };
+    let (_, rotation, translation) = hold.to_scale_rotation_translation();
     for mut transform in &mut marker {
-        transform.translation = hold.translation();
+        transform.translation = translation;
+        transform.rotation = rotation;
     }
 }
 

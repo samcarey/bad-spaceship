@@ -1,5 +1,5 @@
 use bad_spaceship_shared::{
-    part::{Holdable, TargetOrientation, TargetPosition, DELETE_RADIUS},
+    part::{Holdable, SuppressLocalParts, TargetOrientation, TargetPosition, DELETE_RADIUS},
     player::get_hold_point_entity,
     DisplayableJoint, ExistingJoints, HoldPoint, Holding, Modifying, PotentialJoints,
     PredeleteJoint, PredeleteJoints, UpdateJointsLabel,
@@ -35,12 +35,16 @@ impl Plugin for RenderSecondaryPassPlugin {
                 Update,
                 (
                     position_gizmo,
-                    add_hold_point_delete_zone_visualization,
+                    // The hold-point delete-zone sphere is a local-build UI; in
+                    // multiplayer the local hold is suppressed, so skip it.
+                    add_hold_point_delete_zone_visualization
+                        .run_if(not(resource_exists::<SuppressLocalParts>)),
                     (
                         display_potential_joints,
                         display_existing_joints,
                         display_predelete_joints,
-                        delete_zone_visibility,
+                        delete_zone_visibility
+                            .run_if(not(resource_exists::<SuppressLocalParts>)),
                     )
                         .after(UpdateJointsLabel),
                 ),
