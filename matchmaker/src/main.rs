@@ -1,29 +1,29 @@
-//! Bad Spaceship matchmaker — the lobby-coordination tier.
+//! Bad Spaceship matchmaker — the version-aware lobby/router tier.
 //!
-//! A small standalone HTTP service (no bevy/lightyear) that tracks open
-//! multiplayer matches and hands out shareable join links. The static lobby
-//! browser (`client/lobby.html`) talks to it via `fetch()`. It is hosted
-//! separately from the static site (GitHub Pages can't run a server).
+//! A small standalone HTTP service (no bevy/lightyear) that tracks open matches
+//! and routes each one to the game-server **version** it was created on, so a
+//! room's frontend and backend always match even as new versions deploy.
+//!
+//! Two on-disk files form the contract with the deploy automation:
+//!   * `BS_REGISTRY`  (default ~/bs-mac/versions/registry.json) — WRITTEN by the
+//!     deploy scripts, READ here. Lists the live server versions and which is
+//!     `latest`. New matches land on `latest`; a room whose version is no longer
+//!     listed has been retired (→ 410).
+//!   * `BS_ROOMS_STATE` (default ~/bs-mac/versions/rooms.json) — WRITTEN + READ
+//!     here. Persists each room's pinned version so a matchmaker restart doesn't
+//!     orphan live rooms.
 //!
 //! Endpoints (all JSON):
-//!   GET  /api/health            -> "ok"
-//!   GET  /api/matches           -> [Lobby, ...]      (open lobbies, newest first)
-//!   POST /api/matches           -> { id, join_path } (create a lobby)
-//!   POST /api/matches/{id}/join -> Lobby             (claim a slot; 404/409 on miss/full)
+//!   GET  /api/health                 -> "ok"
+//!   GET  /api/matches                -> [LobbyView, ...]   (rooms on still-live versions, newest first)
+//!   POST /api/matches                -> { id, sha, server, web_url, share_url } | 503 no_active_version
+//!   POST /api/matches/{id}/join      -> LobbyView | 404 | 409 | 410 version_retired
+//!   GET  /api/matches/{id}/resolve   -> { sha, server, web_url } | 404 | 410 version_retired
 //!
-//! State is in-memory for now (a process restart clears lobbies). Swappable for
-//! Redis/a DB later without touching the front-end contract.
-//!
-//! Config via env:
-//!   BIND                 listen addr (default 0.0.0.0:5000)
-//!   STATIC_DIR           if set, also serve this dir at `/` (local single-origin testing)
-//!   BS_GAME_SERVER_URL   the dedicated game server's public `wss://host[:port]`
-//!                        endpoint, handed out with every match so the lobby's
-//!                        join link actually connects the client to it. Unset ⇒
-//!                        empty ⇒ the join link is single-player (offline). A
-//!                        single shared server for now: every match points at it
-//!                        and shares one world (per-room world isolation is a
-//!                        later slice).
+//! Public URL shape (origins configurable via env):
+//!   server   wss://{BS_GAME_ORIGIN}/v/{sha}/ws
+//!   web_url  https://{BS_GAME_ORIGIN}/v/{sha}/play.html?room={code}
+//!   share    {BS_LOBBY_BASE}/j.html?room={code}
 
 use std::{
     collections::HashMap,
@@ -43,21 +43,41 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 use tower_http::{cors::CorsLayer, services::ServeDir};
 
-/// One open multiplayer match, as the lobby browser sees it.
-#[derive(Clone, Serialize)]
-struct Lobby {
-    /// Short shareable code, also the join-link token.
+/// A room's persisted state (the matchmaker owns this; see `rooms.json`).
+#[derive(Clone, Serialize, Deserialize)]
+struct Room {
+    name: String,
+    players: u32,
+    max_players: u32,
+    created_unix: u64,
+    /// The git SHA / version this room is pinned to. Frontend and backend both
+    /// resolve from it, so the room stays internally consistent for its lifetime.
+    sha: String,
+}
+
+/// What the lobby browser / join flow sees.
+#[derive(Serialize)]
+struct LobbyView {
     id: String,
     name: String,
     players: u32,
     max_players: u32,
-    /// Seconds since the Unix epoch.
     created_unix: u64,
-    /// The game server's public `wss://` endpoint for this match (from
-    /// `BS_GAME_SERVER_URL`). The front-end threads it into the join link as
-    /// `?server=…`, which the WASM client reads on boot to know who to connect
-    /// to. Empty ⇒ single-player (no server configured).
+    sha: String,
+    /// `wss://…/v/<sha>/ws` — the version's game endpoint.
     server: String,
+    /// Absolute play URL for this room on its matched version.
+    web_url: String,
+}
+
+#[derive(Serialize)]
+struct CreateResp {
+    id: String,
+    sha: String,
+    server: String,
+    web_url: String,
+    /// Short, version-agnostic link to share; resolves the version on open.
+    share_url: String,
 }
 
 #[derive(Deserialize)]
@@ -66,26 +86,46 @@ struct CreateReq {
     max_players: Option<u32>,
 }
 
-#[derive(Serialize)]
-struct CreateResp {
-    id: String,
-    /// Relative room link (`play.html?room=ID`); the front-end appends the
-    /// `&server=…` (it already builds the absolute, shareable URL and owns the
-    /// query encoding).
-    join_path: String,
-    /// The game server endpoint for the new match (echoes `Lobby.server`), so
-    /// the front-end can thread it into the join link.
-    server: String,
+// ---- Deploy registry (read-only here) -------------------------------------
+
+#[derive(Default, Deserialize)]
+struct Registry {
+    latest: Option<String>,
+    #[serde(default)]
+    versions: HashMap<String, VersionEntry>,
 }
 
-type Db = Arc<Mutex<HashMap<String, Lobby>>>;
+#[derive(Deserialize)]
+struct VersionEntry {
+    /// building | active | draining | failed. Only `active` accepts new matches;
+    /// `active` + `draining` keep serving existing rooms.
+    #[serde(default)]
+    status: String,
+}
 
-/// Shared handler state: the in-memory lobby store plus the configured game
-/// server endpoint handed out with every match.
+impl Registry {
+    /// The version new matches should use: `latest`, if it's `active`.
+    fn current(&self) -> Option<String> {
+        let sha = self.latest.as_ref()?;
+        let v = self.versions.get(sha)?;
+        (v.status == "active").then(|| sha.clone())
+    }
+    /// A version still backs existing rooms while it's present at all (active or
+    /// draining). Absent ⇒ retired ⇒ rooms on it are dead (410).
+    fn serves(&self, sha: &str) -> bool {
+        self.versions.contains_key(sha)
+    }
+}
+
+// ---- Shared state ----------------------------------------------------------
+
 #[derive(Clone)]
 struct AppState {
-    db: Db,
-    game_server: Arc<str>,
+    rooms: Arc<Mutex<HashMap<String, Room>>>,
+    registry_path: String,
+    rooms_path: String,
+    game_origin: Arc<str>, // e.g. "game.badspaceship.com:7443"
+    lobby_base: Arc<str>,  // e.g. "https://badspaceship.com"
 }
 
 fn now_unix() -> u64 {
@@ -104,16 +144,71 @@ fn gen_id() -> String {
         .collect()
 }
 
+fn load_registry(path: &str) -> Registry {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn load_rooms(path: &str) -> HashMap<String, Room> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+/// Atomic persist (temp + rename on the same dir) so a crash never leaves a
+/// half-written rooms file.
+fn save_rooms(path: &str, rooms: &HashMap<String, Room>) {
+    if let Ok(json) = serde_json::to_string_pretty(rooms) {
+        let tmp = format!("{path}.tmp");
+        if std::fs::write(&tmp, json).is_ok() {
+            let _ = std::fs::rename(&tmp, path);
+        }
+    }
+}
+
+fn server_url(origin: &str, sha: &str) -> String {
+    format!("wss://{origin}/v/{sha}/ws")
+}
+fn web_url(origin: &str, sha: &str, code: &str) -> String {
+    format!("https://{origin}/v/{sha}/play.html?room={code}")
+}
+fn share_url(lobby_base: &str, code: &str) -> String {
+    format!("{lobby_base}/j.html?room={code}")
+}
+
+fn view(state: &AppState, id: &str, room: &Room) -> LobbyView {
+    LobbyView {
+        id: id.to_string(),
+        name: room.name.clone(),
+        players: room.players,
+        max_players: room.max_players,
+        created_unix: room.created_unix,
+        sha: room.sha.clone(),
+        server: server_url(&state.game_origin, &room.sha),
+        web_url: web_url(&state.game_origin, &room.sha, id),
+    }
+}
+
+// ---- Handlers --------------------------------------------------------------
+
 async fn health() -> &'static str {
     "ok"
 }
 
-async fn list_matches(State(state): State<AppState>) -> Json<Vec<Lobby>> {
-    let db = state.db.lock().unwrap();
-    let mut lobbies: Vec<Lobby> = db.values().cloned().collect();
-    // Newest first.
-    lobbies.sort_by(|a, b| b.created_unix.cmp(&a.created_unix));
-    Json(lobbies)
+/// Open lobbies whose version is still live, newest first.
+async fn list_matches(State(state): State<AppState>) -> Json<Vec<LobbyView>> {
+    let reg = load_registry(&state.registry_path);
+    let rooms = state.rooms.lock().unwrap();
+    let mut out: Vec<LobbyView> = rooms
+        .iter()
+        .filter(|(_, r)| reg.serves(&r.sha))
+        .map(|(id, r)| view(&state, id, r))
+        .collect();
+    out.sort_by(|a, b| b.created_unix.cmp(&a.created_unix));
+    Json(out)
 }
 
 async fn create_match(
@@ -125,88 +220,139 @@ async fn create_match(
         max_players: None,
     });
 
-    let mut db = state.db.lock().unwrap();
-    // Avoid the (astronomically unlikely) id collision.
+    // Assign to the current live version. None yet (e.g. first deploy still
+    // building) ⇒ 503 so the lobby retries instead of making a dead room.
+    let reg = load_registry(&state.registry_path);
+    let Some(sha) = reg.current() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "error": "no_active_version" })),
+        )
+            .into_response();
+    };
+
+    let mut rooms = state.rooms.lock().unwrap();
     let id = loop {
         let candidate = gen_id();
-        if !db.contains_key(&candidate) {
+        if !rooms.contains_key(&candidate) {
             break candidate;
         }
     };
-
     let name = req
         .name
         .map(|n| n.trim().chars().take(40).collect::<String>())
         .filter(|n| !n.is_empty())
         .unwrap_or_else(|| format!("Match {id}"));
     let max_players = req.max_players.unwrap_or(8).clamp(2, 32);
-    let server = state.game_server.to_string();
 
-    let lobby = Lobby {
-        id: id.clone(),
+    let room = Room {
         name,
         players: 1,
         max_players,
         created_unix: now_unix(),
-        server: server.clone(),
+        sha: sha.clone(),
     };
-    db.insert(id.clone(), lobby);
+    rooms.insert(id.clone(), room);
+    save_rooms(&state.rooms_path, &rooms);
 
     (
         StatusCode::CREATED,
         Json(CreateResp {
-            join_path: format!("play.html?room={id}"),
+            server: server_url(&state.game_origin, &sha),
+            web_url: web_url(&state.game_origin, &sha, &id),
+            share_url: share_url(&state.lobby_base, &id),
             id,
-            server,
+            sha,
         }),
     )
+        .into_response()
 }
 
 async fn join_match(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
     let id = id.to_uppercase();
-    let mut db = state.db.lock().unwrap();
-    match db.get_mut(&id) {
+    let reg = load_registry(&state.registry_path);
+    let mut rooms = state.rooms.lock().unwrap();
+    match rooms.get_mut(&id) {
         None => (StatusCode::NOT_FOUND, "no such match").into_response(),
-        Some(lobby) if lobby.players >= lobby.max_players => {
+        Some(room) if !reg.serves(&room.sha) => (
+            StatusCode::GONE,
+            Json(serde_json::json!({ "error": "version_retired" })),
+        )
+            .into_response(),
+        Some(room) if room.players >= room.max_players => {
             (StatusCode::CONFLICT, "match is full").into_response()
         }
-        Some(lobby) => {
-            lobby.players += 1;
-            Json(lobby.clone()).into_response()
+        Some(room) => {
+            room.players += 1;
+            let v = view(&state, &id, room);
+            save_rooms(&state.rooms_path, &rooms);
+            Json(v).into_response()
         }
+    }
+}
+
+/// Short-link / direct-link resolution: map a room code to its versioned play
+/// URL, or 410 if the version has been retired (so the front-end shows a clean
+/// "this game has ended" instead of a dead connect).
+async fn resolve_match(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+    let id = id.to_uppercase();
+    let reg = load_registry(&state.registry_path);
+    let rooms = state.rooms.lock().unwrap();
+    match rooms.get(&id) {
+        None => (StatusCode::NOT_FOUND, "no such match").into_response(),
+        Some(room) if !reg.serves(&room.sha) => (
+            StatusCode::GONE,
+            Json(serde_json::json!({ "error": "version_retired" })),
+        )
+            .into_response(),
+        Some(room) => Json(serde_json::json!({
+            "sha": room.sha,
+            "server": server_url(&state.game_origin, &room.sha),
+            "web_url": web_url(&state.game_origin, &room.sha, &id),
+        }))
+        .into_response(),
     }
 }
 
 #[tokio::main]
 async fn main() {
-    let db: Db = Arc::new(Mutex::new(HashMap::new()));
-    // The dedicated game server endpoint handed out with every match. Empty when
-    // unset, so the lobby flow degrades to single-player rather than a dead link.
-    let game_server: Arc<str> = std::env::var("BS_GAME_SERVER_URL")
-        .unwrap_or_default()
-        .trim()
+    let home = std::env::var("HOME").unwrap_or_default();
+    let registry_path = std::env::var("BS_REGISTRY")
+        .unwrap_or_else(|_| format!("{home}/bs-mac/versions/registry.json"));
+    let rooms_path = std::env::var("BS_ROOMS_STATE")
+        .unwrap_or_else(|_| format!("{home}/bs-mac/versions/rooms.json"));
+    let game_origin: Arc<str> = std::env::var("BS_GAME_ORIGIN")
+        .unwrap_or_else(|_| "game.badspaceship.com:7443".into())
         .into();
-    if game_server.is_empty() {
-        println!(
-            "warning: BS_GAME_SERVER_URL is unset — matches will have no server \
-             (single-player join links). Set it to the game server's wss:// URL."
-        );
-    } else {
-        println!("handing out game server endpoint: {game_server}");
-    }
-    let state = AppState { db, game_server };
+    let lobby_base: Arc<str> = std::env::var("BS_LOBBY_BASE")
+        .unwrap_or_else(|_| "https://badspaceship.com".into())
+        .into();
+
+    // Restore rooms persisted from a previous run so live rooms survive restart.
+    let rooms = Arc::new(Mutex::new(load_rooms(&rooms_path)));
+    println!(
+        "matchmaker: registry={registry_path} rooms={rooms_path} game_origin={game_origin} \
+         (restored {} rooms)",
+        rooms.lock().unwrap().len()
+    );
+
+    let state = AppState {
+        rooms,
+        registry_path,
+        rooms_path,
+        game_origin,
+        lobby_base,
+    };
 
     let mut app = Router::new()
         .route("/api/health", get(health))
         .route("/api/matches", get(list_matches).post(create_match))
         .route("/api/matches/{id}/join", post(join_match))
-        // Permissive CORS for now (the lobby page lives on a different origin).
-        // Lock this down to the deployed site origin before going public.
+        .route("/api/matches/{id}/resolve", get(resolve_match))
         .layer(CorsLayer::permissive())
         .with_state(state);
 
-    // Optional: serve the static client dir on the same origin for local
-    // end-to-end testing (no CORS needed). Off in production — Pages serves it.
+    // Optional same-origin static serving for local end-to-end testing.
     if let Ok(dir) = std::env::var("STATIC_DIR") {
         app = app.fallback_service(ServeDir::new(dir));
     }

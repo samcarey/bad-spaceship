@@ -393,7 +393,16 @@ fn start_server(mut commands: Commands) {
             .with_no_encryption(),
     };
     let server = commands
-        .spawn((NetcodeServer::new(NetcodeConfig::default()), LocalAddr(addr), io))
+        .spawn((
+            // Match the client's version gate: only accept connect tokens whose
+            // protocol id equals this build's BS_PROTOCOL_ID (same git commit).
+            NetcodeServer::new(
+                NetcodeConfig::default()
+                    .with_protocol_id(bad_spaceship_shared::net::BS_PROTOCOL_ID),
+            ),
+            LocalAddr(addr),
+            io,
+        ))
         .id();
     commands.trigger(Start { entity: server });
     info!("multiplayer server listening on ws://{addr}");
