@@ -527,7 +527,10 @@ fn build_netcode_client(server_addr: SocketAddr) -> Option<NetcodeClient> {
         server_addr,
         client_id: rand::random::<u64>(),
         private_key: [0u8; 32],
-        protocol_id: 0,
+        // Version gate: a client only connects to a server built from the same
+        // commit. The matchmaker routes to the matching version; this is the
+        // netcode-level backstop if a mismatched URL ever slips through.
+        protocol_id: bad_spaceship_shared::net::BS_PROTOCOL_ID,
     };
     match NetcodeClient::new(auth, NetcodeConfig::default()) {
         Ok(n) => Some(n),

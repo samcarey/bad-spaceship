@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Bad Spaceship · Joining…</title>
+  <!-- Short-link resolver. A share link `…/j.html?room=CODE` is version-agnostic;
+       this page asks the matchmaker which game version the room is pinned to and
+       redirects to that version's frontend+server, so the link keeps working
+       across deploys (and shows a clean message once the version is retired). -->
+  <style>
+    html, body { height: 100%; margin: 0; }
+    body {
+      background: radial-gradient(circle at 50% 0%, #0a1426 0%, #05070d 70%);
+      color: #cde3ff;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .box { text-align: center; padding: 1.5rem; }
+    #title { font-size: 1.4rem; letter-spacing: 0.3em; text-transform: uppercase; color: #7fb3ff; margin-bottom: 1rem; }
+    #msg { font-size: 0.95rem; min-height: 1.3em; }
+    #link { margin-top: 1.2rem; }
+    #link a { color: #7fb3ff; text-decoration: none; letter-spacing: 0.08em; }
+  </style>
+</head>
+
+<body>
+  <div class="box">
+    <div id="title">Bad Spaceship</div>
+    <div id="msg">Resolving match…</div>
+    <div id="link"></div>
+  </div>
+
+  <script>
+    (async function () {
+      const p = new URLSearchParams(location.search);
+      const isLocal = /^(localhost|127\.|0\.0\.0\.0)/.test(location.hostname);
+      const MATCHMAKER = (
+        p.get('api') ||
+        window.BS_MATCHMAKER_URL ||
+        (isLocal ? 'http://localhost:5000' : 'https://game.badspaceship.com:7443')
+      ).replace(/\/$/, '');
+      const room = (p.get('room') || '').toUpperCase();
+      const msg = document.getElementById('msg');
+      const link = document.getElementById('link');
+      const lobby = () => { link.innerHTML = '<a href="/lobby.html">← Multiplayer lobby</a>'; };
+
+      if (!room) { msg.textContent = 'No match code in this link.'; lobby(); return; }
+      try {
+        const r = await fetch(
+          MATCHMAKER + '/api/matches/' + encodeURIComponent(room) + '/resolve',
+          { cache: 'no-cache' }
+        );
+        if (r.status === 404) { msg.textContent = 'Match ' + room + ' was not found.'; lobby(); return; }
+        if (r.status === 410) { msg.textContent = 'Match ' + room + ' has ended — its game version was retired.'; lobby(); return; }
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const { web_url } = await r.json();
+        msg.textContent = 'Joining ' + room + '…';
+        location.replace(web_url);
+      } catch (e) {
+        msg.textContent = "Couldn't reach the matchmaker (" + ((e && e.message) || e) + ').';
+        lobby();
+      }
+    })();
+  </script>
+</body>
+
+</html>

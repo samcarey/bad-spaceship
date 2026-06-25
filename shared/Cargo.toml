@@ -3,6 +3,9 @@ name = "bad-spaceship-shared"
 version = "0.1.0"
 authors = ["Sam Carey <sam@samcarey.com>"]
 edition = "2021"
+# Generates BS_PROTOCOL_ID / BS_VERSION from the git SHA (see build.rs); both the
+# client and server inherit them through `shared` so the netcode protocol id matches.
+build = "build.rs"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

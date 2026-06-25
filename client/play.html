@@ -138,13 +138,25 @@
     // netcode tier). An absent/empty `room` means single-player (offline).
     (function () {
       const p = new URLSearchParams(location.search);
-      window.__BS_NET__ = {
-        room: p.get('room') || '',
-        server: p.get('server') || '',
-      };
-      if (window.__BS_NET__.room) {
-        document.getElementById('room').textContent =
-          'multiplayer · room ' + window.__BS_NET__.room;
+      const isLocal = /^(localhost|127\.|0\.0\.0\.0)/.test(location.hostname);
+      const matchmaker = (
+        p.get('api') ||
+        window.BS_MATCHMAKER_URL ||
+        (isLocal ? 'http://localhost:5000' : 'https://game.badspaceship.com:7443')
+      ).replace(/\/$/, '');
+      // This bundle is served under /v/<sha>/play.html, so it self-identifies its
+      // version from its own path.
+      const m = location.pathname.match(/\/v\/([^/]+)\//);
+      const sha = m ? m[1] : '';
+      const room = p.get('room') || '';
+      // Connect target: an explicit ?server= wins (back-compat); otherwise derive
+      // it from our own versioned path+host so the frontend and backend always
+      // match the room's version.
+      let server = p.get('server') || '';
+      if (!server && room && sha) server = 'wss://' + location.host + '/v/' + sha + '/ws';
+      window.__BS_NET__ = { room, server, sha, matchmaker };
+      if (room) {
+        document.getElementById('room').textContent = 'multiplayer · room ' + room;
       }
     })();
   </script>
@@ -156,6 +168,37 @@
     const barInner = document.getElementById('bar-inner');
     const statusEl = document.getElementById('status');
     const etaEl = document.getElementById('eta');
+
+    // End-of-life screen for a retired version (a shared link to a game whose
+    // server has been garbage-collected). Shown instead of a doomed connect.
+    function showEnded() {
+      document.getElementById('title').textContent = 'Game Ended';
+      document.getElementById('bar-outer').style.display = 'none';
+      document.getElementById('room').textContent = '';
+      statusEl.textContent = 'This match has ended — its game version was retired.';
+      etaEl.innerHTML =
+        '<a href="https://badspaceship.com/lobby.html" style="color:#7fb3ff;text-decoration:none">' +
+        '← Back to multiplayer lobby</a>';
+    }
+
+    // Preflight: confirm the room's version is still live before booting the heavy
+    // WASM. Returns false (and shows the EOL screen) only on a definitive
+    // retired/not-found verdict; a transient/unreachable matchmaker proceeds (the
+    // netcode protocol-id gate is the final backstop against a wrong-version join).
+    async function versionAlive() {
+      const net = window.__BS_NET__;
+      if (!net.room || !net.sha) return true;
+      try {
+        const r = await fetch(
+          net.matchmaker + '/api/matches/' + encodeURIComponent(net.room) + '/resolve',
+          { cache: 'no-cache' }
+        );
+        if (r.status === 410 || r.status === 404) { showEnded(); return false; }
+        return true;
+      } catch (_) {
+        return true;
+      }
+    }
 
     // Heavy resources to download up front, with combined progress. The WASM
     // game binary dominates; the grass texture is prefetched so it lands in the
@@ -195,6 +238,8 @@
     }
 
     async function run() {
+      // Gate on version liveness before streaming ~25 MB of WASM.
+      if (!(await versionAlive())) return;
       // Kick off the manifest and the heavy downloads together so the WASM
       // binary starts streaming immediately rather than waiting a round-trip
       // for the tiny manifest.

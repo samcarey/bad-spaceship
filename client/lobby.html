@@ -177,10 +177,11 @@
     // GitHub Pages can't host the matchmaker, so the deployed site must point at
     // wherever it actually runs (e.g. the Mac box / a small VPS).
     const params = new URLSearchParams(location.search);
+    const isLocal = /^(localhost|127\.|0\.0\.0\.0)/.test(location.hostname);
     const MATCHMAKER = (
       params.get('api') ||
       window.BS_MATCHMAKER_URL ||
-      'http://localhost:5000'
+      (isLocal ? 'http://localhost:5000' : 'https://game.badspaceship.com:7443')
     ).replace(/\/$/, '');
 
     const statusEl = document.getElementById('status');
@@ -197,17 +198,11 @@
       return fetch(MATCHMAKER + path, opts);
     }
 
-    // Absolute, shareable game link for a room code. The matchmaker hands out the
-    // game server's wss:// endpoint per match; thread it in as `?server=` so the
-    // client connects to it (absent ⇒ play.html boots single-player).
-    function playLink(id, server) {
-      let path = 'play.html?room=' + encodeURIComponent(id);
-      if (server) path += '&server=' + encodeURIComponent(server);
-      return new URL(path, location.href).href;
-    }
-
-    function enterGame(id, server) {
-      location.href = playLink(id, server);
+    // The matchmaker now owns URL construction: it returns `web_url` (the
+    // versioned play URL for the room's pinned game version) and `share_url` (the
+    // short, version-agnostic invite link). The front-end just navigates to them.
+    function enterGame(webUrl) {
+      location.href = webUrl;
     }
 
     function ago(unix) {
@@ -282,11 +277,15 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ name }),
         });
+        if (r.status === 503) {
+          setStatus('Servers are updating to a new version — try again in a moment.', 'err');
+          return;
+        }
         if (!r.ok) throw new Error('HTTP ' + r.status);
-        const { id, server } = await r.json();
-        shareLink.value = playLink(id, server);
+        const { id, web_url, share_url } = await r.json();
+        shareLink.value = share_url;
         shareEl.classList.add('show');
-        document.getElementById('share-enter').onclick = () => enterGame(id, server);
+        document.getElementById('share-enter').onclick = () => enterGame(web_url);
         setStatus('Match ' + id + ' created.', 'ok');
         refresh();
       } catch (e) {
@@ -301,9 +300,10 @@
         const r = await api('/api/matches/' + encodeURIComponent(id) + '/join', { method: 'POST' });
         if (r.status === 404) { setStatus('No match with code ' + id + '.', 'err'); return; }
         if (r.status === 409) { setStatus('Match ' + id + ' is full.', 'err'); return; }
+        if (r.status === 410) { setStatus('Match ' + id + ' ended — its game version was retired. Create a new one.', 'err'); refresh(); return; }
         if (!r.ok) throw new Error('HTTP ' + r.status);
         const lobby = await r.json();
-        enterGame(id, lobby.server);
+        enterGame(lobby.web_url);
       } catch (e) {
         setStatus('Failed to join: ' + e.message, 'err');
       }
