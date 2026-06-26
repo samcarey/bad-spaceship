@@ -460,10 +460,14 @@ fn move_demo_bot(time: Res<Time>, mut bots: Query<&mut NetTransform, With<DemoBo
 /// pose) overwrites it within a tick. The avatar starts with no `Rooms` filter so
 /// it's visible to its own client (bootstrapping the input/control loop);
 /// `assign_rooms` scopes it once the first input reveals the room.
-fn spawn_player_for_client(trigger: On<Add, Connected>, mut commands: Commands) {
+fn spawn_player_for_client(
+    trigger: On<Add, Connected>,
+    mut commands: Commands,
+    remote: Query<&RemoteId>,
+) {
     let client = trigger.entity;
     commands.spawn((
-        NetPlayer { client_id: client.to_bits() },
+        NetPlayer { client_id: client_identity(client, &remote) },
         // Parked far underground until the first input: while unassigned the
         // avatar carries no `Rooms` filter, so it's briefly visible to every
         // client (replicon shows filter-less entities by default); keeping it
@@ -483,6 +487,24 @@ fn spawn_player_for_client(trigger: On<Add, Connected>, mut commands: Commands) 
         HeldPart::default(),
     ));
     info!("client {client:?} connected — spawned replicated player");
+}
+
+/// The stable u64 a client chose in its netcode `Authentication`, read from the
+/// link's `RemoteId`. We stamp it onto `NetPlayer.client_id` so a client can
+/// recognise its *own* avatar by an id it knows for certain — rather than
+/// lightyear's replicated `Controlled` marker, which leaks to an already-connected
+/// client when a late joiner's avatar arrives (and would mis-tag that peer as
+/// "ours", stacking it on our own avatar — the "first player can't see the second"
+/// bug). Falls back to the link entity bits if the peer id isn't a netcode/steam/
+/// local id (e.g. host-server).
+fn client_identity(link: Entity, remote: &Query<&RemoteId>) -> u64 {
+    match remote.get(link).map(|r| r.0) {
+        Ok(PeerId::Netcode(id))
+        | Ok(PeerId::Steam(id))
+        | Ok(PeerId::Local(id))
+        | Ok(PeerId::Entity(id)) => id,
+        _ => link.to_bits(),
+    }
 }
 
 /// Mirror each client's forwarded character pose into its authoritative
