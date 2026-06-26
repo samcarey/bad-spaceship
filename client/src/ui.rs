@@ -9,6 +9,8 @@ use bevy_egui::{
     EguiContexts, EguiContextSettings, EguiPlugin, EguiPrimaryContextPass,
 };
 use chrono::{DateTime, FixedOffset, Utc};
+use lightyear::prelude::client::Connected;
+use lightyear::prelude::PingManager;
 use once_cell::sync::Lazy;
 use shadow_rs::shadow;
 
@@ -150,6 +152,7 @@ fn commit_age() -> String {
 fn show_bottom_panel(
     mut contexts: EguiContexts,
     diagnostics: Res<DiagnosticsStore>,
+    pings: Query<&PingManager, With<Connected>>,
 ) -> Result {
     let mut fps = 0.0;
     // Bevy 0.13 replaced `DiagnosticId` with `DiagnosticPath`; `get` takes `&path`.
@@ -158,6 +161,20 @@ fn show_bottom_panel(
             fps = fps_avg;
         }
     }
+    // Live round-trip time from lightyear's PingManager (multiplayer only; "—"
+    // until the first ping samples land, or in single-player).
+    let rtt_label = pings
+        .iter()
+        .next()
+        .filter(|p| p.latency_samples_recv() > 0)
+        .map(|p| {
+            format!(
+                "RTT {:.0}ms (±{:.0})",
+                p.rtt().as_secs_f64() * 1000.0,
+                p.jitter().as_secs_f64() * 1000.0,
+            )
+        })
+        .unwrap_or_else(|| "RTT —".to_string());
     egui::TopBottomPanel::bottom("bottom_panel")
         .frame(Frame::default().multiply_with_opacity(0.0))
         // Drop the hairline divider egui draws at the panel's edge.
@@ -175,6 +192,7 @@ fn show_bottom_panel(
                 );
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     ui.colored_label(Color32::from_rgb(255, 0, 0), format!("{:.0} FPS", fps,));
+                    ui.colored_label(Color32::from_rgb(255, 0, 0), rtt_label);
                 });
             });
         });
