@@ -157,13 +157,23 @@ impl Plugin for NetClientPlugin {
 /// its `ActionState`) so our input is written to and sent for that entity.
 fn mark_controlled_player(
     mut commands: Commands,
-    new: Query<Entity, (With<Controlled>, Without<InputMarker<PlayerInput>>)>,
+    my_id: Option<Res<MyClientId>>,
+    new: Query<(Entity, &NetPlayer), (With<Controlled>, Without<InputMarker<PlayerInput>>)>,
 ) {
-    for entity in &new {
-        commands.entity(entity).insert((
-            InputMarker::<PlayerInput>::default(),
-            ActionState::<PlayerInput>::default(),
-        ));
+    // Only drive input for *our* avatar, matched by the netcode id we chose (which
+    // the server stamps onto `NetPlayer.client_id`). lightyear's `Controlled`
+    // marker leaks to an already-connected client for a late joiner's avatar, so
+    // keying purely off `With<Controlled>` would bind our input to that peer too.
+    let Some(my_id) = my_id else {
+        return;
+    };
+    for (entity, player) in &new {
+        if player.client_id == my_id.0 {
+            commands.entity(entity).insert((
+                InputMarker::<PlayerInput>::default(),
+                ActionState::<PlayerInput>::default(),
+            ));
+        }
     }
 }
 
@@ -366,15 +376,27 @@ struct OwnAvatar;
 /// its `Interpolated` copy replicate the same `NetPlayer`.)
 fn mark_own_avatar(
     mut commands: Commands,
-    controlled: Query<&NetPlayer, With<Controlled>>,
-    candidates: Query<(Entity, &NetPlayer), (With<Interpolated>, Without<OwnAvatar>)>,
+    my_id: Option<Res<MyClientId>>,
+    candidates: Query<(Entity, &NetPlayer, Has<OwnAvatar>), With<Interpolated>>,
 ) {
-    let Some(mine) = controlled.iter().next() else {
+    // Identify our avatar by the netcode id we chose (which the server stamps onto
+    // `NetPlayer.client_id`), NOT by the replicated `Controlled` marker: lightyear
+    // leaks `Controlled` for a late joiner's avatar to the already-connected
+    // client, which used to mis-tag the peer as ours — and `predict_own_avatar`
+    // then stacked it on our own avatar, so it looked invisible. Reconciles each
+    // frame (adds where ours, removes where not) so a stale tag can't persist.
+    let Some(my_id) = my_id else {
         return;
     };
-    for (entity, player) in &candidates {
-        if player.client_id == mine.client_id {
-            commands.entity(entity).insert(OwnAvatar);
+    for (entity, player, is_own) in &candidates {
+        match (player.client_id == my_id.0, is_own) {
+            (true, false) => {
+                commands.entity(entity).insert(OwnAvatar);
+            }
+            (false, true) => {
+                commands.entity(entity).remove::<OwnAvatar>();
+            }
+            _ => {}
         }
     }
 }
@@ -581,10 +603,18 @@ fn apply_net_transform(
 /// protocol id + the all-zero key, matching the server's `NetcodeConfig::
 /// default()`; production would issue a real ConnectToken from the matchmaker
 /// instead of `Manual`.
-fn build_netcode_client(server_addr: SocketAddr) -> Option<NetcodeClient> {
+/// Our chosen netcode client id, stored once we connect. The server stamps it
+/// onto every avatar's `NetPlayer.client_id`, so we recognise our own avatar by
+/// id rather than the replicated `Controlled` marker (which leaks to an
+/// already-connected client for a late joiner). Re-inserted on each (re)connect.
+#[derive(Resource, Clone, Copy)]
+struct MyClientId(u64);
+
+fn build_netcode_client(server_addr: SocketAddr) -> Option<(NetcodeClient, u64)> {
+    let client_id = rand::random::<u64>();
     let auth = Authentication::Manual {
         server_addr,
-        client_id: rand::random::<u64>(),
+        client_id,
         private_key: [0u8; 32],
         // Version gate: a client only connects to a server built from the same
         // commit. The matchmaker routes to the matching version; this is the
@@ -592,7 +622,7 @@ fn build_netcode_client(server_addr: SocketAddr) -> Option<NetcodeClient> {
         protocol_id: bad_spaceship_shared::net::BS_PROTOCOL_ID,
     };
     match NetcodeClient::new(auth, NetcodeConfig::default()) {
-        Ok(n) => Some(n),
+        Ok(n) => Some((n, client_id)),
         Err(e) => {
             error!("failed to build netcode client: {e:?}");
             None
@@ -655,9 +685,10 @@ fn spawn_client(commands: &mut Commands) {
             return;
         }
     };
-    let Some(netcode) = build_netcode_client(server_addr) else {
+    let Some((netcode, my_id)) = build_netcode_client(server_addr) else {
         return;
     };
+    commands.insert_resource(MyClientId(my_id));
 
     let url = format!("ws://{server_addr}");
     let io = WebSocketClientIo::from_url(ClientConfig::builder().with_no_encryption(), url.clone());
@@ -677,9 +708,10 @@ fn spawn_client(commands: &mut Commands) {
     // connects via the explicit URL (`from_url`), so the netcode token's
     // `server_addr` is only a logical field — a placeholder is fine.
     let server_addr: SocketAddr = "0.0.0.0:0".parse().unwrap();
-    let Some(netcode) = build_netcode_client(server_addr) else {
+    let Some((netcode, my_id)) = build_netcode_client(server_addr) else {
         return;
     };
+    commands.insert_resource(MyClientId(my_id));
 
     // On wasm aeronet's `ClientConfig` is a unit struct (the browser owns TLS).
     let io = WebSocketClientIo::from_url(ClientConfig::default(), url.clone());
