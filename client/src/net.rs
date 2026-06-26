@@ -136,6 +136,12 @@ impl Plugin for NetClientPlugin {
                 (mirror_grab_state, track_hold_rotation, highlight_grabbable)
                     .chain()
                     .after(read_grab_intent),
+                // Predict the part WE hold locally (zero round-trip), like
+                // predict_own_avatar does for our body: mark it once the grab is
+                // mirrored, then drive it from the local hold point. apply_net_transform
+                // skips it while held, so the interpolated echo doesn't fight us.
+                mark_held_part.after(mirror_grab_state),
+                predict_held_part.after(mark_held_part),
             ),
         );
         // Forward our character pose each tick, in lightyear's input-writing set.
@@ -394,6 +400,53 @@ fn predict_own_avatar(
     }
 }
 
+/// Marks the part the local player is holding so it renders from local prediction
+/// instead of the server's interpolated (round-trip-late) echo.
+#[derive(Component)]
+struct LocallyHeld;
+
+/// Latch `LocallyHeld` onto the part in our hand, clearing it on release or when
+/// the focus changes. Reads the same `Holding` / `FocusedInteractable` that
+/// `mirror_grab_state` maintains from the networked grab.
+fn mark_held_part(
+    mut commands: Commands,
+    player: Query<(&Holding, &FocusedInteractable), With<Player>>,
+    held: Query<Entity, With<LocallyHeld>>,
+) {
+    let target = player
+        .single()
+        .ok()
+        .and_then(|(holding, focused)| holding.0.then_some(focused.0).flatten());
+    for entity in &held {
+        if Some(entity) != target {
+            commands.entity(entity).remove::<LocallyHeld>();
+        }
+    }
+    if let Some(t) = target {
+        if held.get(t).is_err() {
+            commands.entity(t).insert(LocallyHeld);
+        }
+    }
+}
+
+/// Render our held part from the local hold point + our chosen rotation (zero
+/// round-trip), overriding the interpolated echo. The server stays authoritative
+/// (collisions, other players); on release the mark clears and `apply_net_transform`
+/// snaps the part to the server's position (a small, occasional pop is acceptable).
+fn predict_held_part(
+    hold_point: Query<&GlobalTransform, With<HoldPoint>>,
+    held_rotation: Res<HeldRotation>,
+    mut held: Query<&mut Transform, With<LocallyHeld>>,
+) {
+    let Some(hp) = hold_point.iter().next() else {
+        return;
+    };
+    for mut transform in &mut held {
+        transform.translation = hp.translation();
+        transform.rotation = held_rotation.0;
+    }
+}
+
 /// Attach a mesh to each player's `Interpolated` copy (the smoothed visual
 /// entity) that doesn't have one yet. The raw `Confirmed` entities stay
 /// invisible; input/control still rides on them (they carry `Controlled`).
@@ -510,7 +563,13 @@ fn draw_replicated_joints(
 fn apply_net_transform(
     mut q: Query<
         (&NetTransform, &mut Transform),
-        (Changed<NetTransform>, With<Interpolated>, Without<OwnAvatar>),
+        (
+            Changed<NetTransform>,
+            With<Interpolated>,
+            Without<OwnAvatar>,
+            // While we hold a part, predict_held_part owns its transform.
+            Without<LocallyHeld>,
+        ),
     >,
 ) {
     for (net, mut transform) in &mut q {
