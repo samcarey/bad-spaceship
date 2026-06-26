@@ -34,6 +34,34 @@ use lightyear::prelude::input::native::ActionState;
 use lightyear::prelude::server::*;
 use lightyear::prelude::*;
 
+/// Telemetry: log every connected client's RTT/jitter every ~2s so latency can be
+/// tracked from the server log without the player reporting it. lightyear keeps a
+/// `PingManager` per client (`ClientOf`); `MinimalPlugins` has no `LogPlugin`, so
+/// use `println!` (captured by launchd into the version's `server.log`).
+fn log_client_rtt(
+    time: Res<Time>,
+    mut acc: Local<f32>,
+    clients: Query<(Entity, &PingManager), (With<ClientOf>, With<Connected>)>,
+) {
+    *acc += time.delta_secs();
+    if *acc < 2.0 {
+        return;
+    }
+    *acc = 0.0;
+    for (entity, ping) in &clients {
+        if ping.latency_samples_recv() == 0 {
+            continue;
+        }
+        println!(
+            "[rtt] client={} rtt={:.1}ms jitter={:.1}ms samples={}",
+            entity.to_bits(),
+            ping.rtt().as_secs_f64() * 1000.0,
+            ping.jitter().as_secs_f64() * 1000.0,
+            ping.latency_samples_recv(),
+        );
+    }
+}
+
 pub struct NetServerPlugin;
 
 impl Plugin for NetServerPlugin {
@@ -63,6 +91,8 @@ impl Plugin for NetServerPlugin {
         // useful because mobile browsers suspend background tabs, so two tabs on
         // one phone never connect simultaneously.
         app.add_systems(Update, move_demo_bot);
+        // Latency telemetry: log each client's RTT/jitter to stdout (-> server.log).
+        app.add_systems(Update, log_client_rtt);
         // Stream the authoritative part/joint poses each frame, and refill a
         // room's parts that fall off its platform.
         app.add_systems(
