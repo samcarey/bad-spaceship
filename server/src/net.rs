@@ -86,11 +86,6 @@ impl Plugin for NetServerPlugin {
         app.add_systems(Startup, start_server);
         // One server-owned, replicated player per client that connects.
         app.add_observer(spawn_player_for_client);
-        // Each per-room demo bot orbits so a single client can see live
-        // replication (motion streamed over the wire) without a second device —
-        // useful because mobile browsers suspend background tabs, so two tabs on
-        // one phone never connect simultaneously.
-        app.add_systems(Update, move_demo_bot);
         // Latency telemetry: log each client's RTT/jitter to stdout (-> server.log).
         app.add_systems(Update, log_client_rtt);
         // Stream the authoritative part/joint poses each frame, and refill a
@@ -164,8 +159,8 @@ struct PartRoom {
 struct HeldPart(Option<Entity>);
 
 /// Assign each connected client (and its avatar) to the room it reported, the
-/// first time a real input arrives. Lazily creates the room's world (parts +
-/// demo bot) on first sighting of a code. Until assigned, the avatar carries no
+/// first time a real input arrives. Lazily creates the room's world (parts) on
+/// first sighting of a code. Until assigned, the avatar carries no
 /// `Rooms` filter, so it's visible to its own client (which bootstraps the
 /// input/control loop) — the assignment then scopes it.
 fn assign_rooms(
@@ -195,21 +190,12 @@ fn assign_rooms(
 }
 
 /// Spawn a fresh room's world: its own set of parts (replicated + interpolated +
-/// collision-isolated to the room) and a per-room demo bot.
+/// collision-isolated to the room).
 fn spawn_room_world(commands: &mut Commands, room: Room) {
     for _ in 0..NUM_PARTS {
         let (entity, half_extents) = spawn_random_part(commands);
         tag_room_part(commands, entity, half_extents, room);
     }
-    // One demo bot per room so a single device still sees live replication.
-    commands.spawn((
-        NetPlayer { client_id: 0 },
-        NetTransform::from_transform(&Transform::from_xyz(3.0, 2.0, 0.0)),
-        Replicate::to_clients(NetworkTarget::All),
-        InterpolationTarget::to_clients(NetworkTarget::All),
-        Rooms::single(room.id),
-        DemoBot,
-    ));
 }
 
 /// Tag a freshly-spawned part for room-scoped replication: its shape via
@@ -436,22 +422,6 @@ fn start_server(mut commands: Commands) {
         .id();
     commands.trigger(Start { entity: server });
     info!("multiplayer server listening on ws://{addr}");
-}
-
-/// Marks the always-present, server-driven demo player (one per room).
-#[derive(Component)]
-struct DemoBot;
-
-/// Drive every demo player in a slow circle each frame; the changed
-/// `NetTransform` replicates to every client sharing that bot's room, so its cube
-/// visibly moves.
-fn move_demo_bot(time: Res<Time>, mut bots: Query<&mut NetTransform, With<DemoBot>>) {
-    let t = time.elapsed_secs();
-    let pose = Transform::from_xyz(t.cos() * 3.0, 2.0, t.sin() * 3.0)
-        .with_rotation(Quat::from_rotation_y(t));
-    for mut net in &mut bots {
-        *net = NetTransform::from_transform(&pose);
-    }
 }
 
 /// When a client finishes connecting (`Connected` added to its link entity),
