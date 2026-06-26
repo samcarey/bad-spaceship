@@ -8,7 +8,7 @@
 //! both binaries after their plugin group.
 //!
 //! Scaffold status: this registers a representative component + channel and
-//! defines the per-tick input type, proving the lightyear 0.27 dependency builds
+//! defines the per-tick input type, proving the lightyear 0.28 dependency builds
 //! into every target (native + wasm). Wiring the live connection, replicating
 //! the Avian physics bodies (via `lightyear_avian3d`), and client-side
 //! prediction/interpolation come next, where they can be tested on real
@@ -186,7 +186,7 @@ pub struct ProtocolPlugin;
 
 impl Plugin for ProtocolPlugin {
     fn build(&self, app: &mut App) {
-        // lightyear 0.27 builder API (the older `register_component` is
+        // lightyear builder API (the older `register_component` is
         // deprecated). `.replicate()` marks the component for World replication.
         // Thin slice: replicate the player marker + its transform, server → client.
         app.component::<NetPlayer>().replicate();

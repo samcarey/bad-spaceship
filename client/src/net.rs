@@ -265,7 +265,7 @@ fn highlight_grabbable(
     }
     let recolour = |entity, materials: &mut Assets<StandardMaterial>, lit: bool| {
         if let Ok((_, _, material)) = parts.get(entity) {
-            if let Some(mat) = materials.get_mut(&material.0) {
+            if let Some(mut mat) = materials.get_mut(&material.0) {
                 (mat.base_color, mat.emissive) = if lit {
                     (Color::srgb(1.0, 1.0, 0.0), LinearRgba::rgb(0.6, 0.6, 0.0))
                 } else {

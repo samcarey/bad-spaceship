@@ -47,7 +47,7 @@ fn add_lighting(mut commands: Commands) {
             // brighter. ~0.6x dims the whole scene back toward the 0.12 look;
             // tune alongside the ambient fill in main.rs.
             illuminance: 6_000.0,
-            shadows_enabled: true,
+            shadow_maps_enabled: true,
             ..Default::default()
         },
         // Bevy 0.10 replaced DirectionalLight's manual `shadow_projection` with
