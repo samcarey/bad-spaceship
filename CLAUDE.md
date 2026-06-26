@@ -4,16 +4,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Bad Spaceship is a 3D game built on the **Bevy 0.18** engine (ECS), with
+Bad Spaceship is a 3D game built on the **Bevy 0.19** engine (ECS), with
 **Avian** (`avian3d`, an XPBD physics engine) for physics and `bevy_egui` for UI.
 It is a Cargo workspace with three crates that compiles both to a **native**
 binary and to a **WASM** web build playable in the browser. (Physics was migrated
 off `bevy_rapier3d` — see the "Migrating bevy_rapier3d → Avian" section below.)
 
-> **Engine version note:** the repo briefly ran on Bevy **0.19** but was stepped
-> back to **0.18** so the multiplayer netcode stack (`lightyear`) builds — see
-> "Temporarily on Bevy 0.18 for multiplayer" below. **Engine versions are now
-> pinned in one place:** `[workspace.dependencies]` in the root `Cargo.toml`.
+> **Engine version note:** the repo was held at Bevy **0.18** for a while because
+> the multiplayer netcode stack (`lightyear`) had no 0.19 release; **lightyear 0.28
+> shipped 0.19 support and the engine is now on Bevy 0.19** (see "Bevy 0.19
+> migration gotchas" below). **Engine versions are pinned in one place:**
+> `[workspace.dependencies]` in the root `Cargo.toml`.
 
 ## Toolchain & reproducibility (read first)
 
@@ -461,15 +462,15 @@ small, mostly-mechanical bump — only four code changes:
   changes (`#{MATERIAL_BIND_GROUP}` already tracks the engine). web-sys/wasm-bindgen stayed
   at 0.3.102 / 0.2.125, so the CI `WASM_BINDGEN_VERSION` pin is unchanged.
 
-### Temporarily on Bevy 0.18 for multiplayer (lightyear)
+### Engine version history: 0.19 → 0.18 (for lightyear) → 0.19 again
 
-The repo reached Bevy **0.19** (the "Bevy 0.19 migration gotchas" section below is
-that bump), then **stepped the engine back to 0.18** to add multiplayer. Reason:
-multiplayer uses **`lightyear`**, and as of this writing lightyear — and the rest
-of the Bevy netcode ecosystem (`bevy_replicon`, `bevy_ggrs`, `bevy_matchbox`) —
-targets Bevy **0.18**; none had a 0.19-compatible release yet (0.19 support is
-expected within weeks of the 0.19 engine release). Rather than wait, the engine was
-downgraded, *structured so the re-bump to 0.19 is near-trivial*:
+The repo reached Bevy **0.19**, **stepped back to 0.18** to add multiplayer (because
+**`lightyear`** and the rest of the netcode ecosystem had no 0.19 release yet), then
+**re-bumped to 0.19** once **lightyear 0.28** shipped 0.19 support (→ bevy ^0.19,
+aeronet_io ^0.21, bevy_replicon 0.41, avian3d ^0.7). The down-then-up round trip was
+*structured so the re-bump was near-trivial* — and it was: lightyear 0.27→0.28 needed
+zero code changes, and 0.18→0.19 needed three small fixes (see "Bevy 0.19 migration
+gotchas" below). How it was kept cheap:
 
 - **All engine-coupled version pins live in `[workspace.dependencies]` in the root
   `Cargo.toml`** (`bevy`, `avian3d`, `bevy_egui`, and eventually `lightyear`). Member
@@ -490,17 +491,25 @@ downgraded, *structured so the re-bump to 0.19 is near-trivial*:
 
 ### Bevy 0.19 migration gotchas
 
-> **Currently reversed** — the repo is on Bevy 0.18 for multiplayer (see
-> "Temporarily on Bevy 0.18 for multiplayer" above). This section is retained as the
-> canonical record of the 0.18 → 0.19 changes to **re-apply** when lightyear ships a
-> 0.19-compatible release.
+> **Applied (current)** — the repo is on Bevy 0.19 with lightyear 0.28. This bump was
+> done alongside `lightyear` 0.27 → **0.28** (the release that targets Bevy 0.19);
+> lightyear itself needed **zero** code changes — the API surface we use
+> (`component().replicate()`, `ClientPlugins`/`ServerPlugins`, `Replicate`/
+> `InterpolationTarget`/`Rooms`, `NetcodeConfig::with_protocol_id`, native input) is
+> unchanged from 0.27.
 
 The 0.18 → 0.19 bump (third-party deps: `avian3d` 0.6.1 → **0.7.0** — the Avian release
 targeting 0.19, parry3d 0.26 → 0.27; `bevy_egui` 0.39 → **0.40** — targets 0.19, bundles
-egui 0.34). MSRV rose to **1.95**, still under the 1.96 pin, so the toolchain is unchanged.
-wgpu went 27 → **29**. This bump was *tiny* — `shared`/server compiled with zero code
-changes, and the client needed only two one-line fixes. The 0.19 guide's two headline
-changes (Resources-are-Components, rendering-as-systems) don't touch anything here.
+egui 0.34; `lightyear` 0.27 → **0.28**, which pulls `bevy_replicon` 0.40.3 → **0.41**).
+MSRV rose to **1.95**, still under the 1.96 pin, so the toolchain is unchanged. wgpu went
+27 → **29**. This bump was *tiny* — `shared`/server compiled with zero code changes, and
+the client needed only three small fixes. The 0.19 guide's two headline changes
+(Resources-are-Components, rendering-as-systems) don't touch anything here.
+
+- **`Assets::get_mut` now returns a change-detection `Mut<T>`** (not `&mut T`), so the
+  material-recolour binding in `client/src/net.rs` (`highlight_grabbable`) needs `mut`:
+  `if let Some(mut mat) = materials.get_mut(&handle)`. The only Bevy 0.19 fix beyond the
+  two below.
 
 - **`DirectionalLight::shadows_enabled` → `shadow_maps_enabled`.** A straight field rename
   (`client/src/render_main_pass.rs`). The only Bevy-side code change in the whole bump.
@@ -817,10 +826,10 @@ for now — **lock it to the site origin before going public.**
   so "Create Match" from the web provisions a server-side match — it never makes
   the browser a host.
 
-## Multiplayer netcode (lightyear 0.27)
+## Multiplayer netcode (lightyear 0.28)
 
-Server-authoritative netcode over **lightyear 0.27** (the release targeting Bevy
-0.18 — the reason the engine is held at 0.18). Current state is a **thin vertical
+Server-authoritative netcode over **lightyear 0.28** (the release targeting Bevy
+0.19; built on `bevy_replicon` 0.41). Current state is a **thin vertical
 slice**: a dedicated server accepts WebSocket clients and replicates a player
 entity per connection; the client draws each replicated player. It is **gated
 off by default** (env vars below) so single-player is byte-identical, and the
@@ -1011,8 +1020,9 @@ game's own systems engage instead of being re-implemented:
   `HeldRotation` (the target orientation), shown only while holding — so the RGB
   axes indicate the orientation the part is being rotated toward, like single-player.
 
-**0.27 API gotchas worth remembering** (the published book lags the crate; the
-ground truth is the crate source in `~/.cargo/registry/src/.../lightyear*-0.27.0`):
+**lightyear API gotchas worth remembering** (the published book lags the crate; the
+ground truth is the crate source in `~/.cargo/registry/src/.../lightyear*-0.28.0`).
+These all held unchanged across the 0.27 → 0.28 bump:
 - Plugin groups are `ClientPlugins`/`ServerPlugins` structs with a `tick_duration`
   field (Default 1/60s); add the group *before* the protocol *before* spawning the
   connection entity.

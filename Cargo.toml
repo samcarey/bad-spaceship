@@ -11,27 +11,20 @@ resolver = "2"
 # the renderer, the server is headless, etc.); only the version + the shared base
 # settings are centralized.
 #
-# WHY WE ARE ON BEVY 0.18 (not 0.19):
-# The repo briefly ran on Bevy 0.19 (commit #35), but multiplayer needs `lightyear`,
-# and as of this writing lightyear (and the rest of the Bevy netcode ecosystem)
-# targets Bevy 0.18 — 0.19 support is expected to land within a few weeks of the
-# 0.19 engine release. We deliberately stepped the engine back to 0.18 so the
-# netcode stack builds, structured so the re-bump to 0.19 is a near-trivial edit.
+# ENGINE VERSION: Bevy 0.19 (with lightyear 0.28 for multiplayer).
+# The repo was held at Bevy 0.18 for a while because the netcode stack (`lightyear`)
+# had no 0.19-compatible release; lightyear 0.28 (→ bevy ^0.19, aeronet_io ^0.21,
+# bevy_replicon 0.41, avian3d ^0.7) shipped that support and we re-bumped to 0.19.
+# lightyear 0.27→0.28 needed ZERO code changes; the 0.18→0.19 bump needed only three
+# small fixes (see the "Bevy 0.19 migration gotchas" section in CLAUDE.md).
 #
-# HOW TO UPGRADE BACK TO 0.19 once lightyear ships a 0.19-compatible release:
-#   1. In THIS block, bump:  bevy 0.18→0.19,  avian3d 0.6.1→0.7.0,
-#      bevy_egui 0.39→0.40,  and lightyear → its 0.19 release.
-#   2. Re-apply the two code changes the downgrade reversed (see the "Bevy 0.19
-#      migration gotchas" section in CLAUDE.md — they're the canonical list):
-#        • client/src/render_main_pass.rs: DirectionalLight `shadows_enabled`
-#          → `shadow_maps_enabled`.
-#        • client/src/ui.rs: `update_ui_scale_factor` back to egui's per-context
-#          zoom factor (drop the `EguiContextSettings::scale_factor` query, move
-#          the system into `EguiPrimaryContextPass`, make it fallible).
-#   3. `rm Cargo.lock && cargo generate-lockfile` (the prescribed move on a Bevy
-#      bump: single engine in the graph, no duplicate Bevy).
-#   4. Bump `RUST_TOOLCHAIN`/`WASM_BINDGEN_VERSION` notes in pages.yml only if the
-#      regenerated lock moves wasm-bindgen (0.18 and 0.19 both resolve 0.2.125).
+# HOW TO DO THE NEXT ENGINE BUMP (the pattern that worked here):
+#   1. In THIS block, bump bevy + avian3d + bevy_egui + lightyear together to the
+#      releases that target the new Bevy (check each crate's `bevy` req on crates.io).
+#   2. `rm Cargo.lock && cargo generate-lockfile` (the prescribed move on a Bevy
+#      bump: single engine in the graph, no duplicate Bevy), then build & fix.
+#   3. Bump `RUST_TOOLCHAIN`/`WASM_BINDGEN_VERSION` notes in pages.yml only if the
+#      regenerated lock moves wasm-bindgen (0.18/0.19 both resolve 0.2.125).
 # ─────────────────────────────────────────────────────────────────────────────
 [workspace.dependencies]
 bevy = { version = "0.19", default-features = false }
