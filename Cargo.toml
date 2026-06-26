@@ -34,22 +34,21 @@ resolver = "2"
 #      regenerated lock moves wasm-bindgen (0.18 and 0.19 both resolve 0.2.125).
 # ─────────────────────────────────────────────────────────────────────────────
 [workspace.dependencies]
-bevy = { version = "0.18", default-features = false }
-# Avian (XPBD physics). 0.6.1 is the release that targets Bevy 0.18 (parry3d 0.26).
+bevy = { version = "0.19", default-features = false }
+# Avian (XPBD physics). 0.7.0 is the release that targets Bevy 0.19 (parry3d 0.27).
 # The base feature set is identical across all three crates; native/server re-add
 # `avian3d/simd` + `avian3d/parallel` via their own `[features]` lists. See
 # shared/Cargo.toml for the full rationale on each base feature (esp. xpbd_joints).
-avian3d = { version = "0.6.1", default-features = false, features = ["3d", "f32", "parry-f32", "xpbd_joints"] }
-# bevy_egui 0.39 is the release that targets Bevy 0.18 (egui 0.31). Client-only,
+avian3d = { version = "0.7.0", default-features = false, features = ["3d", "f32", "parry-f32", "xpbd_joints"] }
+# bevy_egui 0.40 is the release that targets Bevy 0.19 (egui 0.34). Client-only,
 # but pinned here so all engine-coupled versions live in one place.
-bevy_egui = { version = "0.39", default-features = false, features = ["default_fonts", "render"] }
-# Multiplayer netcode. 0.27 is the release that targets Bevy 0.18 (this is the
-# whole reason the engine is held at 0.18 — see the note above). `default-features
+bevy_egui = { version = "0.40", default-features = false, features = ["default_fonts", "render"] }
+# Multiplayer netcode. 0.28 is the release that targets Bevy 0.19 (it requires
+# bevy_app/bevy_ecs ^0.19, aeronet_io ^0.21, avian3d ^0.7). `default-features
 # = false` so each crate opts into only what it needs: `shared` takes the
 # protocol-building features (no client/server runtime), the client takes
-# `client` + browser transports, the server takes `server` + transports. Bump to
-# the 0.19-compatible lightyear release as step 1 of the 0.19 re-upgrade.
-lightyear = { version = "0.27", default-features = false }
+# `client` + browser transports, the server takes `server` + transports.
+lightyear = { version = "0.28", default-features = false }
 
 # Recommended for rapier: https://rapier.rs/docs/user_guides/bevy_plugin/common_mistakes
 [profile.dev.package."*"]
