@@ -34,6 +34,9 @@ avian3d = { workspace = true }
 # `PlayerInput`); registered once in `ProtocolPlugin` (cfg-gated to the client or
 # server input plugin per binary by lightyear's own `client`/`server` features).
 lightyear = { workspace = true, features = ["replication", "prediction", "interpolation", "std", "input_native"] }
+# Networked Avian Position/Rotation (the protocol registers them here). See the
+# root `[workspace.dependencies]` note.
+lightyear_avian3d = { workspace = true }
 serde = { version = "1.0", features = ["derive"] }
 ron = "0.7"
 rand = "0.8"

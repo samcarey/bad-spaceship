@@ -8,8 +8,8 @@ use crate::{
 };
 use avian3d::prelude::{
     AngularVelocity, Collider, ColliderDensity, Collisions, ComputedCenterOfMass, Forces, Friction,
-    Gravity, LinearVelocity, ReadRigidBodyForces, Restitution, RigidBody, SphericalJoint, SweptCcd,
-    WriteRigidBodyForces,
+    Gravity, LinearVelocity, Position, ReadRigidBodyForces, Restitution, RigidBody, SphericalJoint,
+    SweptCcd, WriteRigidBodyForces,
 };
 use bevy::prelude::*;
 use rand::prelude::ThreadRng;
@@ -194,33 +194,51 @@ pub fn spawn_random_part(commands: &mut Commands) -> (Entity, Vec3) {
         .unwrap_or(Vec3::ONE);
     // Bounding radius from the parry shape, before the collider is moved in.
     let bounding_radius = collider.shape().compute_local_bounding_sphere().radius;
-    let entity = commands
-        .spawn_empty()
-        .insert(BoundingRadius(bounding_radius))
-        .insert(RigidBody::Dynamic)
+    let spawn = Vec3::new(
+        rng.gen_range(-SPAWN_ZONE_HALF_WIDTH..=SPAWN_ZONE_HALF_WIDTH),
+        rng.gen_range(5.0..=15.0),
+        rng.gen_range(-SPAWN_ZONE_HALF_WIDTH..=SPAWN_ZONE_HALF_WIDTH),
+    );
+    let mut e = commands.spawn_empty();
+    insert_part_physics(&mut e, half_extents);
+    e.insert((
+        BoundingRadius(bounding_radius),
         // Bevy 0.15: bare `Transform` (it now requires `GlobalTransform`).
-        .insert(Transform::from_xyz(
-            rng.gen_range(-SPAWN_ZONE_HALF_WIDTH..=SPAWN_ZONE_HALF_WIDTH),
-            rng.gen_range(5.0..=15.0),
-            rng.gen_range(-SPAWN_ZONE_HALF_WIDTH..=SPAWN_ZONE_HALF_WIDTH),
-        ))
-        .insert(collider)
+        // Set Avian `Position` too, not just `Transform`: in multiplayer the server
+        // disables Avian's `PhysicsTransformPlugin` (lightyear_avian owns the sync),
+        // so a spawn `Transform` alone is NOT copied into `Position` — the body would
+        // simulate from the origin and every part would cluster in the middle of the
+        // stage. Seeding `Position` matches `build_server_avatar`. Harmless in
+        // single-player (both are set to the same pose).
+        Transform::from_translation(spawn),
+        Position(spawn),
+        PartBundle::default(),
+    ));
+    (e.id(), half_extents)
+}
+
+/// Insert the shared dynamic-part physics (collider + mass/friction/restitution +
+/// CCD) onto an entity from its cuboid half-extents. Used by `spawn_random_part`
+/// (single-player + the server's authoritative parts) AND the multiplayer client's
+/// predicted-part setup, so both ends simulate an *identical* body — essential for
+/// client-side prediction to stay close to the server (state replication only
+/// corrects divergence; matching physics keeps that divergence tiny).
+pub fn insert_part_physics(entity: &mut EntityCommands, half_extents: Vec3) {
+    entity.insert((
+        RigidBody::Dynamic,
+        // Avian's `Collider::cuboid` takes FULL extents (= 2 × half_extents).
+        Collider::cuboid(half_extents.x * 2.0, half_extents.y * 2.0, half_extents.z * 2.0),
         // rapier's `ColliderMassProperties::Density` / `Friction::coefficient` /
         // `Restitution::coefficient` → Avian's `ColliderDensity` / `Friction::new`
-        // / `Restitution::new`. Avian tracks contacts in its graph by default, so
-        // rapier's `ActiveEvents::COLLISION_EVENTS` opt-in is no longer needed.
-        .insert(ColliderDensity(2.0))
-        .insert(Friction::new(1.0))
-        .insert(Restitution::new(0.1))
-        // Blocks spawn high (y 5..15) and hit the thin trimesh ground fast.
-        // Without continuous collision detection a fast impact can penetrate
-        // deeply in a single solver step and the soft-contact recovery leaves
-        // the block partially embedded. CCD catches the fast impact so blocks
-        // rest flush. (rapier's `Ccd::enabled()` → Avian's `SweptCcd`.)
-        .insert(SweptCcd::default())
-        .insert(PartBundle::default())
-        .id();
-    (entity, half_extents)
+        // / `Restitution::new`.
+        ColliderDensity(2.0),
+        Friction::new(1.0),
+        Restitution::new(0.1),
+        // Blocks spawn high and hit the thin trimesh ground fast; without CCD a fast
+        // impact penetrates deeply in one solver step and soft-contact recovery
+        // leaves the block embedded. CCD catches it so blocks rest flush.
+        SweptCcd::default(),
+    ));
 }
 
 fn spawn_initial_parts(mut new_part_events: MessageWriter<NewPart>) {

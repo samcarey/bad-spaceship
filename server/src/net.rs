@@ -6,7 +6,7 @@
 //! **Per-room world isolation.** One server process hosts many lobby rooms, kept
 //! separate via lightyear's room visibility (`Rooms`): an entity is only
 //! replicated to clients sharing a room with it. Each client reports its lobby
-//! code (carried on `PlayerInput`); the server maps the code to a `RoomId` and a
+//! code (carried on `NetInput`); the server maps the code to a `RoomId` and a
 //! distinct Avian collision-layer bit, then spawns that room its own set of
 //! parts. The single shared Avian world keeps the rooms from physically
 //! interacting via collision layers (each room's parts collide only with
@@ -20,15 +20,17 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 
 use avian3d::prelude::{
-    CollisionLayers, Collisions, ComputedCenterOfMass, Forces, Gravity, ReadRigidBodyForces,
-    SphericalJoint, WriteRigidBodyForces,
+    CollisionLayers, Collisions, ComputedCenterOfMass, Forces, Gravity, LinearVelocity, Position,
+    ReadRigidBodyForces, Rotation, SphericalJoint, WriteRigidBodyForces,
 };
+use bad_spaceship_shared::character::{CharacterMovement, ServerAvatar};
 use bad_spaceship_shared::net::{
-    focused_part, hold_acceleration, orient_acceleration, NetJoint, NetPart, NetPlayer,
-    NetTransform, PlayerInput, ProtocolPlugin, TICK,
+    apply_net_input, focused_part, hold_acceleration, orient_acceleration, NetFacing, NetInput,
+    NetJoint, NetPart, NetPlayer, NetTransform, ProtocolPlugin, TICK,
 };
 use bad_spaceship_shared::part::{spawn_random_part, SuppressLocalParts, NUM_PARTS};
 use bad_spaceship_shared::utils::QuatExt;
+use bad_spaceship_shared::{SuppressLocalPlayer, Yaw};
 use bevy::prelude::*;
 use lightyear::prelude::input::native::ActionState;
 use lightyear::prelude::server::*;
@@ -74,6 +76,14 @@ impl Plugin for NetServerPlugin {
         // Order matters: plugin group → protocol → spawn the server entity.
         app.add_plugins(ServerPlugins { tick_duration: TICK });
         app.add_plugins(ProtocolPlugin);
+        // Owns the Avian `Position`↔`Transform` sync (its sub-plugins are disabled
+        // in multiplayer by `add_physics`) and the rollback wiring. State
+        // replication (server `Position` is truth) → no `rollback_resources`.
+        app.add_plugins(lightyear_avian3d::prelude::LightyearAvianPlugin {
+            replication_mode: lightyear_avian3d::plugin::AvianReplicationMode::Position,
+            update_syncs_manually: false,
+            rollback_resources: false,
+        });
         // Room-based interest management: scope replication so a client only sees
         // entities sharing one of its rooms.
         app.add_plugins(RoomPlugin);
@@ -83,25 +93,49 @@ impl Plugin for NetServerPlugin {
         // `replace_fallen_parts` in `PartPlugin`); the per-room spawner below
         // replaces it.
         app.insert_resource(SuppressLocalParts);
+        // The server simulates one `ServerAvatar` body per connected client, so
+        // suppress the stray local single-player character `CommonPlugins` would spawn.
+        app.insert_resource(SuppressLocalPlayer);
         app.add_systems(Startup, start_server);
         // One server-owned, replicated player per client that connects.
         app.add_observer(spawn_player_for_client);
         // Latency telemetry: log each client's RTT/jitter to stdout (-> server.log).
         app.add_systems(Update, log_client_rtt);
-        // Stream the authoritative part/joint poses each frame, and refill a
-        // room's parts that fall off its platform.
+        // Stream the authoritative avatar/part/joint poses each frame, and refill
+        // a room's parts that fall off its platform.
+        // Parts now replicate their predicted Avian Position/Rotation directly (no
+        // NetTransform mirror); only the joint markers still stream a NetTransform.
         app.add_systems(
             Update,
-            (sync_part_transforms, sync_joint_transforms, replace_fallen_room_parts),
+            (
+                sync_joint_transforms,
+                replace_fallen_room_parts,
+                promote_settled_parts,
+                sync_avatar_facing,
+            ),
         );
         // Assign each client (and its avatar) to its reported room on the first
         // input, lazily creating the room's world.
         app.add_systems(Update, assign_rooms);
-        // Apply each client's replicated input to its player (FixedUpdate, the
-        // sim tick). Grab/hold run in Update where Avian's `Forces` helper
-        // accumulates (matching the single-player `position_held_part`).
-        app.add_systems(FixedUpdate, apply_player_input);
-        app.add_systems(Update, (server_grab, server_hold, server_attach).chain());
+        // Bridge each client's per-tick input intent into its avatar's movement
+        // inputs (`DirectionalInput`/`Yaw`), before the shared movement systems
+        // read them on the same sim tick — so the server simulates the character
+        // authoritatively from intent. Grab/hold run in Update where Avian's
+        // `Forces` helper accumulates (matching single-player `position_held_part`).
+        // Grab-latch + the hold/orient spring run in `FixedUpdate` (was `Update`)
+        // so the spring force lands in the same tick as the Avian step that
+        // consumes it — phase-aligned with the client's *predicted* hold spring
+        // (`predict_hold`), so the two worlds diverge only by round-trip and don't
+        // generate constant rollback churn from a fixed schedule offset. Attach
+        // (the one-shot joint spawn) stays in `Update` for now — Phase 5 moves it.
+        app.add_systems(
+            FixedUpdate,
+            (
+                apply_net_input.before(CharacterMovement),
+                (server_grab, server_hold).chain(),
+            ),
+        );
+        app.add_systems(Update, server_attach);
     }
 }
 
@@ -158,6 +192,33 @@ struct PartRoom {
 #[derive(Component, Default)]
 struct HeldPart(Option<Entity>);
 
+/// How long a freshly-spawned part may keep settling before it's force-promoted to
+/// replication even if not yet at rest (so a jostling part still appears in a
+/// bounded time).
+const PART_SETTLE_TIMEOUT_SECS: f32 = 3.0;
+/// Speed² (in (m/s)²) below which a settling part counts as at-rest and is promoted.
+const PART_SETTLE_REST_SPEED_SQ: f32 = 0.05;
+
+/// A freshly-spawned part still *settling* on the server, held back from
+/// replication until it comes to rest (or a timeout elapses). The room's parts
+/// spawn high (y=5..15) and free-fall; the first client to enter the room would
+/// otherwise see them mid-fall. Since parts are predicted but their *velocity*
+/// isn't replicated (replicating it fought the character's velocity smoothing and
+/// made movement rubber-band), a client builds its predicted copy at rest while the
+/// server's is falling — and lightyear's error-smoothing renders the growing
+/// correction as a slow downward drift ("parts sink slowly on first load"). Holding
+/// replication until the server part is at rest means the client only ever predicts
+/// a *settled* part, so there's nothing to drift. Carries what `tag_room_part` needs
+/// to promote it once settled.
+#[derive(Component)]
+struct Settling {
+    half_extents: Vec3,
+    room: Room,
+    /// Seconds left before the part is force-promoted even if not yet fully at rest
+    /// (so a part that keeps jostling still appears within a bounded time).
+    timeout: f32,
+}
+
 /// Assign each connected client (and its avatar) to the room it reported, the
 /// first time a real input arrives. Lazily creates the room's world (parts) on
 /// first sighting of a code. Until assigned, the avatar carries no
@@ -167,12 +228,12 @@ fn assign_rooms(
     mut commands: Commands,
     mut registry: ResMut<RoomRegistry>,
     mut allocator: ResMut<RoomAllocator>,
-    players: Query<(Entity, &ActionState<PlayerInput>, &ControlledBy), Without<RoomMember>>,
+    players: Query<(Entity, &ActionState<NetInput>, &ControlledBy), Without<RoomMember>>,
 ) {
     for (entity, state, controlled) in &players {
         // Wait for the first real input — the all-zero seed carries no room (a
         // real input always has a unit-quaternion rotation, never `[0,0,0,0]`).
-        if state.0 == PlayerInput::default() {
+        if state.0 == NetInput::default() {
             continue;
         }
         let (room, is_new) = registry.get_or_create(state.0.room, &mut allocator);
@@ -180,21 +241,59 @@ fn assign_rooms(
             spawn_room_world(&mut commands, room);
         }
         // Scope this avatar and this client to the room (`Rooms` is immutable, so
-        // `insert` replaces any prior membership).
-        commands
-            .entity(entity)
-            .insert((Rooms::single(room.id), RoomMember(room.id)));
+        // `insert` replaces any prior membership). The avatar is a real dynamic body
+        // in the one shared Avian world, so isolate it to the room's collision layer
+        // too (membership = room bit, filter = room bit + ground's default bit 0) —
+        // otherwise it would shove *every* room's blocks. Matches `tag_room_part`,
+        // so same-room avatars/parts/ground interact and cross-room ones don't.
+        commands.entity(entity).insert((
+            Rooms::single(room.id),
+            RoomMember(room.id),
+            CollisionLayers::from_bits(room.bit, room.bit | 1),
+        ));
         commands.entity(controlled.owner).insert(Rooms::single(room.id));
         info!("client {:?} joined room {:?}", controlled.owner, room.id);
     }
 }
 
-/// Spawn a fresh room's world: its own set of parts (replicated + interpolated +
-/// collision-isolated to the room).
+/// Spawn a fresh room's world: its own set of parts. Each spawns *settling* (not
+/// yet replicated) so the first client sees them only once they've come to rest
+/// (see [`Settling`]).
 fn spawn_room_world(commands: &mut Commands, room: Room) {
     for _ in 0..NUM_PARTS {
-        let (entity, half_extents) = spawn_random_part(commands);
-        tag_room_part(commands, entity, half_extents, room);
+        spawn_settling_part(commands, room);
+    }
+}
+
+/// Spawn one random part into a room and mark it [`Settling`]: it gets its physics
+/// body, room collision layer, and `PartRoom` immediately (so it falls and settles
+/// correctly, isolated to its room), but is held back from replication — `NetPart`/
+/// `Replicate`/`PredictionTarget`/`Rooms` are added by `promote_settled_parts` once
+/// it's at rest.
+fn spawn_settling_part(commands: &mut Commands, room: Room) {
+    let (entity, half_extents) = spawn_random_part(commands);
+    commands.entity(entity).insert((
+        PartRoom { id: room.id, bit: room.bit },
+        CollisionLayers::from_bits(room.bit, room.bit | 1),
+        Settling { half_extents, room, timeout: PART_SETTLE_TIMEOUT_SECS },
+    ));
+}
+
+/// Promote each [`Settling`] part to a replicated, predicted part once it has come
+/// to rest on its room's platform (or its settle timeout expires), so clients only
+/// ever predict a settled part — never one mid-free-fall.
+fn promote_settled_parts(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut parts: Query<(Entity, &LinearVelocity, &mut Settling)>,
+) {
+    for (entity, velocity, mut settling) in &mut parts {
+        settling.timeout -= time.delta_secs();
+        // ~0.22 m/s: at rest within solver jitter. Promote on rest or timeout.
+        if velocity.0.length_squared() < PART_SETTLE_REST_SPEED_SQ || settling.timeout <= 0.0 {
+            tag_room_part(&mut commands, entity, settling.half_extents, settling.room);
+            commands.entity(entity).remove::<Settling>();
+        }
     }
 }
 
@@ -205,9 +304,13 @@ fn spawn_room_world(commands: &mut Commands, room: Room) {
 fn tag_room_part(commands: &mut Commands, entity: Entity, half_extents: Vec3, room: Room) {
     commands.entity(entity).insert((
         NetPart { half_extents: half_extents.to_array() },
-        NetTransform::default(),
         Replicate::to_clients(NetworkTarget::All),
-        InterpolationTarget::to_clients(NetworkTarget::All),
+        // Predict the loose blocks on every client in the room: each client
+        // simulates them locally (so shoving one is instant) and rollback reconciles
+        // against the server's authoritative Avian `Position`/`Rotation`. (Was an
+        // interpolated `NetTransform` follower; the pose now rides on the predicted
+        // Position/Rotation registered in `ProtocolPlugin`.)
+        PredictionTarget::to_clients(NetworkTarget::All),
         Rooms::single(room.id),
         PartRoom { id: room.id, bit: room.bit },
         CollisionLayers::from_bits(room.bit, room.bit | 1),
@@ -219,8 +322,8 @@ fn tag_room_part(commands: &mut Commands, entity: Entity, half_extents: Vec3, ro
 /// single-player, cast from the forwarded orbit-center origin along the ray to
 /// the hold target. On release, let go. The part stays dynamic throughout.
 fn server_grab(
-    mut players: Query<(&ActionState<PlayerInput>, &mut HeldPart, &RoomMember)>,
-    parts: Query<(Entity, &Transform, &PartRoom), With<NetPart>>,
+    mut players: Query<(&ActionState<NetInput>, &mut HeldPart, &RoomMember)>,
+    parts: Query<(Entity, &Position, &PartRoom), With<NetPart>>,
 ) {
     for (state, mut held, member) in &mut players {
         if !state.0.grab {
@@ -238,7 +341,7 @@ fn server_grab(
             parts
                 .iter()
                 .filter(|(_, _, part_room)| part_room.id == member.0)
-                .map(|(entity, t, _)| (entity, t.translation)),
+                .map(|(entity, p, _)| (entity, p.0)),
         );
     }
 }
@@ -249,19 +352,23 @@ fn server_grab(
 /// `orient_held_part`). The part stays dynamic, so it still collides. Both forces
 /// go through the one `Forces` accessor to avoid an ambiguous double-write.
 fn server_hold(
-    players: Query<(&ActionState<PlayerInput>, &HeldPart)>,
-    mut parts: Query<(&Transform, Forces), With<NetPart>>,
+    players: Query<(&ActionState<NetInput>, &HeldPart)>,
+    // Read the authoritative Avian `Position`/`Rotation` rather than `Transform`:
+    // in multiplayer `lightyear_avian` owns the Position→Transform sync (the Avian
+    // `PhysicsTransformPlugin` is disabled), so `Transform` can lag within the fixed
+    // schedule; `Position`/`Rotation` are always current where the step reads them.
+    mut parts: Query<(&Position, &Rotation, Forces), With<NetPart>>,
     gravity: Res<Gravity>,
 ) {
     for (state, held) in &players {
         let Some(part_entity) = held.0 else {
             continue;
         };
-        let Ok((transform, mut forces)) = parts.get_mut(part_entity) else {
+        let Ok((position, rotation, mut forces)) = parts.get_mut(part_entity) else {
             continue;
         };
         // Position.
-        let displacement = Vec3::from_array(state.0.hold_target) - transform.translation;
+        let displacement = Vec3::from_array(state.0.hold_target) - position.0;
         let lin_vel = forces.linear_velocity();
         forces.apply_linear_acceleration(hold_acceleration(displacement, lin_vel) - gravity.0);
         // Orientation: drive toward the target rotation (the client tracks it,
@@ -271,7 +378,7 @@ fn server_hold(
         // exactly as the single-player `orient_held_part`.
         let target = Quat::from_array(state.0.hold_rotation);
         if target.length_squared() > 0.5 {
-            let error = (target * transform.rotation.conjugate()).to_rotation_vector();
+            let error = (target * rotation.0.conjugate()).to_rotation_vector();
             let ang_vel = forces.angular_velocity();
             forces.apply_angular_acceleration(orient_acceleration(error, ang_vel));
         }
@@ -289,10 +396,13 @@ fn server_hold(
 fn server_attach(
     mut commands: Commands,
     collisions: Collisions,
-    transforms: Query<&Transform>,
+    // Recover the anchors from the authoritative Avian `Rotation`, not `Transform`:
+    // in multiplayer `lightyear_avian` owns the Position→Transform sync, so a body's
+    // `Transform` can lag the rotation the contact anchors were computed against.
+    rotations: Query<&Rotation>,
     coms: Query<&ComputedCenterOfMass>,
     net_parts: Query<(), With<NetPart>>,
-    mut players: Query<(&ActionState<PlayerInput>, &mut HeldPart, &RoomMember)>,
+    mut players: Query<(&ActionState<NetInput>, &mut HeldPart, &RoomMember)>,
 ) {
     for (state, mut held, member) in &mut players {
         if !state.0.attach {
@@ -312,7 +422,7 @@ fn server_attach(
             if net_parts.get(other).is_err() {
                 continue;
             }
-            let rot = |e| transforms.get(e).map(|t| t.rotation).unwrap_or(Quat::IDENTITY);
+            let rot = |e| rotations.get(e).map(|r| r.0).unwrap_or(Quat::IDENTITY);
             let com = |e| coms.get(e).map(|c| c.0).unwrap_or(Vec3::ZERO);
             for manifold in &pair.manifolds {
                 for contact in &manifold.points {
@@ -340,21 +450,22 @@ fn server_attach(
     }
 }
 
-/// Mirror each replicated part's authoritative physics pose into its
-/// `NetTransform` so the change replicates to clients. Only writes on an actual
-/// change, so settled (motionless) parts stop generating replication traffic.
-fn sync_part_transforms(mut parts: Query<(&Transform, &mut NetTransform), With<NetPart>>) {
-    for (transform, mut net) in &mut parts {
-        let updated = NetTransform::from_transform(transform);
-        if *net != updated {
-            *net = updated;
+/// Mirror each avatar's look `Yaw` into its replicated `NetFacing`, so remote
+/// clients can draw it facing where it looks. Only writes on change (a still avatar
+/// stops generating facing traffic). `Yaw` itself is deliberately not replicated —
+/// doing so overwrote the owning client's locally-driven look and broke its turning.
+fn sync_avatar_facing(mut avatars: Query<(&Yaw, &mut NetFacing)>) {
+    for (yaw, mut facing) in &mut avatars {
+        if facing.0 != yaw.0 {
+            facing.0 = yaw.0;
         }
     }
 }
 
 /// Stream each replicated joint's world anchor point into its `NetTransform`
 /// (body1's transform applied to local anchor1), so the client's joint marker
-/// tracks the moving assembly.
+/// tracks the moving assembly. Only writes on an actual change, so a settled
+/// assembly stops generating replication traffic.
 fn sync_joint_transforms(
     mut joints: Query<(&SphericalJoint, &mut NetTransform), With<NetJoint>>,
     bodies: Query<&Transform, Without<NetJoint>>,
@@ -382,11 +493,10 @@ fn replace_fallen_room_parts(
     for (entity, transform, part_room) in &parts {
         if transform.translation.y < -10.0 {
             commands.entity(entity).despawn();
-            let (new_entity, half_extents) = spawn_random_part(&mut commands);
-            tag_room_part(
+            // The replacement also spawns high and falls; spawn it settling so it,
+            // too, only replicates once at rest (no mid-fall drift on clients).
+            spawn_settling_part(
                 &mut commands,
-                new_entity,
-                half_extents,
                 Room { id: part_room.id, bit: part_room.bit },
             );
         }
@@ -426,7 +536,7 @@ fn start_server(mut commands: Commands) {
 
 /// When a client finishes connecting (`Connected` added to its link entity),
 /// spawn a player entity owned by the server and replicated to it. The initial
-/// pose is a placeholder — the client's first `PlayerInput` (its real character
+/// pose is a placeholder — the client's first `NetInput` (its real character
 /// pose) overwrites it within a tick. The avatar starts with no `Rooms` filter so
 /// it's visible to its own client (bootstrapping the input/control loop);
 /// `assign_rooms` scopes it once the first input reveals the room.
@@ -436,27 +546,33 @@ fn spawn_player_for_client(
     remote: Query<&RemoteId>,
 ) {
     let client = trigger.entity;
+    // The owning client's peer id: it predicts its own avatar; everyone else
+    // interpolates it. (Predicting a remote player is impossible without its input.)
+    let owner = remote.get(client).map(|r| r.0).unwrap_or(PeerId::Server);
     commands.spawn((
         NetPlayer { client_id: client_identity(client, &remote) },
-        // Parked far underground until the first input: while unassigned the
-        // avatar carries no `Rooms` filter, so it's briefly visible to every
-        // client (replicon shows filter-less entities by default); keeping it
-        // off-screen hides that ~1-RTT blip from other rooms. The owner never
-        // sees the placeholder (prediction overrides its own avatar's pose).
-        NetTransform::from_transform(&Transform::from_xyz(0.0, -1000.0, 0.0)),
+        // Replicate the avatar; its pose rides on Avian `Position`/`Rotation`
+        // (`build_server_avatar` gives it a real body next frame, and the server
+        // simulates it from the client's input intent).
         Replicate::to_clients(NetworkTarget::All),
-        // Clients (including the owner) render an interpolated copy, smoothing
-        // the replicated pose between confirmed snapshots.
-        InterpolationTarget::to_clients(NetworkTarget::All),
+        // Predict on the owner (zero input delay, rolled back), interpolate on others.
+        PredictionTarget::to_clients(NetworkTarget::Single(owner)),
+        InterpolationTarget::to_clients(NetworkTarget::AllExceptSingle(owner)),
         // Bind this player to the connecting client so that client's networked
         // input drives it. The server auto-adds the `InputBuffer`/`ActionState`
-        // when input arrives; seeding `ActionState` here lets `apply_player_input`
+        // when input arrives; seeding `ActionState` here lets `apply_net_input`
         // match the entity immediately. `SessionBased` despawns it on disconnect.
         ControlledBy { owner: client, lifetime: Lifetime::SessionBased },
-        ActionState::<PlayerInput>::default(),
+        ActionState::<NetInput>::default(),
+        // Make this avatar a server-simulated character body (assembled once the
+        // config loads).
+        ServerAvatar,
         HeldPart::default(),
+        // Replicated facing (mirrored from the avatar's `Yaw` by
+        // `sync_avatar_facing`) so remote clients can draw it facing its look.
+        NetFacing::default(),
     ));
-    info!("client {client:?} connected — spawned replicated player");
+    info!("client {client:?} connected — spawned replicated avatar");
 }
 
 /// The stable u64 a client chose in its netcode `Authentication`, read from the
@@ -477,18 +593,4 @@ fn client_identity(link: Entity, remote: &Query<&RemoteId>) -> u64 {
     }
 }
 
-/// Mirror each client's forwarded character pose into its authoritative
-/// `NetTransform`. Runs in `FixedUpdate` (server tick); the changed
-/// `NetTransform` then replicates to all clients.
-fn apply_player_input(mut players: Query<(&ActionState<PlayerInput>, &mut NetTransform)>) {
-    for (state, mut net) in &mut players {
-        // The all-zero default is the unsent seed, not a real pose (a real pose's
-        // rotation is a unit quaternion, never `[0,0,0,0]`), so skip it and keep
-        // the spawn pose until the client's first input arrives.
-        if state.0 == PlayerInput::default() {
-            continue;
-        }
-        net.translation = state.0.translation;
-        net.rotation = state.0.rotation;
-    }
-}
+

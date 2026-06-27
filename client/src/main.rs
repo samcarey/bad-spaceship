@@ -82,9 +82,15 @@ fn main() {
         .add_systems(Startup, load_configs)
         .add_systems(Update, add_camera_to_player);
 
+    // Avian physics — with the multiplayer transform-sync handling disabled when
+    // we're connecting (so `lightyear_avian3d` can own it). Must precede
+    // `NetClientPlugin` (which adds `LightyearAvianPlugin`).
+    let multiplayer = net::multiplayer_target().is_some();
+    bad_spaceship_shared::add_physics(&mut app, multiplayer);
+
     // Opt-in multiplayer: when a connect target is configured, add the netcode
     // client. Otherwise the app is the unchanged single-player game.
-    if net::multiplayer_target().is_some() {
+    if multiplayer {
         app.add_plugins(net::NetClientPlugin);
     }
 
@@ -108,8 +114,13 @@ fn load_configs(
 ) {
     // We're not going to use these handles,
     // but we need to store them or else the assets will be dropped
-    *handle = Some(asset_server.load("config\\character.character.ron"));
-    *handle2 = Some(asset_server.load("config\\player.player.ron"));
+    // Forward slashes: valid on both the native filesystem and in the wasm
+    // asset-fetch URL. (The old Windows-style backslashes only "worked" on wasm
+    // because browsers normalise `\`→`/` in URLs; on native macOS the backslash is
+    // a literal filename byte, so the config never loaded and no character body
+    // could be assembled.)
+    *handle = Some(asset_server.load("config/character.character.ron"));
+    *handle2 = Some(asset_server.load("config/player.player.ron"));
 
     // TODO: Fix this
     // Theoretically this should work instead of the above, but it doesn't...

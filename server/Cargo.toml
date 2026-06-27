@@ -18,7 +18,8 @@ avian3d = { workspace = true }
 # Server-side netcode: the dedicated authoritative host. `server` runtime group +
 # WebSocket transport (browsers connect over WSS) + netcode connection layer +
 # replication. Version pinned in the root `[workspace.dependencies]`.
-lightyear = { workspace = true, features = ["server", "replication", "interpolation", "websocket", "netcode", "std", "input_native"] }
+lightyear = { workspace = true, features = ["server", "replication", "prediction", "interpolation", "websocket", "netcode", "std", "input_native"] }
+lightyear_avian3d = { workspace = true }
 
 [features]
 default = [

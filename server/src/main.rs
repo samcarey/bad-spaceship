@@ -6,6 +6,19 @@ use bevy::{app::ScheduleRunnerPlugin, asset::AssetPlugin, prelude::*};
 mod net;
 
 fn main() {
+    // Bevy resolves its asset root from `BEVY_ASSET_ROOT`, else `CARGO_MANIFEST_DIR`
+    // (set by `cargo run`), else the *executable's* directory — never the working
+    // directory. The deployed server runs as a bare binary in `bin/` under launchd
+    // with its `WorkingDirectory` at the server crate, so without this it looks for
+    // assets next to the binary and silently fails to load the character `Config`
+    // (its size/speed/jump) — which the server now needs to simulate characters.
+    // Anchor the root at the working directory so `../client/assets` resolves the
+    // same way `cargo run` does.
+    if std::env::var_os("BEVY_ASSET_ROOT").is_none() {
+        if let Ok(cwd) = std::env::current_dir() {
+            std::env::set_var("BEVY_ASSET_ROOT", cwd);
+        }
+    }
     let mut app = App::new();
     app
         // Bevy 0.11 merged ScheduleRunnerSettings into ScheduleRunnerPlugin;
@@ -26,7 +39,17 @@ fn main() {
 
     // Opt-in multiplayer host: set BS_MULTIPLAYER to run as the authoritative
     // netcode server. Unset → the headless single-player sim, unchanged.
-    if std::env::var("BS_MULTIPLAYER").is_ok() {
+    let multiplayer = std::env::var("BS_MULTIPLAYER").is_ok();
+    // Avian physics — disabling the transform-sync sub-plugins in multiplayer so
+    // `lightyear_avian3d` (added by `NetServerPlugin`) owns it. Must precede it.
+    bad_spaceship_shared::add_physics(&mut app, multiplayer);
+    if multiplayer {
+        // `lightyear_avian3d` drives Bevy's `bevy_transform` propagation systems
+        // (Avian's own `PhysicsTransformPlugin` is disabled in multiplayer), which
+        // need `StaticTransformOptimizations` + the propagation infra that
+        // `TransformPlugin` sets up. `DefaultPlugins` gives the client this; the
+        // headless server's `MinimalPlugins` omits it, so add it here.
+        app.add_plugins(bevy::transform::TransformPlugin);
         app.add_plugins(net::NetServerPlugin);
     }
 
@@ -42,8 +65,13 @@ fn load_configs(
 ) {
     // We're not going to use these handles,
     // but we need to store them or else the assets will be dropped
-    *handle = Some(asset_server.load("..\\assets\\config\\character.character.ron"));
-    *handle2 = Some(asset_server.load("..\\..\\assets\\config\\player.player.ron"));
+    // Forward slashes (the old `..\assets\…` backslash paths are treated as a
+    // single literal filename on macOS native — the server box — so they silently
+    // failed; it never mattered until the server began simulating characters, which
+    // need the character `Config` via `build_server_avatar`). Relative to the asset
+    // root (`../client/assets`).
+    *handle = Some(asset_server.load("config/character.character.ron"));
+    *handle2 = Some(asset_server.load("config/player.player.ron"));
 
     // TODO: Fix this
     // Theoretically this should work instead of the above, but it doesn't...

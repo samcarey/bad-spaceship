@@ -4,7 +4,6 @@ use bevy::{
     math::{Quat, Vec2, Vec3},
     prelude::{Bundle, Entity, Message, PluginGroup, Resource, SystemSet},
 };
-use avian3d::PhysicsPlugins;
 use character::CharacterPlugin;
 use config::ConfigPlugin;
 use map::MapPlugin;
@@ -23,12 +22,11 @@ pub struct CommonPlugins;
 
 impl PluginGroup for CommonPlugins {
     fn build(self) -> PluginGroupBuilder {
+        // NOTE: Avian's `PhysicsPlugins` is added separately by each binary via
+        // `add_physics` (below), because in multiplayer two of its sub-plugins must
+        // be disabled (handled by `lightyear_avian3d`) and that can't be expressed
+        // through this group builder.
         PluginGroupBuilder::start::<Self>()
-            // Third-party plugins. Avian's `PhysicsPlugins` group is the
-            // bevy_rapier `RapierPhysicsPlugin` replacement (broad/narrow phase,
-            // XPBD solver, integrator, CCD, sleeping). Unlike rapier's single
-            // plugin, it's a `PluginGroup`, so nest it with `add_group`.
-            .add_group(PhysicsPlugins::default())
             // Custom plugins
             .add(CharacterPlugin)
             .add(ConfigPlugin)
@@ -38,13 +36,36 @@ impl PluginGroup for CommonPlugins {
     }
 }
 
+/// Add Avian's physics plugin group. In multiplayer, `lightyear_avian3d` takes over
+/// the `Position`↔`Transform` sync and frame interpolation, so Avian's own
+/// `PhysicsTransformPlugin` + `PhysicsInterpolationPlugin` must be disabled (doing
+/// so in single-player would break rendering, which relies on Avian's sync). Call
+/// once from each binary's `main`, before any `LightyearAvianPlugin`.
+pub fn add_physics(app: &mut bevy::app::App, multiplayer: bool) {
+    use avian3d::prelude::*;
+    if multiplayer {
+        app.add_plugins(
+            PhysicsPlugins::default()
+                .build()
+                .disable::<PhysicsTransformPlugin>()
+                .disable::<PhysicsInterpolationPlugin>(),
+        );
+    } else {
+        app.add_plugins(PhysicsPlugins::default());
+    }
+}
+
 #[derive(Default, Component)]
 pub struct KeyboardDirectionalInput(pub Vec3);
 
 #[derive(Default, Component)]
 pub struct GameStickDirectionalInput(pub Vec3);
 
-#[derive(Default, Component)]
+/// The player's look yaw (radians). Replicated so remote clients can face each
+/// avatar the way it's looking — the body itself is `ROTATION_LOCKED` at identity
+/// (the camera rig owns the look), so facing rides on this value, applied to the
+/// rendered avatar's visual pivot (`face_replicated_players`).
+#[derive(Default, Component, Clone, Copy, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Yaw(pub f32);
 
 #[derive(Default, Component)]
@@ -61,6 +82,13 @@ pub struct Holding(pub bool);
 
 #[derive(Default, Component)]
 pub struct Player;
+
+/// When present, suppresses spawning the local single-player `Player`/`Character`.
+/// Both netcode plugins insert it: the server simulates one `ServerAvatar` body per
+/// connected client, and the client controls its *predicted* networked avatar
+/// instead of a separate local character (so there's exactly one character on each).
+#[derive(Default, Resource)]
+pub struct SuppressLocalPlayer;
 
 #[derive(Component)]
 pub struct OrbitingCamera(pub Entity);
@@ -87,7 +115,7 @@ pub struct PlayerClick;
 pub struct Character;
 
 #[derive(Default, Component)]
-struct DirectionalInput(Vec3);
+pub struct DirectionalInput(pub Vec3);
 
 #[derive(SystemSet, Hash, Debug, PartialEq, Eq, Clone)]
 pub struct InputEvents;

@@ -11,21 +11,29 @@
 //!
 //! For every player the server replicates, draw a cube at its `NetTransform`.
 
-use avian3d::prelude::{Collider, RigidBody};
-use bad_spaceship_shared::net::{
-    focused_part, NetJoint, NetPart, NetPlayer, NetTransform, PlayerInput, ProtocolPlugin, TICK,
+use avian3d::prelude::{
+    Forces, Gravity, Position, ReadRigidBodyForces, Rotation, WriteRigidBodyForces,
 };
-use bad_spaceship_shared::part::{Holdable, SuppressLocalParts};
+use bad_spaceship_shared::character::{
+    insert_character_body, CharacterMovement, Config as CharacterConfig,
+};
+use bad_spaceship_shared::net::{
+    apply_net_input, focused_part, hold_acceleration, orient_acceleration, NetFacing, NetInput,
+    NetJoint, NetPart, NetPlayer, NetTransform, ProtocolPlugin, TICK,
+};
+use bad_spaceship_shared::part::{insert_part_physics, Holdable, SuppressLocalParts};
+use bad_spaceship_shared::player::make_local_player;
+use bad_spaceship_shared::utils::QuatExt;
 use crate::render_secondary_pass::JointAppearance;
 use bad_spaceship_shared::{
-    CameraOrbitCenter, Character, FocusedInteractable, HoldPoint, Holding, InputEvents, Modifying,
-    PartRotation, Player, PlayerClick, Yaw,
+    CameraOrbitCenter, Character, DirectionalInput, FocusedInteractable, HoldPoint, Holding,
+    InputEvents, LookPitch, Modifying, PartRotation, Player, PlayerClick, SuppressLocalPlayer, Yaw,
 };
 use bevy::prelude::*;
 use lightyear::prelude::client::input::InputSystems as ClientInputSystems;
 use lightyear::prelude::client::*;
 use lightyear::prelude::input::native::{ActionState, InputMarker};
-use lightyear::prelude::{Authentication, Controlled, Interpolated};
+use lightyear::prelude::{Authentication, Interpolated, Predicted, PredictionManager};
 use std::net::SocketAddr;
 
 /// The lobby room this client is in, forwarded to the server (which scopes our
@@ -98,9 +106,23 @@ impl Plugin for NetClientPlugin {
         // Order matters: plugin group → protocol → spawn the client entity.
         app.add_plugins(ClientPlugins { tick_duration: TICK });
         app.add_plugins(ProtocolPlugin);
+        // Owns the Avian `Position`↔`Transform` sync (its sub-plugins are disabled
+        // in multiplayer by `add_physics`), frame interpolation, and client-side
+        // prediction rollback for replicated Avian bodies. State replication, so no
+        // `rollback_resources`.
+        app.add_plugins(lightyear_avian3d::prelude::LightyearAvianPlugin {
+            replication_mode: lightyear_avian3d::plugin::AvianReplicationMode::Position,
+            update_syncs_manually: false,
+            rollback_resources: false,
+        });
         // In multiplayer the parts are server-authoritative: suppress the local
         // part sim and render the server's replicated parts instead.
         app.insert_resource(SuppressLocalParts);
+        // The local character is the *predicted networked avatar* (assembled by
+        // `setup_predicted_avatar` on the lightyear `Predicted` entity), not a
+        // separate single-player character — suppress the latter so there's exactly
+        // one character on the client.
+        app.insert_resource(SuppressLocalPlayer);
         // The lobby room this client is in, forwarded to the server so it scopes
         // our world. Read once at plugin build (after `play.html` has populated
         // `window.__BS_NET__`); constant for the session.
@@ -112,23 +134,22 @@ impl Plugin for NetClientPlugin {
         // Recover from a dropped link (e.g. a suspended/backgrounded tab) by
         // reconnecting when the tab returns to the foreground.
         app.add_systems(Update, reconnect_dropped);
-        // Toggle the grab intent on each (non-modifier) click; sent in PlayerInput.
+        // Toggle the grab intent on each (non-modifier) click; sent in NetInput.
         // After `InputEvents` (mobile `apply_pointer` / desktop `get_modifying`)
         // so `Modifying` is current when classifying a click as grab vs attach.
         app.add_systems(Update, read_grab_intent.after(InputEvents));
-        // Give every replicated player a visible body, then keep its transform
-        // in sync with the replicated pose, tag the player we control, and tag
-        // our own avatar so we can render it predicted (from the local pose).
+        // Assemble our predicted avatar into the controllable character, give every
+        // *other* replicated player a visible body, keep parts/joints in sync with
+        // their replicated pose.
         app.add_systems(
             Update,
             (
+                setup_predicted_avatar,
                 draw_replicated_players,
+                face_replicated_players,
                 draw_replicated_parts,
                 draw_replicated_joints,
                 apply_net_transform,
-                mark_controlled_player,
-                mark_own_avatar,
-                predict_own_avatar,
                 // Mirror the networked grab into local `Holding`/`FocusedInteractable`
                 // (after the intent is read), then track the held part's target
                 // orientation, then highlight it — in that order so each reads the
@@ -136,90 +157,88 @@ impl Plugin for NetClientPlugin {
                 (mirror_grab_state, track_hold_rotation, highlight_grabbable)
                     .chain()
                     .after(read_grab_intent),
-                // Predict the part WE hold locally (zero round-trip), like
-                // predict_own_avatar does for our body: mark it once the grab is
-                // mirrored, then drive it from the local hold point. apply_net_transform
-                // skips it while held, so the interpolated echo doesn't fight us.
-                mark_held_part.after(mirror_grab_state),
-                predict_held_part.after(mark_held_part),
             ),
         );
-        // Forward our character pose each tick, in lightyear's input-writing set.
+        // Forward our input intent each tick, in lightyear's input-writing set.
         app.add_systems(
             FixedPreUpdate,
-            write_player_pose.in_set(ClientInputSystems::WriteClientInputs),
+            write_input.in_set(ClientInputSystems::WriteClientInputs),
+        );
+        // Drive the *predicted* avatar from the buffered input intent each sim tick —
+        // the same bridge the server runs — so local prediction and rollback replay
+        // use exactly the inputs the server will. Before `CharacterMovement` reads them.
+        // `predict_hold` applies the held-part spring locally each tick (the same
+        // spring the server runs) so carrying a block is instant and rollback-replayed.
+        app.add_systems(
+            FixedUpdate,
+            (apply_net_input.before(CharacterMovement), predict_hold),
         );
     }
 }
 
-/// The server binds a player to us via `ControlledBy`; on the client that entity
-/// arrives carrying the `Controlled` marker. Tag it with `InputMarker` (and seed
-/// its `ActionState`) so our input is written to and sent for that entity.
-fn mark_controlled_player(
+/// Turn our *predicted* networked avatar into the controllable local character.
+/// lightyear creates a `Predicted` entity for the avatar the server marks
+/// `PredictionTarget` to us (only our own — predicting a remote player is
+/// impossible without its input), and rolls back its Avian `Position`/`Rotation`.
+/// We give that entity the real character body (`insert_character_body`) so Avian
+/// simulates it locally with zero input delay, plus the player/input state
+/// (`make_local_player`) and the networked-input marker so `write_input` fills its
+/// `ActionState` and lightyear sends it. From there it's an ordinary `Character`:
+/// `assign_characters` renders it and `attach_camera_orbit` mounts the camera —
+/// the same path single-player uses.
+///
+/// Gated on `Position` so we assemble the body only once the avatar's real spawn
+/// pose has arrived (rather than briefly at the origin). The loose blocks are also
+/// `Predicted` now, so exclude `NetPart` — the avatar is the predicted entity that
+/// is NOT a part (it carries no `NetPart`; `draw_replicated_parts` handles those).
+fn setup_predicted_avatar(
     mut commands: Commands,
-    my_id: Option<Res<MyClientId>>,
-    new: Query<(Entity, &NetPlayer), (With<Controlled>, Without<InputMarker<PlayerInput>>)>,
+    new: Query<Entity, (With<Predicted>, With<Position>, Without<Character>, Without<NetPart>)>,
+    configs: Res<Assets<CharacterConfig>>,
 ) {
-    // Only drive input for *our* avatar, matched by the netcode id we chose (which
-    // the server stamps onto `NetPlayer.client_id`). lightyear's `Controlled`
-    // marker leaks to an already-connected client for a late joiner's avatar, so
-    // keying purely off `With<Controlled>` would bind our input to that peer too.
-    let Some(my_id) = my_id else {
+    let Some((_, config)) = configs.iter().next() else {
         return;
     };
-    for (entity, player) in &new {
-        if player.client_id == my_id.0 {
-            commands.entity(entity).insert((
-                InputMarker::<PlayerInput>::default(),
-                ActionState::<PlayerInput>::default(),
-            ));
-        }
+    for entity in &new {
+        let mut e = commands.entity(entity);
+        insert_character_body(&mut e, config.size());
+        make_local_player(&mut e);
+        e.insert((
+            InputMarker::<NetInput>::default(),
+            ActionState::<NetInput>::default(),
+        ));
     }
 }
 
-/// Build an avatar render pose from a world translation plus a yaw-derived
-/// rotation. The character ball is rotation-locked (its physics rotation is
-/// identity); the player's facing is the look `Yaw`. Match the movement basis,
-/// which yaws look directions by `-yaw` (see `move_character` in shared), so the
-/// avatar's +Z "nose" points where the player looks.
-fn avatar_pose(translation: Vec3, yaw: &Yaw) -> Transform {
-    Transform {
-        translation,
-        rotation: Quat::from_rotation_y(-yaw.0),
-        ..default()
-    }
-}
-
-/// Forward our local character's authoritative world pose into the controlled
-/// player's `ActionState` (lightyear sends it to the server, which mirrors it
-/// into the replicated `NetTransform`). The local character is a single body
-/// (the `Character` ball — `Player` and `Character` are the same entity), so its
-/// `GlobalTransform` is the player's true position/orientation on every platform.
-fn write_player_pose(
-    character: Query<(&GlobalTransform, &Yaw), With<Character>>,
+/// Forward our per-tick input *intent* (move/jump/look) into the controlled
+/// avatar's `ActionState`; lightyear sends it and the server simulates our
+/// character authoritatively from it. We read the local character's combined
+/// `DirectionalInput` — the same intent that drives our local (predicted)
+/// character — plus `Yaw`/`LookPitch`. The grab-ray fields are still forwarded
+/// from the local camera entities for now (the server's grab uses them directly);
+/// a later phase reconstructs the ray from the simulated character + look angles.
+fn write_input(
+    character: Query<(&DirectionalInput, &Yaw, &LookPitch), With<Character>>,
     orbit: Query<&GlobalTransform, With<CameraOrbitCenter>>,
     hold: Query<&GlobalTransform, With<HoldPoint>>,
     want_hold: Res<WantHold>,
     mut want_attach: ResMut<WantAttach>,
     held_rotation: Res<HeldRotation>,
     my_room: Res<MyRoom>,
-    mut controlled: Query<&mut ActionState<PlayerInput>, With<InputMarker<PlayerInput>>>,
+    mut controlled: Query<&mut ActionState<NetInput>, With<InputMarker<NetInput>>>,
 ) {
-    let Some((global, yaw)) = character.iter().next() else {
+    let Some((dir, yaw, pitch)) = character.iter().next() else {
         return;
     };
-    let pose = avatar_pose(global.translation(), yaw);
-    // The grab ray origin and hold-point position come from the real
-    // camera-orbit/hold entities (above the character), so the networked hold
-    // matches single-player. The held part's *orientation* target is tracked
-    // separately (`track_hold_rotation`): it starts at the part's pickup
-    // orientation and accumulates the rotate gesture.
     let grab_origin = orbit.iter().next().map(|g| g.translation());
     let hold_pos = hold.iter().next().map(|g| g.translation());
     let attach = want_attach.0;
     for mut state in &mut controlled {
-        state.0.translation = pose.translation.to_array();
-        state.0.rotation = pose.rotation.to_array();
+        // DirectionalInput: x = strafe, y = jump (non-zero), z = forward.
+        state.0.move_xz = [dir.0.x, dir.0.z];
+        state.0.jump = dir.0.y != 0.0;
+        state.0.yaw = yaw.0;
+        state.0.pitch = pitch.0;
         state.0.attach = attach;
         // The room is constant for the session; the server keys our world on it.
         state.0.room = my_room.0;
@@ -302,12 +321,12 @@ fn highlight_grabbable(
 struct WantHold(bool);
 
 /// One-shot attach intent, set on a modifier click (the join gesture), consumed
-/// by `write_player_pose` after it's forwarded.
+/// by `write_input` after it's forwarded.
 #[derive(Resource, Default)]
 struct WantAttach(bool);
 
 /// The held part's target orientation, tracked client-side and forwarded to the
-/// server as `PlayerInput::hold_rotation`. `Quat::default()` is the identity, so
+/// server as `NetInput::hold_rotation`. `Quat::default()` is the identity, so
 /// the derived `Default` seeds it correctly. Mirrors single-player's
 /// `TargetOrientation`: it's seeded to the part's orientation at pickup and
 /// accumulates the rotate gesture (`track_hold_rotation`). Public so the
@@ -325,7 +344,7 @@ fn track_hold_rotation(
     mut was_holding: Local<bool>,
     mut held_rotation: ResMut<HeldRotation>,
     player: Query<(&FocusedInteractable, &PartRotation), With<Player>>,
-    parts: Query<&Transform, (With<NetPart>, With<Interpolated>)>,
+    parts: Query<&Transform, (With<NetPart>, With<Predicted>)>,
 ) {
     let Ok((focused, part_rotation)) = player.single() else {
         return;
@@ -343,6 +362,53 @@ fn track_hold_rotation(
     } else {
         // Accumulate the rotate gesture, matching `apply_part_rotation`.
         held_rotation.0 = part_rotation.0 * held_rotation.0;
+    }
+}
+
+/// Predict the held-part spring locally so carrying a block is instant (zero
+/// input delay), reconciled by rollback against the server's authoritative pose.
+/// Mirrors `server_hold`: the same critically-damped anti-gravity float to the
+/// hold point + orient spring toward the tracked target, applied via Avian
+/// `Forces` to the *predicted* held part — in `FixedUpdate`, so the spring is part
+/// of the simulation lightyear replays on a rollback. The held part is the one
+/// `mirror_grab_state` latched into the local Player's `FocusedInteractable` (the
+/// same look-angle rule the server grabs by), and the hold target/orientation are
+/// the same values `write_input` forwards to the server (`HoldPoint` world position
+/// + `HeldRotation`), so both worlds spring toward an identical goal and diverge
+/// only by round-trip. Reads `Position`/`Rotation` (current in the fixed schedule),
+/// not `Transform`, for the same reason `server_hold` does.
+fn predict_hold(
+    player: Query<(&Holding, &FocusedInteractable), With<Player>>,
+    hold: Query<&GlobalTransform, With<HoldPoint>>,
+    held_rotation: Res<HeldRotation>,
+    mut parts: Query<(&Position, &Rotation, Forces), With<NetPart>>,
+    gravity: Res<Gravity>,
+) {
+    let Ok((holding, focused)) = player.single() else {
+        return;
+    };
+    if !holding.0 {
+        return;
+    }
+    let (Some(part_entity), Some(hold_target)) =
+        (focused.0, hold.iter().next().map(|g| g.translation()))
+    else {
+        return;
+    };
+    let Ok((position, rotation, mut forces)) = parts.get_mut(part_entity) else {
+        return;
+    };
+    // Position: float to the hold point, cancelling the part's weight.
+    let displacement = hold_target - position.0;
+    let lin_vel = forces.linear_velocity();
+    forces.apply_linear_acceleration(hold_acceleration(displacement, lin_vel) - gravity.0);
+    // Orientation: drive toward the tracked target (seeded at pickup + rotate
+    // gesture). Skip the unset seed, matching `server_hold`.
+    let target = held_rotation.0;
+    if target.length_squared() > 0.5 {
+        let error = (target * rotation.0.conjugate()).to_rotation_vector();
+        let ang_vel = forces.angular_velocity();
+        forces.apply_angular_acceleration(orient_acceleration(error, ang_vel));
     }
 }
 
@@ -366,115 +432,23 @@ fn read_grab_intent(
     }
 }
 
-/// Marks our *own* avatar's `Interpolated` entity, so it can be rendered from
-/// the local character pose (prediction) rather than the network echo.
+/// Records a remote avatar's visual yaw-pivot child (the entity carrying its body
+/// + nose mesh), so `face_replicated_players` can turn it to the avatar's
+/// replicated look `Yaw` without writing the avatar entity's own `Transform` —
+/// which `lightyear_avian` owns (it syncs `Position`→`Transform` and pins the
+/// rotation to the body's `ROTATION_LOCKED` identity every frame, so a yaw written
+/// there would be stomped).
 #[derive(Component)]
-struct OwnAvatar;
+struct AvatarVisual(Entity);
 
-/// Tag our own avatar: the `Interpolated` entity whose `NetPlayer.client_id`
-/// matches the player we control. (Both the `Controlled`/`Confirmed` entity and
-/// its `Interpolated` copy replicate the same `NetPlayer`.)
-fn mark_own_avatar(
-    mut commands: Commands,
-    my_id: Option<Res<MyClientId>>,
-    candidates: Query<(Entity, &NetPlayer, Has<OwnAvatar>), With<Interpolated>>,
-) {
-    // Identify our avatar by the netcode id we chose (which the server stamps onto
-    // `NetPlayer.client_id`), NOT by the replicated `Controlled` marker: lightyear
-    // leaks `Controlled` for a late joiner's avatar to the already-connected
-    // client, which used to mis-tag the peer as ours — and `predict_own_avatar`
-    // then stacked it on our own avatar, so it looked invisible. Reconciles each
-    // frame (adds where ours, removes where not) so a stale tag can't persist.
-    let Some(my_id) = my_id else {
-        return;
-    };
-    for (entity, player, is_own) in &candidates {
-        match (player.client_id == my_id.0, is_own) {
-            (true, false) => {
-                commands.entity(entity).insert(OwnAvatar);
-            }
-            (false, true) => {
-                commands.entity(entity).remove::<OwnAvatar>();
-            }
-            _ => {}
-        }
-    }
-}
-
-/// Render our own avatar from the live local character pose (zero round-trip),
-/// overriding the interpolated network echo. Because the client is authoritative
-/// over its own pose (it forwards it to the server), this "prediction" is exact —
-/// no rollback needed, unlike server-authoritative movement prediction. Reads the
-/// character's `Transform` (not `GlobalTransform`, which the engine only refreshes
-/// in PostUpdate and would lag a frame): the character is a root entity, so its
-/// `Transform` is the current world pose, and the avatar then propagates in lockstep
-/// with the rendered character the same frame.
-fn predict_own_avatar(
-    character: Query<(&Transform, &Yaw), (With<Character>, Without<OwnAvatar>)>,
-    mut own: Query<&mut Transform, (With<OwnAvatar>, Without<Character>)>,
-) {
-    let Some((transform, yaw)) = character.iter().next() else {
-        return;
-    };
-    let pose = avatar_pose(transform.translation, yaw);
-    for mut own_transform in &mut own {
-        *own_transform = pose;
-    }
-}
-
-/// Marks the part the local player is holding so it renders from local prediction
-/// instead of the server's interpolated (round-trip-late) echo.
-#[derive(Component)]
-struct LocallyHeld;
-
-/// Latch `LocallyHeld` onto the part in our hand, clearing it on release or when
-/// the focus changes. Reads the same `Holding` / `FocusedInteractable` that
-/// `mirror_grab_state` maintains from the networked grab.
-fn mark_held_part(
-    mut commands: Commands,
-    player: Query<(&Holding, &FocusedInteractable), With<Player>>,
-    held: Query<Entity, With<LocallyHeld>>,
-) {
-    let target = player
-        .single()
-        .ok()
-        .and_then(|(holding, focused)| holding.0.then_some(focused.0).flatten());
-    for entity in &held {
-        if Some(entity) != target {
-            commands.entity(entity).remove::<LocallyHeld>();
-        }
-    }
-    if let Some(t) = target {
-        if held.get(t).is_err() {
-            commands.entity(t).insert(LocallyHeld);
-        }
-    }
-}
-
-/// Render our held part from the local hold point + our chosen rotation (zero
-/// round-trip), overriding the interpolated echo. The server stays authoritative
-/// (collisions, other players); on release the mark clears and `apply_net_transform`
-/// snaps the part to the server's position (a small, occasional pop is acceptable).
-fn predict_held_part(
-    hold_point: Query<&GlobalTransform, With<HoldPoint>>,
-    held_rotation: Res<HeldRotation>,
-    mut held: Query<&mut Transform, With<LocallyHeld>>,
-) {
-    let Some(hp) = hold_point.iter().next() else {
-        return;
-    };
-    for mut transform in &mut held {
-        transform.translation = hp.translation();
-        transform.rotation = held_rotation.0;
-    }
-}
-
-/// Attach a mesh to each player's `Interpolated` copy (the smoothed visual
-/// entity) that doesn't have one yet. The raw `Confirmed` entities stay
-/// invisible; input/control still rides on them (they carry `Controlled`).
+/// Give each *other* player's `Interpolated` copy a visible body, mounted on a yaw
+/// pivot so `face_replicated_players` can turn it to the player's look direction.
+/// Our own avatar is `Predicted`, not `Interpolated`, and renders via the
+/// single-player character path (`assign_characters`), so it's excluded here. The
+/// raw `Confirmed` entities stay invisible.
 fn draw_replicated_players(
     mut commands: Commands,
-    new_players: Query<Entity, (With<NetPlayer>, With<Interpolated>, Without<Mesh3d>)>,
+    new_players: Query<Entity, (With<NetPlayer>, With<Interpolated>, Without<AvatarVisual>)>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
@@ -488,37 +462,61 @@ fn draw_replicated_players(
                 Transform::from_xyz(0.0, 0.0, 0.9),
             ))
             .id();
-        commands
-            .entity(entity)
-            .insert((
+        // The pivot carries the body mesh and is rotated to the look yaw; the avatar
+        // entity itself keeps the Avian-driven Transform (translation only).
+        let pivot = commands
+            .spawn((
                 Mesh3d(meshes.add(Cuboid::new(0.8, 1.2, 1.6))),
                 MeshMaterial3d(materials.add(Color::srgb(0.9, 0.35, 0.35))),
+                Transform::default(),
             ))
-            .add_children(&[nose]);
+            .add_children(&[nose])
+            .id();
+        commands
+            .entity(entity)
+            .insert(AvatarVisual(pivot))
+            .add_children(&[pivot]);
     }
 }
 
-/// Give each replicated part's `Interpolated` copy a cuboid mesh + a kinematic
-/// collider built from its `NetPart` shape. The pose is driven by the server via
-/// the interpolated `NetTransform` (`apply_net_transform`); a `Kinematic` body
-/// follows that pose and blocks the local dynamic character, so the player bumps
-/// the shared world (the part is never pushed back — the server is authoritative).
+/// Turn each remote avatar's visual pivot to its replicated, interpolated facing
+/// (`NetFacing`, the server's mirror of that avatar's look yaw), so other players
+/// are drawn facing the way they're looking. Uses the same basis as the movement
+/// code (`Quat::from_rotation_y(-yaw)`, see `walk_based_on_input`), so the +Z nose
+/// points along the avatar's forward. Reads `NetFacing`, not the owner's local-input
+/// `Yaw` (which isn't replicated — replicating it broke the owner's turning).
+fn face_replicated_players(
+    avatars: Query<(&NetFacing, &AvatarVisual), (With<Interpolated>, Changed<NetFacing>)>,
+    mut pivots: Query<&mut Transform>,
+) {
+    for (facing, visual) in &avatars {
+        if let Ok(mut transform) = pivots.get_mut(visual.0) {
+            transform.rotation = Quat::from_rotation_y(-facing.0);
+        }
+    }
+}
+
+/// Turn each replicated part's `Predicted` copy into a real dynamic body: the same
+/// physics (`insert_part_physics`) the server simulates, a cuboid mesh from its
+/// `NetPart` shape, and `Holdable` for the joint-display systems. The pose rides on
+/// the predicted Avian `Position`/`Rotation`, so the client simulates the block
+/// locally (shoving it is instant) and rollback reconciles against the server.
+/// Gated on `Position` + `Rotation` both present (lightyear_avian inserts them on
+/// the predicted entity from the server's confirmed state) so the body isn't built —
+/// and rendered — at a default pose for a frame.
 fn draw_replicated_parts(
     mut commands: Commands,
-    new_parts: Query<(Entity, &NetPart), (With<Interpolated>, Without<Mesh3d>)>,
+    new_parts: Query<(Entity, &NetPart), (With<Predicted>, With<Position>, With<Rotation>, Without<Mesh3d>)>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     for (entity, part) in &new_parts {
         let [hx, hy, hz] = part.half_extents;
-        commands.entity(entity).insert((
+        let mut e = commands.entity(entity);
+        insert_part_physics(&mut e, Vec3::new(hx, hy, hz));
+        e.insert((
             Mesh3d(meshes.add(Cuboid::new(hx * 2.0, hy * 2.0, hz * 2.0))),
             MeshMaterial3d(materials.add(Color::srgb(0.55, 0.6, 0.72))),
-            RigidBody::Kinematic,
-            // Avian's `Collider::cuboid` takes FULL extents (= 2 × half_extents).
-            Collider::cuboid(hx * 2.0, hy * 2.0, hz * 2.0),
-            // Marked Holdable so the real joint-display systems (which query
-            // Holdable transforms) can render potential/existing joints on them.
             Holdable,
         ));
     }
@@ -533,10 +531,10 @@ fn mirror_grab_state(
     want_hold: Res<WantHold>,
     orbit: Query<&GlobalTransform, With<CameraOrbitCenter>>,
     hold: Query<&GlobalTransform, With<HoldPoint>>,
-    // Only the `Interpolated` copies carry the collider/Holdable that Avian's
-    // `Collisions` (read by `update_active_joints`) reports against, so focus must
-    // latch one of those — not the invisible `Confirmed` originals.
-    parts: Query<(Entity, &Transform), (With<NetPart>, With<Interpolated>)>,
+    // Only the `Predicted` copies carry the dynamic body/collider/Holdable that
+    // Avian's `Collisions` (read by `update_active_joints`) reports against, so focus
+    // must latch one of those — not the invisible `Confirmed` originals.
+    parts: Query<(Entity, &Transform), (With<NetPart>, With<Predicted>)>,
     mut player: Query<(&mut Holding, &mut FocusedInteractable), With<Player>>,
 ) {
     let Ok((mut holding, mut focused)) = player.single_mut() else {
@@ -583,16 +581,7 @@ fn draw_replicated_joints(
 /// eases the `NetTransform` on `Interpolated` entities each frame; mirror it onto
 /// the Bevy `Transform` we render.
 fn apply_net_transform(
-    mut q: Query<
-        (&NetTransform, &mut Transform),
-        (
-            Changed<NetTransform>,
-            With<Interpolated>,
-            Without<OwnAvatar>,
-            // While we hold a part, predict_held_part owns its transform.
-            Without<LocallyHeld>,
-        ),
-    >,
+    mut q: Query<(&NetTransform, &mut Transform), (Changed<NetTransform>, With<Interpolated>)>,
 ) {
     for (net, mut transform) in &mut q {
         *transform = net.to_transform();
@@ -602,19 +591,13 @@ fn apply_net_transform(
 /// Build the dev netcode client for `server_addr`. Dev auth uses a fixed
 /// protocol id + the all-zero key, matching the server's `NetcodeConfig::
 /// default()`; production would issue a real ConnectToken from the matchmaker
-/// instead of `Manual`.
-/// Our chosen netcode client id, stored once we connect. The server stamps it
-/// onto every avatar's `NetPlayer.client_id`, so we recognise our own avatar by
-/// id rather than the replicated `Controlled` marker (which leaks to an
-/// already-connected client for a late joiner). Re-inserted on each (re)connect.
-#[derive(Resource, Clone, Copy)]
-struct MyClientId(u64);
-
-fn build_netcode_client(server_addr: SocketAddr) -> Option<(NetcodeClient, u64)> {
-    let client_id = rand::random::<u64>();
+/// instead of `Manual`. The random client id is the netcode handshake identity
+/// only — we recognise our own avatar locally by lightyear's `Predicted` marker,
+/// so it doesn't need to be retained.
+fn build_netcode_client(server_addr: SocketAddr) -> Option<NetcodeClient> {
     let auth = Authentication::Manual {
         server_addr,
-        client_id,
+        client_id: rand::random::<u64>(),
         private_key: [0u8; 32],
         // Version gate: a client only connects to a server built from the same
         // commit. The matchmaker routes to the matching version; this is the
@@ -622,7 +605,7 @@ fn build_netcode_client(server_addr: SocketAddr) -> Option<(NetcodeClient, u64)>
         protocol_id: bad_spaceship_shared::net::BS_PROTOCOL_ID,
     };
     match NetcodeClient::new(auth, NetcodeConfig::default()) {
-        Ok(n) => Some((n, client_id)),
+        Ok(n) => Some(n),
         Err(e) => {
             error!("failed to build netcode client: {e:?}");
             None
@@ -685,14 +668,17 @@ fn spawn_client(commands: &mut Commands) {
             return;
         }
     };
-    let Some((netcode, my_id)) = build_netcode_client(server_addr) else {
+    let Some(netcode) = build_netcode_client(server_addr) else {
         return;
     };
-    commands.insert_resource(MyClientId(my_id));
 
     let url = format!("ws://{server_addr}");
     let io = WebSocketClientIo::from_url(ClientConfig::builder().with_no_encryption(), url.clone());
-    let client = commands.spawn((netcode, io)).id();
+    // `PredictionManager` enables client-side prediction on this connection: its
+    // insert-hook creates the `PredictionResource` lightyear needs to process
+    // predicted entities. It is NOT auto-added (unlike the interpolation config),
+    // so without it receiving a predicted avatar panics in `receive_replication`.
+    let client = commands.spawn((netcode, io, PredictionManager::default())).id();
     commands.trigger(Connect { entity: client });
     info!("connecting to multiplayer server at {url}");
 }
@@ -708,14 +694,16 @@ fn spawn_client(commands: &mut Commands) {
     // connects via the explicit URL (`from_url`), so the netcode token's
     // `server_addr` is only a logical field — a placeholder is fine.
     let server_addr: SocketAddr = "0.0.0.0:0".parse().unwrap();
-    let Some((netcode, my_id)) = build_netcode_client(server_addr) else {
+    let Some(netcode) = build_netcode_client(server_addr) else {
         return;
     };
-    commands.insert_resource(MyClientId(my_id));
 
     // On wasm aeronet's `ClientConfig` is a unit struct (the browser owns TLS).
     let io = WebSocketClientIo::from_url(ClientConfig::default(), url.clone());
-    let client = commands.spawn((netcode, io)).id();
+    // See the native counterpart: `PredictionManager` enables client-side
+    // prediction (creates `PredictionResource`); required or receiving a predicted
+    // entity panics.
+    let client = commands.spawn((netcode, io, PredictionManager::default())).id();
     commands.trigger(Connect { entity: client });
     info!("connecting to multiplayer server at {url}");
 }

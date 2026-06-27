@@ -37,6 +37,7 @@ bad-spaceship-shared = { path = "../shared" }
 # `[workspace.dependencies]`. `prediction`/`interpolation` are on for the
 # server-authoritative smoothing the thin slice and later phases use.
 lightyear = { workspace = true, features = ["client", "replication", "prediction", "interpolation", "websocket", "netcode", "std", "input_native"] }
+lightyear_avian3d = { workspace = true }
 # Bevy 0.17's wasm build needs getrandom 0.3's `wasm_js` backend explicitly
 # selected (it dropped the implicit wasm fallback). The backend cfg is set for
 # the wasm target in `.cargo/config.toml`; this enables the matching feature.

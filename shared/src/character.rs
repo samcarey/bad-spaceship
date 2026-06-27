@@ -1,4 +1,4 @@
-use avian3d::prelude::{Collider, Collisions, LinearVelocity, LockedAxes, Mass, RigidBody};
+use avian3d::prelude::{Collider, Collisions, LinearVelocity, LockedAxes, Mass, Position, RigidBody};
 use bevy::prelude::*;
 use bevy::reflect::TypePath;
 
@@ -12,21 +12,43 @@ pub struct CharacterPlugin;
 
 impl Plugin for CharacterPlugin {
     fn build(&self, app: &mut App) {
+        // Input *merging* stays in `Update`: it's sampled once per render frame
+        // from the device input written there (and `combine` zeroes the keyboard
+        // accumulator, which is only safe once per frame). The velocity-applying
+        // systems move to `FixedUpdate` so movement advances exactly once per
+        // simulation tick. This is a prerequisite for the upcoming client-side
+        // prediction + rollback (which replays per-tick inputs deterministically),
+        // and it removes the old frame-rate dependence — movement used to run in
+        // `Update`, so a 120 Hz display literally moved the character faster.
         app.add_systems(
             Update,
             (
-                touching_ground,
-                combine_directional_inputs.in_set(CombineInputs),
-                walk_based_on_input
-                    .after(CombineInputs)
-                    .after(touching_ground),
-                jump_based_on_input
-                    .after(CombineInputs)
-                    .after(touching_ground),
-                spawn,
+                combine_directional_inputs,
+                // Suppressed in multiplayer — the predicted networked avatar (client)
+                // / the per-client `ServerAvatar` (server) is the character instead.
+                spawn.run_if(not(resource_exists::<crate::SuppressLocalPlayer>)),
+                build_server_avatar,
             ),
         )
-        .init_asset::<Config>();
+            .add_systems(
+                FixedUpdate,
+                (
+                    touching_ground,
+                    walk_based_on_input.after(touching_ground),
+                    // walk + jump both write `LinearVelocity` (different axes, but
+                    // the same component), so order them explicitly for a
+                    // deterministic result under rollback replay.
+                    jump_based_on_input
+                        .after(touching_ground)
+                        .after(walk_based_on_input),
+                )
+                    .in_set(CharacterMovement),
+            )
+            // Run the fixed timestep at the netcode tick rate (60 Hz) so single-
+            // player physics + movement match the multiplayer simulation tick
+            // (Bevy's default `Time<Fixed>` is 64 Hz). Avian steps on this too.
+            .insert_resource(Time::<Fixed>::from_duration(crate::net::TICK))
+            .init_asset::<Config>();
     }
 }
 
@@ -39,6 +61,15 @@ pub struct Config {
     jump_force: f32,
 }
 
+impl Config {
+    /// The character ball's diameter, in metres. Exposed so the client's
+    /// predicted-avatar setup can build the same body the single-player `spawn`
+    /// does, from the loaded config asset.
+    pub fn size(&self) -> f32 {
+        self.size
+    }
+}
+
 #[derive(Default, Bundle)]
 struct CharacterBundle {
     character: Character,
@@ -48,6 +79,28 @@ struct CharacterBundle {
     touching_ground: TouchingGround,
 }
 
+/// Insert the core character physics body onto an entity. Shared by the
+/// single-player `spawn`, the server's `build_server_avatar`, and the client's
+/// predicted-avatar setup. Does NOT set `Transform`/`Position` — the caller sets
+/// the spawn pose (single-player/server) or replication provides it (client
+/// predicted). The sphere collider, rotation lock, unit mass, and the
+/// movement-input component (`DirectionalInput`) plus `Character`/velocity/
+/// ground-contact (`CharacterBundle`) match what every controllable character needs.
+pub fn insert_character_body(entity: &mut EntityCommands, size: f32) {
+    entity.insert((
+        RigidBody::Dynamic,
+        LockedAxes::ROTATION_LOCKED,
+        // Avian's sphere constructor (rapier's "ball"). Avian collides all collider
+        // pairs by default, so rapier's `ActiveCollisionTypes` opt-in is dropped.
+        Collider::sphere(size / 2.0),
+        // Pin mass to 1.0; movement sets velocity directly so this only scales how
+        // the character shoves parts on contact.
+        Mass(1.0),
+        CharacterBundle::default(),
+        DirectionalInput::default(),
+    ));
+}
+
 fn spawn(
     mut commands: Commands,
     players_without_characters: Query<Entity, (With<Player>, Without<Character>)>,
@@ -55,27 +108,58 @@ fn spawn(
 ) {
     if let Some((_, config)) = configs.iter().next() {
         for player_entity in players_without_characters.iter() {
-            commands
-                .entity(player_entity)
-                .insert(RigidBody::Dynamic)
-                // Bevy 0.15: bare `Transform` (it now requires `GlobalTransform`).
-                .insert(Transform::from_xyz(0.0, 10.0, 0.0))
-                .insert(LockedAxes::ROTATION_LOCKED)
-                // Avian's sphere constructor (rapier's "ball"). Avian collides all
-                // collider pairs by default, so rapier's `ActiveCollisionTypes`
-                // opt-in is dropped.
-                .insert(Collider::sphere(config.size / 2.0))
-                .insert(CharacterBundle::default())
-                // Pin mass to 1.0 (rapier's `AdditionalMassProperties` did this);
-                // movement sets velocity directly so this only scales how the
-                // character shoves parts on contact.
-                .insert(Mass(1.0));
+            let mut entity = commands.entity(player_entity);
+            insert_character_body(&mut entity, config.size);
+            // Bevy 0.15: bare `Transform` (it now requires `GlobalTransform`).
+            entity.insert(Transform::from_xyz(0.0, 10.0, 0.0));
         }
     }
 }
 
+/// System set wrapping the `FixedUpdate` movement systems, so the server's
+/// input-bridge (which writes `DirectionalInput`/`Yaw` from the networked input)
+/// can be ordered `.before` them.
 #[derive(SystemSet, Clone, Hash, Debug, PartialEq, Eq)]
-struct CombineInputs;
+pub struct CharacterMovement;
+
+/// Marks a server-side networked avatar that needs its character body assembled —
+/// the multiplayer equivalent of a local `Player`. The server adds this to each
+/// client's replicated avatar; `build_server_avatar` then gives it the same Avian
+/// body the single-player `spawn` builds, so the server simulates it authoritatively
+/// from the client's input intent.
+#[derive(Default, Component)]
+pub struct ServerAvatar;
+
+/// Assemble the character body for each `ServerAvatar` that doesn't have one yet,
+/// once the character `Config` (its size) is loaded. Mirrors `spawn`, but driven by
+/// the networked marker and seeded with the movement-input component the server's
+/// bridge writes (`DirectionalInput`) plus `Yaw` (the bridge writes it from the
+/// client's look angle each tick).
+fn build_server_avatar(
+    mut commands: Commands,
+    avatars: Query<Entity, (With<ServerAvatar>, Without<Character>)>,
+    configs: Res<Assets<Config>>,
+) {
+    if let Some((_, config)) = configs.iter().next() {
+        for entity in avatars.iter() {
+            let mut e = commands.entity(entity);
+            insert_character_body(&mut e, config.size);
+            // Spawn the networked avatar just above the ground (a tiny settle), NOT
+            // from the single-player drop-in height (y=10). A predicting client
+            // assembles this body right at the chaotic connect moment — while
+            // lightyear is still ramping its tick sync and the wasm page is mid-load
+            // — so a tall fall is mispredicted in slow motion. A ~0.75 m settle is
+            // imperceptible and sidesteps that entirely. (Single-player keeps its
+            // y=10 drop-in in `spawn`.) Seed both Transform and Position because
+            // Avian's transform-sync is disabled in multiplayer.
+            e.insert((
+                Transform::from_xyz(0.0, 0.0, 0.0),
+                Position(Vec3::new(0.0, 0.0, 0.0)),
+                Yaw::default(),
+            ));
+        }
+    }
+}
 
 fn combine_directional_inputs(
     mut query: Query<(
@@ -173,7 +257,11 @@ fn walk_based_on_input(
             if !touching_ground.0 {
                 horizontal_velocity_change *= 0.13; // slowing down even more when in air
             }
-            velocity.0 += horizontal_velocity_change * 0.13; // tuning factor
+            // Per-tick blend toward the desired velocity. Now that this runs in
+            // `FixedUpdate` at a fixed 60 Hz (was per-render-frame in `Update`),
+            // this is a deterministic per-tick factor; retune it (and `max_speed`)
+            // if the fixed-tick feel differs from the old variable-frame-rate feel.
+            velocity.0 += horizontal_velocity_change * 0.13;
         }
     }
 }
