@@ -146,6 +146,7 @@ impl Plugin for NetClientPlugin {
             (
                 setup_predicted_avatar,
                 draw_replicated_players,
+                face_replicated_players,
                 draw_replicated_parts,
                 draw_replicated_joints,
                 apply_net_transform,
@@ -431,14 +432,23 @@ fn read_grab_intent(
     }
 }
 
-/// Attach a mesh to each *other* player's `Interpolated` copy (the smoothed visual
-/// entity) that doesn't have one yet. Our own avatar is `Predicted`, not
-/// `Interpolated`, and renders via the single-player character path
-/// (`assign_characters`), so it's excluded here. The raw `Confirmed` entities stay
-/// invisible.
+/// Records a remote avatar's visual yaw-pivot child (the entity carrying its body
+/// + nose mesh), so `face_replicated_players` can turn it to the avatar's
+/// replicated look `Yaw` without writing the avatar entity's own `Transform` —
+/// which `lightyear_avian` owns (it syncs `Position`→`Transform` and pins the
+/// rotation to the body's `ROTATION_LOCKED` identity every frame, so a yaw written
+/// there would be stomped).
+#[derive(Component)]
+struct AvatarVisual(Entity);
+
+/// Give each *other* player's `Interpolated` copy a visible body, mounted on a yaw
+/// pivot so `face_replicated_players` can turn it to the player's look direction.
+/// Our own avatar is `Predicted`, not `Interpolated`, and renders via the
+/// single-player character path (`assign_characters`), so it's excluded here. The
+/// raw `Confirmed` entities stay invisible.
 fn draw_replicated_players(
     mut commands: Commands,
-    new_players: Query<Entity, (With<NetPlayer>, With<Interpolated>, Without<Mesh3d>)>,
+    new_players: Query<Entity, (With<NetPlayer>, With<Interpolated>, Without<AvatarVisual>)>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
@@ -452,13 +462,35 @@ fn draw_replicated_players(
                 Transform::from_xyz(0.0, 0.0, 0.9),
             ))
             .id();
-        commands
-            .entity(entity)
-            .insert((
+        // The pivot carries the body mesh and is rotated to the look yaw; the avatar
+        // entity itself keeps the Avian-driven Transform (translation only).
+        let pivot = commands
+            .spawn((
                 Mesh3d(meshes.add(Cuboid::new(0.8, 1.2, 1.6))),
                 MeshMaterial3d(materials.add(Color::srgb(0.9, 0.35, 0.35))),
+                Transform::default(),
             ))
-            .add_children(&[nose]);
+            .add_children(&[nose])
+            .id();
+        commands
+            .entity(entity)
+            .insert(AvatarVisual(pivot))
+            .add_children(&[pivot]);
+    }
+}
+
+/// Turn each remote avatar's visual pivot to its replicated, interpolated look
+/// `Yaw`, so other players are drawn facing the way they're looking. Uses the same
+/// basis as the movement code (`Quat::from_rotation_y(-yaw)`, see
+/// `walk_based_on_input`), so the +Z nose points along the avatar's forward.
+fn face_replicated_players(
+    avatars: Query<(&Yaw, &AvatarVisual), (With<Interpolated>, Changed<Yaw>)>,
+    mut pivots: Query<&mut Transform>,
+) {
+    for (yaw, visual) in &avatars {
+        if let Ok(mut transform) = pivots.get_mut(visual.0) {
+            transform.rotation = Quat::from_rotation_y(-yaw.0);
+        }
     }
 }
 

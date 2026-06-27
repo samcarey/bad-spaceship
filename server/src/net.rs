@@ -332,7 +332,10 @@ fn server_hold(
 fn server_attach(
     mut commands: Commands,
     collisions: Collisions,
-    transforms: Query<&Transform>,
+    // Recover the anchors from the authoritative Avian `Rotation`, not `Transform`:
+    // in multiplayer `lightyear_avian` owns the Position→Transform sync, so a body's
+    // `Transform` can lag the rotation the contact anchors were computed against.
+    rotations: Query<&Rotation>,
     coms: Query<&ComputedCenterOfMass>,
     net_parts: Query<(), With<NetPart>>,
     mut players: Query<(&ActionState<NetInput>, &mut HeldPart, &RoomMember)>,
@@ -355,7 +358,7 @@ fn server_attach(
             if net_parts.get(other).is_err() {
                 continue;
             }
-            let rot = |e| transforms.get(e).map(|t| t.rotation).unwrap_or(Quat::IDENTITY);
+            let rot = |e| rotations.get(e).map(|r| r.0).unwrap_or(Quat::IDENTITY);
             let com = |e| coms.get(e).map(|c| c.0).unwrap_or(Vec3::ZERO);
             for manifold in &pair.manifolds {
                 for contact in &manifold.points {

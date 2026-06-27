@@ -179,6 +179,15 @@ pub struct NetPart {
 #[derive(Component, Serialize, Deserialize, Clone, Copy, PartialEq, Debug, Default)]
 pub struct NetJoint;
 
+/// Interpolate a replicated look yaw along the **shortest** angular path, so a
+/// wrap across ±π eases smoothly instead of spinning the long way. Used by
+/// lightyear's interpolation for remote avatars' `Yaw` (their facing).
+fn lerp_yaw(start: Yaw, other: Yaw, t: f32) -> Yaw {
+    use core::f32::consts::{PI, TAU};
+    let delta = (other.0 - start.0 + PI).rem_euclid(TAU) - PI;
+    Yaw(start.0 + delta * t)
+}
+
 /// Interpolate between two replicated poses: lerp the translation, slerp the
 /// rotation. Used by lightyear's interpolation for `NetTransform`.
 fn lerp_net_transform(start: NetTransform, other: NetTransform, t: f32) -> NetTransform {
@@ -261,6 +270,15 @@ impl Plugin for ProtocolPlugin {
         // The part shape is constant, so it only needs replicating (no interp).
         app.component::<NetPart>().replicate();
         app.component::<NetJoint>().replicate();
+        // Replicate each avatar's look `Yaw` so remote clients can face it the way
+        // it's looking. The body is `ROTATION_LOCKED` at identity (the camera rig
+        // owns the look), so facing can't ride on the replicated `Rotation`; it
+        // rides on this and is applied to the rendered avatar's visual pivot
+        // (`face_replicated_players`). Interpolated on remotes (the owner drives its
+        // own `Yaw` locally from input each tick, so no `.predict()` needed).
+        app.component::<Yaw>()
+            .replicate()
+            .add_interpolation_with(lerp_yaw);
 
         // Register `PlayerInput` as a networked native input. `InputPlugin` is
         // role-agnostic: it adds the client input plugin under lightyear's

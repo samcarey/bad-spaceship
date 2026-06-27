@@ -61,7 +61,11 @@ pub struct KeyboardDirectionalInput(pub Vec3);
 #[derive(Default, Component)]
 pub struct GameStickDirectionalInput(pub Vec3);
 
-#[derive(Default, Component)]
+/// The player's look yaw (radians). Replicated so remote clients can face each
+/// avatar the way it's looking — the body itself is `ROTATION_LOCKED` at identity
+/// (the camera rig owns the look), so facing rides on this value, applied to the
+/// rendered avatar's visual pivot (`face_replicated_players`).
+#[derive(Default, Component, Clone, Copy, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Yaw(pub f32);
 
 #[derive(Default, Component)]
