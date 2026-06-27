@@ -202,21 +202,22 @@ fn rotation_lerp(start: Rotation, other: Rotation, t: f32) -> Rotation {
 
 /// Bridge a networked avatar's per-tick input *intent* into the movement inputs the
 /// shared `walk_based_on_input`/`jump_based_on_input` read — `DirectionalInput`
-/// (move + jump) and `Yaw` (look) — plus its facing on the Avian `Rotation`. Runs
-/// in `FixedUpdate` *before* `CharacterMovement` on BOTH ends: the server simulates
-/// the body authoritatively from intent, and the predicting client replays the same
-/// intent through the same systems so rollback reconciles deterministically.
+/// (move + jump) and `Yaw` (look). Runs in `FixedUpdate` *before* `CharacterMovement`
+/// on BOTH ends: the server simulates the body authoritatively from intent, and the
+/// predicting client replays the same intent through the same systems so rollback
+/// reconciles deterministically.
 ///
-/// Facing rides on `Rotation` because the body is `ROTATION_LOCKED` (its physics
-/// rotation stays identity, so yaw would otherwise be lost over the wire). The lock
-/// only zeroes angular *velocity*; a direct per-tick write to `Rotation` persists,
-/// derives purely from the (buffered, replayed) input yaw, and so replicates to
-/// other clients and rolls back cleanly. `walk_based_on_input` derives its movement
-/// basis from `Yaw`, not `Rotation`, so this is render-facing only.
+/// Deliberately does NOT touch the body's Avian `Rotation`. The body is
+/// `ROTATION_LOCKED` and stays at identity, which is what the camera rig relies on:
+/// the camera-orbit center is a *child* of the body and applies the full look yaw
+/// itself (`mouse_motion`), so writing yaw onto the body too would double the
+/// camera's rotation relative to the movement direction. Remote-player *facing* is
+/// therefore carried separately (a replicated look angle applied to the rendered
+/// avatar), not by spinning the physics body.
 pub fn apply_net_input(
-    mut q: Query<(&ActionState<NetInput>, &mut DirectionalInput, &mut Yaw, &mut Rotation)>,
+    mut q: Query<(&ActionState<NetInput>, &mut DirectionalInput, &mut Yaw)>,
 ) {
-    for (state, mut dir, mut yaw, mut rotation) in &mut q {
+    for (state, mut dir, mut yaw) in &mut q {
         // DirectionalInput layout matches the single-player combiner: x = strafe,
         // y = jump (0/1), z = forward.
         dir.0 = Vec3::new(
@@ -225,9 +226,6 @@ pub fn apply_net_input(
             state.0.move_xz[1],
         );
         yaw.0 = state.0.yaw;
-        // Match the movement/look basis (`walk_based_on_input`, `mouse_motion`):
-        // look directions are yawed by `-yaw`, so the avatar's +Z "nose" faces there.
-        rotation.0 = Quat::from_rotation_y(-yaw.0);
     }
 }
 
