@@ -98,6 +98,15 @@ impl Plugin for NetClientPlugin {
         // Order matters: plugin group → protocol → spawn the client entity.
         app.add_plugins(ClientPlugins { tick_duration: TICK });
         app.add_plugins(ProtocolPlugin);
+        // Owns the Avian `Position`↔`Transform` sync (its sub-plugins are disabled
+        // in multiplayer by `add_physics`), frame interpolation, and client-side
+        // prediction rollback for replicated Avian bodies. State replication, so no
+        // `rollback_resources`.
+        app.add_plugins(lightyear_avian3d::prelude::LightyearAvianPlugin {
+            replication_mode: lightyear_avian3d::plugin::AvianReplicationMode::Position,
+            update_syncs_manually: false,
+            rollback_resources: false,
+        });
         // In multiplayer the parts are server-authoritative: suppress the local
         // part sim and render the server's replicated parts instead.
         app.insert_resource(SuppressLocalParts);

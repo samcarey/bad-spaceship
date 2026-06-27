@@ -76,6 +76,14 @@ impl Plugin for NetServerPlugin {
         // Order matters: plugin group → protocol → spawn the server entity.
         app.add_plugins(ServerPlugins { tick_duration: TICK });
         app.add_plugins(ProtocolPlugin);
+        // Owns the Avian `Position`↔`Transform` sync (its sub-plugins are disabled
+        // in multiplayer by `add_physics`) and the rollback wiring. State
+        // replication (server `Position` is truth) → no `rollback_resources`.
+        app.add_plugins(lightyear_avian3d::prelude::LightyearAvianPlugin {
+            replication_mode: lightyear_avian3d::plugin::AvianReplicationMode::Position,
+            update_syncs_manually: false,
+            rollback_resources: false,
+        });
         // Room-based interest management: scope replication so a client only sees
         // entities sharing one of its rooms.
         app.add_plugins(RoomPlugin);

@@ -634,6 +634,7 @@ dependencies = [
  "gloo",
  "js-sys",
  "lightyear",
+ "lightyear_avian3d",
  "log",
  "once_cell",
  "rand 0.8.6",
@@ -664,6 +665,7 @@ dependencies = [
  "bad-spaceship-shared",
  "bevy",
  "lightyear",
+ "lightyear_avian3d",
 ]
 
 [[package]]
@@ -675,6 +677,7 @@ dependencies = [
  "bevy",
  "include_dir",
  "lightyear",
+ "lightyear_avian3d",
  "rand 0.8.6",
  "ron 0.7.1",
  "serde",

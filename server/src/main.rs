@@ -39,7 +39,17 @@ fn main() {
 
     // Opt-in multiplayer host: set BS_MULTIPLAYER to run as the authoritative
     // netcode server. Unset → the headless single-player sim, unchanged.
-    if std::env::var("BS_MULTIPLAYER").is_ok() {
+    let multiplayer = std::env::var("BS_MULTIPLAYER").is_ok();
+    // Avian physics — disabling the transform-sync sub-plugins in multiplayer so
+    // `lightyear_avian3d` (added by `NetServerPlugin`) owns it. Must precede it.
+    bad_spaceship_shared::add_physics(&mut app, multiplayer);
+    if multiplayer {
+        // `lightyear_avian3d` drives Bevy's `bevy_transform` propagation systems
+        // (Avian's own `PhysicsTransformPlugin` is disabled in multiplayer), which
+        // need `StaticTransformOptimizations` + the propagation infra that
+        // `TransformPlugin` sets up. `DefaultPlugins` gives the client this; the
+        // headless server's `MinimalPlugins` omits it, so add it here.
+        app.add_plugins(bevy::transform::TransformPlugin);
         app.add_plugins(net::NetServerPlugin);
     }
 

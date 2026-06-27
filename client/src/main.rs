@@ -82,9 +82,15 @@ fn main() {
         .add_systems(Startup, load_configs)
         .add_systems(Update, add_camera_to_player);
 
+    // Avian physics — with the multiplayer transform-sync handling disabled when
+    // we're connecting (so `lightyear_avian3d` can own it). Must precede
+    // `NetClientPlugin` (which adds `LightyearAvianPlugin`).
+    let multiplayer = net::multiplayer_target().is_some();
+    bad_spaceship_shared::add_physics(&mut app, multiplayer);
+
     // Opt-in multiplayer: when a connect target is configured, add the netcode
     // client. Otherwise the app is the unchanged single-player game.
-    if net::multiplayer_target().is_some() {
+    if multiplayer {
         app.add_plugins(net::NetClientPlugin);
     }
 
