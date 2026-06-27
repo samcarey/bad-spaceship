@@ -87,7 +87,7 @@ pub struct PlayerClick;
 pub struct Character;
 
 #[derive(Default, Component)]
-struct DirectionalInput(Vec3);
+pub struct DirectionalInput(pub Vec3);
 
 #[derive(SystemSet, Hash, Debug, PartialEq, Eq, Clone)]
 pub struct InputEvents;

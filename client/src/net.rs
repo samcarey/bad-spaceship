@@ -13,13 +13,13 @@
 
 use avian3d::prelude::{Collider, RigidBody};
 use bad_spaceship_shared::net::{
-    focused_part, NetJoint, NetPart, NetPlayer, NetTransform, PlayerInput, ProtocolPlugin, TICK,
+    focused_part, NetJoint, NetPart, NetPlayer, NetTransform, NetInput, ProtocolPlugin, TICK,
 };
 use bad_spaceship_shared::part::{Holdable, SuppressLocalParts};
 use crate::render_secondary_pass::JointAppearance;
 use bad_spaceship_shared::{
-    CameraOrbitCenter, Character, FocusedInteractable, HoldPoint, Holding, InputEvents, Modifying,
-    PartRotation, Player, PlayerClick, Yaw,
+    CameraOrbitCenter, Character, DirectionalInput, FocusedInteractable, HoldPoint, Holding,
+    InputEvents, LookPitch, Modifying, PartRotation, Player, PlayerClick, Yaw,
 };
 use bevy::prelude::*;
 use lightyear::prelude::client::input::InputSystems as ClientInputSystems;
@@ -112,7 +112,7 @@ impl Plugin for NetClientPlugin {
         // Recover from a dropped link (e.g. a suspended/backgrounded tab) by
         // reconnecting when the tab returns to the foreground.
         app.add_systems(Update, reconnect_dropped);
-        // Toggle the grab intent on each (non-modifier) click; sent in PlayerInput.
+        // Toggle the grab intent on each (non-modifier) click; sent in NetInput.
         // After `InputEvents` (mobile `apply_pointer` / desktop `get_modifying`)
         // so `Modifying` is current when classifying a click as grab vs attach.
         app.add_systems(Update, read_grab_intent.after(InputEvents));
@@ -138,10 +138,10 @@ impl Plugin for NetClientPlugin {
                     .after(read_grab_intent),
             ),
         );
-        // Forward our character pose each tick, in lightyear's input-writing set.
+        // Forward our input intent each tick, in lightyear's input-writing set.
         app.add_systems(
             FixedPreUpdate,
-            write_player_pose.in_set(ClientInputSystems::WriteClientInputs),
+            write_input.in_set(ClientInputSystems::WriteClientInputs),
         );
     }
 }
@@ -152,7 +152,7 @@ impl Plugin for NetClientPlugin {
 fn mark_controlled_player(
     mut commands: Commands,
     my_id: Option<Res<MyClientId>>,
-    new: Query<(Entity, &NetPlayer), (With<Controlled>, Without<InputMarker<PlayerInput>>)>,
+    new: Query<(Entity, &NetPlayer), (With<Controlled>, Without<InputMarker<NetInput>>)>,
 ) {
     // Only drive input for *our* avatar, matched by the netcode id we chose (which
     // the server stamps onto `NetPlayer.client_id`). lightyear's `Controlled`
@@ -164,8 +164,8 @@ fn mark_controlled_player(
     for (entity, player) in &new {
         if player.client_id == my_id.0 {
             commands.entity(entity).insert((
-                InputMarker::<PlayerInput>::default(),
-                ActionState::<PlayerInput>::default(),
+                InputMarker::<NetInput>::default(),
+                ActionState::<NetInput>::default(),
             ));
         }
     }
@@ -184,36 +184,35 @@ fn avatar_pose(translation: Vec3, yaw: &Yaw) -> Transform {
     }
 }
 
-/// Forward our local character's authoritative world pose into the controlled
-/// player's `ActionState` (lightyear sends it to the server, which mirrors it
-/// into the replicated `NetTransform`). The local character is a single body
-/// (the `Character` ball — `Player` and `Character` are the same entity), so its
-/// `GlobalTransform` is the player's true position/orientation on every platform.
-fn write_player_pose(
-    character: Query<(&GlobalTransform, &Yaw), With<Character>>,
+/// Forward our per-tick input *intent* (move/jump/look) into the controlled
+/// avatar's `ActionState`; lightyear sends it and the server simulates our
+/// character authoritatively from it. We read the local character's combined
+/// `DirectionalInput` — the same intent that drives our local (predicted)
+/// character — plus `Yaw`/`LookPitch`. The grab-ray fields are still forwarded
+/// from the local camera entities for now (the server's grab uses them directly);
+/// a later phase reconstructs the ray from the simulated character + look angles.
+fn write_input(
+    character: Query<(&DirectionalInput, &Yaw, &LookPitch), With<Character>>,
     orbit: Query<&GlobalTransform, With<CameraOrbitCenter>>,
     hold: Query<&GlobalTransform, With<HoldPoint>>,
     want_hold: Res<WantHold>,
     mut want_attach: ResMut<WantAttach>,
     held_rotation: Res<HeldRotation>,
     my_room: Res<MyRoom>,
-    mut controlled: Query<&mut ActionState<PlayerInput>, With<InputMarker<PlayerInput>>>,
+    mut controlled: Query<&mut ActionState<NetInput>, With<InputMarker<NetInput>>>,
 ) {
-    let Some((global, yaw)) = character.iter().next() else {
+    let Some((dir, yaw, pitch)) = character.iter().next() else {
         return;
     };
-    let pose = avatar_pose(global.translation(), yaw);
-    // The grab ray origin and hold-point position come from the real
-    // camera-orbit/hold entities (above the character), so the networked hold
-    // matches single-player. The held part's *orientation* target is tracked
-    // separately (`track_hold_rotation`): it starts at the part's pickup
-    // orientation and accumulates the rotate gesture.
     let grab_origin = orbit.iter().next().map(|g| g.translation());
     let hold_pos = hold.iter().next().map(|g| g.translation());
     let attach = want_attach.0;
     for mut state in &mut controlled {
-        state.0.translation = pose.translation.to_array();
-        state.0.rotation = pose.rotation.to_array();
+        // DirectionalInput: x = strafe, y = jump (non-zero), z = forward.
+        state.0.move_xz = [dir.0.x, dir.0.z];
+        state.0.jump = dir.0.y != 0.0;
+        state.0.yaw = yaw.0;
+        state.0.pitch = pitch.0;
         state.0.attach = attach;
         // The room is constant for the session; the server keys our world on it.
         state.0.room = my_room.0;
@@ -301,7 +300,7 @@ struct WantHold(bool);
 struct WantAttach(bool);
 
 /// The held part's target orientation, tracked client-side and forwarded to the
-/// server as `PlayerInput::hold_rotation`. `Quat::default()` is the identity, so
+/// server as `NetInput::hold_rotation`. `Quat::default()` is the identity, so
 /// the derived `Default` seeds it correctly. Mirrors single-player's
 /// `TargetOrientation`: it's seeded to the part's orientation at pickup and
 /// accumulates the rotate gesture (`track_hold_rotation`). Public so the

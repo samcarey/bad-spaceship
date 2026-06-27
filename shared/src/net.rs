@@ -65,24 +65,30 @@ impl NetTransform {
     }
 }
 
-/// Per-tick client → server message carrying the controlling client's current
-/// character pose (world space). The client owns its local character sim, so
-/// rather than re-simulating movement on the server (which drifts and feels
-/// wrong vs the real physics character), the client forwards its authoritative
-/// pose and the server mirrors it into the replicated `NetTransform` — so every
-/// other client sees the avatar exactly track the character (offset only by
-/// network round-trip, smoothed later by interpolation).
+/// Per-tick client → server **input intent** (not pose). The server runs the
+/// authoritative character simulation from this intent (move direction, jump,
+/// look angle), so the world is server-authoritative and — once client-side
+/// prediction lands — the client predicts the same simulation locally and the
+/// server reconciles only on divergence. The grab-ray fields are still sent from
+/// the client's camera for now (the server's grab uses them directly); a later
+/// phase reconstructs the ray from the simulated character + look angles.
 ///
 /// Sent via lightyear's native-input channel (registered with
-/// `InputPlugin::<PlayerInput>` in `ProtocolPlugin`); native inputs must be
+/// `InputPlugin::<NetInput>` in `ProtocolPlugin`); native inputs must be
 /// `Serialize`/`Deserialize`/`Clone`/`PartialEq`/`Debug`/`Default` + `Reflect` +
 /// `MapEntities`.
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug, Default, Reflect)]
-pub struct PlayerInput {
-    /// Character world position (drives the avatar body).
-    pub translation: [f32; 3],
-    /// Avatar facing, yaw-only quaternion `[x, y, z, w]`.
-    pub rotation: [f32; 4],
+pub struct NetInput {
+    /// Look-relative move intent: `[strafe(+right), forward]`, clamped to length 1
+    /// (analog magnitude preserved for the touch joystick / gamepad).
+    pub move_xz: [f32; 2],
+    /// Jump intent this tick.
+    pub jump: bool,
+    /// Absolute look yaw (radians) — the movement basis and the avatar's facing.
+    pub yaw: f32,
+    /// Absolute look pitch (radians) — used by the server grab-ray reconstruction
+    /// in a later phase (forwarded now to stabilise the protocol).
+    pub pitch: f32,
     /// Camera-orbit-center world position — the origin of the grab look-ray.
     pub grab_origin: [f32; 3],
     /// Hold-point world position — where a grabbed part floats to.
@@ -149,9 +155,9 @@ pub fn orient_acceleration(rotation_vector: Vec3, angular_velocity: Vec3) -> Vec
     rotation_vector * ORIENTING_STIFFNESS - angular_velocity * damping
 }
 
-// No entities are referenced by `PlayerInput`, so the mapping is a no-op — but
+// No entities are referenced by `NetInput`, so the mapping is a no-op — but
 // the trait is a required bound for native inputs.
-impl MapEntities for PlayerInput {
+impl MapEntities for NetInput {
     fn map_entities<M: EntityMapper>(&mut self, _entity_mapper: &mut M) {}
 }
 
@@ -205,6 +211,6 @@ impl Plugin for ProtocolPlugin {
         // role-agnostic: it adds the client input plugin under lightyear's
         // `client` feature and the server one under `server`, so a single
         // registration here wires both binaries (each compiles only its half).
-        app.add_plugins(input::native::InputPlugin::<PlayerInput>::default());
+        app.add_plugins(input::native::InputPlugin::<NetInput>::default());
     }
 }

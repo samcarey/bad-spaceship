@@ -20,7 +20,7 @@ impl Plugin for CharacterPlugin {
         // prediction + rollback (which replays per-tick inputs deterministically),
         // and it removes the old frame-rate dependence — movement used to run in
         // `Update`, so a 120 Hz display literally moved the character faster.
-        app.add_systems(Update, (combine_directional_inputs, spawn))
+        app.add_systems(Update, (combine_directional_inputs, spawn, build_server_avatar))
             .add_systems(
                 FixedUpdate,
                 (
@@ -32,7 +32,8 @@ impl Plugin for CharacterPlugin {
                     jump_based_on_input
                         .after(touching_ground)
                         .after(walk_based_on_input),
-                ),
+                )
+                    .in_set(CharacterMovement),
             )
             // Run the fixed timestep at the netcode tick rate (60 Hz) so single-
             // player physics + movement match the multiplayer simulation tick
@@ -82,6 +83,46 @@ fn spawn(
                 // movement sets velocity directly so this only scales how the
                 // character shoves parts on contact.
                 .insert(Mass(1.0));
+        }
+    }
+}
+
+/// System set wrapping the `FixedUpdate` movement systems, so the server's
+/// input-bridge (which writes `DirectionalInput`/`Yaw` from the networked input)
+/// can be ordered `.before` them.
+#[derive(SystemSet, Clone, Hash, Debug, PartialEq, Eq)]
+pub struct CharacterMovement;
+
+/// Marks a server-side networked avatar that needs its character body assembled —
+/// the multiplayer equivalent of a local `Player`. The server adds this to each
+/// client's replicated avatar; `build_server_avatar` then gives it the same Avian
+/// body the single-player `spawn` builds, so the server simulates it authoritatively
+/// from the client's input intent.
+#[derive(Default, Component)]
+pub struct ServerAvatar;
+
+/// Assemble the character body for each `ServerAvatar` that doesn't have one yet,
+/// once the character `Config` (its size) is loaded. Mirrors `spawn`, but driven by
+/// the networked marker and seeded with the movement-input component the server's
+/// bridge writes (`DirectionalInput`) plus `Yaw` (the bridge writes it from the
+/// client's look angle each tick).
+fn build_server_avatar(
+    mut commands: Commands,
+    avatars: Query<Entity, (With<ServerAvatar>, Without<Character>)>,
+    configs: Res<Assets<Config>>,
+) {
+    if let Some((_, config)) = configs.iter().next() {
+        for entity in avatars.iter() {
+            commands
+                .entity(entity)
+                .insert(RigidBody::Dynamic)
+                .insert(Transform::from_xyz(0.0, 10.0, 0.0))
+                .insert(LockedAxes::ROTATION_LOCKED)
+                .insert(Collider::sphere(config.size / 2.0))
+                .insert(CharacterBundle::default())
+                .insert(Mass(1.0))
+                .insert(DirectionalInput::default())
+                .insert(Yaw::default());
         }
     }
 }
