@@ -103,9 +103,11 @@ impl Plugin for NetServerPlugin {
         app.add_systems(Update, log_client_rtt);
         // Stream the authoritative avatar/part/joint poses each frame, and refill
         // a room's parts that fall off its platform.
+        // Parts now replicate their predicted Avian Position/Rotation directly (no
+        // NetTransform mirror); only the joint markers still stream a NetTransform.
         app.add_systems(
             Update,
-            (sync_part_transforms, sync_joint_transforms, replace_fallen_room_parts),
+            (sync_joint_transforms, replace_fallen_room_parts),
         );
         // Assign each client (and its avatar) to its reported room on the first
         // input, lazily creating the room's world.
@@ -195,10 +197,16 @@ fn assign_rooms(
             spawn_room_world(&mut commands, room);
         }
         // Scope this avatar and this client to the room (`Rooms` is immutable, so
-        // `insert` replaces any prior membership).
-        commands
-            .entity(entity)
-            .insert((Rooms::single(room.id), RoomMember(room.id)));
+        // `insert` replaces any prior membership). The avatar is a real dynamic body
+        // in the one shared Avian world, so isolate it to the room's collision layer
+        // too (membership = room bit, filter = room bit + ground's default bit 0) —
+        // otherwise it would shove *every* room's blocks. Matches `tag_room_part`,
+        // so same-room avatars/parts/ground interact and cross-room ones don't.
+        commands.entity(entity).insert((
+            Rooms::single(room.id),
+            RoomMember(room.id),
+            CollisionLayers::from_bits(room.bit, room.bit | 1),
+        ));
         commands.entity(controlled.owner).insert(Rooms::single(room.id));
         info!("client {:?} joined room {:?}", controlled.owner, room.id);
     }
@@ -220,9 +228,13 @@ fn spawn_room_world(commands: &mut Commands, room: Room) {
 fn tag_room_part(commands: &mut Commands, entity: Entity, half_extents: Vec3, room: Room) {
     commands.entity(entity).insert((
         NetPart { half_extents: half_extents.to_array() },
-        NetTransform::default(),
         Replicate::to_clients(NetworkTarget::All),
-        InterpolationTarget::to_clients(NetworkTarget::All),
+        // Predict the loose blocks on every client in the room: each client
+        // simulates them locally (so shoving one is instant) and rollback reconciles
+        // against the server's authoritative Avian `Position`/`Rotation`. (Was an
+        // interpolated `NetTransform` follower; the pose now rides on the predicted
+        // Position/Rotation registered in `ProtocolPlugin`.)
+        PredictionTarget::to_clients(NetworkTarget::All),
         Rooms::single(room.id),
         PartRoom { id: room.id, bit: room.bit },
         CollisionLayers::from_bits(room.bit, room.bit | 1),
@@ -358,15 +370,6 @@ fn server_attach(
 /// Mirror each replicated part's authoritative physics pose into its
 /// `NetTransform` so the change replicates to clients. Only writes on an actual
 /// change, so settled (motionless) parts stop generating replication traffic.
-fn sync_part_transforms(mut parts: Query<(&Transform, &mut NetTransform), With<NetPart>>) {
-    for (transform, mut net) in &mut parts {
-        let updated = NetTransform::from_transform(transform);
-        if *net != updated {
-            *net = updated;
-        }
-    }
-}
-
 /// Stream each replicated joint's world anchor point into its `NetTransform`
 /// (body1's transform applied to local anchor1), so the client's joint marker
 /// tracks the moving assembly.

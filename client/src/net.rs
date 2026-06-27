@@ -11,7 +11,7 @@
 //!
 //! For every player the server replicates, draw a cube at its `NetTransform`.
 
-use avian3d::prelude::{Collider, Position, RigidBody};
+use avian3d::prelude::{Position, Rotation};
 use bad_spaceship_shared::character::{
     insert_character_body, CharacterMovement, Config as CharacterConfig,
 };
@@ -19,7 +19,7 @@ use bad_spaceship_shared::net::{
     apply_net_input, focused_part, NetInput, NetJoint, NetPart, NetPlayer, NetTransform,
     ProtocolPlugin, TICK,
 };
-use bad_spaceship_shared::part::{Holdable, SuppressLocalParts};
+use bad_spaceship_shared::part::{insert_part_physics, Holdable, SuppressLocalParts};
 use bad_spaceship_shared::player::make_local_player;
 use crate::render_secondary_pass::JointAppearance;
 use bad_spaceship_shared::{
@@ -179,12 +179,12 @@ impl Plugin for NetClientPlugin {
 /// the same path single-player uses.
 ///
 /// Gated on `Position` so we assemble the body only once the avatar's real spawn
-/// pose has arrived (rather than briefly at the origin). In this phase the avatar
-/// is the only predicted entity, so `With<Predicted>` identifies it; predicted
-/// loose blocks (a later phase) will need a marker to disambiguate.
+/// pose has arrived (rather than briefly at the origin). The loose blocks are also
+/// `Predicted` now, so exclude `NetPart` — the avatar is the predicted entity that
+/// is NOT a part (it carries no `NetPart`; `draw_replicated_parts` handles those).
 fn setup_predicted_avatar(
     mut commands: Commands,
-    new: Query<Entity, (With<Predicted>, With<Position>, Without<Character>)>,
+    new: Query<Entity, (With<Predicted>, With<Position>, Without<Character>, Without<NetPart>)>,
     configs: Res<Assets<CharacterConfig>>,
 ) {
     let Some((_, config)) = configs.iter().next() else {
@@ -335,7 +335,7 @@ fn track_hold_rotation(
     mut was_holding: Local<bool>,
     mut held_rotation: ResMut<HeldRotation>,
     player: Query<(&FocusedInteractable, &PartRotation), With<Player>>,
-    parts: Query<&Transform, (With<NetPart>, With<Interpolated>)>,
+    parts: Query<&Transform, (With<NetPart>, With<Predicted>)>,
 ) {
     let Ok((focused, part_rotation)) = player.single() else {
         return;
@@ -407,27 +407,27 @@ fn draw_replicated_players(
     }
 }
 
-/// Give each replicated part's `Interpolated` copy a cuboid mesh + a kinematic
-/// collider built from its `NetPart` shape. The pose is driven by the server via
-/// the interpolated `NetTransform` (`apply_net_transform`); a `Kinematic` body
-/// follows that pose and blocks the local dynamic character, so the player bumps
-/// the shared world (the part is never pushed back — the server is authoritative).
+/// Turn each replicated part's `Predicted` copy into a real dynamic body: the same
+/// physics (`insert_part_physics`) the server simulates, a cuboid mesh from its
+/// `NetPart` shape, and `Holdable` for the joint-display systems. The pose rides on
+/// the predicted Avian `Position`/`Rotation`, so the client simulates the block
+/// locally (shoving it is instant) and rollback reconciles against the server.
+/// Gated on `Position` + `Rotation` both present (lightyear_avian inserts them on
+/// the predicted entity from the server's confirmed state) so the body isn't built —
+/// and rendered — at a default pose for a frame.
 fn draw_replicated_parts(
     mut commands: Commands,
-    new_parts: Query<(Entity, &NetPart), (With<Interpolated>, Without<Mesh3d>)>,
+    new_parts: Query<(Entity, &NetPart), (With<Predicted>, With<Position>, With<Rotation>, Without<Mesh3d>)>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     for (entity, part) in &new_parts {
         let [hx, hy, hz] = part.half_extents;
-        commands.entity(entity).insert((
+        let mut e = commands.entity(entity);
+        insert_part_physics(&mut e, Vec3::new(hx, hy, hz));
+        e.insert((
             Mesh3d(meshes.add(Cuboid::new(hx * 2.0, hy * 2.0, hz * 2.0))),
             MeshMaterial3d(materials.add(Color::srgb(0.55, 0.6, 0.72))),
-            RigidBody::Kinematic,
-            // Avian's `Collider::cuboid` takes FULL extents (= 2 × half_extents).
-            Collider::cuboid(hx * 2.0, hy * 2.0, hz * 2.0),
-            // Marked Holdable so the real joint-display systems (which query
-            // Holdable transforms) can render potential/existing joints on them.
             Holdable,
         ));
     }
@@ -442,10 +442,10 @@ fn mirror_grab_state(
     want_hold: Res<WantHold>,
     orbit: Query<&GlobalTransform, With<CameraOrbitCenter>>,
     hold: Query<&GlobalTransform, With<HoldPoint>>,
-    // Only the `Interpolated` copies carry the collider/Holdable that Avian's
-    // `Collisions` (read by `update_active_joints`) reports against, so focus must
-    // latch one of those — not the invisible `Confirmed` originals.
-    parts: Query<(Entity, &Transform), (With<NetPart>, With<Interpolated>)>,
+    // Only the `Predicted` copies carry the dynamic body/collider/Holdable that
+    // Avian's `Collisions` (read by `update_active_joints`) reports against, so focus
+    // must latch one of those — not the invisible `Confirmed` originals.
+    parts: Query<(Entity, &Transform), (With<NetPart>, With<Predicted>)>,
     mut player: Query<(&mut Holding, &mut FocusedInteractable), With<Player>>,
 ) {
     let Ok((mut holding, mut focused)) = player.single_mut() else {
