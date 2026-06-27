@@ -18,8 +18,8 @@ use bad_spaceship_shared::character::{
     insert_character_body, CharacterMovement, Config as CharacterConfig,
 };
 use bad_spaceship_shared::net::{
-    apply_net_input, focused_part, hold_acceleration, orient_acceleration, NetInput, NetJoint,
-    NetPart, NetPlayer, NetTransform, ProtocolPlugin, TICK,
+    apply_net_input, focused_part, hold_acceleration, orient_acceleration, NetFacing, NetInput,
+    NetJoint, NetPart, NetPlayer, NetTransform, ProtocolPlugin, TICK,
 };
 use bad_spaceship_shared::part::{insert_part_physics, Holdable, SuppressLocalParts};
 use bad_spaceship_shared::player::make_local_player;
@@ -479,17 +479,19 @@ fn draw_replicated_players(
     }
 }
 
-/// Turn each remote avatar's visual pivot to its replicated, interpolated look
-/// `Yaw`, so other players are drawn facing the way they're looking. Uses the same
-/// basis as the movement code (`Quat::from_rotation_y(-yaw)`, see
-/// `walk_based_on_input`), so the +Z nose points along the avatar's forward.
+/// Turn each remote avatar's visual pivot to its replicated, interpolated facing
+/// (`NetFacing`, the server's mirror of that avatar's look yaw), so other players
+/// are drawn facing the way they're looking. Uses the same basis as the movement
+/// code (`Quat::from_rotation_y(-yaw)`, see `walk_based_on_input`), so the +Z nose
+/// points along the avatar's forward. Reads `NetFacing`, not the owner's local-input
+/// `Yaw` (which isn't replicated — replicating it broke the owner's turning).
 fn face_replicated_players(
-    avatars: Query<(&Yaw, &AvatarVisual), (With<Interpolated>, Changed<Yaw>)>,
+    avatars: Query<(&NetFacing, &AvatarVisual), (With<Interpolated>, Changed<NetFacing>)>,
     mut pivots: Query<&mut Transform>,
 ) {
-    for (yaw, visual) in &avatars {
+    for (facing, visual) in &avatars {
         if let Ok(mut transform) = pivots.get_mut(visual.0) {
-            transform.rotation = Quat::from_rotation_y(-yaw.0);
+            transform.rotation = Quat::from_rotation_y(-facing.0);
         }
     }
 }

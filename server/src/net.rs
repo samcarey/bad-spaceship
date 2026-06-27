@@ -25,12 +25,12 @@ use avian3d::prelude::{
 };
 use bad_spaceship_shared::character::{CharacterMovement, ServerAvatar};
 use bad_spaceship_shared::net::{
-    apply_net_input, focused_part, hold_acceleration, orient_acceleration, NetInput, NetJoint,
-    NetPart, NetPlayer, NetTransform, ProtocolPlugin, TICK,
+    apply_net_input, focused_part, hold_acceleration, orient_acceleration, NetFacing, NetInput,
+    NetJoint, NetPart, NetPlayer, NetTransform, ProtocolPlugin, TICK,
 };
 use bad_spaceship_shared::part::{spawn_random_part, SuppressLocalParts, NUM_PARTS};
 use bad_spaceship_shared::utils::QuatExt;
-use bad_spaceship_shared::SuppressLocalPlayer;
+use bad_spaceship_shared::{SuppressLocalPlayer, Yaw};
 use bevy::prelude::*;
 use lightyear::prelude::input::native::ActionState;
 use lightyear::prelude::server::*;
@@ -107,7 +107,12 @@ impl Plugin for NetServerPlugin {
         // NetTransform mirror); only the joint markers still stream a NetTransform.
         app.add_systems(
             Update,
-            (sync_joint_transforms, replace_fallen_room_parts, promote_settled_parts),
+            (
+                sync_joint_transforms,
+                replace_fallen_room_parts,
+                promote_settled_parts,
+                sync_avatar_facing,
+            ),
         );
         // Assign each client (and its avatar) to its reported room on the first
         // input, lazily creating the room's world.
@@ -438,6 +443,18 @@ fn server_attach(
     }
 }
 
+/// Mirror each avatar's look `Yaw` into its replicated `NetFacing`, so remote
+/// clients can draw it facing where it looks. Only writes on change (a still avatar
+/// stops generating facing traffic). `Yaw` itself is deliberately not replicated —
+/// doing so overwrote the owning client's locally-driven look and broke its turning.
+fn sync_avatar_facing(mut avatars: Query<(&Yaw, &mut NetFacing)>) {
+    for (yaw, mut facing) in &mut avatars {
+        if facing.0 != yaw.0 {
+            facing.0 = yaw.0;
+        }
+    }
+}
+
 /// Mirror each replicated part's authoritative physics pose into its
 /// `NetTransform` so the change replicates to clients. Only writes on an actual
 /// change, so settled (motionless) parts stop generating replication traffic.
@@ -546,6 +563,9 @@ fn spawn_player_for_client(
         // config loads).
         ServerAvatar,
         HeldPart::default(),
+        // Replicated facing (mirrored from the avatar's `Yaw` by
+        // `sync_avatar_facing`) so remote clients can draw it facing its look.
+        NetFacing::default(),
     ));
     info!("client {client:?} connected — spawned replicated avatar");
 }

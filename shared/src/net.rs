@@ -179,13 +179,25 @@ pub struct NetPart {
 #[derive(Component, Serialize, Deserialize, Clone, Copy, PartialEq, Debug, Default)]
 pub struct NetJoint;
 
+/// An avatar's look yaw (radians), replicated **server → other clients** purely so
+/// remote avatars can be drawn facing the way they look. Deliberately a *separate*
+/// component from the local-input [`Yaw`]: the owner drives its own `Yaw` locally
+/// (the camera rig) and must NOT have it overwritten by the server's round-trip-
+/// stale copy — replicating `Yaw` itself made the owner's turning jitter/snap back.
+/// The server mirrors each avatar's `Yaw` into `NetFacing` (`sync_avatar_facing`);
+/// the owner never reads `NetFacing`, so the round-trip copy landing on its
+/// predicted entity is inert, while remote (interpolated) clients read it to face
+/// the avatar (`face_replicated_players`).
+#[derive(Component, Serialize, Deserialize, Clone, Copy, PartialEq, Debug, Default)]
+pub struct NetFacing(pub f32);
+
 /// Interpolate a replicated look yaw along the **shortest** angular path, so a
 /// wrap across ±π eases smoothly instead of spinning the long way. Used by
-/// lightyear's interpolation for remote avatars' `Yaw` (their facing).
-fn lerp_yaw(start: Yaw, other: Yaw, t: f32) -> Yaw {
+/// lightyear's interpolation for remote avatars' `NetFacing` (their facing).
+fn lerp_facing(start: NetFacing, other: NetFacing, t: f32) -> NetFacing {
     use core::f32::consts::{PI, TAU};
     let delta = (other.0 - start.0 + PI).rem_euclid(TAU) - PI;
-    Yaw(start.0 + delta * t)
+    NetFacing(start.0 + delta * t)
 }
 
 /// Interpolate between two replicated poses: lerp the translation, slerp the
@@ -270,15 +282,16 @@ impl Plugin for ProtocolPlugin {
         // The part shape is constant, so it only needs replicating (no interp).
         app.component::<NetPart>().replicate();
         app.component::<NetJoint>().replicate();
-        // Replicate each avatar's look `Yaw` so remote clients can face it the way
-        // it's looking. The body is `ROTATION_LOCKED` at identity (the camera rig
-        // owns the look), so facing can't ride on the replicated `Rotation`; it
-        // rides on this and is applied to the rendered avatar's visual pivot
-        // (`face_replicated_players`). Interpolated on remotes (the owner drives its
-        // own `Yaw` locally from input each tick, so no `.predict()` needed).
-        app.component::<Yaw>()
+        // Replicate each avatar's facing (`NetFacing`, the server's mirror of its
+        // look `Yaw`) so remote clients can draw it facing the way it looks. The body
+        // is `ROTATION_LOCKED` at identity (the camera rig owns the look), so facing
+        // can't ride on the replicated `Rotation`. This is a *separate* component
+        // from the owner's local-input `Yaw` on purpose — replicating `Yaw` itself
+        // overwrote the owner's locally-driven look with the round-trip-stale copy
+        // and made turning jitter. Interpolated on remotes; the owner never reads it.
+        app.component::<NetFacing>()
             .replicate()
-            .add_interpolation_with(lerp_yaw);
+            .add_interpolation_with(lerp_facing);
 
         // Register `PlayerInput` as a networked native input. `InputPlugin` is
         // role-agnostic: it adds the client input plugin under lightyear's
