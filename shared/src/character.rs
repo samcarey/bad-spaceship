@@ -12,21 +12,33 @@ pub struct CharacterPlugin;
 
 impl Plugin for CharacterPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(
-            Update,
-            (
-                touching_ground,
-                combine_directional_inputs.in_set(CombineInputs),
-                walk_based_on_input
-                    .after(CombineInputs)
-                    .after(touching_ground),
-                jump_based_on_input
-                    .after(CombineInputs)
-                    .after(touching_ground),
-                spawn,
-            ),
-        )
-        .init_asset::<Config>();
+        // Input *merging* stays in `Update`: it's sampled once per render frame
+        // from the device input written there (and `combine` zeroes the keyboard
+        // accumulator, which is only safe once per frame). The velocity-applying
+        // systems move to `FixedUpdate` so movement advances exactly once per
+        // simulation tick. This is a prerequisite for the upcoming client-side
+        // prediction + rollback (which replays per-tick inputs deterministically),
+        // and it removes the old frame-rate dependence — movement used to run in
+        // `Update`, so a 120 Hz display literally moved the character faster.
+        app.add_systems(Update, (combine_directional_inputs, spawn))
+            .add_systems(
+                FixedUpdate,
+                (
+                    touching_ground,
+                    walk_based_on_input.after(touching_ground),
+                    // walk + jump both write `LinearVelocity` (different axes, but
+                    // the same component), so order them explicitly for a
+                    // deterministic result under rollback replay.
+                    jump_based_on_input
+                        .after(touching_ground)
+                        .after(walk_based_on_input),
+                ),
+            )
+            // Run the fixed timestep at the netcode tick rate (60 Hz) so single-
+            // player physics + movement match the multiplayer simulation tick
+            // (Bevy's default `Time<Fixed>` is 64 Hz). Avian steps on this too.
+            .insert_resource(Time::<Fixed>::from_duration(crate::net::TICK))
+            .init_asset::<Config>();
     }
 }
 
@@ -73,9 +85,6 @@ fn spawn(
         }
     }
 }
-
-#[derive(SystemSet, Clone, Hash, Debug, PartialEq, Eq)]
-struct CombineInputs;
 
 fn combine_directional_inputs(
     mut query: Query<(
@@ -173,7 +182,11 @@ fn walk_based_on_input(
             if !touching_ground.0 {
                 horizontal_velocity_change *= 0.13; // slowing down even more when in air
             }
-            velocity.0 += horizontal_velocity_change * 0.13; // tuning factor
+            // Per-tick blend toward the desired velocity. Now that this runs in
+            // `FixedUpdate` at a fixed 60 Hz (was per-render-frame in `Update`),
+            // this is a deterministic per-tick factor; retune it (and `max_speed`)
+            // if the fixed-tick feel differs from the old variable-frame-rate feel.
+            velocity.0 += horizontal_velocity_change * 0.13;
         }
     }
 }
