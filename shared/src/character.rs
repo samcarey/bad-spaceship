@@ -144,12 +144,17 @@ fn build_server_avatar(
         for entity in avatars.iter() {
             let mut e = commands.entity(entity);
             insert_character_body(&mut e, config.size);
-            // Seed both Transform and Position at the spawn height: with Avian's
-            // transform-sync disabled in multiplayer, set Position explicitly so the
-            // body doesn't start (and replicate) at the origin for a frame.
+            // Spawn the networked avatar just above the ground (a tiny settle), NOT
+            // from the single-player drop-in height (y=10). A predicting client
+            // assembles this body right at the chaotic connect moment — while
+            // lightyear is still ramping its tick sync and the wasm page is mid-load
+            // — so a tall fall is mispredicted in slow motion. A ~0.75 m settle is
+            // imperceptible and sidesteps that entirely. (Single-player keeps its
+            // y=10 drop-in in `spawn`.) Seed both Transform and Position because
+            // Avian's transform-sync is disabled in multiplayer.
             e.insert((
-                Transform::from_xyz(0.0, 10.0, 0.0),
-                Position(Vec3::new(0.0, 10.0, 0.0)),
+                Transform::from_xyz(0.0, 0.0, 0.0),
+                Position(Vec3::new(0.0, 0.0, 0.0)),
                 Yaw::default(),
             ));
         }
