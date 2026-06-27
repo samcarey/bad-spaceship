@@ -11,16 +11,19 @@
 //!
 //! For every player the server replicates, draw a cube at its `NetTransform`.
 
-use avian3d::prelude::{Position, Rotation};
+use avian3d::prelude::{
+    Forces, Gravity, Position, ReadRigidBodyForces, Rotation, WriteRigidBodyForces,
+};
 use bad_spaceship_shared::character::{
     insert_character_body, CharacterMovement, Config as CharacterConfig,
 };
 use bad_spaceship_shared::net::{
-    apply_net_input, focused_part, NetInput, NetJoint, NetPart, NetPlayer, NetTransform,
-    ProtocolPlugin, TICK,
+    apply_net_input, focused_part, hold_acceleration, orient_acceleration, NetInput, NetJoint,
+    NetPart, NetPlayer, NetTransform, ProtocolPlugin, TICK,
 };
 use bad_spaceship_shared::part::{insert_part_physics, Holdable, SuppressLocalParts};
 use bad_spaceship_shared::player::make_local_player;
+use bad_spaceship_shared::utils::QuatExt;
 use crate::render_secondary_pass::JointAppearance;
 use bad_spaceship_shared::{
     CameraOrbitCenter, Character, DirectionalInput, FocusedInteractable, HoldPoint, Holding,
@@ -163,7 +166,12 @@ impl Plugin for NetClientPlugin {
         // Drive the *predicted* avatar from the buffered input intent each sim tick —
         // the same bridge the server runs — so local prediction and rollback replay
         // use exactly the inputs the server will. Before `CharacterMovement` reads them.
-        app.add_systems(FixedUpdate, apply_net_input.before(CharacterMovement));
+        // `predict_hold` applies the held-part spring locally each tick (the same
+        // spring the server runs) so carrying a block is instant and rollback-replayed.
+        app.add_systems(
+            FixedUpdate,
+            (apply_net_input.before(CharacterMovement), predict_hold),
+        );
     }
 }
 
@@ -353,6 +361,53 @@ fn track_hold_rotation(
     } else {
         // Accumulate the rotate gesture, matching `apply_part_rotation`.
         held_rotation.0 = part_rotation.0 * held_rotation.0;
+    }
+}
+
+/// Predict the held-part spring locally so carrying a block is instant (zero
+/// input delay), reconciled by rollback against the server's authoritative pose.
+/// Mirrors `server_hold`: the same critically-damped anti-gravity float to the
+/// hold point + orient spring toward the tracked target, applied via Avian
+/// `Forces` to the *predicted* held part — in `FixedUpdate`, so the spring is part
+/// of the simulation lightyear replays on a rollback. The held part is the one
+/// `mirror_grab_state` latched into the local Player's `FocusedInteractable` (the
+/// same look-angle rule the server grabs by), and the hold target/orientation are
+/// the same values `write_input` forwards to the server (`HoldPoint` world position
+/// + `HeldRotation`), so both worlds spring toward an identical goal and diverge
+/// only by round-trip. Reads `Position`/`Rotation` (current in the fixed schedule),
+/// not `Transform`, for the same reason `server_hold` does.
+fn predict_hold(
+    player: Query<(&Holding, &FocusedInteractable), With<Player>>,
+    hold: Query<&GlobalTransform, With<HoldPoint>>,
+    held_rotation: Res<HeldRotation>,
+    mut parts: Query<(&Position, &Rotation, Forces), With<NetPart>>,
+    gravity: Res<Gravity>,
+) {
+    let Ok((holding, focused)) = player.single() else {
+        return;
+    };
+    if !holding.0 {
+        return;
+    }
+    let (Some(part_entity), Some(hold_target)) =
+        (focused.0, hold.iter().next().map(|g| g.translation()))
+    else {
+        return;
+    };
+    let Ok((position, rotation, mut forces)) = parts.get_mut(part_entity) else {
+        return;
+    };
+    // Position: float to the hold point, cancelling the part's weight.
+    let displacement = hold_target - position.0;
+    let lin_vel = forces.linear_velocity();
+    forces.apply_linear_acceleration(hold_acceleration(displacement, lin_vel) - gravity.0);
+    // Orientation: drive toward the tracked target (seeded at pickup + rotate
+    // gesture). Skip the unset seed, matching `server_hold`.
+    let target = held_rotation.0;
+    if target.length_squared() > 0.5 {
+        let error = (target * rotation.0.conjugate()).to_rotation_vector();
+        let ang_vel = forces.angular_velocity();
+        forces.apply_angular_acceleration(orient_acceleration(error, ang_vel));
     }
 }
 

@@ -20,8 +20,8 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 
 use avian3d::prelude::{
-    CollisionLayers, Collisions, ComputedCenterOfMass, Forces, Gravity, ReadRigidBodyForces,
-    SphericalJoint, WriteRigidBodyForces,
+    CollisionLayers, Collisions, ComputedCenterOfMass, Forces, Gravity, Position,
+    ReadRigidBodyForces, Rotation, SphericalJoint, WriteRigidBodyForces,
 };
 use bad_spaceship_shared::character::{CharacterMovement, ServerAvatar};
 use bad_spaceship_shared::net::{
@@ -117,8 +117,20 @@ impl Plugin for NetServerPlugin {
         // read them on the same sim tick — so the server simulates the character
         // authoritatively from intent. Grab/hold run in Update where Avian's
         // `Forces` helper accumulates (matching single-player `position_held_part`).
-        app.add_systems(FixedUpdate, apply_net_input.before(CharacterMovement));
-        app.add_systems(Update, (server_grab, server_hold, server_attach).chain());
+        // Grab-latch + the hold/orient spring run in `FixedUpdate` (was `Update`)
+        // so the spring force lands in the same tick as the Avian step that
+        // consumes it — phase-aligned with the client's *predicted* hold spring
+        // (`predict_hold`), so the two worlds diverge only by round-trip and don't
+        // generate constant rollback churn from a fixed schedule offset. Attach
+        // (the one-shot joint spawn) stays in `Update` for now — Phase 5 moves it.
+        app.add_systems(
+            FixedUpdate,
+            (
+                apply_net_input.before(CharacterMovement),
+                (server_grab, server_hold).chain(),
+            ),
+        );
+        app.add_systems(Update, server_attach);
     }
 }
 
@@ -247,7 +259,7 @@ fn tag_room_part(commands: &mut Commands, entity: Entity, half_extents: Vec3, ro
 /// the hold target. On release, let go. The part stays dynamic throughout.
 fn server_grab(
     mut players: Query<(&ActionState<NetInput>, &mut HeldPart, &RoomMember)>,
-    parts: Query<(Entity, &Transform, &PartRoom), With<NetPart>>,
+    parts: Query<(Entity, &Position, &PartRoom), With<NetPart>>,
 ) {
     for (state, mut held, member) in &mut players {
         if !state.0.grab {
@@ -265,7 +277,7 @@ fn server_grab(
             parts
                 .iter()
                 .filter(|(_, _, part_room)| part_room.id == member.0)
-                .map(|(entity, t, _)| (entity, t.translation)),
+                .map(|(entity, p, _)| (entity, p.0)),
         );
     }
 }
@@ -277,18 +289,22 @@ fn server_grab(
 /// go through the one `Forces` accessor to avoid an ambiguous double-write.
 fn server_hold(
     players: Query<(&ActionState<NetInput>, &HeldPart)>,
-    mut parts: Query<(&Transform, Forces), With<NetPart>>,
+    // Read the authoritative Avian `Position`/`Rotation` rather than `Transform`:
+    // in multiplayer `lightyear_avian` owns the Position→Transform sync (the Avian
+    // `PhysicsTransformPlugin` is disabled), so `Transform` can lag within the fixed
+    // schedule; `Position`/`Rotation` are always current where the step reads them.
+    mut parts: Query<(&Position, &Rotation, Forces), With<NetPart>>,
     gravity: Res<Gravity>,
 ) {
     for (state, held) in &players {
         let Some(part_entity) = held.0 else {
             continue;
         };
-        let Ok((transform, mut forces)) = parts.get_mut(part_entity) else {
+        let Ok((position, rotation, mut forces)) = parts.get_mut(part_entity) else {
             continue;
         };
         // Position.
-        let displacement = Vec3::from_array(state.0.hold_target) - transform.translation;
+        let displacement = Vec3::from_array(state.0.hold_target) - position.0;
         let lin_vel = forces.linear_velocity();
         forces.apply_linear_acceleration(hold_acceleration(displacement, lin_vel) - gravity.0);
         // Orientation: drive toward the target rotation (the client tracks it,
@@ -298,7 +314,7 @@ fn server_hold(
         // exactly as the single-player `orient_held_part`.
         let target = Quat::from_array(state.0.hold_rotation);
         if target.length_squared() > 0.5 {
-            let error = (target * transform.rotation.conjugate()).to_rotation_vector();
+            let error = (target * rotation.0.conjugate()).to_rotation_vector();
             let ang_vel = forces.angular_velocity();
             forces.apply_angular_acceleration(orient_acceleration(error, ang_vel));
         }
