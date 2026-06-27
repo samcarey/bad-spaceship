@@ -177,9 +177,14 @@ struct AttachCameraOrbitSystem;
 
 fn attach_camera_orbit(
     mut commands: Commands,
+    // Attach the orbit hierarchy once, gated on *not having an orbit center yet* —
+    // NOT on `Without<Children>`. The multiplayer predicted avatar already carries a
+    // child (added by lightyear/avian), so a `Without<Children>` guard would never
+    // fire for it and the camera would never mount. `PlayerCameraOrbitCenter` is set
+    // below the moment we attach, so this stays idempotent for single-player too.
     characters_without_players: Query<
         (Entity, &GlobalTransform, &Collider),
-        (With<Character>, Without<Children>),
+        (With<Character>, Without<PlayerCameraOrbitCenter>),
     >,
     configs: ResMut<Assets<Config>>,
     mut camera_orbit_offset: ResMut<CameraOrbitOffset>,

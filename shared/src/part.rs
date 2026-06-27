@@ -8,8 +8,8 @@ use crate::{
 };
 use avian3d::prelude::{
     AngularVelocity, Collider, ColliderDensity, Collisions, ComputedCenterOfMass, Forces, Friction,
-    Gravity, LinearVelocity, ReadRigidBodyForces, Restitution, RigidBody, SphericalJoint, SweptCcd,
-    WriteRigidBodyForces,
+    Gravity, LinearVelocity, Position, ReadRigidBodyForces, Restitution, RigidBody, SphericalJoint,
+    SweptCcd, WriteRigidBodyForces,
 };
 use bevy::prelude::*;
 use rand::prelude::ThreadRng;
@@ -194,16 +194,24 @@ pub fn spawn_random_part(commands: &mut Commands) -> (Entity, Vec3) {
         .unwrap_or(Vec3::ONE);
     // Bounding radius from the parry shape, before the collider is moved in.
     let bounding_radius = collider.shape().compute_local_bounding_sphere().radius;
+    let spawn = Vec3::new(
+        rng.gen_range(-SPAWN_ZONE_HALF_WIDTH..=SPAWN_ZONE_HALF_WIDTH),
+        rng.gen_range(5.0..=15.0),
+        rng.gen_range(-SPAWN_ZONE_HALF_WIDTH..=SPAWN_ZONE_HALF_WIDTH),
+    );
     let entity = commands
         .spawn_empty()
         .insert(BoundingRadius(bounding_radius))
         .insert(RigidBody::Dynamic)
         // Bevy 0.15: bare `Transform` (it now requires `GlobalTransform`).
-        .insert(Transform::from_xyz(
-            rng.gen_range(-SPAWN_ZONE_HALF_WIDTH..=SPAWN_ZONE_HALF_WIDTH),
-            rng.gen_range(5.0..=15.0),
-            rng.gen_range(-SPAWN_ZONE_HALF_WIDTH..=SPAWN_ZONE_HALF_WIDTH),
-        ))
+        // Set Avian `Position` too, not just `Transform`: in multiplayer the server
+        // disables Avian's `PhysicsTransformPlugin` (lightyear_avian owns the sync),
+        // so a spawn `Transform` alone is NOT copied into `Position` — the body would
+        // simulate from the origin and every part would cluster in the middle of the
+        // stage. Seeding `Position` matches `build_server_avatar`. Harmless in
+        // single-player (both are set to the same pose).
+        .insert(Transform::from_translation(spawn))
+        .insert(Position(spawn))
         .insert(collider)
         // rapier's `ColliderMassProperties::Density` / `Friction::coefficient` /
         // `Restitution::coefficient` → Avian's `ColliderDensity` / `Friction::new`
