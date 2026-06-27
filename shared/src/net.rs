@@ -15,12 +15,12 @@
 //! endpoints.
 use core::time::Duration;
 
-use avian3d::prelude::{Position, Rotation};
+use avian3d::prelude::{AngularVelocity, LinearVelocity, Position, Rotation};
 use bevy::ecs::entity::{EntityMapper, MapEntities};
 use bevy::prelude::*;
 use lightyear::prelude::input::native::ActionState;
 use lightyear::prelude::*;
-use lightyear_avian3d::types::{position, rotation};
+use lightyear_avian3d::types::{angular_velocity, linear_velocity, position, rotation};
 use serde::{Deserialize, Serialize};
 
 use crate::{DirectionalInput, Yaw};
@@ -220,6 +220,12 @@ fn position_lerp(start: Position, other: Position, t: f32) -> Position {
 fn rotation_lerp(start: Rotation, other: Rotation, t: f32) -> Rotation {
     rotation::lerp(&start, &other, t)
 }
+fn linear_velocity_lerp(start: LinearVelocity, other: LinearVelocity, t: f32) -> LinearVelocity {
+    linear_velocity::lerp(&start, &other, t)
+}
+fn angular_velocity_lerp(start: AngularVelocity, other: AngularVelocity, t: f32) -> AngularVelocity {
+    angular_velocity::lerp(&start, &other, t)
+}
 
 /// Bridge a networked avatar's per-tick input *intent* into the movement inputs the
 /// shared `walk_based_on_input`/`jump_based_on_input` read — `DirectionalInput`
@@ -272,6 +278,23 @@ impl Plugin for ProtocolPlugin {
             .replicate()
             .predict()
             .add_interpolation_with(rotation_lerp);
+        // Replicate the bodies' velocities too, predicted alongside Position/Rotation
+        // — the canonical lightyear_avian setup for predicted physics. Without these,
+        // only *where* a body is gets rolled back, not *how fast it's moving*: a client
+        // that starts observing a moving body (a part mid-fall on spawn, or any part a
+        // late joiner sees being shoved) rebuilds it at rest, diverges, and the
+        // correction smears into a slow drift. Replicating velocity makes the rollback
+        // restore the *complete* rigid-body state, so the re-simulation is consistent.
+        // Settled/sleeping bodies hold velocity ~0 (unchanged) → no steady-state
+        // traffic. (This supersedes the server-side `Settling` spawn-delay hack.)
+        app.component::<LinearVelocity>()
+            .replicate()
+            .predict()
+            .add_interpolation_with(linear_velocity_lerp);
+        app.component::<AngularVelocity>()
+            .replicate()
+            .predict()
+            .add_interpolation_with(angular_velocity_lerp);
         // Replicate the pose and register linear interpolation for it: the client
         // renders `Interpolated` copies whose `NetTransform` lightyear eases
         // between confirmed snapshots each frame, smoothing the round-trip motion
