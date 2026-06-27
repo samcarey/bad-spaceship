@@ -321,7 +321,7 @@ fn highlight_grabbable(
 struct WantHold(bool);
 
 /// One-shot attach intent, set on a modifier click (the join gesture), consumed
-/// by `write_player_pose` after it's forwarded.
+/// by `write_input` after it's forwarded.
 #[derive(Resource, Default)]
 struct WantAttach(bool);
 

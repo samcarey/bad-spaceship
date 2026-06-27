@@ -293,7 +293,7 @@ impl Plugin for ProtocolPlugin {
             .replicate()
             .add_interpolation_with(lerp_facing);
 
-        // Register `PlayerInput` as a networked native input. `InputPlugin` is
+        // Register `NetInput` as a networked native input. `InputPlugin` is
         // role-agnostic: it adds the client input plugin under lightyear's
         // `client` feature and the server one under `server`, so a single
         // registration here wires both binaries (each compiles only its half).

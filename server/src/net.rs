@@ -192,6 +192,13 @@ struct PartRoom {
 #[derive(Component, Default)]
 struct HeldPart(Option<Entity>);
 
+/// How long a freshly-spawned part may keep settling before it's force-promoted to
+/// replication even if not yet at rest (so a jostling part still appears in a
+/// bounded time).
+const PART_SETTLE_TIMEOUT_SECS: f32 = 3.0;
+/// Speed² (in (m/s)²) below which a settling part counts as at-rest and is promoted.
+const PART_SETTLE_REST_SPEED_SQ: f32 = 0.05;
+
 /// A freshly-spawned part still *settling* on the server, held back from
 /// replication until it comes to rest (or a timeout elapses). The room's parts
 /// spawn high (y=5..15) and free-fall; the first client to enter the room would
@@ -268,7 +275,7 @@ fn spawn_settling_part(commands: &mut Commands, room: Room) {
     commands.entity(entity).insert((
         PartRoom { id: room.id, bit: room.bit },
         CollisionLayers::from_bits(room.bit, room.bit | 1),
-        Settling { half_extents, room, timeout: 3.0 },
+        Settling { half_extents, room, timeout: PART_SETTLE_TIMEOUT_SECS },
     ));
 }
 
@@ -283,7 +290,7 @@ fn promote_settled_parts(
     for (entity, velocity, mut settling) in &mut parts {
         settling.timeout -= time.delta_secs();
         // ~0.22 m/s: at rest within solver jitter. Promote on rest or timeout.
-        if velocity.0.length_squared() < 0.05 || settling.timeout <= 0.0 {
+        if velocity.0.length_squared() < PART_SETTLE_REST_SPEED_SQ || settling.timeout <= 0.0 {
             tag_room_part(&mut commands, entity, settling.half_extents, settling.room);
             commands.entity(entity).remove::<Settling>();
         }
@@ -455,12 +462,10 @@ fn sync_avatar_facing(mut avatars: Query<(&Yaw, &mut NetFacing)>) {
     }
 }
 
-/// Mirror each replicated part's authoritative physics pose into its
-/// `NetTransform` so the change replicates to clients. Only writes on an actual
-/// change, so settled (motionless) parts stop generating replication traffic.
 /// Stream each replicated joint's world anchor point into its `NetTransform`
 /// (body1's transform applied to local anchor1), so the client's joint marker
-/// tracks the moving assembly.
+/// tracks the moving assembly. Only writes on an actual change, so a settled
+/// assembly stops generating replication traffic.
 fn sync_joint_transforms(
     mut joints: Query<(&SphericalJoint, &mut NetTransform), With<NetJoint>>,
     bodies: Query<&Transform, Without<NetJoint>>,
