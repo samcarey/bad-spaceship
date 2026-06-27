@@ -42,34 +42,6 @@ pub struct NetPlayer {
     pub client_id: u64,
 }
 
-/// Replicated pose. Bevy's `Transform` isn't `Serialize`, and lightyear's
-/// `.replicate()` requires it, so we replicate this plain-`f32` mirror instead
-/// and map it to/from `Transform` on each side (server writes it from the
-/// authoritative sim; the client applies it to the rendered entity).
-#[derive(Component, Serialize, Deserialize, Clone, Copy, PartialEq, Debug, Default)]
-pub struct NetTransform {
-    pub translation: [f32; 3],
-    /// Rotation quaternion, `[x, y, z, w]`.
-    pub rotation: [f32; 4],
-}
-
-impl NetTransform {
-    pub fn from_transform(t: &Transform) -> Self {
-        Self {
-            translation: t.translation.to_array(),
-            rotation: t.rotation.to_array(),
-        }
-    }
-
-    pub fn to_transform(&self) -> Transform {
-        Transform {
-            translation: Vec3::from_array(self.translation),
-            rotation: Quat::from_array(self.rotation),
-            ..default()
-        }
-    }
-}
-
 /// Per-tick client → server **input intent** (not pose). The server runs the
 /// authoritative character simulation from this intent (move direction, jump,
 /// look angle), so the world is server-authoritative and — once client-side
@@ -166,18 +138,35 @@ impl MapEntities for NetInput {
     fn map_entities<M: EntityMapper>(&mut self, _entity_mapper: &mut M) {}
 }
 
-/// Replicated cuboid shape of a part (full extents = 2 × `half_extents`). The
-/// server replicates this once per part so a client that doesn't simulate parts
-/// can rebuild the render mesh; the part's live pose rides on `NetTransform`.
+/// Replicated cuboid shape of a part (full extents = 2 × `half_extents`), plus a
+/// stable cross-network id. The shape lets a client rebuild the render mesh; the
+/// part's live pose rides on the predicted Avian `Position`/`Rotation`. `id` is
+/// the server part entity's bits — a *stable* identity (replicated onto both the
+/// client's `Confirmed` and `Predicted` copies) that lets the client match a
+/// replicated joint's endpoints (`NetJoint`) to the local *predicted* part
+/// entities, without depending on lightyear's confirmed→predicted entity mapping.
 #[derive(Component, Serialize, Deserialize, Clone, Copy, PartialEq, Debug, Default)]
 pub struct NetPart {
     pub half_extents: [f32; 3],
+    pub id: u64,
 }
 
-/// Marks a replicated joint marker entity — a server joint's world anchor point,
-/// streamed via `NetTransform` so clients can draw the joint like single-player.
+/// A replicated joint between two parts. Carries enough to reconstruct the joint
+/// as *real predicted physics* on each client: the stable ids (`NetPart::id`) of
+/// the two bodies and their body-local (COM-relative) anchors, in the same order
+/// the server's `SphericalJoint` uses (`body1`/`anchor1` ↔ `local_anchor1`). The
+/// client looks up the matching *predicted* part entities by id and spawns a real
+/// Avian `SphericalJoint` between them, so the assembly is held together by the
+/// client's own simulation (and survives rollback) — not just rendered. Without
+/// this the predicted parts are unconstrained locally and a lifted assembly sags
+/// apart, corrected only by replication.
 #[derive(Component, Serialize, Deserialize, Clone, Copy, PartialEq, Debug, Default)]
-pub struct NetJoint;
+pub struct NetJoint {
+    pub body1: u64,
+    pub body2: u64,
+    pub anchor1: [f32; 3],
+    pub anchor2: [f32; 3],
+}
 
 /// An avatar's look yaw (radians), replicated **server → other clients** purely so
 /// remote avatars can be drawn facing the way they look. Deliberately a *separate*
@@ -200,16 +189,17 @@ fn lerp_facing(start: NetFacing, other: NetFacing, t: f32) -> NetFacing {
     NetFacing(start.0 + delta * t)
 }
 
-/// Interpolate between two replicated poses: lerp the translation, slerp the
-/// rotation. Used by lightyear's interpolation for `NetTransform`.
-fn lerp_net_transform(start: NetTransform, other: NetTransform, t: f32) -> NetTransform {
-    let translation = Vec3::from_array(start.translation)
-        .lerp(Vec3::from_array(other.translation), t)
-        .to_array();
-    let rotation = Quat::from_array(start.rotation)
-        .slerp(Quat::from_array(other.rotation), t)
-        .to_array();
-    NetTransform { translation, rotation }
+/// A rollback condition that never triggers. Registered for the bodies'
+/// velocities so they are *replicated and restored* during a rollback (keeping the
+/// re-simulation's starting state complete) without themselves *causing* one:
+/// velocity is a noisy float that diverges by a hair almost every tick, and the
+/// default condition (`PartialEq::ne`) would then fire a rollback — which re-sims
+/// the whole predicted world (character + every part) — nearly every frame, which
+/// stutters badly on a single-threaded phone. Position/Rotation remain the
+/// rollback triggers (the visually meaningful divergence); velocity just rides
+/// along and is snapped to the confirmed value whenever they do.
+fn never_rollback<C>(_confirmed: &C, _predicted: &C) -> bool {
+    false
 }
 
 // lightyear's `LerpFn` takes its endpoints by value; `lightyear_avian3d`'s lerps
@@ -290,18 +280,13 @@ impl Plugin for ProtocolPlugin {
         app.component::<LinearVelocity>()
             .replicate()
             .predict()
+            .with_rollback_condition(never_rollback)
             .add_interpolation_with(linear_velocity_lerp);
         app.component::<AngularVelocity>()
             .replicate()
             .predict()
+            .with_rollback_condition(never_rollback)
             .add_interpolation_with(angular_velocity_lerp);
-        // Replicate the pose and register linear interpolation for it: the client
-        // renders `Interpolated` copies whose `NetTransform` lightyear eases
-        // between confirmed snapshots each frame, smoothing the round-trip motion
-        // trail. `NetTransform` isn't `Ease`, so supply a custom lerp.
-        app.component::<NetTransform>()
-            .replicate()
-            .add_interpolation_with(lerp_net_transform);
         // The part shape is constant, so it only needs replicating (no interp).
         app.component::<NetPart>().replicate();
         app.component::<NetJoint>().replicate();

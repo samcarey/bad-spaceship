@@ -26,7 +26,7 @@ use avian3d::prelude::{
 use bad_spaceship_shared::character::{CharacterMovement, ServerAvatar};
 use bad_spaceship_shared::net::{
     apply_net_input, focused_part, hold_acceleration, orient_acceleration, NetFacing, NetInput,
-    NetJoint, NetPart, NetPlayer, NetTransform, ProtocolPlugin, TICK,
+    NetJoint, NetPart, NetPlayer, ProtocolPlugin, TICK,
 };
 use bad_spaceship_shared::part::{spawn_random_part, SuppressLocalParts, NUM_PARTS};
 use bad_spaceship_shared::utils::QuatExt;
@@ -101,18 +101,11 @@ impl Plugin for NetServerPlugin {
         app.add_observer(spawn_player_for_client);
         // Latency telemetry: log each client's RTT/jitter to stdout (-> server.log).
         app.add_systems(Update, log_client_rtt);
-        // Stream the authoritative avatar/part/joint poses each frame, and refill
-        // a room's parts that fall off its platform.
-        // Parts now replicate their predicted Avian Position/Rotation directly (no
-        // NetTransform mirror); only the joint markers still stream a NetTransform.
-        app.add_systems(
-            Update,
-            (
-                sync_joint_transforms,
-                replace_fallen_room_parts,
-                sync_avatar_facing,
-            ),
-        );
+        // Refill a room's parts that fall off its platform, and mirror each avatar's
+        // look yaw into its replicated facing. Parts and joints replicate their state
+        // directly (predicted Avian `Position`/`Rotation`; `NetJoint` data) — nothing
+        // to stream per-frame.
+        app.add_systems(Update, (replace_fallen_room_parts, sync_avatar_facing));
         // Assign each client (and its avatar) to its reported room on the first
         // input, lazily creating the room's world.
         app.add_systems(Update, assign_rooms);
@@ -239,19 +232,22 @@ fn spawn_room_world(commands: &mut Commands, room: Room) {
     }
 }
 
-/// Tag a freshly-spawned part for room-scoped replication: its shape via
-/// `NetPart`, its pose via `NetTransform`, replicated + interpolated, scoped to
-/// the room's `Rooms`, and isolated to the room's collision layer (it collides
-/// only with same-room parts and the ground — default bit 0).
+/// Tag a freshly-spawned part for room-scoped replication: its shape + stable id
+/// via `NetPart`, its pose via the predicted Avian `Position`/`Rotation`,
+/// replicated + predicted, scoped to the room's `Rooms`, and isolated to the
+/// room's collision layer (it collides only with same-room parts and the ground —
+/// default bit 0).
 fn tag_room_part(commands: &mut Commands, entity: Entity, half_extents: Vec3, room: Room) {
     commands.entity(entity).insert((
-        NetPart { half_extents: half_extents.to_array() },
+        // `id` is the part's stable cross-network identity (this entity's bits), so
+        // a replicated `NetJoint` can name its two endpoints and the client can find
+        // the matching *predicted* parts to joint locally.
+        NetPart { half_extents: half_extents.to_array(), id: entity.to_bits() },
         Replicate::to_clients(NetworkTarget::All),
         // Predict the loose blocks on every client in the room: each client
         // simulates them locally (so shoving one is instant) and rollback reconciles
-        // against the server's authoritative Avian `Position`/`Rotation`. (Was an
-        // interpolated `NetTransform` follower; the pose now rides on the predicted
-        // Position/Rotation registered in `ProtocolPlugin`.)
+        // against the server's authoritative Avian `Position`/`Rotation` (which ride
+        // on the predicted components registered in `ProtocolPlugin`).
         PredictionTarget::to_clients(NetworkTarget::All),
         Rooms::single(room.id),
         PartRoom { id: room.id, bit: room.bit },
@@ -371,15 +367,21 @@ fn server_attach(
                     let p1 = rot(c1).inverse() * contact.anchor1 + com(c1);
                     let p2 = rot(c2).inverse() * contact.anchor2 + com(c2);
                     commands.spawn((
+                        // The server's authoritative joint (body1=c2, body2=c1).
                         SphericalJoint::new(c2, c1)
                             .with_local_anchor1(p2)
                             .with_local_anchor2(p1),
-                        // Replicate a marker at the joint so clients can draw it,
-                        // scoped to the holder's room.
-                        NetJoint,
-                        NetTransform::default(),
+                        // Replicate the joint's data (endpoints by stable id +
+                        // anchors, matching the SphericalJoint above) so each client
+                        // can rebuild it as real predicted physics between its
+                        // predicted parts — and draw it — scoped to the holder's room.
+                        NetJoint {
+                            body1: c2.to_bits(),
+                            body2: c1.to_bits(),
+                            anchor1: p2.to_array(),
+                            anchor2: p1.to_array(),
+                        },
                         Replicate::to_clients(NetworkTarget::All),
-                        InterpolationTarget::to_clients(NetworkTarget::All),
                         Rooms::single(member.0),
                     ));
                     attached = true;
@@ -400,26 +402,6 @@ fn sync_avatar_facing(mut avatars: Query<(&Yaw, &mut NetFacing)>) {
     for (yaw, mut facing) in &mut avatars {
         if facing.0 != yaw.0 {
             facing.0 = yaw.0;
-        }
-    }
-}
-
-/// Stream each replicated joint's world anchor point into its `NetTransform`
-/// (body1's transform applied to local anchor1), so the client's joint marker
-/// tracks the moving assembly. Only writes on an actual change, so a settled
-/// assembly stops generating replication traffic.
-fn sync_joint_transforms(
-    mut joints: Query<(&SphericalJoint, &mut NetTransform), With<NetJoint>>,
-    bodies: Query<&Transform, Without<NetJoint>>,
-) {
-    for (joint, mut net) in &mut joints {
-        let (Ok(body), Some(anchor)) = (bodies.get(joint.body1), joint.local_anchor1()) else {
-            continue;
-        };
-        let world = body.translation + body.rotation * anchor;
-        let updated = NetTransform::from_transform(&Transform::from_translation(world));
-        if *net != updated {
-            *net = updated;
         }
     }
 }
