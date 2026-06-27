@@ -79,6 +79,13 @@ pub struct Holding(pub bool);
 #[derive(Default, Component)]
 pub struct Player;
 
+/// When present, suppresses spawning the local single-player `Player`/`Character`.
+/// Both netcode plugins insert it: the server simulates one `ServerAvatar` body per
+/// connected client, and the client controls its *predicted* networked avatar
+/// instead of a separate local character (so there's exactly one character on each).
+#[derive(Default, Resource)]
+pub struct SuppressLocalPlayer;
+
 #[derive(Component)]
 pub struct OrbitingCamera(pub Entity);
 

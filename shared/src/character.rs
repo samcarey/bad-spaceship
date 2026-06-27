@@ -1,4 +1,4 @@
-use avian3d::prelude::{Collider, Collisions, LinearVelocity, LockedAxes, Mass, RigidBody};
+use avian3d::prelude::{Collider, Collisions, LinearVelocity, LockedAxes, Mass, Position, RigidBody};
 use bevy::prelude::*;
 use bevy::reflect::TypePath;
 
@@ -20,7 +20,16 @@ impl Plugin for CharacterPlugin {
         // prediction + rollback (which replays per-tick inputs deterministically),
         // and it removes the old frame-rate dependence — movement used to run in
         // `Update`, so a 120 Hz display literally moved the character faster.
-        app.add_systems(Update, (combine_directional_inputs, spawn, build_server_avatar))
+        app.add_systems(
+            Update,
+            (
+                combine_directional_inputs,
+                // Suppressed in multiplayer — the predicted networked avatar (client)
+                // / the per-client `ServerAvatar` (server) is the character instead.
+                spawn.run_if(not(resource_exists::<crate::SuppressLocalPlayer>)),
+                build_server_avatar,
+            ),
+        )
             .add_systems(
                 FixedUpdate,
                 (
@@ -61,6 +70,28 @@ struct CharacterBundle {
     touching_ground: TouchingGround,
 }
 
+/// Insert the core character physics body onto an entity. Shared by the
+/// single-player `spawn`, the server's `build_server_avatar`, and the client's
+/// predicted-avatar setup. Does NOT set `Transform`/`Position` — the caller sets
+/// the spawn pose (single-player/server) or replication provides it (client
+/// predicted). The sphere collider, rotation lock, unit mass, and the
+/// movement-input component (`DirectionalInput`) plus `Character`/velocity/
+/// ground-contact (`CharacterBundle`) match what every controllable character needs.
+pub fn insert_character_body(entity: &mut EntityCommands, size: f32) {
+    entity.insert((
+        RigidBody::Dynamic,
+        LockedAxes::ROTATION_LOCKED,
+        // Avian's sphere constructor (rapier's "ball"). Avian collides all collider
+        // pairs by default, so rapier's `ActiveCollisionTypes` opt-in is dropped.
+        Collider::sphere(size / 2.0),
+        // Pin mass to 1.0; movement sets velocity directly so this only scales how
+        // the character shoves parts on contact.
+        Mass(1.0),
+        CharacterBundle::default(),
+        DirectionalInput::default(),
+    ));
+}
+
 fn spawn(
     mut commands: Commands,
     players_without_characters: Query<Entity, (With<Player>, Without<Character>)>,
@@ -68,21 +99,10 @@ fn spawn(
 ) {
     if let Some((_, config)) = configs.iter().next() {
         for player_entity in players_without_characters.iter() {
-            commands
-                .entity(player_entity)
-                .insert(RigidBody::Dynamic)
-                // Bevy 0.15: bare `Transform` (it now requires `GlobalTransform`).
-                .insert(Transform::from_xyz(0.0, 10.0, 0.0))
-                .insert(LockedAxes::ROTATION_LOCKED)
-                // Avian's sphere constructor (rapier's "ball"). Avian collides all
-                // collider pairs by default, so rapier's `ActiveCollisionTypes`
-                // opt-in is dropped.
-                .insert(Collider::sphere(config.size / 2.0))
-                .insert(CharacterBundle::default())
-                // Pin mass to 1.0 (rapier's `AdditionalMassProperties` did this);
-                // movement sets velocity directly so this only scales how the
-                // character shoves parts on contact.
-                .insert(Mass(1.0));
+            let mut entity = commands.entity(player_entity);
+            insert_character_body(&mut entity, config.size);
+            // Bevy 0.15: bare `Transform` (it now requires `GlobalTransform`).
+            entity.insert(Transform::from_xyz(0.0, 10.0, 0.0));
         }
     }
 }
@@ -113,16 +133,16 @@ fn build_server_avatar(
 ) {
     if let Some((_, config)) = configs.iter().next() {
         for entity in avatars.iter() {
-            commands
-                .entity(entity)
-                .insert(RigidBody::Dynamic)
-                .insert(Transform::from_xyz(0.0, 10.0, 0.0))
-                .insert(LockedAxes::ROTATION_LOCKED)
-                .insert(Collider::sphere(config.size / 2.0))
-                .insert(CharacterBundle::default())
-                .insert(Mass(1.0))
-                .insert(DirectionalInput::default())
-                .insert(Yaw::default());
+            let mut e = commands.entity(entity);
+            insert_character_body(&mut e, config.size);
+            // Seed both Transform and Position at the spawn height: with Avian's
+            // transform-sync disabled in multiplayer, set Position explicitly so the
+            // body doesn't start (and replicate) at the origin for a frame.
+            e.insert((
+                Transform::from_xyz(0.0, 10.0, 0.0),
+                Position(Vec3::new(0.0, 10.0, 0.0)),
+                Yaw::default(),
+            ));
         }
     }
 }

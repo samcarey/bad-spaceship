@@ -32,7 +32,9 @@ impl Plugin for PlayerPlugin {
             .add_systems(
                 Update,
                 (
-                    spawn,
+                    // Suppressed in multiplayer — the client controls its predicted
+                    // networked avatar, not a separate local player.
+                    spawn.run_if(not(resource_exists::<crate::SuppressLocalPlayer>)),
                     mouse_motion.after(EaseLabel),
                     toggle_holding
                         .in_set(ToggleHoldingSystemLabel)
@@ -133,6 +135,16 @@ fn spawn(mut commands: Commands, players: Query<(), With<Player>>) {
             .spawn(PlayerBundle::default())
             .insert(PlayerInput::default());
     }
+}
+
+/// Turn an existing entity into the controllable local player (the input + camera
+/// state — `Player`, `Yaw`/`LookPitch`, the directional/mouse input sinks). Used for
+/// the client's *predicted* networked avatar: lightyear spawns it and we add the
+/// player components so the existing input/camera/movement systems drive it. The
+/// character body is added separately (`insert_character_body`); the camera attaches
+/// via `attach_camera_orbit` once `Character` is present.
+pub fn make_local_player(entity: &mut EntityCommands) {
+    entity.insert((PlayerBundle::default(), PlayerInput::default()));
 }
 
 fn despawn(
