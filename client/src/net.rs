@@ -30,7 +30,7 @@ use bevy::prelude::*;
 use lightyear::prelude::client::input::InputSystems as ClientInputSystems;
 use lightyear::prelude::client::*;
 use lightyear::prelude::input::native::{ActionState, InputMarker};
-use lightyear::prelude::{Authentication, Interpolated, Predicted};
+use lightyear::prelude::{Authentication, Interpolated, Predicted, PredictionManager};
 use std::net::SocketAddr;
 
 /// The lobby room this client is in, forwarded to the server (which scopes our
@@ -585,7 +585,11 @@ fn spawn_client(commands: &mut Commands) {
 
     let url = format!("ws://{server_addr}");
     let io = WebSocketClientIo::from_url(ClientConfig::builder().with_no_encryption(), url.clone());
-    let client = commands.spawn((netcode, io)).id();
+    // `PredictionManager` enables client-side prediction on this connection: its
+    // insert-hook creates the `PredictionResource` lightyear needs to process
+    // predicted entities. It is NOT auto-added (unlike the interpolation config),
+    // so without it receiving a predicted avatar panics in `receive_replication`.
+    let client = commands.spawn((netcode, io, PredictionManager::default())).id();
     commands.trigger(Connect { entity: client });
     info!("connecting to multiplayer server at {url}");
 }
@@ -607,7 +611,10 @@ fn spawn_client(commands: &mut Commands) {
 
     // On wasm aeronet's `ClientConfig` is a unit struct (the browser owns TLS).
     let io = WebSocketClientIo::from_url(ClientConfig::default(), url.clone());
-    let client = commands.spawn((netcode, io)).id();
+    // See the native counterpart: `PredictionManager` enables client-side
+    // prediction (creates `PredictionResource`); required or receiving a predicted
+    // entity panics.
+    let client = commands.spawn((netcode, io, PredictionManager::default())).id();
     commands.trigger(Connect { entity: client });
     info!("connecting to multiplayer server at {url}");
 }
