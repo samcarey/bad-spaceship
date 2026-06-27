@@ -11,21 +11,26 @@
 //!
 //! For every player the server replicates, draw a cube at its `NetTransform`.
 
-use avian3d::prelude::{Collider, RigidBody};
+use avian3d::prelude::{Collider, Position, RigidBody};
+use bad_spaceship_shared::character::{
+    insert_character_body, CharacterMovement, Config as CharacterConfig,
+};
 use bad_spaceship_shared::net::{
-    focused_part, NetJoint, NetPart, NetPlayer, NetTransform, NetInput, ProtocolPlugin, TICK,
+    apply_net_input, focused_part, NetInput, NetJoint, NetPart, NetPlayer, NetTransform,
+    ProtocolPlugin, TICK,
 };
 use bad_spaceship_shared::part::{Holdable, SuppressLocalParts};
+use bad_spaceship_shared::player::make_local_player;
 use crate::render_secondary_pass::JointAppearance;
 use bad_spaceship_shared::{
     CameraOrbitCenter, Character, DirectionalInput, FocusedInteractable, HoldPoint, Holding,
-    InputEvents, LookPitch, Modifying, PartRotation, Player, PlayerClick, Yaw,
+    InputEvents, LookPitch, Modifying, PartRotation, Player, PlayerClick, SuppressLocalPlayer, Yaw,
 };
 use bevy::prelude::*;
 use lightyear::prelude::client::input::InputSystems as ClientInputSystems;
 use lightyear::prelude::client::*;
 use lightyear::prelude::input::native::{ActionState, InputMarker};
-use lightyear::prelude::{Authentication, Controlled, Interpolated};
+use lightyear::prelude::{Authentication, Interpolated, Predicted};
 use std::net::SocketAddr;
 
 /// The lobby room this client is in, forwarded to the server (which scopes our
@@ -110,6 +115,11 @@ impl Plugin for NetClientPlugin {
         // In multiplayer the parts are server-authoritative: suppress the local
         // part sim and render the server's replicated parts instead.
         app.insert_resource(SuppressLocalParts);
+        // The local character is the *predicted networked avatar* (assembled by
+        // `setup_predicted_avatar` on the lightyear `Predicted` entity), not a
+        // separate single-player character — suppress the latter so there's exactly
+        // one character on the client.
+        app.insert_resource(SuppressLocalPlayer);
         // The lobby room this client is in, forwarded to the server so it scopes
         // our world. Read once at plugin build (after `play.html` has populated
         // `window.__BS_NET__`); constant for the session.
@@ -125,19 +135,17 @@ impl Plugin for NetClientPlugin {
         // After `InputEvents` (mobile `apply_pointer` / desktop `get_modifying`)
         // so `Modifying` is current when classifying a click as grab vs attach.
         app.add_systems(Update, read_grab_intent.after(InputEvents));
-        // Give every replicated player a visible body, then keep its transform
-        // in sync with the replicated pose, tag the player we control, and tag
-        // our own avatar so we can render it predicted (from the local pose).
+        // Assemble our predicted avatar into the controllable character, give every
+        // *other* replicated player a visible body, keep parts/joints in sync with
+        // their replicated pose.
         app.add_systems(
             Update,
             (
+                setup_predicted_avatar,
                 draw_replicated_players,
                 draw_replicated_parts,
                 draw_replicated_joints,
                 apply_net_transform,
-                mark_controlled_player,
-                mark_own_avatar,
-                predict_own_avatar,
                 // Mirror the networked grab into local `Holding`/`FocusedInteractable`
                 // (after the intent is read), then track the held part's target
                 // orientation, then highlight it — in that order so each reads the
@@ -152,44 +160,44 @@ impl Plugin for NetClientPlugin {
             FixedPreUpdate,
             write_input.in_set(ClientInputSystems::WriteClientInputs),
         );
+        // Drive the *predicted* avatar from the buffered input intent each sim tick —
+        // the same bridge the server runs — so local prediction and rollback replay
+        // use exactly the inputs the server will. Before `CharacterMovement` reads them.
+        app.add_systems(FixedUpdate, apply_net_input.before(CharacterMovement));
     }
 }
 
-/// The server binds a player to us via `ControlledBy`; on the client that entity
-/// arrives carrying the `Controlled` marker. Tag it with `InputMarker` (and seed
-/// its `ActionState`) so our input is written to and sent for that entity.
-fn mark_controlled_player(
+/// Turn our *predicted* networked avatar into the controllable local character.
+/// lightyear creates a `Predicted` entity for the avatar the server marks
+/// `PredictionTarget` to us (only our own — predicting a remote player is
+/// impossible without its input), and rolls back its Avian `Position`/`Rotation`.
+/// We give that entity the real character body (`insert_character_body`) so Avian
+/// simulates it locally with zero input delay, plus the player/input state
+/// (`make_local_player`) and the networked-input marker so `write_input` fills its
+/// `ActionState` and lightyear sends it. From there it's an ordinary `Character`:
+/// `assign_characters` renders it and `attach_camera_orbit` mounts the camera —
+/// the same path single-player uses.
+///
+/// Gated on `Position` so we assemble the body only once the avatar's real spawn
+/// pose has arrived (rather than briefly at the origin). In this phase the avatar
+/// is the only predicted entity, so `With<Predicted>` identifies it; predicted
+/// loose blocks (a later phase) will need a marker to disambiguate.
+fn setup_predicted_avatar(
     mut commands: Commands,
-    my_id: Option<Res<MyClientId>>,
-    new: Query<(Entity, &NetPlayer), (With<Controlled>, Without<InputMarker<NetInput>>)>,
+    new: Query<Entity, (With<Predicted>, With<Position>, Without<Character>)>,
+    configs: Res<Assets<CharacterConfig>>,
 ) {
-    // Only drive input for *our* avatar, matched by the netcode id we chose (which
-    // the server stamps onto `NetPlayer.client_id`). lightyear's `Controlled`
-    // marker leaks to an already-connected client for a late joiner's avatar, so
-    // keying purely off `With<Controlled>` would bind our input to that peer too.
-    let Some(my_id) = my_id else {
+    let Some((_, config)) = configs.iter().next() else {
         return;
     };
-    for (entity, player) in &new {
-        if player.client_id == my_id.0 {
-            commands.entity(entity).insert((
-                InputMarker::<NetInput>::default(),
-                ActionState::<NetInput>::default(),
-            ));
-        }
-    }
-}
-
-/// Build an avatar render pose from a world translation plus a yaw-derived
-/// rotation. The character ball is rotation-locked (its physics rotation is
-/// identity); the player's facing is the look `Yaw`. Match the movement basis,
-/// which yaws look directions by `-yaw` (see `move_character` in shared), so the
-/// avatar's +Z "nose" points where the player looks.
-fn avatar_pose(translation: Vec3, yaw: &Yaw) -> Transform {
-    Transform {
-        translation,
-        rotation: Quat::from_rotation_y(-yaw.0),
-        ..default()
+    for entity in &new {
+        let mut e = commands.entity(entity);
+        insert_character_body(&mut e, config.size());
+        make_local_player(&mut e);
+        e.insert((
+            InputMarker::<NetInput>::default(),
+            ActionState::<NetInput>::default(),
+        ));
     }
 }
 
@@ -368,65 +376,11 @@ fn read_grab_intent(
     }
 }
 
-/// Marks our *own* avatar's `Interpolated` entity, so it can be rendered from
-/// the local character pose (prediction) rather than the network echo.
-#[derive(Component)]
-struct OwnAvatar;
-
-/// Tag our own avatar: the `Interpolated` entity whose `NetPlayer.client_id`
-/// matches the player we control. (Both the `Controlled`/`Confirmed` entity and
-/// its `Interpolated` copy replicate the same `NetPlayer`.)
-fn mark_own_avatar(
-    mut commands: Commands,
-    my_id: Option<Res<MyClientId>>,
-    candidates: Query<(Entity, &NetPlayer, Has<OwnAvatar>), With<Interpolated>>,
-) {
-    // Identify our avatar by the netcode id we chose (which the server stamps onto
-    // `NetPlayer.client_id`), NOT by the replicated `Controlled` marker: lightyear
-    // leaks `Controlled` for a late joiner's avatar to the already-connected
-    // client, which used to mis-tag the peer as ours — and `predict_own_avatar`
-    // then stacked it on our own avatar, so it looked invisible. Reconciles each
-    // frame (adds where ours, removes where not) so a stale tag can't persist.
-    let Some(my_id) = my_id else {
-        return;
-    };
-    for (entity, player, is_own) in &candidates {
-        match (player.client_id == my_id.0, is_own) {
-            (true, false) => {
-                commands.entity(entity).insert(OwnAvatar);
-            }
-            (false, true) => {
-                commands.entity(entity).remove::<OwnAvatar>();
-            }
-            _ => {}
-        }
-    }
-}
-
-/// Render our own avatar from the live local character pose (zero round-trip),
-/// overriding the interpolated network echo. Because the client is authoritative
-/// over its own pose (it forwards it to the server), this "prediction" is exact —
-/// no rollback needed, unlike server-authoritative movement prediction. Reads the
-/// character's `Transform` (not `GlobalTransform`, which the engine only refreshes
-/// in PostUpdate and would lag a frame): the character is a root entity, so its
-/// `Transform` is the current world pose, and the avatar then propagates in lockstep
-/// with the rendered character the same frame.
-fn predict_own_avatar(
-    character: Query<(&Transform, &Yaw), (With<Character>, Without<OwnAvatar>)>,
-    mut own: Query<&mut Transform, (With<OwnAvatar>, Without<Character>)>,
-) {
-    let Some((transform, yaw)) = character.iter().next() else {
-        return;
-    };
-    let pose = avatar_pose(transform.translation, yaw);
-    for mut own_transform in &mut own {
-        *own_transform = pose;
-    }
-}
-
-/// Attach a mesh to each player's `Interpolated` copy (the smoothed visual
-/// entity) that doesn't have one yet. The raw `Confirmed` entities stay
-/// invisible; input/control still rides on them (they carry `Controlled`).
+/// Attach a mesh to each *other* player's `Interpolated` copy (the smoothed visual
+/// entity) that doesn't have one yet. Our own avatar is `Predicted`, not
+/// `Interpolated`, and renders via the single-player character path
+/// (`assign_characters`), so it's excluded here. The raw `Confirmed` entities stay
+/// invisible.
 fn draw_replicated_players(
     mut commands: Commands,
     new_players: Query<Entity, (With<NetPlayer>, With<Interpolated>, Without<Mesh3d>)>,
@@ -538,10 +492,7 @@ fn draw_replicated_joints(
 /// eases the `NetTransform` on `Interpolated` entities each frame; mirror it onto
 /// the Bevy `Transform` we render.
 fn apply_net_transform(
-    mut q: Query<
-        (&NetTransform, &mut Transform),
-        (Changed<NetTransform>, With<Interpolated>, Without<OwnAvatar>),
-    >,
+    mut q: Query<(&NetTransform, &mut Transform), (Changed<NetTransform>, With<Interpolated>)>,
 ) {
     for (net, mut transform) in &mut q {
         *transform = net.to_transform();
@@ -551,19 +502,13 @@ fn apply_net_transform(
 /// Build the dev netcode client for `server_addr`. Dev auth uses a fixed
 /// protocol id + the all-zero key, matching the server's `NetcodeConfig::
 /// default()`; production would issue a real ConnectToken from the matchmaker
-/// instead of `Manual`.
-/// Our chosen netcode client id, stored once we connect. The server stamps it
-/// onto every avatar's `NetPlayer.client_id`, so we recognise our own avatar by
-/// id rather than the replicated `Controlled` marker (which leaks to an
-/// already-connected client for a late joiner). Re-inserted on each (re)connect.
-#[derive(Resource, Clone, Copy)]
-struct MyClientId(u64);
-
-fn build_netcode_client(server_addr: SocketAddr) -> Option<(NetcodeClient, u64)> {
-    let client_id = rand::random::<u64>();
+/// instead of `Manual`. The random client id is the netcode handshake identity
+/// only — we recognise our own avatar locally by lightyear's `Predicted` marker,
+/// so it doesn't need to be retained.
+fn build_netcode_client(server_addr: SocketAddr) -> Option<NetcodeClient> {
     let auth = Authentication::Manual {
         server_addr,
-        client_id,
+        client_id: rand::random::<u64>(),
         private_key: [0u8; 32],
         // Version gate: a client only connects to a server built from the same
         // commit. The matchmaker routes to the matching version; this is the
@@ -571,7 +516,7 @@ fn build_netcode_client(server_addr: SocketAddr) -> Option<(NetcodeClient, u64)>
         protocol_id: bad_spaceship_shared::net::BS_PROTOCOL_ID,
     };
     match NetcodeClient::new(auth, NetcodeConfig::default()) {
-        Ok(n) => Some((n, client_id)),
+        Ok(n) => Some(n),
         Err(e) => {
             error!("failed to build netcode client: {e:?}");
             None
@@ -634,10 +579,9 @@ fn spawn_client(commands: &mut Commands) {
             return;
         }
     };
-    let Some((netcode, my_id)) = build_netcode_client(server_addr) else {
+    let Some(netcode) = build_netcode_client(server_addr) else {
         return;
     };
-    commands.insert_resource(MyClientId(my_id));
 
     let url = format!("ws://{server_addr}");
     let io = WebSocketClientIo::from_url(ClientConfig::builder().with_no_encryption(), url.clone());
@@ -657,10 +601,9 @@ fn spawn_client(commands: &mut Commands) {
     // connects via the explicit URL (`from_url`), so the netcode token's
     // `server_addr` is only a logical field — a placeholder is fine.
     let server_addr: SocketAddr = "0.0.0.0:0".parse().unwrap();
-    let Some((netcode, my_id)) = build_netcode_client(server_addr) else {
+    let Some(netcode) = build_netcode_client(server_addr) else {
         return;
     };
-    commands.insert_resource(MyClientId(my_id));
 
     // On wasm aeronet's `ClientConfig` is a unit struct (the browser owns TLS).
     let io = WebSocketClientIo::from_url(ClientConfig::default(), url.clone());

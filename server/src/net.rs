@@ -25,12 +25,12 @@ use avian3d::prelude::{
 };
 use bad_spaceship_shared::character::{CharacterMovement, ServerAvatar};
 use bad_spaceship_shared::net::{
-    focused_part, hold_acceleration, orient_acceleration, NetInput, NetJoint, NetPart, NetPlayer,
-    NetTransform, ProtocolPlugin, TICK,
+    apply_net_input, focused_part, hold_acceleration, orient_acceleration, NetInput, NetJoint,
+    NetPart, NetPlayer, NetTransform, ProtocolPlugin, TICK,
 };
 use bad_spaceship_shared::part::{spawn_random_part, SuppressLocalParts, NUM_PARTS};
 use bad_spaceship_shared::utils::QuatExt;
-use bad_spaceship_shared::{DirectionalInput, SuppressLocalPlayer, Yaw};
+use bad_spaceship_shared::SuppressLocalPlayer;
 use bevy::prelude::*;
 use lightyear::prelude::input::native::ActionState;
 use lightyear::prelude::server::*;
@@ -495,20 +495,4 @@ fn client_identity(link: Entity, remote: &Query<&RemoteId>) -> u64 {
     }
 }
 
-/// Bridge each client's per-tick input intent into its avatar's movement inputs:
-/// write `DirectionalInput` (move + jump) and `Yaw` (look) so the shared
-/// `walk_based_on_input`/`jump_based_on_input` drive the body exactly as they drive
-/// the single-player character. Runs in `FixedUpdate` before `CharacterMovement`.
-fn apply_net_input(mut q: Query<(&ActionState<NetInput>, &mut DirectionalInput, &mut Yaw)>) {
-    for (state, mut dir, mut yaw) in &mut q {
-        // DirectionalInput layout matches the single-player combiner: x = strafe,
-        // y = jump (0/1), z = forward.
-        dir.0 = Vec3::new(
-            state.0.move_xz[0],
-            if state.0.jump { 1.0 } else { 0.0 },
-            state.0.move_xz[1],
-        );
-        yaw.0 = state.0.yaw;
-    }
-}
 

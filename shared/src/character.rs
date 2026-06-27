@@ -61,6 +61,15 @@ pub struct Config {
     jump_force: f32,
 }
 
+impl Config {
+    /// The character ball's diameter, in metres. Exposed so the client's
+    /// predicted-avatar setup can build the same body the single-player `spawn`
+    /// does, from the loaded config asset.
+    pub fn size(&self) -> f32 {
+        self.size
+    }
+}
+
 #[derive(Default, Bundle)]
 struct CharacterBundle {
     character: Character,
