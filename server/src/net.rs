@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 
 use avian3d::prelude::{
-    CollisionLayers, Collisions, ComputedCenterOfMass, Forces, Gravity, Position,
+    CollisionLayers, Collisions, ComputedCenterOfMass, Forces, Gravity, LinearVelocity, Position,
     ReadRigidBodyForces, Rotation, SphericalJoint, WriteRigidBodyForces,
 };
 use bad_spaceship_shared::character::{CharacterMovement, ServerAvatar};
@@ -107,7 +107,7 @@ impl Plugin for NetServerPlugin {
         // NetTransform mirror); only the joint markers still stream a NetTransform.
         app.add_systems(
             Update,
-            (sync_joint_transforms, replace_fallen_room_parts),
+            (sync_joint_transforms, replace_fallen_room_parts, promote_settled_parts),
         );
         // Assign each client (and its avatar) to its reported room on the first
         // input, lazily creating the room's world.
@@ -187,6 +187,26 @@ struct PartRoom {
 #[derive(Component, Default)]
 struct HeldPart(Option<Entity>);
 
+/// A freshly-spawned part still *settling* on the server, held back from
+/// replication until it comes to rest (or a timeout elapses). The room's parts
+/// spawn high (y=5..15) and free-fall; the first client to enter the room would
+/// otherwise see them mid-fall. Since parts are predicted but their *velocity*
+/// isn't replicated (replicating it fought the character's velocity smoothing and
+/// made movement rubber-band), a client builds its predicted copy at rest while the
+/// server's is falling — and lightyear's error-smoothing renders the growing
+/// correction as a slow downward drift ("parts sink slowly on first load"). Holding
+/// replication until the server part is at rest means the client only ever predicts
+/// a *settled* part, so there's nothing to drift. Carries what `tag_room_part` needs
+/// to promote it once settled.
+#[derive(Component)]
+struct Settling {
+    half_extents: Vec3,
+    room: Room,
+    /// Seconds left before the part is force-promoted even if not yet fully at rest
+    /// (so a part that keeps jostling still appears within a bounded time).
+    timeout: f32,
+}
+
 /// Assign each connected client (and its avatar) to the room it reported, the
 /// first time a real input arrives. Lazily creates the room's world (parts) on
 /// first sighting of a code. Until assigned, the avatar carries no
@@ -224,12 +244,44 @@ fn assign_rooms(
     }
 }
 
-/// Spawn a fresh room's world: its own set of parts (replicated + interpolated +
-/// collision-isolated to the room).
+/// Spawn a fresh room's world: its own set of parts. Each spawns *settling* (not
+/// yet replicated) so the first client sees them only once they've come to rest
+/// (see [`Settling`]).
 fn spawn_room_world(commands: &mut Commands, room: Room) {
     for _ in 0..NUM_PARTS {
-        let (entity, half_extents) = spawn_random_part(commands);
-        tag_room_part(commands, entity, half_extents, room);
+        spawn_settling_part(commands, room);
+    }
+}
+
+/// Spawn one random part into a room and mark it [`Settling`]: it gets its physics
+/// body, room collision layer, and `PartRoom` immediately (so it falls and settles
+/// correctly, isolated to its room), but is held back from replication — `NetPart`/
+/// `Replicate`/`PredictionTarget`/`Rooms` are added by `promote_settled_parts` once
+/// it's at rest.
+fn spawn_settling_part(commands: &mut Commands, room: Room) {
+    let (entity, half_extents) = spawn_random_part(commands);
+    commands.entity(entity).insert((
+        PartRoom { id: room.id, bit: room.bit },
+        CollisionLayers::from_bits(room.bit, room.bit | 1),
+        Settling { half_extents, room, timeout: 3.0 },
+    ));
+}
+
+/// Promote each [`Settling`] part to a replicated, predicted part once it has come
+/// to rest on its room's platform (or its settle timeout expires), so clients only
+/// ever predict a settled part — never one mid-free-fall.
+fn promote_settled_parts(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut parts: Query<(Entity, &LinearVelocity, &mut Settling)>,
+) {
+    for (entity, velocity, mut settling) in &mut parts {
+        settling.timeout -= time.delta_secs();
+        // ~0.22 m/s: at rest within solver jitter. Promote on rest or timeout.
+        if velocity.0.length_squared() < 0.05 || settling.timeout <= 0.0 {
+            tag_room_part(&mut commands, entity, settling.half_extents, settling.room);
+            commands.entity(entity).remove::<Settling>();
+        }
     }
 }
 
@@ -419,11 +471,10 @@ fn replace_fallen_room_parts(
     for (entity, transform, part_room) in &parts {
         if transform.translation.y < -10.0 {
             commands.entity(entity).despawn();
-            let (new_entity, half_extents) = spawn_random_part(&mut commands);
-            tag_room_part(
+            // The replacement also spawns high and falls; spawn it settling so it,
+            // too, only replicates once at rest (no mid-fall drift on clients).
+            spawn_settling_part(
                 &mut commands,
-                new_entity,
-                half_extents,
                 Room { id: part_room.id, bit: part_room.bit },
             );
         }

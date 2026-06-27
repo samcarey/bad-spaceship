@@ -15,12 +15,12 @@
 //! endpoints.
 use core::time::Duration;
 
-use avian3d::prelude::{AngularVelocity, LinearVelocity, Position, Rotation};
+use avian3d::prelude::{Position, Rotation};
 use bevy::ecs::entity::{EntityMapper, MapEntities};
 use bevy::prelude::*;
 use lightyear::prelude::input::native::ActionState;
 use lightyear::prelude::*;
-use lightyear_avian3d::types::{angular_velocity, linear_velocity, position, rotation};
+use lightyear_avian3d::types::{position, rotation};
 use serde::{Deserialize, Serialize};
 
 use crate::{DirectionalInput, Yaw};
@@ -208,12 +208,6 @@ fn position_lerp(start: Position, other: Position, t: f32) -> Position {
 fn rotation_lerp(start: Rotation, other: Rotation, t: f32) -> Rotation {
     rotation::lerp(&start, &other, t)
 }
-fn linear_velocity_lerp(start: LinearVelocity, other: LinearVelocity, t: f32) -> LinearVelocity {
-    linear_velocity::lerp(&start, &other, t)
-}
-fn angular_velocity_lerp(start: AngularVelocity, other: AngularVelocity, t: f32) -> AngularVelocity {
-    angular_velocity::lerp(&start, &other, t)
-}
 
 /// Bridge a networked avatar's per-tick input *intent* into the movement inputs the
 /// shared `walk_based_on_input`/`jump_based_on_input` read — `DirectionalInput`
@@ -266,24 +260,6 @@ impl Plugin for ProtocolPlugin {
             .replicate()
             .predict()
             .add_interpolation_with(rotation_lerp);
-        // Replicate the bodies' velocities too, with prediction. Without this, a
-        // freshly-built predicted body (a part, or the owner's avatar) starts at
-        // *rest* — its `Position` is replicated but its velocity defaults to zero —
-        // while the server's body may be moving (the room's parts spawn high and are
-        // in free-fall when the first client first sees them). The predicted body
-        // then lags the server's and lightyear's error-smoothing renders the growing
-        // correction as a slow downward drift ("parts sink slowly to the ground" on
-        // first load). Seeding the predicted body with the server's velocity makes it
-        // fall in sync. Settled/sleeping bodies hold velocity ~0 (unchanged), so this
-        // adds no steady-state replication traffic.
-        app.component::<LinearVelocity>()
-            .replicate()
-            .predict()
-            .add_interpolation_with(linear_velocity_lerp);
-        app.component::<AngularVelocity>()
-            .replicate()
-            .predict()
-            .add_interpolation_with(angular_velocity_lerp);
         // Replicate the pose and register linear interpolation for it: the client
         // renders `Interpolated` copies whose `NetTransform` lightyear eases
         // between confirmed snapshots each frame, smoothing the round-trip motion
