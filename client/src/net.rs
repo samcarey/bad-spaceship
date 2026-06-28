@@ -36,6 +36,7 @@ use lightyear::prelude::client::input::InputSystems as ClientInputSystems;
 use lightyear::prelude::client::*;
 use lightyear::prelude::input::native::{ActionState, InputMarker};
 use lightyear::prelude::{Authentication, Interpolated, Predicted, PredictionManager};
+use lightyear::frame_interpolation::{FrameInterpolate, FrameInterpolationPlugin};
 use std::net::SocketAddr;
 
 /// The lobby room this client is in, forwarded to the server (which scopes our
@@ -117,6 +118,26 @@ impl Plugin for NetClientPlugin {
             update_syncs_manually: false,
             rollback_resources: false,
         });
+        // Render-interpolate predicted bodies between fixed (60 Hz) sim ticks.
+        // Prediction/rollback advance Position/Rotation only in `FixedUpdate`; without
+        // this the rendered pose is held constant between ticks and the camera (a
+        // child of the predicted character) judders when the render rate isn't
+        // phase-locked to 60 Hz — measured as ~22% frame-to-frame speed variance and
+        // felt as a "low frame rate". We interpolate `Position`/`Rotation` (NOT
+        // `Transform`): in `AvianReplicationMode::Position` those are the predicted
+        // components, they already have interpolation fns registered (`ProtocolPlugin`),
+        // and the Position→Transform sync then carries the interpolated value to the
+        // rendered `Transform` (`FrameInterpolate`'s change-detection trigger makes the
+        // sync pick it up). `lightyear_avian` orders its sync around the
+        // `FrameInterpolationSystems` sets but does NOT add these plugins or the
+        // per-entity components — we must. Each predicted entity opts in via
+        // `FrameInterpolate<Position/Rotation>` (`setup_predicted_avatar`,
+        // `draw_replicated_parts`). Interpolated remote avatars are already
+        // frame-smooth via lightyear's interpolation, so they don't need it.
+        app.add_plugins((
+            FrameInterpolationPlugin::<Position>::default(),
+            FrameInterpolationPlugin::<Rotation>::default(),
+        ));
         // In multiplayer the parts are server-authoritative: suppress the local
         // part sim and render the server's replicated parts instead.
         app.insert_resource(SuppressLocalParts);
@@ -207,6 +228,10 @@ fn setup_predicted_avatar(
         e.insert((
             InputMarker::<NetInput>::default(),
             ActionState::<NetInput>::default(),
+            // Render-interpolate this predicted body between fixed ticks, so the camera
+            // mounted on it moves smoothly instead of stepping at 60 Hz.
+            FrameInterpolate::<Position>::default(),
+            FrameInterpolate::<Rotation>::default(),
         ));
     }
 }
@@ -519,6 +544,10 @@ fn draw_replicated_parts(
             Mesh3d(meshes.add(Cuboid::new(hx * 2.0, hy * 2.0, hz * 2.0))),
             MeshMaterial3d(materials.add(Color::srgb(0.55, 0.6, 0.72))),
             Holdable,
+            // Render-interpolate the predicted block between fixed ticks (same reason
+            // as the character) so loose/held blocks move smoothly.
+            FrameInterpolate::<Position>::default(),
+            FrameInterpolate::<Rotation>::default(),
         ));
     }
 }
