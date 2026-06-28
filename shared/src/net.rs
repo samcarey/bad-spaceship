@@ -15,12 +15,12 @@
 //! endpoints.
 use core::time::Duration;
 
-use avian3d::prelude::{Position, Rotation};
+use avian3d::prelude::{AngularVelocity, LinearVelocity, Position, Rotation};
 use bevy::ecs::entity::{EntityMapper, MapEntities};
 use bevy::prelude::*;
 use lightyear::prelude::input::native::ActionState;
 use lightyear::prelude::*;
-use lightyear_avian3d::types::{position, rotation};
+use lightyear_avian3d::types::{angular_velocity, linear_velocity, position, rotation};
 use serde::{Deserialize, Serialize};
 
 use crate::{DirectionalInput, Yaw};
@@ -40,34 +40,6 @@ pub const TICK: Duration = Duration::from_millis(1000 / 60);
 #[derive(Component, Serialize, Deserialize, Clone, Copy, PartialEq, Debug)]
 pub struct NetPlayer {
     pub client_id: u64,
-}
-
-/// Replicated pose. Bevy's `Transform` isn't `Serialize`, and lightyear's
-/// `.replicate()` requires it, so we replicate this plain-`f32` mirror instead
-/// and map it to/from `Transform` on each side (server writes it from the
-/// authoritative sim; the client applies it to the rendered entity).
-#[derive(Component, Serialize, Deserialize, Clone, Copy, PartialEq, Debug, Default)]
-pub struct NetTransform {
-    pub translation: [f32; 3],
-    /// Rotation quaternion, `[x, y, z, w]`.
-    pub rotation: [f32; 4],
-}
-
-impl NetTransform {
-    pub fn from_transform(t: &Transform) -> Self {
-        Self {
-            translation: t.translation.to_array(),
-            rotation: t.rotation.to_array(),
-        }
-    }
-
-    pub fn to_transform(&self) -> Transform {
-        Transform {
-            translation: Vec3::from_array(self.translation),
-            rotation: Quat::from_array(self.rotation),
-            ..default()
-        }
-    }
 }
 
 /// Per-tick client → server **input intent** (not pose). The server runs the
@@ -166,18 +138,35 @@ impl MapEntities for NetInput {
     fn map_entities<M: EntityMapper>(&mut self, _entity_mapper: &mut M) {}
 }
 
-/// Replicated cuboid shape of a part (full extents = 2 × `half_extents`). The
-/// server replicates this once per part so a client that doesn't simulate parts
-/// can rebuild the render mesh; the part's live pose rides on `NetTransform`.
+/// Replicated cuboid shape of a part (full extents = 2 × `half_extents`), plus a
+/// stable cross-network id. The shape lets a client rebuild the render mesh; the
+/// part's live pose rides on the predicted Avian `Position`/`Rotation`. `id` is
+/// the server part entity's bits — a *stable* identity (replicated onto both the
+/// client's `Confirmed` and `Predicted` copies) that lets the client match a
+/// replicated joint's endpoints (`NetJoint`) to the local *predicted* part
+/// entities, without depending on lightyear's confirmed→predicted entity mapping.
 #[derive(Component, Serialize, Deserialize, Clone, Copy, PartialEq, Debug, Default)]
 pub struct NetPart {
     pub half_extents: [f32; 3],
+    pub id: u64,
 }
 
-/// Marks a replicated joint marker entity — a server joint's world anchor point,
-/// streamed via `NetTransform` so clients can draw the joint like single-player.
+/// A replicated joint between two parts. Carries enough to reconstruct the joint
+/// as *real predicted physics* on each client: the stable ids (`NetPart::id`) of
+/// the two bodies and their body-local (COM-relative) anchors, in the same order
+/// the server's `SphericalJoint` uses (`body1`/`anchor1` ↔ `local_anchor1`). The
+/// client looks up the matching *predicted* part entities by id and spawns a real
+/// Avian `SphericalJoint` between them, so the assembly is held together by the
+/// client's own simulation (and survives rollback) — not just rendered. Without
+/// this the predicted parts are unconstrained locally and a lifted assembly sags
+/// apart, corrected only by replication.
 #[derive(Component, Serialize, Deserialize, Clone, Copy, PartialEq, Debug, Default)]
-pub struct NetJoint;
+pub struct NetJoint {
+    pub body1: u64,
+    pub body2: u64,
+    pub anchor1: [f32; 3],
+    pub anchor2: [f32; 3],
+}
 
 /// An avatar's look yaw (radians), replicated **server → other clients** purely so
 /// remote avatars can be drawn facing the way they look. Deliberately a *separate*
@@ -200,16 +189,56 @@ fn lerp_facing(start: NetFacing, other: NetFacing, t: f32) -> NetFacing {
     NetFacing(start.0 + delta * t)
 }
 
-/// Interpolate between two replicated poses: lerp the translation, slerp the
-/// rotation. Used by lightyear's interpolation for `NetTransform`.
-fn lerp_net_transform(start: NetTransform, other: NetTransform, t: f32) -> NetTransform {
-    let translation = Vec3::from_array(start.translation)
-        .lerp(Vec3::from_array(other.translation), t)
-        .to_array();
-    let rotation = Quat::from_array(start.rotation)
-        .slerp(Quat::from_array(other.rotation), t)
-        .to_array();
-    NetTransform { translation, rotation }
+/// Roll back on velocity divergence too, but only past a *meaningful* margin — NOT
+/// the default exact `PartialEq` (which fires a rollback on a hair of float drift
+/// almost every tick → re-sims the whole predicted world every frame → stutter on a
+/// single-threaded phone), and NOT never (which lets velocity drift unbounded until
+/// it surfaces as a delayed position snap — e.g. coasting to a stop then jumping
+/// back, because the client and server decayed momentum slightly differently and
+/// nothing re-synced the velocity). A ~0.5 m/s margin ignores steady-motion float
+/// noise but catches the larger divergence that builds up across an acceleration or
+/// deceleration transition, keeping the coast-to-stop consistent.
+const LINEAR_VELOCITY_ROLLBACK_TOLERANCE: f32 = 0.5; // m/s
+const ANGULAR_VELOCITY_ROLLBACK_TOLERANCE: f32 = 1.0; // rad/s
+
+/// Euclidean divergence of two `Vec3`-newtype values past a tolerance — the shared
+/// body of the per-component (position / linear-vel / angular-vel) rollback conditions.
+fn over_tolerance(confirmed: Vec3, predicted: Vec3, tolerance: f32) -> bool {
+    confirmed.distance_squared(predicted) > tolerance * tolerance
+}
+
+fn linear_velocity_should_rollback(confirmed: &LinearVelocity, predicted: &LinearVelocity) -> bool {
+    over_tolerance(confirmed.0, predicted.0, LINEAR_VELOCITY_ROLLBACK_TOLERANCE)
+}
+
+fn angular_velocity_should_rollback(
+    confirmed: &AngularVelocity,
+    predicted: &AngularVelocity,
+) -> bool {
+    over_tolerance(confirmed.0, predicted.0, ANGULAR_VELOCITY_ROLLBACK_TOLERANCE)
+}
+
+/// Only roll back the predicted pose when it diverges from the server's confirmed
+/// pose by a *visible* margin — NOT lightyear's default exact `PartialEq`, which
+/// fires a full-world rollback on sub-millimeter float drift. The client and server
+/// run the same sim but not bit-identically (FP non-determinism across platforms),
+/// so an exact check diverges almost every snapshot → a rollback (re-simming the
+/// character + every predicted part) nearly every frame → the predicted character
+/// and the camera mounted on it judder, reading as a low-frame-rate "roughness".
+/// A few-cm / few-degree tolerance lets the client keep its locally-predicted pose
+/// for trivial disagreements (still server-authoritative on real divergence — a
+/// wall hit, a shove — which exceeds the margin and snaps, eased by visual
+/// correction), so prediction stays smooth. Applies to every predicted body
+/// (registration is global): the character *and* the loose parts.
+const POSITION_ROLLBACK_TOLERANCE: f32 = 0.05; // metres
+const ROTATION_ROLLBACK_TOLERANCE: f32 = 0.05; // radians (~3°)
+
+fn position_should_rollback(confirmed: &Position, predicted: &Position) -> bool {
+    over_tolerance(confirmed.0, predicted.0, POSITION_ROLLBACK_TOLERANCE)
+}
+
+fn rotation_should_rollback(confirmed: &Rotation, predicted: &Rotation) -> bool {
+    confirmed.0.angle_between(predicted.0) > ROTATION_ROLLBACK_TOLERANCE
 }
 
 // lightyear's `LerpFn` takes its endpoints by value; `lightyear_avian3d`'s lerps
@@ -219,6 +248,12 @@ fn position_lerp(start: Position, other: Position, t: f32) -> Position {
 }
 fn rotation_lerp(start: Rotation, other: Rotation, t: f32) -> Rotation {
     rotation::lerp(&start, &other, t)
+}
+fn linear_velocity_lerp(start: LinearVelocity, other: LinearVelocity, t: f32) -> LinearVelocity {
+    linear_velocity::lerp(&start, &other, t)
+}
+fn angular_velocity_lerp(start: AngularVelocity, other: AngularVelocity, t: f32) -> AngularVelocity {
+    angular_velocity::lerp(&start, &other, t)
 }
 
 /// Bridge a networked avatar's per-tick input *intent* into the movement inputs the
@@ -267,18 +302,32 @@ impl Plugin for ProtocolPlugin {
         app.component::<Position>()
             .replicate()
             .predict()
+            .with_rollback_condition(position_should_rollback)
             .add_interpolation_with(position_lerp);
         app.component::<Rotation>()
             .replicate()
             .predict()
+            .with_rollback_condition(rotation_should_rollback)
             .add_interpolation_with(rotation_lerp);
-        // Replicate the pose and register linear interpolation for it: the client
-        // renders `Interpolated` copies whose `NetTransform` lightyear eases
-        // between confirmed snapshots each frame, smoothing the round-trip motion
-        // trail. `NetTransform` isn't `Ease`, so supply a custom lerp.
-        app.component::<NetTransform>()
+        // Replicate the bodies' velocities too, predicted alongside Position/Rotation
+        // — the canonical lightyear_avian setup for predicted physics. Without these,
+        // only *where* a body is gets rolled back, not *how fast it's moving*: a client
+        // that starts observing a moving body (a part mid-fall on spawn, or any part a
+        // late joiner sees being shoved) rebuilds it at rest, diverges, and the
+        // correction smears into a slow drift. Replicating velocity makes the rollback
+        // restore the *complete* rigid-body state, so the re-simulation is consistent.
+        // Settled/sleeping bodies hold velocity ~0 (unchanged) → no steady-state
+        // traffic. (This supersedes the server-side `Settling` spawn-delay hack.)
+        app.component::<LinearVelocity>()
             .replicate()
-            .add_interpolation_with(lerp_net_transform);
+            .predict()
+            .with_rollback_condition(linear_velocity_should_rollback)
+            .add_interpolation_with(linear_velocity_lerp);
+        app.component::<AngularVelocity>()
+            .replicate()
+            .predict()
+            .with_rollback_condition(angular_velocity_should_rollback)
+            .add_interpolation_with(angular_velocity_lerp);
         // The part shape is constant, so it only needs replicating (no interp).
         app.component::<NetPart>().replicate();
         app.component::<NetJoint>().replicate();

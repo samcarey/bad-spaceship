@@ -9,17 +9,19 @@
 //!   `?server=` query param) → a full `wss://host[:port]` URL. The browser owns
 //!   TLS, so no certs are configured client-side.
 //!
-//! For every player the server replicates, draw a cube at its `NetTransform`.
+//! For every player the server replicates, draw a body at its predicted/
+//! interpolated Avian pose.
 
 use avian3d::prelude::{
-    Forces, Gravity, Position, ReadRigidBodyForces, Rotation, WriteRigidBodyForces,
+    Forces, Gravity, Position, ReadRigidBodyForces, RigidBody, Rotation, SphericalJoint,
+    WriteRigidBodyForces,
 };
 use bad_spaceship_shared::character::{
     insert_character_body, CharacterMovement, Config as CharacterConfig,
 };
 use bad_spaceship_shared::net::{
     apply_net_input, focused_part, hold_acceleration, orient_acceleration, NetFacing, NetInput,
-    NetJoint, NetPart, NetPlayer, NetTransform, ProtocolPlugin, TICK,
+    NetJoint, NetPart, NetPlayer, ProtocolPlugin, TICK,
 };
 use bad_spaceship_shared::part::{insert_part_physics, Holdable, SuppressLocalParts};
 use bad_spaceship_shared::player::make_local_player;
@@ -34,6 +36,7 @@ use lightyear::prelude::client::input::InputSystems as ClientInputSystems;
 use lightyear::prelude::client::*;
 use lightyear::prelude::input::native::{ActionState, InputMarker};
 use lightyear::prelude::{Authentication, Interpolated, Predicted, PredictionManager};
+use lightyear::frame_interpolation::{FrameInterpolate, FrameInterpolationPlugin};
 use std::net::SocketAddr;
 
 /// The lobby room this client is in, forwarded to the server (which scopes our
@@ -115,6 +118,26 @@ impl Plugin for NetClientPlugin {
             update_syncs_manually: false,
             rollback_resources: false,
         });
+        // Render-interpolate predicted bodies between fixed (60 Hz) sim ticks.
+        // Prediction/rollback advance Position/Rotation only in `FixedUpdate`; without
+        // this the rendered pose is held constant between ticks and the camera (a
+        // child of the predicted character) judders when the render rate isn't
+        // phase-locked to 60 Hz — measured as ~22% frame-to-frame speed variance and
+        // felt as a "low frame rate". We interpolate `Position`/`Rotation` (NOT
+        // `Transform`): in `AvianReplicationMode::Position` those are the predicted
+        // components, they already have interpolation fns registered (`ProtocolPlugin`),
+        // and the Position→Transform sync then carries the interpolated value to the
+        // rendered `Transform` (`FrameInterpolate`'s change-detection trigger makes the
+        // sync pick it up). `lightyear_avian` orders its sync around the
+        // `FrameInterpolationSystems` sets but does NOT add these plugins or the
+        // per-entity components — we must. Each predicted entity opts in via
+        // `FrameInterpolate<Position/Rotation>` (`setup_predicted_avatar`,
+        // `draw_replicated_parts`). Interpolated remote avatars are already
+        // frame-smooth via lightyear's interpolation, so they don't need it.
+        app.add_plugins((
+            FrameInterpolationPlugin::<Position>::default(),
+            FrameInterpolationPlugin::<Rotation>::default(),
+        ));
         // In multiplayer the parts are server-authoritative: suppress the local
         // part sim and render the server's replicated parts instead.
         app.insert_resource(SuppressLocalParts);
@@ -148,8 +171,7 @@ impl Plugin for NetClientPlugin {
                 draw_replicated_players,
                 face_replicated_players,
                 draw_replicated_parts,
-                draw_replicated_joints,
-                apply_net_transform,
+                (bind_replicated_joints, position_replicated_joints).chain(),
                 // Mirror the networked grab into local `Holding`/`FocusedInteractable`
                 // (after the intent is read), then track the held part's target
                 // orientation, then highlight it — in that order so each reads the
@@ -206,6 +228,10 @@ fn setup_predicted_avatar(
         e.insert((
             InputMarker::<NetInput>::default(),
             ActionState::<NetInput>::default(),
+            // Render-interpolate this predicted body between fixed ticks, so the camera
+            // mounted on it moves smoothly instead of stepping at 60 Hz.
+            FrameInterpolate::<Position>::default(),
+            FrameInterpolate::<Rotation>::default(),
         ));
     }
 }
@@ -232,7 +258,7 @@ fn write_input(
     };
     let grab_origin = orbit.iter().next().map(|g| g.translation());
     let hold_pos = hold.iter().next().map(|g| g.translation());
-    let attach = want_attach.0;
+    let attach = want_attach.0 > 0;
     for mut state in &mut controlled {
         // DirectionalInput: x = strafe, y = jump (non-zero), z = forward.
         state.0.move_xz = [dir.0.x, dir.0.z];
@@ -253,8 +279,8 @@ fn write_input(
             _ => state.0.grab = false,
         }
     }
-    // One-shot attach intent: consumed after forwarding.
-    want_attach.0 = false;
+    // Assert the attach intent for a few ticks after a press, then let it lapse.
+    want_attach.0 = want_attach.0.saturating_sub(1);
 }
 
 /// Highlight the part the player is interacting with in single-player's yellow
@@ -320,10 +346,18 @@ fn highlight_grabbable(
 #[derive(Resource, Default)]
 struct WantHold(bool);
 
-/// One-shot attach intent, set on a modifier click (the join gesture), consumed
-/// by `write_input` after it's forwarded.
+/// Attach intent as a small countdown of ticks, set on a modifier click (the join
+/// gesture) and decremented each tick by `write_input`. Sending the intent for a few
+/// ticks (rather than one) survives a dropped packet; the server arms its retry
+/// window on the rising edge, so the extra ticks don't cause a double-join.
 #[derive(Resource, Default)]
-struct WantAttach(bool);
+struct WantAttach(u32);
+
+/// How many ticks the client asserts the attach intent after a join press. The
+/// server arms its retry window on the rising edge (so extra ticks don't double-join),
+/// but sending the intent for a few ticks means a single dropped packet doesn't lose
+/// the press. ~0.1s at 60 Hz.
+const ATTACH_SEND_TICKS: u32 = 6;
 
 /// The held part's target orientation, tracked client-side and forwarded to the
 /// server as `NetInput::hold_rotation`. `Quat::default()` is the identity, so
@@ -425,7 +459,7 @@ fn read_grab_intent(
     let modding = modifying.iter().next().is_some_and(|m| m.0);
     for _ in clicks.read() {
         if modding {
-            want_attach.0 = true;
+            want_attach.0 = ATTACH_SEND_TICKS;
         } else {
             want_hold.0 = !want_hold.0;
         }
@@ -518,6 +552,10 @@ fn draw_replicated_parts(
             Mesh3d(meshes.add(Cuboid::new(hx * 2.0, hy * 2.0, hz * 2.0))),
             MeshMaterial3d(materials.add(Color::srgb(0.55, 0.6, 0.72))),
             Holdable,
+            // Render-interpolate the predicted block between fixed ticks (same reason
+            // as the character) so loose/held blocks move smoothly.
+            FrameInterpolate::<Position>::default(),
+            FrameInterpolate::<Rotation>::default(),
         ));
     }
 }
@@ -558,33 +596,74 @@ fn mirror_grab_state(
     }
 }
 
-/// Draw each replicated joint marker using the game's *real* joint visuals — the
-/// `JointAppearance` mesh + `GizmoMaterial` that single-player uses for existing
-/// joints (so it looks identical and draws on top via the secondary pass) —
-/// positioned via the interpolated `NetTransform`.
-fn draw_replicated_joints(
+/// The *predicted* part entity a replicated joint anchors its gizmo to (its
+/// `body1`), recorded so `position_replicated_joints` can track the gizmo to the
+/// moving assembly without re-resolving the id each frame. Its presence also marks
+/// the `NetJoint` as already bound (so `bind_replicated_joints` doesn't re-spawn
+/// the constraint).
+#[derive(Component)]
+struct JointAnchorBody(Entity);
+
+/// Reconstruct each replicated joint as **real predicted physics**: look up the
+/// local *predicted* part entities matching the `NetJoint`'s endpoint ids and
+/// insert a real Avian `SphericalJoint` (with the replicated body-local anchors)
+/// between them, so the client's own simulation holds the assembly together and
+/// rollback keeps it consistent — the server's joint is server-only, so without
+/// this the predicted parts are unconstrained locally and a lifted assembly sags
+/// apart. Also gives the joint entity the game's real `JointAppearance` mesh +
+/// `GizmoMaterial` so it draws identically to single-player (positioned by
+/// `position_replicated_joints`).
+///
+/// Retries (gated on `Without<JointAnchorBody>`) until both predicted parts exist and
+/// have their physics body built (`With<RigidBody>`), since the `NetJoint` can
+/// replicate before the parts it references finish spawning.
+fn bind_replicated_joints(
     mut commands: Commands,
-    new_joints: Query<Entity, (With<NetJoint>, With<Interpolated>, Without<Mesh3d>)>,
+    new_joints: Query<(Entity, &NetJoint), Without<JointAnchorBody>>,
+    parts: Query<(Entity, &NetPart), (With<Predicted>, With<RigidBody>)>,
     appearance: Res<JointAppearance>,
 ) {
     let (Some(mesh), Some(material)) = (&appearance.mesh, &appearance.invalid_material) else {
         return;
     };
-    for entity in &new_joints {
-        commands
-            .entity(entity)
-            .insert((Mesh3d(mesh.clone()), MeshMaterial3d(material.clone())));
+    for (joint_entity, joint) in &new_joints {
+        let find = |id: u64| {
+            parts
+                .iter()
+                .find(|(_, part)| part.id == id)
+                .map(|(entity, _)| entity)
+        };
+        let (Some(body1), Some(body2)) = (find(joint.body1), find(joint.body2)) else {
+            continue;
+        };
+        commands.entity(joint_entity).insert((
+            SphericalJoint::new(body1, body2)
+                .with_local_anchor1(Vec3::from_array(joint.anchor1))
+                .with_local_anchor2(Vec3::from_array(joint.anchor2)),
+            JointAnchorBody(body1),
+            Mesh3d(mesh.clone()),
+            MeshMaterial3d(material.clone()),
+            Transform::default(),
+        ));
     }
 }
 
-/// Apply the (interpolated) replicated pose to the rendered transform. Lightyear
-/// eases the `NetTransform` on `Interpolated` entities each frame; mirror it onto
-/// the Bevy `Transform` we render.
-fn apply_net_transform(
-    mut q: Query<(&NetTransform, &mut Transform), (Changed<NetTransform>, With<Interpolated>)>,
+/// Track each bound joint's gizmo to its assembly: place it at body1's world-space
+/// anchor (`body1.transform · anchor1`), the same point the constraint pins, so the
+/// visual rides the *predicted* blocks rather than floating at a stale pose.
+fn position_replicated_joints(
+    mut joints: Query<(&NetJoint, &JointAnchorBody, &mut Transform)>,
+    parts: Query<&Transform, (With<NetPart>, Without<NetJoint>)>,
 ) {
-    for (net, mut transform) in &mut q {
-        *transform = net.to_transform();
+    for (joint, anchor_body, mut transform) in &mut joints {
+        if let Ok(body) = parts.get(anchor_body.0) {
+            let anchor = body.transform_point(Vec3::from_array(joint.anchor1));
+            // Only write on change, so a settled assembly stops dirtying `Transform`
+            // (and re-propagating `GlobalTransform`) every frame.
+            if transform.translation != anchor {
+                transform.translation = anchor;
+            }
+        }
     }
 }
 
