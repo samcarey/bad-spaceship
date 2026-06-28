@@ -150,7 +150,6 @@ impl Plugin for NetClientPlugin {
         // our world. Read once at plugin build (after `play.html` has populated
         // `window.__BS_NET__`); constant for the session.
         app.insert_resource(MyRoom(multiplayer_room()));
-        app.init_resource::<WantHold>();
         app.init_resource::<WantAttach>();
         app.init_resource::<HeldRotation>();
         app.add_systems(Startup, connect);
@@ -177,11 +176,10 @@ impl Plugin for NetClientPlugin {
                 face_replicated_players,
                 draw_replicated_parts,
                 (bind_replicated_joints, position_replicated_joints).chain(),
-                // Mirror the networked grab into the local `Holding` flag (after the
-                // intent is read), then track the held part's target orientation, then
-                // highlight the focused part — in that order so each reads the previous
-                // one's freshly-written state this frame.
-                (mirror_grab_state, track_hold_rotation, highlight_grabbable)
+                // After the click → grab intent writes `Holding`, track the held part's
+                // target orientation, then highlight the focused part — in that order so
+                // each reads the previous one's freshly-written state this frame.
+                (track_hold_rotation, highlight_grabbable)
                     .chain()
                     .after(read_grab_intent),
             ),
@@ -249,16 +247,15 @@ fn setup_predicted_avatar(
 /// from the local camera entities for now (the server's grab uses them directly);
 /// a later phase reconstructs the ray from the simulated character + look angles.
 fn write_input(
-    character: Query<(&DirectionalInput, &Yaw, &LookPitch), With<Character>>,
+    character: Query<(&DirectionalInput, &Yaw, &LookPitch, &Holding), With<Character>>,
     orbit: Query<&GlobalTransform, With<CameraOrbitCenter>>,
     hold: Query<&GlobalTransform, With<HoldPoint>>,
-    want_hold: Res<WantHold>,
     mut want_attach: ResMut<WantAttach>,
     held_rotation: Res<HeldRotation>,
     my_room: Res<MyRoom>,
     mut controlled: Query<&mut ActionState<NetInput>, With<InputMarker<NetInput>>>,
 ) {
-    let Some((dir, yaw, pitch)) = character.iter().next() else {
+    let Some((dir, yaw, pitch, holding)) = character.iter().next() else {
         return;
     };
     let grab_origin = orbit.iter().next().map(|g| g.translation());
@@ -278,7 +275,7 @@ fn write_input(
                 state.0.grab_origin = origin.to_array();
                 state.0.hold_target = hold_pos.to_array();
                 state.0.hold_rotation = held_rotation.0.to_array();
-                state.0.grab = want_hold.0;
+                state.0.grab = holding.0;
             }
             // No hold point yet (camera orbit not attached) — can't grab.
             _ => state.0.grab = false,
@@ -327,12 +324,6 @@ fn highlight_grabbable(
     *lit = highlighted;
 }
 
-/// The client's grab intent: toggled on each non-modifier click. The local
-/// hold mechanic (`toggle_holding`) is inert in multiplayer (no local parts to
-/// focus), so the grab toggle is tracked here and sent to the server instead.
-#[derive(Resource, Default)]
-struct WantHold(bool);
-
 /// Attach intent as a small countdown of ticks, set on a modifier click (the join
 /// gesture) and decremented each tick by `write_input`. Sending the intent for a few
 /// ticks (rather than one) survives a dropped packet; the server arms its retry
@@ -361,18 +352,17 @@ pub struct HeldRotation(pub Quat);
 /// `set_part_rotation` from the modifier + look delta — identity when not
 /// rotating). The server drives the part toward this in `server_hold`.
 fn track_hold_rotation(
-    want_hold: Res<WantHold>,
     mut was_holding: Local<bool>,
     mut held_rotation: ResMut<HeldRotation>,
-    player: Query<(&FocusedInteractable, &PartRotation), With<Player>>,
+    player: Query<(&Holding, &FocusedInteractable, &PartRotation), With<Player>>,
     parts: Query<&Transform, (With<NetPart>, With<Predicted>)>,
 ) {
-    let Ok((focused, part_rotation)) = player.single() else {
+    let Ok((holding, focused, part_rotation)) = player.single() else {
         return;
     };
-    let just_grabbed = want_hold.0 && !*was_holding;
-    *was_holding = want_hold.0;
-    if !want_hold.0 {
+    let just_grabbed = holding.0 && !*was_holding;
+    *was_holding = holding.0;
+    if !holding.0 {
         return;
     }
     if just_grabbed {
@@ -392,7 +382,7 @@ fn track_hold_rotation(
 /// hold point + orient spring toward the tracked target, applied via Avian
 /// `Forces` to the *predicted* held part — in `FixedUpdate`, so the spring is part
 /// of the simulation lightyear replays on a rollback. The held part is the one
-/// `mirror_grab_state` latched into the local Player's `FocusedInteractable` (the
+/// `update_focus` latched into the local Player's `FocusedInteractable` (the
 /// same look-angle rule the server grabs by), and the hold target/orientation are
 /// the same values `write_input` forwards to the server (`HoldPoint` world position
 /// + `HeldRotation`), so both worlds spring toward an identical goal and diverge
@@ -442,22 +432,21 @@ fn predict_hold(
 /// `update_focused`, which the replicated parts don't trigger (they carry `Holdable`
 /// but not the `Interactable` marker that system queries).
 fn update_focus(
-    want_hold: Res<WantHold>,
     orbit: Query<&GlobalTransform, With<CameraOrbitCenter>>,
     hold: Query<&GlobalTransform, With<HoldPoint>>,
     // The `Predicted` copies carry the dynamic body/collider Avian's `Collisions`
     // (read by `update_active_joints`) reports against, so focus the same copy the
     // server grab + the join preview resolve over — not the invisible `Confirmed` ones.
     parts: Query<(Entity, &Transform), (With<NetPart>, With<Predicted>)>,
-    mut player: Query<&mut FocusedInteractable, With<Player>>,
+    mut player: Query<(&Holding, &mut FocusedInteractable), With<Player>>,
 ) {
-    // While holding, keep the part latched the frame the grab began — don't re-aim.
-    if want_hold.0 {
-        return;
-    }
-    let Ok(mut focused) = player.single_mut() else {
+    let Ok((holding, mut focused)) = player.single_mut() else {
         return;
     };
+    // While holding, keep the part latched the frame the grab began — don't re-aim.
+    if holding.0 {
+        return;
+    }
     let (Some(orbit), Some(hold)) = (orbit.iter().next(), hold.iter().next()) else {
         return;
     };
@@ -483,21 +472,23 @@ fn update_focus(
 fn read_grab_intent(
     mut clicks: MessageReader<PlayerClick>,
     modifying: Query<&Modifying, With<Player>>,
-    focused: Query<&FocusedInteractable, With<Player>>,
-    mut want_hold: ResMut<WantHold>,
+    mut player: Query<(&mut Holding, &FocusedInteractable), With<Player>>,
     mut want_attach: ResMut<WantAttach>,
 ) {
+    let Ok((mut holding, focused)) = player.single_mut() else {
+        return;
+    };
     let modding = modifying.iter().next().is_some_and(|m| m.0);
-    let looking_at_part = focused.iter().next().is_some_and(|f| f.0.is_some());
+    let looking_at_part = focused.0.is_some();
     for _ in clicks.read() {
         if modding {
             want_attach.0 = ATTACH_SEND_TICKS;
-        } else if want_hold.0 {
+        } else if holding.0 {
             // Holding → drop, regardless of what's under the look (matches single-player).
-            want_hold.0 = false;
+            holding.0 = false;
         } else if looking_at_part {
             // Empty-handed → grab only if a part is focused at THIS press.
-            want_hold.0 = true;
+            holding.0 = true;
         }
     }
 }
@@ -593,17 +584,6 @@ fn draw_replicated_parts(
             FrameInterpolate::<Position>::default(),
             FrameInterpolate::<Rotation>::default(),
         ));
-    }
-}
-
-/// Mirror the networked grab intent into the local `Holding` flag, so the game's real
-/// systems light up in multiplayer: the join/delete button label (keyed on `Holding`)
-/// and `update_active_joints` + `display_potential_joints` (keyed on `Holding` + the
-/// focused held part, which `update_focus` latches). The local `toggle_holding` is
-/// gated off in MP so it doesn't fight this.
-fn mirror_grab_state(want_hold: Res<WantHold>, mut player: Query<&mut Holding, With<Player>>) {
-    if let Ok(mut holding) = player.single_mut() {
-        holding.0 = want_hold.0;
     }
 }
 
