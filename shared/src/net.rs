@@ -189,17 +189,29 @@ fn lerp_facing(start: NetFacing, other: NetFacing, t: f32) -> NetFacing {
     NetFacing(start.0 + delta * t)
 }
 
-/// A rollback condition that never triggers. Registered for the bodies'
-/// velocities so they are *replicated and restored* during a rollback (keeping the
-/// re-simulation's starting state complete) without themselves *causing* one:
-/// velocity is a noisy float that diverges by a hair almost every tick, and the
-/// default condition (`PartialEq::ne`) would then fire a rollback — which re-sims
-/// the whole predicted world (character + every part) — nearly every frame, which
-/// stutters badly on a single-threaded phone. Position/Rotation remain the
-/// rollback triggers (the visually meaningful divergence); velocity just rides
-/// along and is snapped to the confirmed value whenever they do.
-fn never_rollback<C>(_confirmed: &C, _predicted: &C) -> bool {
-    false
+/// Roll back on velocity divergence too, but only past a *meaningful* margin — NOT
+/// the default exact `PartialEq` (which fires a rollback on a hair of float drift
+/// almost every tick → re-sims the whole predicted world every frame → stutter on a
+/// single-threaded phone), and NOT never (which lets velocity drift unbounded until
+/// it surfaces as a delayed position snap — e.g. coasting to a stop then jumping
+/// back, because the client and server decayed momentum slightly differently and
+/// nothing re-synced the velocity). A ~0.5 m/s margin ignores steady-motion float
+/// noise but catches the larger divergence that builds up across an acceleration or
+/// deceleration transition, keeping the coast-to-stop consistent.
+const LINEAR_VELOCITY_ROLLBACK_TOLERANCE: f32 = 0.5; // m/s
+const ANGULAR_VELOCITY_ROLLBACK_TOLERANCE: f32 = 1.0; // rad/s
+
+fn linear_velocity_should_rollback(confirmed: &LinearVelocity, predicted: &LinearVelocity) -> bool {
+    confirmed.0.distance_squared(predicted.0)
+        > LINEAR_VELOCITY_ROLLBACK_TOLERANCE * LINEAR_VELOCITY_ROLLBACK_TOLERANCE
+}
+
+fn angular_velocity_should_rollback(
+    confirmed: &AngularVelocity,
+    predicted: &AngularVelocity,
+) -> bool {
+    confirmed.0.distance_squared(predicted.0)
+        > ANGULAR_VELOCITY_ROLLBACK_TOLERANCE * ANGULAR_VELOCITY_ROLLBACK_TOLERANCE
 }
 
 /// Only roll back the predicted pose when it diverges from the server's confirmed
@@ -306,12 +318,12 @@ impl Plugin for ProtocolPlugin {
         app.component::<LinearVelocity>()
             .replicate()
             .predict()
-            .with_rollback_condition(never_rollback)
+            .with_rollback_condition(linear_velocity_should_rollback)
             .add_interpolation_with(linear_velocity_lerp);
         app.component::<AngularVelocity>()
             .replicate()
             .predict()
-            .with_rollback_condition(never_rollback)
+            .with_rollback_condition(angular_velocity_should_rollback)
             .add_interpolation_with(angular_velocity_lerp);
         // The part shape is constant, so it only needs replicating (no interp).
         app.component::<NetPart>().replicate();
