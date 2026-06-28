@@ -279,12 +279,18 @@ fn tag_room_part(commands: &mut Commands, entity: Entity, half_extents: Vec3, ro
 /// single-player, cast from the forwarded orbit-center origin along the ray to
 /// the hold target. On release, let go. The part stays dynamic throughout.
 fn server_grab(
-    mut players: Query<(&ActionState<NetInput>, &mut HeldPart, &RoomMember)>,
+    mut players: Query<(&ActionState<NetInput>, &mut HeldPart, &RoomMember, &AttachState)>,
     parts: Query<(Entity, &Position, &PartRoom), With<NetPart>>,
 ) {
-    for (state, mut held, member) in &mut players {
+    for (state, mut held, member, attach) in &mut players {
         if !state.0.grab {
-            held.0 = None;
+            // A join (modifier-click) drops `grab` immediately, but keep the held
+            // part while the attach intent is active or its retry window is pending —
+            // so `server_attach` can still join it, and so we don't re-latch it (or
+            // another part of the just-formed assembly) and yank it to the hold point.
+            if !state.0.attach && attach.pending == 0 {
+                held.0 = None;
+            }
             continue;
         }
         if held.0.is_some() {

@@ -459,7 +459,12 @@ fn read_grab_intent(
     let modding = modifying.iter().next().is_some_and(|m| m.0);
     for _ in clicks.read() {
         if modding {
+            // Join = attach + let go (matches single-player). Dropping the hold now
+            // stops the client predicting a hold spring on the part it just joined and
+            // tells the server not to re-grab; the server keeps the part through the
+            // attach window (so the join still lands).
             want_attach.0 = ATTACH_SEND_TICKS;
+            want_hold.0 = false;
         } else {
             want_hold.0 = !want_hold.0;
         }
