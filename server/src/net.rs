@@ -118,16 +118,16 @@ impl Plugin for NetServerPlugin {
         // so the spring force lands in the same tick as the Avian step that
         // consumes it — phase-aligned with the client's *predicted* hold spring
         // (`predict_hold`), so the two worlds diverge only by round-trip and don't
-        // generate constant rollback churn from a fixed schedule offset. Attach
-        // (the one-shot joint spawn) stays in `Update` for now — Phase 5 moves it.
+        // generate constant rollback churn from a fixed schedule offset. `server_attach`
+        // runs in the same chain (it mutates the same `HeldPart`) and is tick-aligned
+        // so its retry window samples one contact graph per sim tick.
         app.add_systems(
             FixedUpdate,
             (
                 apply_net_input.before(CharacterMovement),
-                (server_grab, server_hold).chain(),
+                (server_grab, server_hold, server_attach).chain(),
             ),
         );
-        app.add_systems(Update, server_attach);
     }
 }
 
@@ -183,6 +183,25 @@ struct PartRoom {
 /// The part a networked player is currently holding (server-authoritative).
 #[derive(Component, Default)]
 struct HeldPart(Option<Entity>);
+
+/// How long (ticks) the server keeps trying to satisfy an attach intent after the
+/// join button is pressed. A held part floats on its spring and is usually only
+/// *intermittently* touching the part you're pressing it against, so a one-shot
+/// intent processed on a single tick mostly misses (you had to mash the button).
+/// This window joins as soon as contact exists within ~0.5s of the press.
+const ATTACH_WINDOW_TICKS: u32 = 30;
+
+/// Per-player attach-intent latch. A **rising edge** on the networked `attach`
+/// intent (`prev` tracks the previous value) arms `pending` for [`ATTACH_WINDOW_TICKS`];
+/// while armed, `server_attach` joins the held part to whatever it's touching the
+/// first tick contact exists, then clears `pending`. Rising-edge arming lets the
+/// client re-send the intent across several ticks (packet-loss robustness) without
+/// re-arming, and clearing on success prevents a second joint from the same press.
+#[derive(Component, Default)]
+struct AttachState {
+    pending: u32,
+    prev: bool,
+}
 
 /// Assign each connected client (and its avatar) to the room it reported, the
 /// first time a real input arrives. Lazily creates the room's world (parts) on
@@ -340,12 +359,18 @@ fn server_attach(
     rotations: Query<&Rotation>,
     coms: Query<&ComputedCenterOfMass>,
     net_parts: Query<(), With<NetPart>>,
-    mut players: Query<(&ActionState<NetInput>, &mut HeldPart, &RoomMember)>,
+    mut players: Query<(&ActionState<NetInput>, &mut HeldPart, &RoomMember, &mut AttachState)>,
 ) {
-    for (state, mut held, member) in &mut players {
-        if !state.0.attach {
+    for (state, mut held, member, mut attach) in &mut players {
+        // Arm a retry window on the rising edge of the intent (see `AttachState`).
+        if state.0.attach && !attach.prev {
+            attach.pending = ATTACH_WINDOW_TICKS;
+        }
+        attach.prev = state.0.attach;
+        if attach.pending == 0 {
             continue;
         }
+        attach.pending -= 1;
         let Some(held_entity) = held.0 else {
             continue;
         };
@@ -390,6 +415,7 @@ fn server_attach(
         }
         if attached {
             held.0 = None;
+            attach.pending = 0;
         }
     }
 }
@@ -493,6 +519,7 @@ fn spawn_player_for_client(
         // config loads).
         ServerAvatar,
         HeldPart::default(),
+        AttachState::default(),
         // Replicated facing (mirrored from the avatar's `Yaw` by
         // `sync_avatar_facing`) so remote clients can draw it facing its look.
         NetFacing::default(),

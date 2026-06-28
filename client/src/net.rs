@@ -258,7 +258,7 @@ fn write_input(
     };
     let grab_origin = orbit.iter().next().map(|g| g.translation());
     let hold_pos = hold.iter().next().map(|g| g.translation());
-    let attach = want_attach.0;
+    let attach = want_attach.0 > 0;
     for mut state in &mut controlled {
         // DirectionalInput: x = strafe, y = jump (non-zero), z = forward.
         state.0.move_xz = [dir.0.x, dir.0.z];
@@ -279,8 +279,8 @@ fn write_input(
             _ => state.0.grab = false,
         }
     }
-    // One-shot attach intent: consumed after forwarding.
-    want_attach.0 = false;
+    // Assert the attach intent for a few ticks after a press, then let it lapse.
+    want_attach.0 = want_attach.0.saturating_sub(1);
 }
 
 /// Highlight the part the player is interacting with in single-player's yellow
@@ -346,10 +346,18 @@ fn highlight_grabbable(
 #[derive(Resource, Default)]
 struct WantHold(bool);
 
-/// One-shot attach intent, set on a modifier click (the join gesture), consumed
-/// by `write_input` after it's forwarded.
+/// Attach intent as a small countdown of ticks, set on a modifier click (the join
+/// gesture) and decremented each tick by `write_input`. Sending the intent for a few
+/// ticks (rather than one) survives a dropped packet; the server arms its retry
+/// window on the rising edge, so the extra ticks don't cause a double-join.
 #[derive(Resource, Default)]
-struct WantAttach(bool);
+struct WantAttach(u32);
+
+/// How many ticks the client asserts the attach intent after a join press. The
+/// server arms its retry window on the rising edge (so extra ticks don't double-join),
+/// but sending the intent for a few ticks means a single dropped packet doesn't lose
+/// the press. ~0.1s at 60 Hz.
+const ATTACH_SEND_TICKS: u32 = 6;
 
 /// The held part's target orientation, tracked client-side and forwarded to the
 /// server as `NetInput::hold_rotation`. `Quat::default()` is the identity, so
@@ -451,7 +459,7 @@ fn read_grab_intent(
     let modding = modifying.iter().next().is_some_and(|m| m.0);
     for _ in clicks.read() {
         if modding {
-            want_attach.0 = true;
+            want_attach.0 = ATTACH_SEND_TICKS;
         } else {
             want_hold.0 = !want_hold.0;
         }
