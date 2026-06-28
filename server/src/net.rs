@@ -279,18 +279,12 @@ fn tag_room_part(commands: &mut Commands, entity: Entity, half_extents: Vec3, ro
 /// single-player, cast from the forwarded orbit-center origin along the ray to
 /// the hold target. On release, let go. The part stays dynamic throughout.
 fn server_grab(
-    mut players: Query<(&ActionState<NetInput>, &mut HeldPart, &RoomMember, &AttachState)>,
+    mut players: Query<(&ActionState<NetInput>, &mut HeldPart, &RoomMember)>,
     parts: Query<(Entity, &Position, &PartRoom), With<NetPart>>,
 ) {
-    for (state, mut held, member, attach) in &mut players {
+    for (state, mut held, member) in &mut players {
         if !state.0.grab {
-            // A join (modifier-click) drops `grab` immediately, but keep the held
-            // part while the attach intent is active or its retry window is pending —
-            // so `server_attach` can still join it, and so we don't re-latch it (or
-            // another part of the just-formed assembly) and yank it to the hold point.
-            if !state.0.attach && attach.pending == 0 {
-                held.0 = None;
-            }
+            held.0 = None;
             continue;
         }
         if held.0.is_some() {
@@ -365,9 +359,9 @@ fn server_attach(
     rotations: Query<&Rotation>,
     coms: Query<&ComputedCenterOfMass>,
     net_parts: Query<(), With<NetPart>>,
-    mut players: Query<(&ActionState<NetInput>, &mut HeldPart, &RoomMember, &mut AttachState)>,
+    mut players: Query<(&ActionState<NetInput>, &HeldPart, &RoomMember, &mut AttachState)>,
 ) {
-    for (state, mut held, member, mut attach) in &mut players {
+    for (state, held, member, mut attach) in &mut players {
         // Arm a retry window on the rising edge of the intent (see `AttachState`).
         if state.0.attach && !attach.prev {
             attach.pending = ATTACH_WINDOW_TICKS;
@@ -420,7 +414,9 @@ fn server_attach(
             }
         }
         if attached {
-            held.0 = None;
+            // Keep holding the part after joining (like single-player): you lift your
+            // block and the one you joined hangs below it on the new joint. Just close
+            // the retry window so this press joins exactly once.
             attach.pending = 0;
         }
     }
