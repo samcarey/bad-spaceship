@@ -201,17 +201,21 @@ fn lerp_facing(start: NetFacing, other: NetFacing, t: f32) -> NetFacing {
 const LINEAR_VELOCITY_ROLLBACK_TOLERANCE: f32 = 0.5; // m/s
 const ANGULAR_VELOCITY_ROLLBACK_TOLERANCE: f32 = 1.0; // rad/s
 
+/// Euclidean divergence of two `Vec3`-newtype values past a tolerance — the shared
+/// body of the per-component (position / linear-vel / angular-vel) rollback conditions.
+fn over_tolerance(confirmed: Vec3, predicted: Vec3, tolerance: f32) -> bool {
+    confirmed.distance_squared(predicted) > tolerance * tolerance
+}
+
 fn linear_velocity_should_rollback(confirmed: &LinearVelocity, predicted: &LinearVelocity) -> bool {
-    confirmed.0.distance_squared(predicted.0)
-        > LINEAR_VELOCITY_ROLLBACK_TOLERANCE * LINEAR_VELOCITY_ROLLBACK_TOLERANCE
+    over_tolerance(confirmed.0, predicted.0, LINEAR_VELOCITY_ROLLBACK_TOLERANCE)
 }
 
 fn angular_velocity_should_rollback(
     confirmed: &AngularVelocity,
     predicted: &AngularVelocity,
 ) -> bool {
-    confirmed.0.distance_squared(predicted.0)
-        > ANGULAR_VELOCITY_ROLLBACK_TOLERANCE * ANGULAR_VELOCITY_ROLLBACK_TOLERANCE
+    over_tolerance(confirmed.0, predicted.0, ANGULAR_VELOCITY_ROLLBACK_TOLERANCE)
 }
 
 /// Only roll back the predicted pose when it diverges from the server's confirmed
@@ -230,8 +234,7 @@ const POSITION_ROLLBACK_TOLERANCE: f32 = 0.05; // metres
 const ROTATION_ROLLBACK_TOLERANCE: f32 = 0.05; // radians (~3°)
 
 fn position_should_rollback(confirmed: &Position, predicted: &Position) -> bool {
-    confirmed.0.distance_squared(predicted.0)
-        > POSITION_ROLLBACK_TOLERANCE * POSITION_ROLLBACK_TOLERANCE
+    over_tolerance(confirmed.0, predicted.0, POSITION_ROLLBACK_TOLERANCE)
 }
 
 fn rotation_should_rollback(confirmed: &Rotation, predicted: &Rotation) -> bool {

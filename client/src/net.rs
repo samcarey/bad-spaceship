@@ -614,7 +614,7 @@ struct JointAnchorBody(Entity);
 /// `GizmoMaterial` so it draws identically to single-player (positioned by
 /// `position_replicated_joints`).
 ///
-/// Retries (gated on `Without<JointBodies>`) until both predicted parts exist and
+/// Retries (gated on `Without<JointAnchorBody>`) until both predicted parts exist and
 /// have their physics body built (`With<RigidBody>`), since the `NetJoint` can
 /// replicate before the parts it references finish spawning.
 fn bind_replicated_joints(
@@ -657,7 +657,12 @@ fn position_replicated_joints(
 ) {
     for (joint, anchor_body, mut transform) in &mut joints {
         if let Ok(body) = parts.get(anchor_body.0) {
-            transform.translation = body.transform_point(Vec3::from_array(joint.anchor1));
+            let anchor = body.transform_point(Vec3::from_array(joint.anchor1));
+            // Only write on change, so a settled assembly stops dirtying `Transform`
+            // (and re-propagating `GlobalTransform`) every frame.
+            if transform.translation != anchor {
+                transform.translation = anchor;
+            }
         }
     }
 }
