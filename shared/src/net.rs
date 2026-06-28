@@ -202,6 +202,30 @@ fn never_rollback<C>(_confirmed: &C, _predicted: &C) -> bool {
     false
 }
 
+/// Only roll back the predicted pose when it diverges from the server's confirmed
+/// pose by a *visible* margin — NOT lightyear's default exact `PartialEq`, which
+/// fires a full-world rollback on sub-millimeter float drift. The client and server
+/// run the same sim but not bit-identically (FP non-determinism across platforms),
+/// so an exact check diverges almost every snapshot → a rollback (re-simming the
+/// character + every predicted part) nearly every frame → the predicted character
+/// and the camera mounted on it judder, reading as a low-frame-rate "roughness".
+/// A few-cm / few-degree tolerance lets the client keep its locally-predicted pose
+/// for trivial disagreements (still server-authoritative on real divergence — a
+/// wall hit, a shove — which exceeds the margin and snaps, eased by visual
+/// correction), so prediction stays smooth. Applies to every predicted body
+/// (registration is global): the character *and* the loose parts.
+const POSITION_ROLLBACK_TOLERANCE: f32 = 0.05; // metres
+const ROTATION_ROLLBACK_TOLERANCE: f32 = 0.05; // radians (~3°)
+
+fn position_should_rollback(confirmed: &Position, predicted: &Position) -> bool {
+    confirmed.0.distance_squared(predicted.0)
+        > POSITION_ROLLBACK_TOLERANCE * POSITION_ROLLBACK_TOLERANCE
+}
+
+fn rotation_should_rollback(confirmed: &Rotation, predicted: &Rotation) -> bool {
+    confirmed.0.angle_between(predicted.0) > ROTATION_ROLLBACK_TOLERANCE
+}
+
 // lightyear's `LerpFn` takes its endpoints by value; `lightyear_avian3d`'s lerps
 // take them by reference, so wrap them.
 fn position_lerp(start: Position, other: Position, t: f32) -> Position {
@@ -263,10 +287,12 @@ impl Plugin for ProtocolPlugin {
         app.component::<Position>()
             .replicate()
             .predict()
+            .with_rollback_condition(position_should_rollback)
             .add_interpolation_with(position_lerp);
         app.component::<Rotation>()
             .replicate()
             .predict()
+            .with_rollback_condition(rotation_should_rollback)
             .add_interpolation_with(rotation_lerp);
         // Replicate the bodies' velocities too, predicted alongside Position/Rotation
         // — the canonical lightyear_avian setup for predicted physics. Without these,
