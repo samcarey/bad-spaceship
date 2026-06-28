@@ -418,6 +418,20 @@ fn orient_held_part(mut parts: Query<(&Transform, &TargetOrientation, Forces)>) 
     }
 }
 
+/// Recover a contact point in a body's local frame from Avian's contact anchor.
+///
+/// Avian reports contact anchors in **world orientation, relative to each body's
+/// center of mass**: `anchor = world_point - (pos + rot * com_local)`. The joint
+/// builders want a **body-local** anchor, recovered as `rot⁻¹ * anchor + com_local`.
+/// The `+ com_local` term matters: dropping it only happens to work when the COM
+/// sits at the origin (the centered cuboid parts), but the ground trimesh's COM does
+/// not — omitting it there offset the ground anchor and dragged the joined part down
+/// into the bowl. Shared by single-player `update_active_joints` and the server's
+/// `server_attach` so the anchor convention stays in one place.
+pub fn local_contact_anchor(rotation: Quat, com: Vec3, anchor: Vec3) -> Vec3 {
+    rotation.inverse() * anchor + com
+}
+
 fn update_active_joints(
     collisions: Collisions,
     // Body rotations + centers of mass, used to map Avian's world-space,
@@ -472,14 +486,8 @@ fn update_active_joints(
                     }
 
                     if contact_pair.is_touching() {
-                        // Avian contact anchors are world-space, relative to each
-                        // body's center of mass: `anchor = world_point - (pos + rot *
-                        // com_local)`. Recover the body-local contact point with
-                        // `rot⁻¹ * anchor + com_local`. Dropping the `+ com_local`
-                        // term only happens to work when the COM sits at the origin
-                        // (the centered cuboid parts); the ground trimesh's COM does
-                        // not, so omitting it offset the ground anchor and dragged the
-                        // joined part down into the bowl.
+                        // Recover each contact point in its body's local frame (see
+                        // `local_contact_anchor` for the COM-relative anchor convention).
                         let rot1 = transforms
                             .get(collider1)
                             .map(|t| t.rotation)
@@ -498,8 +506,8 @@ fn update_active_joints(
                             .unwrap_or(Vec3::ZERO);
                         for manifold in &contact_pair.manifolds {
                             for contact in &manifold.points {
-                                let local_p1 = rot1.inverse() * contact.anchor1 + com1;
-                                let local_p2 = rot2.inverse() * contact.anchor2 + com2;
+                                let local_p1 = local_contact_anchor(rot1, com1, contact.anchor1);
+                                let local_p2 = local_contact_anchor(rot2, com2, contact.anchor2);
                                 if existing_joints
                                     .0
                                     .iter()

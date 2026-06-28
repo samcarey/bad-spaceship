@@ -28,7 +28,9 @@ use bad_spaceship_shared::net::{
     apply_net_input, focused_part, hold_acceleration, orient_acceleration, NetFacing, NetInput,
     NetJoint, NetPart, NetPlayer, ProtocolPlugin, TICK,
 };
-use bad_spaceship_shared::part::{spawn_random_part, SuppressLocalParts, NUM_PARTS};
+use bad_spaceship_shared::part::{
+    local_contact_anchor, spawn_random_part, SuppressLocalParts, NUM_PARTS,
+};
 use bad_spaceship_shared::utils::QuatExt;
 use bad_spaceship_shared::{SuppressLocalPlayer, Yaw};
 use bevy::prelude::*;
@@ -346,10 +348,10 @@ fn server_hold(
 /// touching, at the contact anchors — then release it (it's now part of the
 /// assembly). Cross-room parts can't touch (collision layers isolate rooms), so
 /// the join is room-scoped automatically. Ports single-player's
-/// `update_active_joints`/`attach`: Avian's contact anchors are world-space,
-/// COM-relative, so recover each body-local anchor with `rot⁻¹ · anchor + com`.
-/// Joints are server physics, so the joined parts move together and their
-/// replicated poses tell the story (no joint replication needed).
+/// `update_active_joints`/`attach`, recovering each body-local anchor via the shared
+/// `local_contact_anchor` (the COM-relative anchor convention lives there). Joints
+/// are server physics, so the joined parts move together and their replicated poses
+/// tell the story (no joint replication needed).
 fn server_attach(
     mut commands: Commands,
     collisions: Collisions,
@@ -389,8 +391,8 @@ fn server_attach(
             let com = |e| coms.get(e).map(|c| c.0).unwrap_or(Vec3::ZERO);
             for manifold in &pair.manifolds {
                 for contact in &manifold.points {
-                    let p1 = rot(c1).inverse() * contact.anchor1 + com(c1);
-                    let p2 = rot(c2).inverse() * contact.anchor2 + com(c2);
+                    let p1 = local_contact_anchor(rot(c1), com(c1), contact.anchor1);
+                    let p2 = local_contact_anchor(rot(c2), com(c2), contact.anchor2);
                     commands.spawn((
                         // The server's authoritative joint (body1=c2, body2=c1).
                         SphericalJoint::new(c2, c1)
