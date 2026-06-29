@@ -18,6 +18,8 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use avian3d::prelude::{
     CollisionLayers, Collisions, ComputedCenterOfMass, Forces, Gravity, Position, Rotation,
@@ -34,58 +36,230 @@ use bad_spaceship_shared::part::{
 use bad_spaceship_shared::{SuppressLocalPlayer, Yaw};
 use bevy::prelude::*;
 use lightyear::prelude::input::native::ActionState;
+use lightyear::prelude::input::InputBuffer;
 use lightyear::prelude::server::*;
 use lightyear::prelude::*;
 
-/// Telemetry: log every connected client's RTT/jitter every ~2s so latency can be
-/// tracked from the server log without the player reporting it. lightyear keeps a
-/// `PingManager` per client (`ClientOf`); `MinimalPlugins` has no `LogPlugin`, so
-/// use `println!` (captured by launchd into the version's `server.log`).
-fn log_client_rtt(
+/// Per-avatar tally of how many simulated ticks the server had a *fresh* input for
+/// vs. how many it had to fall back on the last-known input (the input for that tick
+/// was late or lost). This is the signal for sizing how far the client timeline
+/// should lead the server: if `late` is a meaningful fraction of `total`, that
+/// client's inputs aren't arriving in time and its sync margin is too tight. Reset
+/// each telemetry window by [`flush_telemetry`] via [`Self::take`].
+#[derive(Component, Default)]
+struct LateInputStats {
+    /// Ticks the input for the current tick was missing → server reused the last input.
+    late: u32,
+    /// Ticks the avatar had a live input buffer (`late` is counted out of this).
+    total: u32,
+}
+
+/// Count late/lost inputs per avatar, every simulated tick. Runs in `FixedUpdate`,
+/// i.e. after lightyear's `update_action_state` (FixedPreUpdate) has consumed this
+/// tick's input from the buffer. The distinction (see `InputBuffer::get` vs
+/// `get_predict`): `get_predict(tick)` is `Some` once the client is live (there is
+/// at least a last-known input to fall back on); `get(tick)` is `Some` only if the
+/// input *for this exact tick* is present. Present-via-fallback but not exact ⇒ the
+/// server simulated this tick on a stale input because the real one hadn't arrived —
+/// a buffer underrun, which a larger client lead would have prevented.
+fn count_late_inputs(
+    timeline: Res<LocalTimeline>,
+    mut avatars: Query<(&InputBuffer<ActionState<NetInput>, NetInput>, &mut LateInputStats)>,
+) {
+    let tick = timeline.tick();
+    for (buffer, mut stats) in &mut avatars {
+        if buffer.get_predict(tick).is_some() {
+            stats.total += 1;
+            if buffer.get(tick).is_none() {
+                stats.late += 1;
+            }
+        }
+    }
+}
+
+/// One per-client telemetry row (a ~2s window). `None` columns are written as SQL
+/// NULL: rtt/jitter before the first ping samples land, the rollback fields when no
+/// report arrived this window, late-input when the avatar had no live input buffer.
+struct Sample {
+    ts_ms: i64,
+    sha: &'static str,
+    /// The client link entity's bits — the same id the live `[tel]` log line prints,
+    /// stable for the session so rows correlate across windows.
+    client: i64,
+    rtt_ms: Option<f64>,
+    jitter_ms: Option<f64>,
+    samples: Option<i64>,
+    rollbacks: Option<u32>,
+    rollback_ticks: Option<u32>,
+    max_pos_err_mm: Option<u32>,
+    pos_triggers: Option<u32>,
+    late_inputs: Option<u32>,
+    input_ticks: Option<u32>,
+}
+
+/// SQLite telemetry sink. `Connection` is `Send` but not `Sync`, so wrap it in a
+/// `Mutex` to satisfy `Resource` (only one system ever touches it, so contention is nil).
+#[derive(Resource)]
+struct TelemetryDb(Mutex<rusqlite::Connection>);
+
+impl TelemetryDb {
+    fn insert(&self, row: &Sample) {
+        let conn = self.0.lock().unwrap();
+        if let Err(e) = conn.execute(
+            "INSERT INTO samples (ts_ms, sha, client, rtt_ms, jitter_ms, samples, \
+             rollbacks, rollback_ticks, max_pos_err_mm, pos_triggers, late_inputs, input_ticks) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            rusqlite::params![
+                row.ts_ms,
+                row.sha,
+                row.client,
+                row.rtt_ms,
+                row.jitter_ms,
+                row.samples,
+                row.rollbacks,
+                row.rollback_ticks,
+                row.max_pos_err_mm,
+                row.pos_triggers,
+                row.late_inputs,
+                row.input_ticks,
+            ],
+        ) {
+            eprintln!("[tel] insert failed: {e}");
+        }
+    }
+}
+
+/// Open (or create) the telemetry db at `BS_TELEMETRY_DB` (default `telemetry.db` in
+/// the process cwd — under the versioned deploy that's the per-version dir, next to
+/// `server.log`, so each build gets its own db). On any failure the resource is
+/// simply not inserted and `flush_telemetry` degrades to printing only. WAL +
+/// `synchronous=NORMAL` keep the per-window write cheap without risking torn rows.
+fn open_telemetry_db(mut commands: Commands) {
+    let path = std::env::var("BS_TELEMETRY_DB").unwrap_or_else(|_| "telemetry.db".to_string());
+    match rusqlite::Connection::open(&path) {
+        Ok(conn) => {
+            if let Err(e) = conn.execute_batch(
+                "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; \
+                 CREATE TABLE IF NOT EXISTS samples ( \
+                     ts_ms          INTEGER NOT NULL, \
+                     sha            TEXT    NOT NULL, \
+                     client         INTEGER NOT NULL, \
+                     rtt_ms         REAL, \
+                     jitter_ms      REAL, \
+                     samples        INTEGER, \
+                     rollbacks      INTEGER, \
+                     rollback_ticks INTEGER, \
+                     max_pos_err_mm INTEGER, \
+                     pos_triggers   INTEGER, \
+                     late_inputs    INTEGER, \
+                     input_ticks    INTEGER \
+                 ); \
+                 CREATE INDEX IF NOT EXISTS idx_samples_client_ts ON samples(client, ts_ms);",
+            ) {
+                eprintln!("[tel] schema init failed: {e}");
+                return;
+            }
+            println!("[tel] telemetry db at {path}");
+            commands.insert_resource(TelemetryDb(Mutex::new(conn)));
+        }
+        Err(e) => eprintln!("[tel] failed to open db {path}: {e}"),
+    }
+}
+
+/// Format an optional telemetry value for the live `[tel]` log line: `-` for a value
+/// that's absent this window (keeps the line compact and the columns aligned).
+fn o<T: core::fmt::Display>(v: Option<T>) -> String {
+    v.map(|x| x.to_string()).unwrap_or_else(|| "-".to_string())
+}
+
+/// Telemetry flush (every ~2s): one wide row per connected client combining latency
+/// (`PingManager`), the client's reported rollback load (`RollbackReport`), and the
+/// server-measured late-input counts ([`LateInputStats`]). Written to the SQLite sink
+/// for later analysis *and* printed as a single `[tel]` line so live `tail -f
+/// server.log` still shows everything. `MinimalPlugins` has no `LogPlugin`, hence
+/// `println!` (captured by launchd into the version's `server.log`).
+fn flush_telemetry(
     time: Res<Time>,
     mut acc: Local<f32>,
-    clients: Query<(Entity, &PingManager), (With<ClientOf>, With<Connected>)>,
+    db: Option<Res<TelemetryDb>>,
+    mut links: Query<
+        (Entity, &PingManager, &mut MessageReceiver<RollbackReport>),
+        (With<ClientOf>, With<Connected>),
+    >,
+    mut avatars: Query<(&ControlledBy, &mut LateInputStats)>,
 ) {
     *acc += time.delta_secs();
     if *acc < 2.0 {
         return;
     }
     *acc = 0.0;
-    for (entity, ping) in &clients {
-        if ping.latency_samples_recv() == 0 {
-            continue;
-        }
-        println!(
-            "[rtt] client={} rtt={:.1}ms jitter={:.1}ms samples={}",
-            entity.to_bits(),
-            ping.rtt().as_secs_f64() * 1000.0,
-            ping.jitter().as_secs_f64() * 1000.0,
-            ping.latency_samples_recv(),
-        );
-    }
-}
 
-/// Telemetry: drain each client's reported `RollbackReport` (its cumulative
-/// client-side prediction load) and log it (`[rb] …`), so the per-version `server.log`
-/// carries the rollback counts that determine whether a determinism change earns its
-/// keep — rollbacks happen on the client, so the server only knows them via this
-/// report. Mirrors `log_client_rtt`'s `client={entity.to_bits()}` id so the two lines
-/// correlate per client.
-fn log_client_rollbacks(
-    mut clients: Query<(Entity, &mut MessageReceiver<RollbackReport>), With<ClientOf>>,
-) {
-    for (entity, mut receiver) in &mut clients {
+    // Map each client link → its avatar's accumulated late-input counts. The avatar
+    // carries the `InputBuffer`/`LateInputStats`; `ControlledBy.owner` is the link
+    // entity whose `PingManager`/`RollbackReport` the rest of the row comes from.
+    let mut late: HashMap<Entity, (u32, u32)> = HashMap::new();
+    for (controlled, mut stats) in &mut avatars {
+        let LateInputStats { late: l, total: t } = core::mem::take(&mut *stats);
+        let entry = late.entry(controlled.owner).or_default();
+        entry.0 += l;
+        entry.1 += t;
+    }
+
+    let ts_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let sha = bad_spaceship_shared::net::BS_VERSION;
+
+    for (entity, ping, mut receiver) in &mut links {
+        let client = entity.to_bits() as i64;
+        let (rtt_ms, jitter_ms, samples) = if ping.latency_samples_recv() > 0 {
+            (
+                Some(ping.rtt().as_secs_f64() * 1000.0),
+                Some(ping.jitter().as_secs_f64() * 1000.0),
+                Some(ping.latency_samples_recv() as i64),
+            )
+        } else {
+            (None, None, None)
+        };
         // Unreliable channel → only the newest sample matters; the counters are
-        // cumulative, so an older one would just log a smaller total.
-        if let Some(report) = receiver.receive().last() {
-            println!(
-                "[rb] client={} rollbacks={} ticks={} max_pos_err_mm={} pos_triggers={}",
-                entity.to_bits(),
-                report.rollbacks,
-                report.rollback_ticks,
-                report.max_pos_err_mm,
-                report.pos_triggers,
-            );
+        // cumulative, so an older one would just report a smaller total.
+        let report = receiver.receive().last();
+        let rollbacks = report.as_ref().map(|r| r.rollbacks);
+        let rollback_ticks = report.as_ref().map(|r| r.rollback_ticks);
+        let max_pos_err_mm = report.as_ref().map(|r| r.max_pos_err_mm);
+        let pos_triggers = report.as_ref().map(|r| r.pos_triggers);
+        let (late_inputs, input_ticks) = late.get(&entity).copied().unzip();
+
+        println!(
+            "[tel] client={} rtt={}ms jitter={}ms samples={} rb={} rbt={} errmm={} trig={} late={}/{}",
+            entity.to_bits(),
+            o(rtt_ms.map(|v| format!("{v:.1}"))),
+            o(jitter_ms.map(|v| format!("{v:.1}"))),
+            o(samples),
+            o(rollbacks),
+            o(rollback_ticks),
+            o(max_pos_err_mm),
+            o(pos_triggers),
+            o(late_inputs),
+            o(input_ticks),
+        );
+
+        if let Some(db) = &db {
+            db.insert(&Sample {
+                ts_ms,
+                sha,
+                client,
+                rtt_ms,
+                jitter_ms,
+                samples,
+                rollbacks,
+                rollback_ticks,
+                max_pos_err_mm,
+                pos_triggers,
+                late_inputs,
+                input_ticks,
+            });
         }
     }
 }
@@ -123,12 +297,15 @@ impl Plugin for NetServerPlugin {
         // suppress the stray local single-player character `CommonPlugins` would spawn.
         app.insert_resource(SuppressLocalPlayer);
         app.add_systems(Startup, start_server);
+        // Open the telemetry db once at startup (degrades to log-only if it fails).
+        app.add_systems(Startup, open_telemetry_db);
         // One server-owned, replicated player per client that connects.
         app.add_observer(spawn_player_for_client);
-        // Latency telemetry: log each client's RTT/jitter to stdout (-> server.log).
-        app.add_systems(Update, log_client_rtt);
-        // Prediction-load telemetry: log each client's reported rollback counts.
-        app.add_systems(Update, log_client_rollbacks);
+        // Tally late/lost inputs per simulated tick (FixedUpdate, after lightyear's
+        // input-buffer read), then flush a combined per-client telemetry row (latency
+        // + rollback load + late inputs) to the db + `[tel]` log line every ~2s.
+        app.add_systems(FixedUpdate, count_late_inputs);
+        app.add_systems(Update, flush_telemetry);
         // Refill a room's parts that fall off its platform, and mirror each avatar's
         // look yaw into its replicated facing. Parts and joints replicate their state
         // directly (predicted Avian `Position`/`Rotation`; `NetJoint` data) — nothing
@@ -546,6 +723,9 @@ fn spawn_player_for_client(
         ServerAvatar,
         HeldPart::default(),
         AttachState::default(),
+        // Telemetry: server-measured late/lost-input tally for this client (the
+        // `InputBuffer` lightyear adds on first input lands on this same entity).
+        LateInputStats::default(),
         // Replicated facing (mirrored from the avatar's `Yaw` by
         // `sync_avatar_facing`) so remote clients can draw it facing its look.
         NetFacing::default(),

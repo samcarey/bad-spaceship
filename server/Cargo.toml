@@ -20,6 +20,13 @@ avian3d = { workspace = true }
 # replication. Version pinned in the root `[workspace.dependencies]`.
 lightyear = { workspace = true, features = ["server", "replication", "prediction", "interpolation", "websocket", "netcode", "std", "input_native"] }
 lightyear_avian3d = { workspace = true }
+# Telemetry sink: append per-client netcode samples (rtt/jitter, the client's
+# reported rollback load, and server-measured late-input counts) to a local
+# SQLite db, one wide row per client per ~2s window, for later tuning analysis
+# (querying late-input rate vs latency/jitter to size the sync margin). Native
+# server only — never compiled to wasm. `bundled` builds SQLite from source so
+# the host needs no system libsqlite3 (it has a C compiler).
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 [features]
 default = [
