@@ -79,10 +79,12 @@ fn log_client_rollbacks(
         // cumulative, so an older one would just log a smaller total.
         if let Some(report) = receiver.receive().last() {
             println!(
-                "[rb] client={} rollbacks={} ticks={}",
+                "[rb] client={} rollbacks={} ticks={} max_pos_err_mm={} pos_triggers={}",
                 entity.to_bits(),
                 report.rollbacks,
                 report.rollback_ticks,
+                report.max_pos_err_mm,
+                report.pos_triggers,
             );
         }
     }

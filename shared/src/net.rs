@@ -14,6 +14,7 @@
 //! prediction/interpolation come next, where they can be tested on real
 //! endpoints.
 use core::time::Duration;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 // `ForcesItem` (the `Forces` query-data item the held-part spring writes through) is
 // not re-exported in avian's prelude — reach it by its full module path.
@@ -272,8 +273,32 @@ fn angular_velocity_should_rollback(
 const POSITION_ROLLBACK_TOLERANCE: f32 = 0.05; // metres
 const ROTATION_ROLLBACK_TOLERANCE: f32 = 0.05; // radians (~3°)
 
+/// Diagnostics for the determinism/lag work: the largest position divergence (mm)
+/// that triggered a rollback and how many such triggers occurred, since the last
+/// telemetry flush. Small maxima (~5-15cm) ⇒ movement/sync drift; large ones
+/// (sub-metre→metres) ⇒ contact chaos (a shoved block resolving a tick apart). Read
+/// + reset by `take_rollback_diag` (client telemetry); never updated on the server
+/// (it doesn't roll back). Atomic because `position_should_rollback` is a free fn
+/// lightyear calls with no access to a resource.
+static MAX_POS_ERR_MM: AtomicU32 = AtomicU32::new(0);
+static POS_ROLLBACK_TRIGGERS: AtomicU32 = AtomicU32::new(0);
+
+/// Take and reset the rollback-divergence diagnostics: `(max_pos_err_mm, triggers)`.
+pub fn take_rollback_diag() -> (u32, u32) {
+    (
+        MAX_POS_ERR_MM.swap(0, Ordering::Relaxed),
+        POS_ROLLBACK_TRIGGERS.swap(0, Ordering::Relaxed),
+    )
+}
+
 fn position_should_rollback(confirmed: &Position, predicted: &Position) -> bool {
-    over_tolerance(confirmed.0, predicted.0, POSITION_ROLLBACK_TOLERANCE)
+    let over = over_tolerance(confirmed.0, predicted.0, POSITION_ROLLBACK_TOLERANCE);
+    if over {
+        let mm = (confirmed.0.distance(predicted.0) * 1000.0) as u32;
+        MAX_POS_ERR_MM.fetch_max(mm, Ordering::Relaxed);
+        POS_ROLLBACK_TRIGGERS.fetch_add(1, Ordering::Relaxed);
+    }
+    over
 }
 
 fn rotation_should_rollback(confirmed: &Rotation, predicted: &Rotation) -> bool {
@@ -336,6 +361,11 @@ pub fn apply_net_input(
 pub struct RollbackReport {
     pub rollbacks: u32,
     pub rollback_ticks: u32,
+    /// Largest position divergence (mm) that triggered a rollback this window, and the
+    /// number of such triggers — distinguishes movement/sync drift (small) from contact
+    /// chaos (large). See `take_rollback_diag`.
+    pub max_pos_err_mm: u32,
+    pub pos_triggers: u32,
 }
 
 /// Low-rate diagnostics channel. Unreliable: a dropped telemetry sample just means one

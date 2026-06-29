@@ -18,7 +18,7 @@ use bad_spaceship_shared::character::{
 };
 use bad_spaceship_shared::net::{
     apply_hold_spring, apply_net_input, focused_part, NetFacing, NetInput, NetJoint, NetPart,
-    NetPlayer, ProtocolPlugin, RollbackReport, TelemetryChannel, TICK,
+    take_rollback_diag, NetPlayer, ProtocolPlugin, RollbackReport, TelemetryChannel, TICK,
 };
 use bad_spaceship_shared::part::{insert_part_physics, Holdable, SuppressLocalParts};
 use bad_spaceship_shared::player::make_local_player;
@@ -220,9 +220,12 @@ fn report_rollbacks(
     *acc = 0.0;
     let Some(metrics) = metrics else { return };
     let Ok(mut sender) = sender.single_mut() else { return };
+    let (max_pos_err_mm, pos_triggers) = take_rollback_diag();
     sender.send::<TelemetryChannel>(RollbackReport {
         rollbacks: metrics.rollbacks,
         rollback_ticks: metrics.rollback_ticks,
+        max_pos_err_mm,
+        pos_triggers,
     });
 }
 
