@@ -138,14 +138,6 @@ pub struct Modifying(pub bool);
 #[derive(Message)]
 struct AttachEvent;
 
-#[derive(Message)]
-struct ReleaseEvent;
-
-#[derive(Message)]
-struct HoldEvent {
-    held: Entity,
-}
-
 pub struct DisplayableJoint {
     pub points: (Vec3, Vec3),
     pub entities: (Entity, Entity),
