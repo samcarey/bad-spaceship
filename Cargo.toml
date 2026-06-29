@@ -32,7 +32,15 @@ bevy = { version = "0.19", default-features = false }
 # The base feature set is identical across all three crates; native/server re-add
 # `avian3d/simd` + `avian3d/parallel` via their own `[features]` lists. See
 # shared/Cargo.toml for the full rationale on each base feature (esp. xpbd_joints).
-avian3d = { version = "0.7.0", default-features = false, features = ["3d", "f32", "parry-f32", "xpbd_joints", "serialize"] }
+# `enhanced-determinism` routes physics math through `libm` (and parry's deterministic
+# path) so the wasm client and the aarch64 server compute the *same* results — the point
+# of a client-prediction/rollback model is that local prediction matches the
+# authoritative server, and platform float differences are a divergence source that
+# triggers corrections. It REQUIRES the per-target `simd`/`parallel` perf features to be
+# OFF (SIMD width + parallel reduction order are themselves non-deterministic across
+# builds), so the server/native `[features]` lists no longer add them — every target now
+# runs the identical scalar, single-threaded-solver physics. (See #41 determinism pass.)
+avian3d = { version = "0.7.0", default-features = false, features = ["3d", "f32", "parry-f32", "xpbd_joints", "serialize", "enhanced-determinism"] }
 # bevy_egui 0.40 is the release that targets Bevy 0.19 (egui 0.34). Client-only,
 # but pinned here so all engine-coupled versions live in one place.
 bevy_egui = { version = "0.40", default-features = false, features = ["default_fonts", "render"] }
