@@ -13,10 +13,10 @@ use crate::{
     part::{Holdable, TargetOrientation, TargetPosition},
     utils::{ToVec3, DEG_TO_RADIANS},
     AttachEvent, BoundingRadius, CameraOrbitCenter, Character, FocusedInteractable,
-    GameStickDirectionalInput, HoldEvent, HoldPoint, Holding, InputEvents,
+    GameStickDirectionalInput, HoldPoint, Holding, InputEvents,
     KeyboardDirectionalInput, LeftClicked, LookPitch, Modifying, MouseMotionDelta, MouseWheelDelta,
     MouseWheelLabel, OriginalPosition, PartRotation, Player, PlayerCameraOrbitCenter, PlayerClick,
-    PlayerInput, ReleaseEvent, ToggleHoldingSystemLabel, Yaw, INITIAL_CAMERA_PITCH,
+    PlayerInput, ToggleHoldingSystemLabel, Yaw, INITIAL_CAMERA_PITCH,
 };
 
 const MAX_CAMERA_PITCH_DEGREES: f32 = 89.;
@@ -45,11 +45,13 @@ impl Plugin for PlayerPlugin {
                     despawn,
                     attach_camera_orbit.in_set(AttachCameraOrbitSystem),
                     apply_part_rotation,
+                    // The pickup camera/hold-point "feel" reacts to the shared `Holding`
+                    // *state* (set by both single-player `toggle_holding` and the
+                    // multiplayer predicted-grab path), so it works identically in both
+                    // modes — see `adjust_camera_on_hold`.
                     (
-                        reset_camera_after_release,
                         adjust_camera_on_hold,
-                        reset_hold_point_after_release.after(AttachCameraOrbitSystem),
-                        adjust_hold_point_on_hold,
+                        adjust_hold_point_on_hold.after(AttachCameraOrbitSystem),
                     )
                         .after(ToggleHoldingSystemLabel),
                     ease_camera.in_set(EaseLabel),
@@ -59,9 +61,7 @@ impl Plugin for PlayerPlugin {
             .add_message::<PlayerClick>()
             .init_asset::<Config>()
             .add_message::<AttachEvent>()
-            .add_message::<ReleaseEvent>()
-            .init_resource::<CameraOrbitOffset>()
-            .add_message::<HoldEvent>();
+            .init_resource::<CameraOrbitOffset>();
     }
 }
 
@@ -329,8 +329,6 @@ fn toggle_holding(
     hold_points: Query<(), With<HoldPoint>>,
     holdables: Query<&GlobalTransform, With<Holdable>>,
     mut attach_events: MessageWriter<AttachEvent>,
-    mut release_events: MessageWriter<ReleaseEvent>,
-    mut hold_events: MessageWriter<HoldEvent>,
 ) {
     if clicks.read().next().is_some() {
         if let Some((mut holding, interactable, player_children, modifying)) =
@@ -349,7 +347,6 @@ fn toggle_holding(
                                 commands
                                     .entity(current_interactable)
                                     .remove::<HeldBundle>();
-                                release_events.write(ReleaseEvent);
                             }
                         } else if !modifying.0 {
                             holding.0 = true;
@@ -359,9 +356,6 @@ fn toggle_holding(
                                     hold_point_entity,
                                     original_transform.compute_transform().rotation,
                                 ));
-                            hold_events.write(HoldEvent {
-                                held: current_interactable,
-                            });
                         }
                     }
                 }
@@ -409,37 +403,49 @@ fn quadratic_in_out(t: f32) -> f32 {
 #[derive(SystemSet, Clone, Hash, Debug, PartialEq, Eq)]
 struct EaseLabel;
 
-fn adjust_camera_on_hold(
-    mut commands: Commands,
-    mut hold_events: MessageReader<HoldEvent>,
-    camera_orbit_offset: Res<CameraOrbitOffset>,
-    camera_orbit_centers: Query<(Entity, &Transform), With<CameraOrbitCenter>>,
-    radiuses: Query<&BoundingRadius, With<Holdable>>,
-) {
-    if let Some(hold_event) = hold_events.read().next() {
-        if let Ok(radius) = radiuses.get(hold_event.held) {
-            for (entity, transform) in camera_orbit_centers.iter() {
-                commands.entity(entity).insert(CameraTween::new(
-                    transform.translation,
-                    camera_orbit_offset.min + Vec3::Y * radius.0,
-                ));
-            }
-        }
+/// The bounding radius of the part currently held by `holding`/`focused`, or `0.0`
+/// when not holding or nothing is focused (which eases the camera/hold-point back to
+/// rest on release). The held entity is read from `FocusedInteractable` and its
+/// `BoundingRadius` is attached by the shared `insert_part_physics`, so this resolves
+/// in single-player (local part) and multiplayer (predicted replicated part) alike.
+fn held_radius(
+    holding: &Holding,
+    focused: &FocusedInteractable,
+    radiuses: &Query<&BoundingRadius>,
+) -> f32 {
+    if !holding.0 {
+        return 0.0;
     }
+    focused
+        .0
+        .and_then(|e| radiuses.get(e).ok())
+        .map_or(0.0, |r| r.0)
 }
 
-fn reset_camera_after_release(
+/// Ease the camera-orbit centre up by the held part's bounding radius on pickup and
+/// back down on release. This reacts to the **shared `Holding` state** — which both
+/// the single-player `toggle_holding` and the multiplayer predicted-grab path
+/// (`read_grab_intent`) set — rather than a `HoldEvent` that only the single-player
+/// input system emits. Because that state is identical across modes, one system gives
+/// single-player and multiplayer the same pickup feel with no mode-specific code.
+/// (This is the general rule for keeping the two in sync: view/feel systems observe
+/// replicated/shared *state*, never an event emitted inside a suppressed system.)
+fn adjust_camera_on_hold(
     mut commands: Commands,
-    mut release_events: MessageReader<ReleaseEvent>,
-    camera_orbit_offset: ResMut<CameraOrbitOffset>,
-    mut camera_orbit_centers: Query<(Entity, &mut Transform), With<CameraOrbitCenter>>,
+    changed: Query<(&Holding, &FocusedInteractable), (With<Player>, Changed<Holding>)>,
+    camera_orbit_offset: Res<CameraOrbitOffset>,
+    camera_orbit_centers: Query<(Entity, &Transform), With<CameraOrbitCenter>>,
+    radiuses: Query<&BoundingRadius>,
 ) {
-    if release_events.read().next().is_some() {
-        for (entity, transform) in camera_orbit_centers.iter_mut() {
-            commands
-                .entity(entity)
-                .insert(CameraTween::new(transform.translation, camera_orbit_offset.min));
-        }
+    let Ok((holding, focused)) = changed.single() else {
+        return;
+    };
+    let rise = held_radius(holding, focused, &radiuses);
+    for (entity, transform) in camera_orbit_centers.iter() {
+        commands.entity(entity).insert(CameraTween::new(
+            transform.translation,
+            camera_orbit_offset.min + Vec3::Y * rise,
+        ));
     }
 }
 
@@ -459,28 +465,20 @@ fn ease_camera(
     }
 }
 
+/// Push the hold point out by the held part's bounding radius on pickup and back to
+/// rest on release — the hold-point counterpart to `adjust_camera_on_hold`, driven by
+/// the same shared `Holding` state so it works in both modes.
 fn adjust_hold_point_on_hold(
-    mut hold_events: MessageReader<HoldEvent>,
+    changed: Query<(&Holding, &FocusedInteractable), (With<Player>, Changed<Holding>)>,
     mut hold_points: Query<(&mut Transform, &OriginalPosition), With<HoldPoint>>,
-    radiuses: Query<&BoundingRadius, With<Holdable>>,
+    radiuses: Query<&BoundingRadius>,
 ) {
-    if let Some(hold_event) = hold_events.read().next() {
-        if let Ok(radius) = radiuses.get(hold_event.held) {
-            for (mut transform, original_position) in hold_points.iter_mut() {
-                transform.translation = original_position.0 + Vec3::Z * radius.0;
-            }
-        }
-    }
-}
-
-fn reset_hold_point_after_release(
-    mut release_events: MessageReader<ReleaseEvent>,
-    mut hold_points: Query<(&mut Transform, &OriginalPosition), With<HoldPoint>>,
-) {
-    if release_events.read().next().is_some() {
-        for (mut transform, original_position) in hold_points.iter_mut() {
-            transform.translation = original_position.0;
-        }
+    let Ok((holding, focused)) = changed.single() else {
+        return;
+    };
+    let push = held_radius(holding, focused, &radiuses);
+    for (mut transform, original_position) in hold_points.iter_mut() {
+        transform.translation = original_position.0 + Vec3::Z * push;
     }
 }
 

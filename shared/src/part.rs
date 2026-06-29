@@ -192,8 +192,6 @@ pub fn spawn_random_part(commands: &mut Commands) -> (Entity, Vec3) {
         .as_cuboid()
         .map(|c| Vec3::new(c.half_extents[0], c.half_extents[1], c.half_extents[2]))
         .unwrap_or(Vec3::ONE);
-    // Bounding radius from the parry shape, before the collider is moved in.
-    let bounding_radius = collider.shape().compute_local_bounding_sphere().radius;
     let spawn = Vec3::new(
         rng.gen_range(-SPAWN_ZONE_HALF_WIDTH..=SPAWN_ZONE_HALF_WIDTH),
         rng.gen_range(5.0..=15.0),
@@ -202,7 +200,6 @@ pub fn spawn_random_part(commands: &mut Commands) -> (Entity, Vec3) {
     let mut e = commands.spawn_empty();
     insert_part_physics(&mut e, half_extents);
     e.insert((
-        BoundingRadius(bounding_radius),
         // Bevy 0.15: bare `Transform` (it now requires `GlobalTransform`).
         // Set Avian `Position` too, not just `Transform`: in multiplayer the server
         // disables Avian's `PhysicsTransformPlugin` (lightyear_avian owns the sync),
@@ -226,6 +223,13 @@ pub fn spawn_random_part(commands: &mut Commands) -> (Entity, Vec3) {
 pub fn insert_part_physics(entity: &mut EntityCommands, half_extents: Vec3) {
     entity.insert((
         RigidBody::Dynamic,
+        // The cuboid's bounding-sphere radius (centre at origin → `half_extents.norm()`,
+        // identical to parry's `compute_local_bounding_sphere().radius`). Attached here,
+        // in the *shared* part-physics helper, so every part carries it from one source —
+        // single-player/server (`spawn_random_part`) AND the multiplayer client's
+        // predicted parts (`draw_replicated_parts`) — rather than only the spawner. The
+        // pickup camera/hold-point "feel" reads this, so it now works in both modes.
+        BoundingRadius(half_extents.length()),
         // Avian's `Collider::cuboid` takes FULL extents (= 2 × half_extents).
         Collider::cuboid(half_extents.x * 2.0, half_extents.y * 2.0, half_extents.z * 2.0),
         // rapier's `ColliderMassProperties::Density` / `Friction::coefficient` /
