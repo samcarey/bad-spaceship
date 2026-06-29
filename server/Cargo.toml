@@ -23,13 +23,9 @@ lightyear_avian3d = { workspace = true }
 
 [features]
 default = [
-    # NB: `avian3d/simd` + `avian3d/parallel` were removed for cross-platform
-    # determinism — they're incompatible with the workspace's `enhanced-determinism`
-    # (SIMD width + parallel solver reduction order are non-deterministic), and the
-    # server must compute bit-for-bit what the wasm client predicts or every divergence
-    # is a client rollback. The single-threaded scalar solver is ample for the server's
-    # load (a few rooms × ~10 parts on an M4). `bevy/multi_threaded` stays (it's for the
-    # file watcher / Bevy's system scheduler, independent of Avian's physics threading).
+    # Avian perf features (rapier's `simd-stable`/`parallel` equivalents).
+    "avian3d/simd",
+    "avian3d/parallel",
     # Hot-reload of RON config assets (watch_for_changes). The file watcher needs
     # the `multi_threaded` feature on to function.
     "bevy/file_watcher",

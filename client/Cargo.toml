@@ -86,12 +86,10 @@ default = [
 ]
 
 native = [
-    # NB: `avian3d/simd` + `avian3d/parallel` were removed for cross-platform
-    # determinism (incompatible with the workspace's `enhanced-determinism`; see the
-    # root Cargo.toml and server Cargo.toml). The native client must simulate identically
-    # to the wasm client and server so a player on either build predicts the same world.
-    # `bevy/multi_threaded` stays listed below (the file watcher needs it; it was also
-    # pulled in transitively by `avian3d/parallel`, so keep it explicit now that's gone).
+    # Avian perf features (rapier's `simd-stable`/`parallel` equivalents). `parallel`
+    # pulls `bevy/multi_threaded`, which the file watcher below also needs.
+    "avian3d/simd",
+    "avian3d/parallel",
     "bevy/bevy_gilrs",
     # winit needs a windowing backend on Linux (was implied by the old `render`
     # umbrella feature, dropped in 0.10).
