@@ -14,6 +14,7 @@
 //! prediction/interpolation come next, where they can be tested on real
 //! endpoints.
 use core::time::Duration;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 // `ForcesItem` (the `Forces` query-data item the held-part spring writes through) is
 // not re-exported in avian's prelude — reach it by its full module path.
@@ -272,8 +273,32 @@ fn angular_velocity_should_rollback(
 const POSITION_ROLLBACK_TOLERANCE: f32 = 0.05; // metres
 const ROTATION_ROLLBACK_TOLERANCE: f32 = 0.05; // radians (~3°)
 
+/// Diagnostics for the determinism/lag work: the largest position divergence (mm)
+/// that triggered a rollback and how many such triggers occurred, since the last
+/// telemetry flush. Small maxima (~5-15cm) ⇒ movement/sync drift; large ones
+/// (sub-metre→metres) ⇒ contact chaos (a shoved block resolving a tick apart). Read
+/// + reset by `take_rollback_diag` (client telemetry); never updated on the server
+/// (it doesn't roll back). Atomic because `position_should_rollback` is a free fn
+/// lightyear calls with no access to a resource.
+static MAX_POS_ERR_MM: AtomicU32 = AtomicU32::new(0);
+static POS_ROLLBACK_TRIGGERS: AtomicU32 = AtomicU32::new(0);
+
+/// Take and reset the rollback-divergence diagnostics: `(max_pos_err_mm, triggers)`.
+pub fn take_rollback_diag() -> (u32, u32) {
+    (
+        MAX_POS_ERR_MM.swap(0, Ordering::Relaxed),
+        POS_ROLLBACK_TRIGGERS.swap(0, Ordering::Relaxed),
+    )
+}
+
 fn position_should_rollback(confirmed: &Position, predicted: &Position) -> bool {
-    over_tolerance(confirmed.0, predicted.0, POSITION_ROLLBACK_TOLERANCE)
+    let over = over_tolerance(confirmed.0, predicted.0, POSITION_ROLLBACK_TOLERANCE);
+    if over {
+        let mm = (confirmed.0.distance(predicted.0) * 1000.0) as u32;
+        MAX_POS_ERR_MM.fetch_max(mm, Ordering::Relaxed);
+        POS_ROLLBACK_TRIGGERS.fetch_add(1, Ordering::Relaxed);
+    }
+    over
 }
 
 fn rotation_should_rollback(confirmed: &Rotation, predicted: &Rotation) -> bool {
@@ -326,6 +351,27 @@ pub fn apply_net_input(
 
 /// Registers the shared protocol. Add to BOTH the client and server apps, AFTER
 /// their respective lightyear plugin group.
+/// Client→server diagnostics so the dev box's per-version `server.log` carries
+/// client-local prediction load. Rollbacks are computed on the client (the server is
+/// authoritative and never rolls back), and on wasm the browser console isn't
+/// reachable from the build box — so the client periodically reports its cumulative
+/// `PredictionMetrics` and the server logs them (`[rb] …`), the same way `[rtt]` is
+/// logged server-side. Measurement only; nothing gameplay reads it.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug)]
+pub struct RollbackReport {
+    pub rollbacks: u32,
+    pub rollback_ticks: u32,
+    /// Largest position divergence (mm) that triggered a rollback this window, and the
+    /// number of such triggers — distinguishes movement/sync drift (small) from contact
+    /// chaos (large). See `take_rollback_diag`.
+    pub max_pos_err_mm: u32,
+    pub pos_triggers: u32,
+}
+
+/// Low-rate diagnostics channel. Unreliable: a dropped telemetry sample just means one
+/// missing log line, and it must never contend with gameplay traffic for bandwidth.
+pub struct TelemetryChannel;
+
 pub struct ProtocolPlugin;
 
 impl Plugin for ProtocolPlugin {
@@ -338,14 +384,28 @@ impl Plugin for ProtocolPlugin {
         // client (so its character is simulated locally with zero input delay and
         // reconciled by rollback against the server) and interpolated on everyone
         // else. `lightyear_avian3d` provides the lerp + the rollback wiring.
+        // `add_linear_correction_fn` enables *visual-correction easing*: when a rollback
+        // moves the predicted Position/Rotation, the render doesn't snap to the new value
+        // — lightyear records the (confirmed − predicted) error and decays it to zero over
+        // a few frames (the `CorrectionPolicy` on the PredictionManager), so the body
+        // glides into place. Without it, every rollback hard-snaps the pose (and the
+        // camera mounted on the predicted character), which is the multiplayer
+        // "jumpiness". Measurement (#41) showed the corrections are small (≤~16cm) and
+        // frequent — exactly the case easing makes imperceptible. `Position`/`Rotation`
+        // are `Diffable<Self>` + `Ease` (avian), and in `AvianReplicationMode::Position`
+        // the avian plugin already orders `RollbackSystems::VisualCorrection` after frame
+        // interpolation and before the Position→Transform writeback, so this composes with
+        // the existing `FrameInterpolate` setup with no further wiring.
         app.component::<Position>()
             .replicate()
             .predict()
+            .add_linear_correction_fn::<Position>()
             .with_rollback_condition(position_should_rollback)
             .add_interpolation_with(position_lerp);
         app.component::<Rotation>()
             .replicate()
             .predict()
+            .add_linear_correction_fn::<Rotation>()
             .with_rollback_condition(rotation_should_rollback)
             .add_interpolation_with(rotation_lerp);
         // Replicate the bodies' velocities too, predicted alongside Position/Rotation
@@ -386,5 +446,21 @@ impl Plugin for ProtocolPlugin {
         // `client` feature and the server one under `server`, so a single
         // registration here wires both binaries (each compiles only its half).
         app.add_plugins(input::native::InputPlugin::<NetInput>::default());
+
+        // Diagnostics channel + client→server rollback telemetry (see `RollbackReport`).
+        // BOTH the channel AND the message need `add_direction`: the channel's
+        // `add_direction` registers the observer that installs the channel's
+        // sender/receiver onto each link's `Transport` (without it, sending fails with
+        // `ChannelNotFound`), while the message's `add_direction` registers the
+        // `MessageSender`/`MessageReceiver` components. (`InputChannel` does the same.)
+        app.add_channel::<TelemetryChannel>(ChannelSettings {
+            mode: ChannelMode::UnorderedUnreliable,
+            ..default()
+        })
+        .add_direction(NetworkDirection::ClientToServer);
+        // `register_message`, not Bevy's `add_message` (events→messages rename in
+        // 0.17 gave `App` its own `add_message`, which would shadow this).
+        app.register_message::<RollbackReport>()
+            .add_direction(NetworkDirection::ClientToServer);
     }
 }

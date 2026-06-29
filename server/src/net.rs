@@ -26,7 +26,7 @@ use avian3d::prelude::{
 use bad_spaceship_shared::character::{CharacterMovement, ServerAvatar};
 use bad_spaceship_shared::net::{
     apply_hold_spring, apply_net_input, focused_part, NetFacing, NetInput, NetJoint, NetPart,
-    NetPlayer, ProtocolPlugin, TICK,
+    NetPlayer, ProtocolPlugin, RollbackReport, TICK,
 };
 use bad_spaceship_shared::part::{
     local_contact_anchor, spawn_random_part, SuppressLocalParts, NUM_PARTS,
@@ -62,6 +62,31 @@ fn log_client_rtt(
             ping.jitter().as_secs_f64() * 1000.0,
             ping.latency_samples_recv(),
         );
+    }
+}
+
+/// Telemetry: drain each client's reported `RollbackReport` (its cumulative
+/// client-side prediction load) and log it (`[rb] …`), so the per-version `server.log`
+/// carries the rollback counts that determine whether a determinism change earns its
+/// keep — rollbacks happen on the client, so the server only knows them via this
+/// report. Mirrors `log_client_rtt`'s `client={entity.to_bits()}` id so the two lines
+/// correlate per client.
+fn log_client_rollbacks(
+    mut clients: Query<(Entity, &mut MessageReceiver<RollbackReport>), With<ClientOf>>,
+) {
+    for (entity, mut receiver) in &mut clients {
+        // Unreliable channel → only the newest sample matters; the counters are
+        // cumulative, so an older one would just log a smaller total.
+        if let Some(report) = receiver.receive().last() {
+            println!(
+                "[rb] client={} rollbacks={} ticks={} max_pos_err_mm={} pos_triggers={}",
+                entity.to_bits(),
+                report.rollbacks,
+                report.rollback_ticks,
+                report.max_pos_err_mm,
+                report.pos_triggers,
+            );
+        }
     }
 }
 
@@ -102,6 +127,8 @@ impl Plugin for NetServerPlugin {
         app.add_observer(spawn_player_for_client);
         // Latency telemetry: log each client's RTT/jitter to stdout (-> server.log).
         app.add_systems(Update, log_client_rtt);
+        // Prediction-load telemetry: log each client's reported rollback counts.
+        app.add_systems(Update, log_client_rollbacks);
         // Refill a room's parts that fall off its platform, and mirror each avatar's
         // look yaw into its replicated facing. Parts and joints replicate their state
         // directly (predicted Avian `Position`/`Rotation`; `NetJoint` data) — nothing
