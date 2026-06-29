@@ -404,10 +404,16 @@ impl Plugin for ProtocolPlugin {
         app.add_plugins(input::native::InputPlugin::<NetInput>::default());
 
         // Diagnostics channel + client→server rollback telemetry (see `RollbackReport`).
+        // BOTH the channel AND the message need `add_direction`: the channel's
+        // `add_direction` registers the observer that installs the channel's
+        // sender/receiver onto each link's `Transport` (without it, sending fails with
+        // `ChannelNotFound`), while the message's `add_direction` registers the
+        // `MessageSender`/`MessageReceiver` components. (`InputChannel` does the same.)
         app.add_channel::<TelemetryChannel>(ChannelSettings {
             mode: ChannelMode::UnorderedUnreliable,
             ..default()
-        });
+        })
+        .add_direction(NetworkDirection::ClientToServer);
         // `register_message`, not Bevy's `add_message` (events→messages rename in
         // 0.17 gave `App` its own `add_message`, which would shadow this).
         app.register_message::<RollbackReport>()
