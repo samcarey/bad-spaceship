@@ -384,14 +384,28 @@ impl Plugin for ProtocolPlugin {
         // client (so its character is simulated locally with zero input delay and
         // reconciled by rollback against the server) and interpolated on everyone
         // else. `lightyear_avian3d` provides the lerp + the rollback wiring.
+        // `add_linear_correction_fn` enables *visual-correction easing*: when a rollback
+        // moves the predicted Position/Rotation, the render doesn't snap to the new value
+        // — lightyear records the (confirmed − predicted) error and decays it to zero over
+        // a few frames (the `CorrectionPolicy` on the PredictionManager), so the body
+        // glides into place. Without it, every rollback hard-snaps the pose (and the
+        // camera mounted on the predicted character), which is the multiplayer
+        // "jumpiness". Measurement (#41) showed the corrections are small (≤~16cm) and
+        // frequent — exactly the case easing makes imperceptible. `Position`/`Rotation`
+        // are `Diffable<Self>` + `Ease` (avian), and in `AvianReplicationMode::Position`
+        // the avian plugin already orders `RollbackSystems::VisualCorrection` after frame
+        // interpolation and before the Position→Transform writeback, so this composes with
+        // the existing `FrameInterpolate` setup with no further wiring.
         app.component::<Position>()
             .replicate()
             .predict()
+            .add_linear_correction_fn::<Position>()
             .with_rollback_condition(position_should_rollback)
             .add_interpolation_with(position_lerp);
         app.component::<Rotation>()
             .replicate()
             .predict()
+            .add_linear_correction_fn::<Rotation>()
             .with_rollback_condition(rotation_should_rollback)
             .add_interpolation_with(rotation_lerp);
         // Replicate the bodies' velocities too, predicted alongside Position/Rotation
