@@ -326,6 +326,22 @@ pub fn apply_net_input(
 
 /// Registers the shared protocol. Add to BOTH the client and server apps, AFTER
 /// their respective lightyear plugin group.
+/// Client→server diagnostics so the dev box's per-version `server.log` carries
+/// client-local prediction load. Rollbacks are computed on the client (the server is
+/// authoritative and never rolls back), and on wasm the browser console isn't
+/// reachable from the build box — so the client periodically reports its cumulative
+/// `PredictionMetrics` and the server logs them (`[rb] …`), the same way `[rtt]` is
+/// logged server-side. Measurement only; nothing gameplay reads it.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug)]
+pub struct RollbackReport {
+    pub rollbacks: u32,
+    pub rollback_ticks: u32,
+}
+
+/// Low-rate diagnostics channel. Unreliable: a dropped telemetry sample just means one
+/// missing log line, and it must never contend with gameplay traffic for bandwidth.
+pub struct TelemetryChannel;
+
 pub struct ProtocolPlugin;
 
 impl Plugin for ProtocolPlugin {
@@ -386,5 +402,15 @@ impl Plugin for ProtocolPlugin {
         // `client` feature and the server one under `server`, so a single
         // registration here wires both binaries (each compiles only its half).
         app.add_plugins(input::native::InputPlugin::<NetInput>::default());
+
+        // Diagnostics channel + client→server rollback telemetry (see `RollbackReport`).
+        app.add_channel::<TelemetryChannel>(ChannelSettings {
+            mode: ChannelMode::UnorderedUnreliable,
+            ..default()
+        });
+        // `register_message`, not Bevy's `add_message` (events→messages rename in
+        // 0.17 gave `App` its own `add_message`, which would shadow this).
+        app.register_message::<RollbackReport>()
+            .add_direction(NetworkDirection::ClientToServer);
     }
 }

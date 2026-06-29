@@ -18,7 +18,7 @@ use bad_spaceship_shared::character::{
 };
 use bad_spaceship_shared::net::{
     apply_hold_spring, apply_net_input, focused_part, NetFacing, NetInput, NetJoint, NetPart,
-    NetPlayer, ProtocolPlugin, TICK,
+    NetPlayer, ProtocolPlugin, RollbackReport, TelemetryChannel, TICK,
 };
 use bad_spaceship_shared::part::{insert_part_physics, Holdable, SuppressLocalParts};
 use bad_spaceship_shared::player::make_local_player;
@@ -31,7 +31,9 @@ use bevy::prelude::*;
 use lightyear::prelude::client::input::InputSystems as ClientInputSystems;
 use lightyear::prelude::client::*;
 use lightyear::prelude::input::native::{ActionState, InputMarker};
-use lightyear::prelude::{Authentication, Interpolated, Predicted, PredictionManager};
+use lightyear::prelude::{
+    Authentication, Interpolated, MessageSender, Predicted, PredictionManager, PredictionMetrics,
+};
 use lightyear::frame_interpolation::{FrameInterpolate, FrameInterpolationPlugin};
 use std::net::SocketAddr;
 
@@ -152,6 +154,9 @@ impl Plugin for NetClientPlugin {
         // Recover from a dropped link (e.g. a suspended/backgrounded tab) by
         // reconnecting when the tab returns to the foreground.
         app.add_systems(Update, reconnect_dropped);
+        // Report our prediction load to the server's log for measurement (see
+        // `RollbackReport`); diagnostics only, off the gameplay path.
+        app.add_systems(Update, report_rollbacks);
         // Each frame: track the look-focused part (empty-handed) into
         // `FocusedInteractable`, then read the click → grab/attach intent gated on it.
         // After `InputEvents` (mobile `apply_pointer` / desktop `get_modifying`) so
@@ -195,6 +200,30 @@ impl Plugin for NetClientPlugin {
             (apply_net_input.before(CharacterMovement), predict_hold),
         );
     }
+}
+
+/// Every ~2 s, report our cumulative `PredictionMetrics` to the server so it lands in
+/// the dev box's per-version `server.log` (`[rb] …`) — rollbacks are computed
+/// client-side and on wasm the browser console is unreachable from the build box, so
+/// this is how prediction load is measured. Diagnostics only; nothing gameplay reads
+/// it. Mirrors the cadence of the server's `[rtt]` logger.
+fn report_rollbacks(
+    time: Res<Time>,
+    mut acc: Local<f32>,
+    metrics: Option<Res<PredictionMetrics>>,
+    mut sender: Query<&mut MessageSender<RollbackReport>, With<Connected>>,
+) {
+    *acc += time.delta_secs();
+    if *acc < 2.0 {
+        return;
+    }
+    *acc = 0.0;
+    let Some(metrics) = metrics else { return };
+    let Ok(mut sender) = sender.single_mut() else { return };
+    sender.send::<TelemetryChannel>(RollbackReport {
+        rollbacks: metrics.rollbacks,
+        rollback_ticks: metrics.rollback_ticks,
+    });
 }
 
 /// Turn our *predicted* networked avatar into the controllable local character.
