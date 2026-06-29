@@ -10,7 +10,7 @@ use bevy_egui::{
 };
 use chrono::{DateTime, FixedOffset, Utc};
 use lightyear::prelude::client::Connected;
-use lightyear::prelude::PingManager;
+use lightyear::prelude::{PingManager, PredictionMetrics};
 use once_cell::sync::Lazy;
 use shadow_rs::shadow;
 
@@ -150,10 +150,25 @@ fn commit_age() -> String {
     "0s".to_string()
 }
 
+/// Smoothed rollback-per-second estimate for the on-screen readout. `PredictionMetrics`
+/// only exposes cumulative counters, so we sample the delta over a ~0.5 s wall-clock
+/// window (kept in a `Local`) to turn the running total into a live rate.
+#[derive(Default)]
+struct RollbackRate {
+    last_count: u32,
+    last_secs: f64,
+    rate: f64,
+}
+
 fn show_bottom_panel(
     mut contexts: EguiContexts,
     diagnostics: Res<DiagnosticsStore>,
     pings: Query<&PingManager, With<Connected>>,
+    // Only present in multiplayer (added by lightyear's `PredictionPlugin`); `None`
+    // in single-player, where the readout shows "RB —".
+    metrics: Option<Res<PredictionMetrics>>,
+    time: Res<Time<Real>>,
+    mut rb_rate: Local<RollbackRate>,
 ) -> Result {
     let mut fps = 0.0;
     // Bevy 0.13 replaced `DiagnosticId` with `DiagnosticPath`; `get` takes `&path`.
@@ -176,25 +191,44 @@ fn show_bottom_panel(
             )
         })
         .unwrap_or_else(|| "RTT —".to_string());
+    // Client-prediction correction load: cumulative rollbacks, a smoothed rate, and
+    // the average rollback depth (ticks resimulated per rollback). This is the
+    // baseline the determinism pass is measured against — fewer/smaller corrections
+    // is the whole goal, so it must be visible on-device. "RB —" in single-player.
+    let rb_label = if let Some(m) = metrics.as_ref() {
+        let now = time.elapsed_secs_f64();
+        let dt = now - rb_rate.last_secs;
+        if dt >= 0.5 {
+            rb_rate.rate = m.rollbacks.saturating_sub(rb_rate.last_count) as f64 / dt;
+            rb_rate.last_count = m.rollbacks;
+            rb_rate.last_secs = now;
+        }
+        let depth = if m.rollbacks == 0 {
+            0.0
+        } else {
+            m.rollback_ticks as f64 / m.rollbacks as f64
+        };
+        format!("RB {} · {:.1}/s · d{:.1}", m.rollbacks, rb_rate.rate, depth)
+    } else {
+        "RB —".to_string()
+    };
     egui::TopBottomPanel::bottom("bottom_panel")
         .frame(Frame::default().multiply_with_opacity(0.0))
         // Drop the hairline divider egui draws at the panel's edge.
         .show_separator_line(false)
         .show(contexts.ctx_mut()?, |ui| {
-            ui.horizontal(|ui| {
+            // Stack each stat on its own short line (a single horizontal row crowds
+            // and overlaps on a narrow phone screen).
+            let red = Color32::from_rgb(255, 0, 0);
+            ui.vertical(|ui| {
+                ui.colored_label(red, rb_label);
+                ui.colored_label(red, rtt_label);
+                ui.colored_label(red, format!("{:.0} FPS", fps));
                 ui.colored_label(
-                    Color32::from_rgb(255, 0, 0),
-                    format!(
-                        "Commit: {}, Built: {} ({} ago)",
-                        bad_spaceship_shared::net::BS_VERSION,
-                        build::BUILD_TIME_2822,
-                        commit_age(),
-                    ),
+                    red,
+                    format!("Commit {}", bad_spaceship_shared::net::BS_VERSION),
                 );
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.colored_label(Color32::from_rgb(255, 0, 0), format!("{:.0} FPS", fps,));
-                    ui.colored_label(Color32::from_rgb(255, 0, 0), rtt_label);
-                });
+                ui.colored_label(red, format!("Built {} ({} ago)", build::BUILD_TIME_2822, commit_age()));
             });
         });
     Ok(())
