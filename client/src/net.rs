@@ -12,20 +12,16 @@
 //! For every player the server replicates, draw a body at its predicted/
 //! interpolated Avian pose.
 
-use avian3d::prelude::{
-    Forces, Gravity, Position, ReadRigidBodyForces, RigidBody, Rotation, SphericalJoint,
-    WriteRigidBodyForces,
-};
+use avian3d::prelude::{Forces, Gravity, Position, RigidBody, Rotation, SphericalJoint};
 use bad_spaceship_shared::character::{
     insert_character_body, CharacterMovement, Config as CharacterConfig,
 };
 use bad_spaceship_shared::net::{
-    apply_net_input, focused_part, hold_acceleration, orient_acceleration, NetFacing, NetInput,
-    NetJoint, NetPart, NetPlayer, ProtocolPlugin, TICK,
+    apply_hold_spring, apply_net_input, focused_part, NetFacing, NetInput, NetJoint, NetPart,
+    NetPlayer, ProtocolPlugin, TICK,
 };
 use bad_spaceship_shared::part::{insert_part_physics, Holdable, SuppressLocalParts};
 use bad_spaceship_shared::player::make_local_player;
-use bad_spaceship_shared::utils::QuatExt;
 use crate::render_secondary_pass::JointAppearance;
 use bad_spaceship_shared::{
     CameraOrbitCenter, Character, DirectionalInput, FocusedInteractable, HoldPoint, Holding,
@@ -409,18 +405,14 @@ fn predict_hold(
     let Ok((position, rotation, mut forces)) = parts.get_mut(part_entity) else {
         return;
     };
-    // Position: float to the hold point, cancelling the part's weight.
-    let displacement = hold_target - position.0;
-    let lin_vel = forces.linear_velocity();
-    forces.apply_linear_acceleration(hold_acceleration(displacement, lin_vel) - gravity.0);
-    // Orientation: drive toward the tracked target (seeded at pickup + rotate
-    // gesture). Skip the unset seed, matching `server_hold`.
-    let target = held_rotation.0;
-    if target.length_squared() > 0.5 {
-        let error = (target * rotation.0.conjugate()).to_rotation_vector();
-        let ang_vel = forces.angular_velocity();
-        forces.apply_angular_acceleration(orient_acceleration(error, ang_vel));
-    }
+    apply_hold_spring(
+        &mut forces,
+        position.0,
+        rotation.0,
+        hold_target,
+        held_rotation.0,
+        gravity.0,
+    );
 }
 
 /// Track which part the empty-handed player is looking at — the same look-angle rule

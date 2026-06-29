@@ -20,18 +20,17 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 
 use avian3d::prelude::{
-    CollisionLayers, Collisions, ComputedCenterOfMass, Forces, Gravity, Position,
-    ReadRigidBodyForces, Rotation, SphericalJoint, WriteRigidBodyForces,
+    CollisionLayers, Collisions, ComputedCenterOfMass, Forces, Gravity, Position, Rotation,
+    SphericalJoint,
 };
 use bad_spaceship_shared::character::{CharacterMovement, ServerAvatar};
 use bad_spaceship_shared::net::{
-    apply_net_input, focused_part, hold_acceleration, orient_acceleration, NetFacing, NetInput,
-    NetJoint, NetPart, NetPlayer, ProtocolPlugin, TICK,
+    apply_hold_spring, apply_net_input, focused_part, NetFacing, NetInput, NetJoint, NetPart,
+    NetPlayer, ProtocolPlugin, TICK,
 };
 use bad_spaceship_shared::part::{
     local_contact_anchor, spawn_random_part, SuppressLocalParts, NUM_PARTS,
 };
-use bad_spaceship_shared::utils::QuatExt;
 use bad_spaceship_shared::{SuppressLocalPlayer, Yaw};
 use bevy::prelude::*;
 use lightyear::prelude::input::native::ActionState;
@@ -326,21 +325,17 @@ fn server_hold(
         let Ok((position, rotation, mut forces)) = parts.get_mut(part_entity) else {
             continue;
         };
-        // Position.
-        let displacement = Vec3::from_array(state.0.hold_target) - position.0;
-        let lin_vel = forces.linear_velocity();
-        forces.apply_linear_acceleration(hold_acceleration(displacement, lin_vel) - gravity.0);
-        // Orientation: drive toward the target rotation (the client tracks it,
-        // starting at the part's pickup orientation and folding in the rotate
-        // gesture). Skip the unsent seed (the all-zero default quat is never a
-        // real rotation). `to_rotation_vector` takes the shortest-path error,
-        // exactly as the single-player `orient_held_part`.
-        let target = Quat::from_array(state.0.hold_rotation);
-        if target.length_squared() > 0.5 {
-            let error = (target * rotation.0.conjugate()).to_rotation_vector();
-            let ang_vel = forces.angular_velocity();
-            forces.apply_angular_acceleration(orient_acceleration(error, ang_vel));
-        }
+        // The hold target/orientation arrive over the wire (the client forwards its
+        // HoldPoint world position + tracked target rotation); the same spring the
+        // client predicts locally (`predict_hold`) runs here authoritatively.
+        apply_hold_spring(
+            &mut forces,
+            position.0,
+            rotation.0,
+            Vec3::from_array(state.0.hold_target),
+            Quat::from_array(state.0.hold_rotation),
+            gravity.0,
+        );
     }
 }
 
