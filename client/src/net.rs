@@ -17,8 +17,8 @@ use bad_spaceship_shared::character::{
     insert_character_body, CharacterMovement, Config as CharacterConfig,
 };
 use bad_spaceship_shared::net::{
-    apply_hold_spring, apply_net_input, focused_part, NetFacing, NetInput, NetJoint, NetPart,
-    take_rollback_diag, NetPlayer, ProtocolPlugin, RollbackReport, TelemetryChannel, TICK,
+    apply_hold_spring, apply_net_input, focused_part, NetFacing, NetHold, NetInput, NetJoint,
+    NetPart, take_rollback_diag, NetPlayer, ProtocolPlugin, RollbackReport, TelemetryChannel, TICK,
 };
 use bad_spaceship_shared::part::{insert_part_physics, Holdable, SuppressLocalParts};
 use bad_spaceship_shared::player::make_local_player;
@@ -267,7 +267,15 @@ impl Plugin for NetClientPlugin {
         // spring the server runs) so carrying a block is instant and rollback-replayed.
         app.add_systems(
             FixedUpdate,
-            (apply_net_input.before(CharacterMovement), predict_hold),
+            (
+                apply_net_input.before(CharacterMovement),
+                // Both spring held parts through `Forces`; order them so the shared
+                // `Forces` accumulation isn't an ambiguous double-write. `predict_hold`
+                // handles our own held part (local, zero-delay hold point);
+                // `predict_remote_hold` springs every *other* player's held part toward
+                // its replicated `NetHold` target so it floats for us instead of bobbing.
+                (predict_hold, predict_remote_hold).chain(),
+            ),
         );
     }
 }
@@ -557,6 +565,40 @@ fn predict_hold(
         held_rotation.0,
         gravity.0,
     );
+}
+
+/// Predict the hold spring for parts held by **other** players, so a block someone
+/// else is carrying floats for us instead of free-falling. Every loose part is
+/// predicted on every client (`PredictionTarget::All`), but only the holder runs
+/// `predict_hold` — so a held part the holder forwards no force for would, on our
+/// client, fall each tick and get yanked back up by replication (the visible sag +
+/// bob). Here we spring every part carrying a replicated [`NetHold`] toward that hold
+/// state with the same `apply_hold_spring` the server runs, EXCEPT our own held part
+/// (`holder == our LocalId`) — `predict_hold` already drives that from our local,
+/// zero-delay hold point, so springing it again would double the force. Chained after
+/// `predict_hold` because both accumulate through the shared `Forces`.
+fn predict_remote_hold(
+    local: Query<&LocalId, With<Connected>>,
+    mut parts: Query<(&Position, &Rotation, &NetHold, Forces), With<NetPart>>,
+    gravity: Res<Gravity>,
+) {
+    let Some(PeerId::Netcode(my_id)) = local.iter().next().map(|l| l.0) else {
+        return;
+    };
+    for (position, rotation, hold, mut forces) in &mut parts {
+        // Our own held part — `predict_hold` owns it (local, zero-delay hold point).
+        if hold.holder == my_id {
+            continue;
+        }
+        apply_hold_spring(
+            &mut forces,
+            position.0,
+            rotation.0,
+            Vec3::from_array(hold.target),
+            Quat::from_array(hold.rotation),
+            gravity.0,
+        );
+    }
 }
 
 /// Track which part the empty-handed player is looking at — the same look-angle rule
