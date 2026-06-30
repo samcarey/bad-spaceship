@@ -1,6 +1,9 @@
-use avian3d::prelude::{Collider, Collisions, LinearVelocity, LockedAxes, Mass, Position, RigidBody};
+use avian3d::prelude::{
+    Collider, CollisionLayers, Collisions, LinearVelocity, LockedAxes, Mass, Position, RigidBody,
+};
 use bevy::prelude::*;
 use bevy::reflect::TypePath;
+use rand::Rng;
 
 use serde::Deserialize;
 
@@ -131,12 +134,22 @@ pub struct CharacterMovement;
 pub struct ServerAvatar;
 
 /// An optional spawn position for a `ServerAvatar`, honored by `build_server_avatar`
-/// instead of the origin. The server sets it for a *reconnecting* client (the
-/// position resolved at connect from the resume id in the connect token), so the
+/// instead of a random spawn point. The server sets it for a *reconnecting* client
+/// (the position resolved at connect from the resume id in the connect token), so the
 /// avatar is assembled directly at its remembered spot — its first replicated
-/// `Position` is the saved one, with no origin→saved easing on the client.
+/// `Position` is the saved one, with no easing on the client.
 #[derive(Component, Clone, Copy)]
 pub struct InitialPose(pub Vec3);
+
+/// Radius (m) of the disc around the platform centre a *fresh* avatar spawns into.
+/// Fresh avatars must NOT all land on the exact origin: two `ROTATION_LOCKED`,
+/// equal-mass spheres at zero separation share one contact point with no defined
+/// separation normal, so the solver oscillates them every tick (and the existing
+/// player's predicted body snaps onto the pile) — the "a new joiner corrupts the
+/// first player" glitch. Any non-zero offset gives the contact a stable normal; a
+/// few metres of spread (well inside the 50 m platform) keeps joiners comfortably
+/// apart while staying on the platform.
+const SPAWN_SPREAD_RADIUS: f32 = 8.0;
 
 /// Assemble the character body for each `ServerAvatar` that doesn't have one yet,
 /// once the character `Config` (its size) is loaded. Mirrors `spawn`, but driven by
@@ -152,18 +165,33 @@ fn build_server_avatar(
         for (entity, initial) in avatars.iter() {
             // A reconnecting client's avatar is built directly at its remembered
             // position (`InitialPose`, resolved at connect from the resume id), so its
-            // first replicated pose is the saved one — no origin→saved ease. A fresh
-            // client spawns at the origin (a tiny settle, NOT the single-player y=10
-            // drop-in, which a predicting client would mispredict in slow motion at the
-            // chaotic connect moment). Seed both Transform and Position because Avian's
-            // transform-sync is disabled in multiplayer.
-            let pos = initial.map(|p| p.0).unwrap_or(Vec3::ZERO);
+            // first replicated pose is the saved one — no easing. A fresh client spawns
+            // at a random point on the spawn disc (NOT the shared origin — two avatars
+            // there overlap exactly and the solver explodes; see `SPAWN_SPREAD_RADIUS`),
+            // at ground level (a tiny settle, NOT the single-player y=10 drop-in, which a
+            // predicting client would mispredict in slow motion at the chaotic connect
+            // moment). Seed both Transform and Position because Avian's transform-sync is
+            // disabled in multiplayer.
+            let pos = initial.map(|p| p.0).unwrap_or_else(|| {
+                let mut rng = rand::thread_rng();
+                let angle = rng.gen_range(0.0..std::f32::consts::TAU);
+                let radius = rng.gen_range(2.0..SPAWN_SPREAD_RADIUS);
+                Vec3::new(radius * angle.cos(), 0.0, radius * angle.sin())
+            });
             let mut e = commands.entity(entity);
             insert_character_body(&mut e, config.size);
             e.insert((
                 Transform::from_translation(pos),
                 Position(pos),
                 Yaw::default(),
+                // Until `assign_rooms` scopes this avatar to its room's collision layer
+                // (on the first input), collide with the GROUND ONLY — never with parts
+                // or avatars in any room. A fresh avatar has no room yet; without this it
+                // takes Avian's default "membership bit 0 / filter ALL" and, for the ~1
+                // RTT before assignment, shoves every room's blocks and any existing
+                // avatar it spawns near (cross-room interference + part of the new-joiner
+                // glitch). `assign_rooms` swaps in the real per-room layer on first input.
+                CollisionLayers::from_bits(crate::map::GROUND_LAYER, crate::map::GROUND_LAYER),
             ));
             e.remove::<InitialPose>();
         }
