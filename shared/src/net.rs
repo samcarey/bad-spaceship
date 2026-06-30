@@ -84,6 +84,10 @@ pub struct NetInput {
     pub grab: bool,
     /// One-shot intent to attach (joint) the held part to whatever it's touching.
     pub attach: bool,
+    /// One-shot intent to delete a joint inside the delete zone (the empty-handed
+    /// modifier-click gesture). The server finds the joint within `DELETE_RADIUS`
+    /// of `hold_target` in the player's room and despawns it — mirroring `attach`.
+    pub delete: bool,
     /// The lobby room code the client is in (the 6-char matchmaker code as raw
     /// bytes, zero-padded; all-zero = no code / default room). Constant for the
     /// session — carried on the already-reliable input channel rather than a

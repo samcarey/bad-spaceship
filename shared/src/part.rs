@@ -50,9 +50,13 @@ impl Plugin for PartPlugin {
                     attach
                         .after(ToggleHoldingSystemLabel)
                         .after(UpdateJointsLabel),
+                    // In multiplayer the joints are replicated from the server, so
+                    // deletion is server-authoritative (`server_delete`); a local
+                    // despawn here would corrupt the replicated joint replica.
                     delete_joints
                         .after(ToggleHoldingSystemLabel)
-                        .after(UpdateJointsLabel),
+                        .after(UpdateJointsLabel)
+                        .run_if(not(resource_exists::<SuppressLocalParts>)),
                 ),
             )
             .add_message::<NewPart>()

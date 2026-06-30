@@ -217,6 +217,7 @@ impl Plugin for NetClientPlugin {
         app.insert_resource(ResumeId(resume_id()));
         app.insert_resource(read_resume_look());
         app.init_resource::<WantAttach>();
+        app.init_resource::<WantDelete>();
         app.init_resource::<HeldRotation>();
         app.add_systems(Startup, connect);
         // Recover from a dropped link (e.g. a suspended/backgrounded tab) by
@@ -356,6 +357,7 @@ fn write_input(
     orbit: Query<&GlobalTransform, With<CameraOrbitCenter>>,
     hold: Query<&GlobalTransform, With<HoldPoint>>,
     mut want_attach: ResMut<WantAttach>,
+    mut want_delete: ResMut<WantDelete>,
     held_rotation: Res<HeldRotation>,
     my_room: Res<MyRoom>,
     resume_id: Res<ResumeId>,
@@ -367,6 +369,7 @@ fn write_input(
     let grab_origin = orbit.iter().next().map(|g| g.translation());
     let hold_pos = hold.iter().next().map(|g| g.translation());
     let attach = want_attach.0 > 0;
+    let delete = want_delete.0 > 0;
     for mut state in &mut controlled {
         // DirectionalInput: x = strafe, y = jump (non-zero), z = forward.
         state.0.move_xz = [dir.0.x, dir.0.z];
@@ -374,6 +377,7 @@ fn write_input(
         state.0.yaw = yaw.0;
         state.0.pitch = pitch.0;
         state.0.attach = attach;
+        state.0.delete = delete;
         // The room is constant for the session; the server keys our world on it.
         state.0.room = my_room.0;
         // Persistent resume id — the server keys our remembered position on it.
@@ -389,8 +393,9 @@ fn write_input(
             _ => state.0.grab = false,
         }
     }
-    // Assert the attach intent for a few ticks after a press, then let it lapse.
+    // Assert the attach/delete intents for a few ticks after a press, then lapse.
     want_attach.0 = want_attach.0.saturating_sub(1);
+    want_delete.0 = want_delete.0.saturating_sub(1);
 }
 
 /// Highlight the focused part in single-player's yellow focus colour. Follows
@@ -438,6 +443,12 @@ fn highlight_grabbable(
 /// window on the rising edge, so the extra ticks don't cause a double-join.
 #[derive(Resource, Default)]
 struct WantAttach(u32);
+
+/// Same one-shot latch as [`WantAttach`], for the empty-handed modifier-click
+/// joint-delete gesture. Asserted for [`ATTACH_SEND_TICKS`] ticks so a dropped
+/// packet doesn't lose the press; the server acts on the rising edge.
+#[derive(Resource, Default)]
+struct WantDelete(u32);
 
 /// How many ticks the client asserts the attach intent after a join press. The
 /// server arms its retry window on the rising edge (so extra ticks don't double-join),
@@ -578,6 +589,7 @@ fn read_grab_intent(
     modifying: Query<&Modifying, With<Player>>,
     mut player: Query<(&mut Holding, &FocusedInteractable), With<Player>>,
     mut want_attach: ResMut<WantAttach>,
+    mut want_delete: ResMut<WantDelete>,
 ) {
     let Ok((mut holding, focused)) = player.single_mut() else {
         return;
@@ -586,7 +598,13 @@ fn read_grab_intent(
     let looking_at_part = focused.0.is_some();
     for _ in clicks.read() {
         if modding {
-            want_attach.0 = ATTACH_SEND_TICKS;
+            // Modifier click: holding → attach (join), empty-handed → delete a
+            // joint in the delete zone. Same split as single-player's two systems.
+            if holding.0 {
+                want_attach.0 = ATTACH_SEND_TICKS;
+            } else {
+                want_delete.0 = ATTACH_SEND_TICKS;
+            }
         } else if holding.0 {
             // Holding → drop, regardless of what's under the look (matches single-player).
             holding.0 = false;
