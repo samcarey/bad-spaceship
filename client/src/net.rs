@@ -33,7 +33,8 @@ use lightyear::prelude::client::*;
 use lightyear::prelude::input::native::{ActionState, InputMarker};
 use lightyear::netcode::ConnectToken;
 use lightyear::prelude::{
-    Authentication, Interpolated, MessageSender, Predicted, PredictionManager, PredictionMetrics,
+    Authentication, Connected, Interpolated, LocalId, MessageSender, PeerId, Predicted,
+    PredictionManager, PredictionMetrics,
 };
 use lightyear::frame_interpolation::{FrameInterpolate, FrameInterpolationPlugin};
 use std::net::SocketAddr;
@@ -298,16 +299,23 @@ fn report_rollbacks(
     });
 }
 
-/// Turn our *predicted* networked avatar into the controllable local character.
-/// lightyear creates a `Predicted` entity for the avatar the server marks
-/// `PredictionTarget` to us (only our own — predicting a remote player is
-/// impossible without its input), and rolls back its Avian `Position`/`Rotation`.
-/// We give that entity the real character body (`insert_character_body`) so Avian
-/// simulates it locally with zero input delay, plus the player/input state
-/// (`make_local_player`) and the networked-input marker so `write_input` fills its
-/// `ActionState` and lightyear sends it. From there it's an ordinary `Character`:
-/// `assign_characters` renders it and `attach_camera_orbit` mounts the camera —
-/// the same path single-player uses.
+/// Turn **our own** predicted networked avatar into the controllable local
+/// character. lightyear rolls back the Avian `Position`/`Rotation` of every
+/// `Predicted` entity it gives us; we give *ours* the real character body
+/// (`insert_character_body`) so Avian simulates it locally with zero input delay,
+/// plus the player/input state (`make_local_player`) and the networked-input marker
+/// so `write_input` fills its `ActionState` and lightyear sends it. From there it's
+/// an ordinary `Character`: `assign_characters` renders it and `attach_camera_orbit`
+/// mounts the camera — the same path single-player uses.
+///
+/// Identify our avatar by `NetPlayer::client_id == our LocalId`, NOT by the bare
+/// `Predicted` marker: lightyear can hand an already-connected client a *predicted
+/// copy of a late joiner's avatar* (verified at runtime), so adopting "any predicted
+/// avatar" makes the first player build a second character and the camera follows the
+/// joiner. `LocalId` is our own netcode `PeerId`, set on the connection the moment it
+/// reaches `Connected` (strictly before any avatar replicates) — the client-side mirror
+/// of the `RemoteId` the server reads in `client_identity` to stamp `NetPlayer`, so the
+/// ids match across the wire and exactly one avatar — ours — is adopted.
 ///
 /// Gated on `Position` so we assemble the body only once the avatar's real spawn
 /// pose has arrived (rather than briefly at the origin). The loose blocks are also
@@ -315,7 +323,11 @@ fn report_rollbacks(
 /// is NOT a part (it carries no `NetPart`; `draw_replicated_parts` handles those).
 fn setup_predicted_avatar(
     mut commands: Commands,
-    new: Query<Entity, (With<Predicted>, With<Position>, Without<Character>, Without<NetPart>)>,
+    new: Query<
+        (Entity, &NetPlayer),
+        (With<Predicted>, With<Position>, Without<Character>, Without<NetPart>),
+    >,
+    local: Query<&LocalId, With<Connected>>,
     configs: Res<Assets<CharacterConfig>>,
     resume_look: Res<ResumeLook>,
     mut look_applied: Local<bool>,
@@ -323,7 +335,16 @@ fn setup_predicted_avatar(
     let Some((_, config)) = configs.iter().next() else {
         return;
     };
-    for entity in &new {
+    // Our own netcode id (the value the server stamps onto our avatar's `NetPlayer`).
+    let Some(PeerId::Netcode(my_id)) = local.iter().next().map(|l| l.0) else {
+        return;
+    };
+    for (entity, net_player) in &new {
+        // Only our own avatar — skip predicted copies of other players' avatars
+        // (lightyear leaks them onto already-connected clients).
+        if net_player.client_id != my_id {
+            continue;
+        }
         let mut e = commands.entity(entity);
         insert_character_body(&mut e, config.size());
         make_local_player(&mut e);
@@ -783,9 +804,10 @@ fn position_replicated_joints(
 /// Build the dev netcode client for `server_addr`. Dev auth uses a fixed
 /// protocol id + the all-zero key, matching the server's `NetcodeConfig::
 /// default()`; production would issue a real ConnectToken from the matchmaker
-/// instead of `Manual`. The random client id is the netcode handshake identity
-/// only — we recognise our own avatar locally by lightyear's `Predicted` marker,
-/// so it doesn't need to be retained.
+/// instead of `Manual`. The random netcode `client_id` is the handshake identity (a
+/// fresh one per connect avoids duplicate-connection rejection); lightyear exposes it
+/// back to us as `LocalId` once connected, which `setup_predicted_avatar` matches
+/// against each avatar's replicated `NetPlayer::client_id` to find our own.
 fn build_netcode_client(server_addr: SocketAddr) -> Option<NetcodeClient> {
     // Carry the persistent resume id in the connect token's `user_data` so the server
     // resolves this player's remembered position AT CONNECT — before the avatar's first
