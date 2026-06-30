@@ -130,6 +130,14 @@ pub struct CharacterMovement;
 #[derive(Default, Component)]
 pub struct ServerAvatar;
 
+/// An optional spawn position for a `ServerAvatar`, honored by `build_server_avatar`
+/// instead of the origin. The server sets it for a *reconnecting* client (the
+/// position resolved at connect from the resume id in the connect token), so the
+/// avatar is assembled directly at its remembered spot — its first replicated
+/// `Position` is the saved one, with no origin→saved easing on the client.
+#[derive(Component, Clone, Copy)]
+pub struct InitialPose(pub Vec3);
+
 /// Assemble the character body for each `ServerAvatar` that doesn't have one yet,
 /// once the character `Config` (its size) is loaded. Mirrors `spawn`, but driven by
 /// the networked marker and seeded with the movement-input component the server's
@@ -137,26 +145,27 @@ pub struct ServerAvatar;
 /// client's look angle each tick).
 fn build_server_avatar(
     mut commands: Commands,
-    avatars: Query<Entity, (With<ServerAvatar>, Without<Character>)>,
+    avatars: Query<(Entity, Option<&InitialPose>), (With<ServerAvatar>, Without<Character>)>,
     configs: Res<Assets<Config>>,
 ) {
     if let Some((_, config)) = configs.iter().next() {
-        for entity in avatars.iter() {
+        for (entity, initial) in avatars.iter() {
+            // A reconnecting client's avatar is built directly at its remembered
+            // position (`InitialPose`, resolved at connect from the resume id), so its
+            // first replicated pose is the saved one — no origin→saved ease. A fresh
+            // client spawns at the origin (a tiny settle, NOT the single-player y=10
+            // drop-in, which a predicting client would mispredict in slow motion at the
+            // chaotic connect moment). Seed both Transform and Position because Avian's
+            // transform-sync is disabled in multiplayer.
+            let pos = initial.map(|p| p.0).unwrap_or(Vec3::ZERO);
             let mut e = commands.entity(entity);
             insert_character_body(&mut e, config.size);
-            // Spawn the networked avatar just above the ground (a tiny settle), NOT
-            // from the single-player drop-in height (y=10). A predicting client
-            // assembles this body right at the chaotic connect moment — while
-            // lightyear is still ramping its tick sync and the wasm page is mid-load
-            // — so a tall fall is mispredicted in slow motion. A ~0.75 m settle is
-            // imperceptible and sidesteps that entirely. (Single-player keeps its
-            // y=10 drop-in in `spawn`.) Seed both Transform and Position because
-            // Avian's transform-sync is disabled in multiplayer.
             e.insert((
-                Transform::from_xyz(0.0, 0.0, 0.0),
-                Position(Vec3::new(0.0, 0.0, 0.0)),
+                Transform::from_translation(pos),
+                Position(pos),
                 Yaw::default(),
             ));
+            e.remove::<InitialPose>();
         }
     }
 }

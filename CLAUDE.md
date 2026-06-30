@@ -1073,8 +1073,58 @@ factored into `spawn_client` (cfg-split native/wasm), called by both the `Startu
 server from being hammered. *Inherent limitation:* a part the player was **holding**
 when the tab suspended is dropped — the server is authoritative and releases the
 `SessionBased` avatar's `HeldPart` the instant the session ends; after reconnect the
-part is simply where it fell. Carrying a hold across a disconnect would need a
-server-side disconnect-grace window (not done).
+part is simply where it fell. (The player's **position** *is* now resumed across a
+disconnect — see "iOS tab-suspension recovery" below — but carrying a held *part*
+across one is still not done.)
+
+### iOS tab-suspension recovery: reload + server-authoritative session resume
+
+`reconnect_dropped`'s in-place recovery works on desktop and **could not be made to work
+on iOS/iPadOS Safari/WebKit** (where the dev test device lives). The hard finding, proven
+on-device and against the winit 0.30.13 / bevy_winit 0.19.0 source: when iOS backgrounds a
+tab it suspends the **entire wasm event loop**, and the loop **cannot be revived in place
+by any means** — rAF never re-arms, winit's `postTask`/`setTimeout` (`UpdateMode::reactive`)
+scheduler stays dead, and even firing winit's own `WakeUp` user-event via `EventLoopProxy`
+from a `setInterval` (which itself keeps firing) executes without error but drives **zero**
+`app.update`s (the GPU/JS context is torn down underneath). This is a documented WebKit
+limitation — silent-audio / Wake Lock / worker keepalives are all desktop/Android-only — so
+every shipped wasm/WebGL engine (Unity, three.js, Bevy, …) **reloads/re-inits on return**.
+(Dead ends tried, for the record: a `data-bs-tick` liveness beacon + canvas-event "kick";
+`UpdateMode::reactive`; the `EventLoopProxy` `WakeUp` pump. None survived a real iOS
+background.)
+
+**So: reload on return, and make the reload land back in place.**
+
+- **Reload trigger** (`play.html`): on `visibilitychange→visible` *or* `pageshow`, reload if
+  the tab was hidden beyond a short threshold (~3 s — a heavy wasm tab backgrounded that long
+  almost always lost its loop/GPU context) **or** the `<body data-bs-tick>` beacon
+  (`heartbeat`, `client/src/platform/web.rs`, bumped every frame) proves the loop is dead.
+  Gated on `data-game-ready` so it never fires during initial load.
+- **Position — server-authoritative session resume.** The server remembers each player's
+  last position keyed by a **persistent app-level resume id** the client mints once and
+  stores in `localStorage`. `record_resume_positions` (server) writes `resume_id → (pos,
+  time)` into a `ResumeRegistry` *continuously* (throttled), so an abrupt iOS socket drop
+  still leaves the last position behind; records are swept past `RESUME_GRACE_SECS` (30 min).
+  The resume id rides in the **netcode connect token's `user_data`** (client builds the token
+  manually via `Authentication::Token` — `Manual` doesn't expose `user_data`), so the server
+  reads it from `TokenUserData` **at connect** (in `spawn_player_for_client`), looks up the
+  remembered position, and tags the fresh avatar with a shared `InitialPose` (`character.rs`)
+  that `build_server_avatar` assembles it at — so the avatar's *first* replicated `Position`
+  is the saved one, with **no origin→saved ease** (resolving at first-input instead caused a
+  visible slide from the map center, since the origin pose replicated ~1 RTT before the
+  resume). The recorder also keys off a copy of `resume_id` that rides each `NetInput` (it
+  needs the id on the avatar, not the connection entity).
+- **Camera look** (yaw + pitch) is client-owned, so it's saved to `sessionStorage` each frame
+  (`write_look_beacon`, `web.rs`) and restored on boot (`read_resume_look` → applied once in
+  `setup_predicted_avatar`). `sessionStorage` survives `location.reload()`.
+- **The held block drops** on disconnect (the server releases the `SessionBased` avatar's
+  `HeldPart` when the session ends) — intentional; only position + look are resumed.
+
+Net result on iOS: background the tab for seconds-to-minutes (even through device sleep) →
+brief reload (cached, or a full re-download if iOS evicted the page) → back at your exact
+position + facing. `[resume]` `println` lines in the version's `server.log` (`fresh connect`
+/ `reconnect -> spawn at <pos>`) verify the round-trip (server `info!` isn't captured —
+`MinimalPlugins` has no `LogPlugin`; use `println!` like `[tel]`).
 
 ### Per-room world isolation (rooms slice)
 

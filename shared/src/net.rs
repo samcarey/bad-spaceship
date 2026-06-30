@@ -90,6 +90,14 @@ pub struct NetInput {
     /// separate connect message, so the server learns each client's room from its
     /// first input and scopes that client's world to it.
     pub room: [u8; 6],
+    /// A stable per-player id the client persists in `localStorage` and re-sends on
+    /// every connect (constant for the session, like `room`). After an iOS tab-
+    /// suspension the page must reload — the wasm loop can't be revived in place — so
+    /// the server remembers each player's last position keyed by this id and restores
+    /// it when the same id reconnects within a grace window (server-authoritative
+    /// session resume). An app-level token, NOT the netcode `client_id`, so a quick
+    /// reconnect isn't rejected as a duplicate connection. `0` = no resume (native).
+    pub resume_id: u64,
 }
 
 // Focus range / look-angle and the held-part spring stiffnesses are defined once

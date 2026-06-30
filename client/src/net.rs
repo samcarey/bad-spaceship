@@ -31,6 +31,7 @@ use bevy::prelude::*;
 use lightyear::prelude::client::input::InputSystems as ClientInputSystems;
 use lightyear::prelude::client::*;
 use lightyear::prelude::input::native::{ActionState, InputMarker};
+use lightyear::netcode::ConnectToken;
 use lightyear::prelude::{
     Authentication, Interpolated, MessageSender, Predicted, PredictionManager, PredictionMetrics,
 };
@@ -76,6 +77,68 @@ fn multiplayer_room() -> [u8; 6] {
     })()
     .unwrap_or_default();
     room_code_bytes(&code)
+}
+
+/// A stable per-player id persisted in `localStorage`, re-sent each session via
+/// `NetInput::resume_id` so the server can restore this player's position after an
+/// iOS reload (server-authoritative session resume). `0` on native (no reload case).
+#[derive(Resource)]
+struct ResumeId(u64);
+
+#[cfg(not(target_arch = "wasm32"))]
+fn resume_id() -> u64 {
+    0
+}
+
+/// Reuse a stable id across reloads so the server recognises a reconnecting player;
+/// mint + persist one on first run. An app-level token (NOT the netcode `client_id`)
+/// so a quick reconnect isn't rejected as a duplicate connection.
+#[cfg(target_arch = "wasm32")]
+fn resume_id() -> u64 {
+    let Some(storage) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) else {
+        return 0;
+    };
+    if let Ok(Some(s)) = storage.get_item("bs-rid") {
+        if let Ok(id) = s.parse::<u64>() {
+            if id != 0 {
+                return id;
+            }
+        }
+    }
+    let id = rand::random::<u64>() | 1; // never 0 (0 means "no resume")
+    let _ = storage.set_item("bs-rid", &id.to_string());
+    id
+}
+
+/// Camera look (yaw, pitch) restored from `sessionStorage` after a reload, so the
+/// view resumes facing where it was. Position is restored by the server (it's
+/// authoritative); the camera rig is client-owned, so its angle is restored here.
+#[derive(Resource, Default)]
+struct ResumeLook {
+    yaw: f32,
+    pitch: f32,
+    has: bool,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn read_resume_look() -> ResumeLook {
+    ResumeLook::default()
+}
+
+/// Read the look saved by `write_look_beacon` (`client/src/platform/web.rs`) into
+/// `sessionStorage` before the suspension; `sessionStorage` survives the reload.
+#[cfg(target_arch = "wasm32")]
+fn read_resume_look() -> ResumeLook {
+    let value = web_sys::window()
+        .and_then(|w| w.session_storage().ok().flatten())
+        .and_then(|s| s.get_item("bs-look").ok().flatten());
+    if let Some(value) = value {
+        let mut parts = value.split(',').filter_map(|v| v.parse::<f32>().ok());
+        if let (Some(yaw), Some(pitch)) = (parts.next(), parts.next()) {
+            return ResumeLook { yaw, pitch, has: true };
+        }
+    }
+    ResumeLook::default()
 }
 
 /// The server to connect to, or `None` for single-player.
@@ -148,6 +211,11 @@ impl Plugin for NetClientPlugin {
         // our world. Read once at plugin build (after `play.html` has populated
         // `window.__BS_NET__`); constant for the session.
         app.insert_resource(MyRoom(multiplayer_room()));
+        // Session resume (see `ResumeId`/`ResumeLook`): a persistent id sent to the
+        // server so it restores our position after an iOS reload, plus the camera
+        // look saved before the suspension so the view resumes facing where it was.
+        app.insert_resource(ResumeId(resume_id()));
+        app.insert_resource(read_resume_look());
         app.init_resource::<WantAttach>();
         app.init_resource::<HeldRotation>();
         app.add_systems(Startup, connect);
@@ -248,6 +316,8 @@ fn setup_predicted_avatar(
     mut commands: Commands,
     new: Query<Entity, (With<Predicted>, With<Position>, Without<Character>, Without<NetPart>)>,
     configs: Res<Assets<CharacterConfig>>,
+    resume_look: Res<ResumeLook>,
+    mut look_applied: Local<bool>,
 ) {
     let Some((_, config)) = configs.iter().next() else {
         return;
@@ -264,6 +334,13 @@ fn setup_predicted_avatar(
             FrameInterpolate::<Position>::default(),
             FrameInterpolate::<Rotation>::default(),
         ));
+        // Session resume: restore the camera look saved before an iOS reload, once,
+        // on the first avatar after boot (overrides `make_local_player`'s defaults).
+        // The avatar's *position* is restored by the server; the look is client-owned.
+        if resume_look.has && !*look_applied {
+            e.insert((Yaw(resume_look.yaw), LookPitch(resume_look.pitch)));
+            *look_applied = true;
+        }
     }
 }
 
@@ -281,6 +358,7 @@ fn write_input(
     mut want_attach: ResMut<WantAttach>,
     held_rotation: Res<HeldRotation>,
     my_room: Res<MyRoom>,
+    resume_id: Res<ResumeId>,
     mut controlled: Query<&mut ActionState<NetInput>, With<InputMarker<NetInput>>>,
 ) {
     let Some((dir, yaw, pitch, holding)) = character.iter().next() else {
@@ -298,6 +376,8 @@ fn write_input(
         state.0.attach = attach;
         // The room is constant for the session; the server keys our world on it.
         state.0.room = my_room.0;
+        // Persistent resume id — the server keys our remembered position on it.
+        state.0.resume_id = resume_id.0;
         match (grab_origin, hold_pos) {
             (Some(origin), Some(hold_pos)) => {
                 state.0.grab_origin = origin.to_array();
@@ -689,16 +769,36 @@ fn position_replicated_joints(
 /// only — we recognise our own avatar locally by lightyear's `Predicted` marker,
 /// so it doesn't need to be retained.
 fn build_netcode_client(server_addr: SocketAddr) -> Option<NetcodeClient> {
-    let auth = Authentication::Manual {
+    // Carry the persistent resume id in the connect token's `user_data` so the server
+    // resolves this player's remembered position AT CONNECT — before the avatar's first
+    // pose replicates — placing a reconnecting avatar directly at its saved spot (no
+    // origin→saved ease). Built manually (`Authentication::Token`) because
+    // `Authentication::Manual` doesn't expose `user_data`; the timeout/expire match
+    // Manual's defaults (3 s / 30 s). The random netcode `client_id` is just the
+    // handshake identity (a fresh one per connect avoids duplicate-connection rejection);
+    // the *resume* identity is the `user_data` id, persisted in localStorage. Version
+    // gate (`BS_PROTOCOL_ID`): a client only connects to a server built from the same
+    // commit — the matchmaker routes to the matching version; this is the backstop.
+    let mut user_data = [0u8; 256];
+    user_data[..8].copy_from_slice(&resume_id().to_le_bytes());
+    let token = ConnectToken::build(
         server_addr,
-        client_id: rand::random::<u64>(),
-        private_key: [0u8; 32],
-        // Version gate: a client only connects to a server built from the same
-        // commit. The matchmaker routes to the matching version; this is the
-        // netcode-level backstop if a mismatched URL ever slips through.
-        protocol_id: bad_spaceship_shared::net::BS_PROTOCOL_ID,
+        bad_spaceship_shared::net::BS_PROTOCOL_ID,
+        rand::random::<u64>(),
+        [0u8; 32],
+    )
+    .timeout_seconds(3)
+    .expire_seconds(30)
+    .user_data(user_data)
+    .generate();
+    let token = match token {
+        Ok(t) => t,
+        Err(e) => {
+            error!("failed to build connect token: {e:?}");
+            return None;
+        }
     };
-    match NetcodeClient::new(auth, NetcodeConfig::default()) {
+    match NetcodeClient::new(Authentication::Token(token), NetcodeConfig::default()) {
         Ok(n) => Some(n),
         Err(e) => {
             error!("failed to build netcode client: {e:?}");

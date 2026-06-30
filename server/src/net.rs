@@ -25,7 +25,7 @@ use avian3d::prelude::{
     CollisionLayers, Collisions, ComputedCenterOfMass, Forces, Gravity, Position, Rotation,
     SphericalJoint,
 };
-use bad_spaceship_shared::character::{CharacterMovement, ServerAvatar};
+use bad_spaceship_shared::character::{CharacterMovement, InitialPose, ServerAvatar};
 use bad_spaceship_shared::net::{
     apply_hold_spring, apply_net_input, focused_part, NetFacing, NetInput, NetJoint, NetPart,
     NetPlayer, ProtocolPlugin, RollbackReport, TICK,
@@ -288,6 +288,10 @@ impl Plugin for NetServerPlugin {
         // entities sharing one of its rooms.
         app.add_plugins(RoomPlugin);
         app.init_resource::<RoomRegistry>();
+        // Server-authoritative session resume: remember each player's last position
+        // (keyed by its persistent `resume_id`) so a reconnect after an iOS reload
+        // lands back in place rather than at the origin.
+        app.init_resource::<ResumeRegistry>();
         // The server owns the part world per room, so suppress the shared
         // single-set spawner (`spawn_initial_parts`/`spawn_part`/
         // `replace_fallen_parts` in `PartPlugin`); the per-room spawner below
@@ -314,6 +318,9 @@ impl Plugin for NetServerPlugin {
         // Assign each client (and its avatar) to its reported room on the first
         // input, lazily creating the room's world.
         app.add_systems(Update, assign_rooms);
+        // Session resume: continuously remember live avatars' positions (the reconnect
+        // restore itself happens at connect, in `spawn_player_for_client`).
+        app.add_systems(Update, record_resume_positions);
         // Bridge each client's per-tick input intent into its avatar's movement
         // inputs (`DirectionalInput`/`Yaw`), before the shared movement systems
         // read them on the same sim tick — so the server simulates the character
@@ -370,6 +377,28 @@ impl RoomRegistry {
         self.by_code.insert(code, room);
         (room, true)
     }
+}
+
+/// How long the server remembers a disconnected player's last position so a
+/// reconnecting client (same persistent `NetInput::resume_id`) resumes where it
+/// left off instead of respawning at the origin. iOS tab-suspension drops the
+/// socket abruptly (no clean disconnect event), so the position is recorded
+/// continuously while the player is live and the last value survives the drop. Past
+/// this window the record is swept and the player is treated as gone. Generous (30
+/// min) so stepping away for a while — or a long enough background that iOS evicts
+/// the page and forces a full reload — still resumes in place; the records are tiny
+/// (one `Vec3` + timestamp per player).
+const RESUME_GRACE_SECS: u64 = 1800;
+
+/// Remembers each player's last avatar position, keyed by the client's persistent
+/// `NetInput::resume_id`. Written continuously by `record_resume_positions` (so an
+/// abrupt iOS drop still leaves the last position behind); read once on the first
+/// input after a reconnect by `assign_rooms`. This is the "server remembers the
+/// user" half of the session-resume: the reload rebuilds the wasm client, the client
+/// re-sends its persisted id, and the server places it back where it was.
+#[derive(Resource, Default)]
+struct ResumeRegistry {
+    by_id: HashMap<u64, (Vec3, SystemTime)>,
 }
 
 /// The room a player avatar belongs to (server-side), so its grab is scoped to
@@ -443,6 +472,36 @@ fn assign_rooms(
         commands.entity(controlled.owner).insert(Rooms::single(room.id));
         info!("client {:?} joined room {:?}", controlled.owner, room.id);
     }
+}
+
+/// Continuously remember each live, room-assigned avatar's position keyed by its
+/// persistent `resume_id`, and sweep records past the grace window. Throttled —
+/// position barely moves in a fraction of a second and this bounds per-frame cost.
+/// Gated on `RoomMember` (only fully-joined avatars). The reconnect *restore* happens
+/// at connect (`spawn_player_for_client` → `InitialPose`), so the body is built
+/// directly at the remembered spot and there's no transient origin for this recorder
+/// to capture.
+fn record_resume_positions(
+    time: Res<Time>,
+    mut throttle: Local<f32>,
+    mut resume: ResMut<ResumeRegistry>,
+    avatars: Query<(&ActionState<NetInput>, &Position), With<RoomMember>>,
+) {
+    *throttle -= time.delta_secs();
+    if *throttle > 0.0 {
+        return;
+    }
+    *throttle = 0.25;
+    let now = SystemTime::now();
+    for (state, position) in &avatars {
+        if state.0.resume_id != 0 {
+            resume.by_id.insert(state.0.resume_id, (position.0, now));
+        }
+    }
+    // Drop records for players who didn't return within the grace window.
+    resume.by_id.retain(|_, (_, at)| {
+        at.elapsed().map(|e| e.as_secs() < RESUME_GRACE_SECS).unwrap_or(false)
+    });
 }
 
 /// Spawn a fresh room's world: its own set of parts (replicated + predicted +
@@ -698,13 +757,33 @@ fn spawn_player_for_client(
     trigger: On<Add, Connected>,
     mut commands: Commands,
     remote: Query<&RemoteId>,
+    tokens: Query<&TokenUserData>,
+    mut resume: ResMut<ResumeRegistry>,
 ) {
     let client = trigger.entity;
     // The owning client's peer id: it predicts its own avatar; everyone else
     // interpolates it. (Predicting a remote player is impossible without its input.)
     let owner = remote.get(client).map(|r| r.0).unwrap_or(PeerId::Server);
-    commands.spawn((
-        NetPlayer { client_id: client_identity(client, &remote) },
+    let client_id = client_identity(client, &remote);
+    // The persistent resume id rides in the connect token's `user_data` (see the client's
+    // `build_netcode_client`). Resolve the remembered position NOW, at connect — before
+    // the avatar's body assembles and its first `Position` replicates — so a reconnecting
+    // avatar is built directly at its saved spot (`InitialPose`), with no origin→saved
+    // ease. Consume the record; `record_resume_positions` re-tracks the live avatar after.
+    let resume_pos = tokens.get(client).ok().and_then(|t| {
+        let rid = u64::from_le_bytes(t.0[..8].try_into().unwrap());
+        if rid == 0 {
+            return None;
+        }
+        resume.by_id.remove(&rid).and_then(|(pos, at)| {
+            at.elapsed()
+                .map(|e| e.as_secs() < RESUME_GRACE_SECS)
+                .unwrap_or(false)
+                .then_some(pos)
+        })
+    });
+    let mut avatar = commands.spawn((
+        NetPlayer { client_id },
         // Replicate the avatar; its pose rides on Avian `Position`/`Rotation`
         // (`build_server_avatar` gives it a real body next frame, and the server
         // simulates it from the client's input intent).
@@ -730,6 +809,12 @@ fn spawn_player_for_client(
         // `sync_avatar_facing`) so remote clients can draw it facing its look.
         NetFacing::default(),
     ));
+    if let Some(pos) = resume_pos {
+        avatar.insert(InitialPose(pos));
+        println!("[resume] client_id={client_id} reconnect -> spawn at {pos:?}");
+    } else {
+        println!("[resume] client_id={client_id} fresh connect (no remembered position)");
+    }
     info!("client {client:?} connected — spawned replicated avatar");
 }
 

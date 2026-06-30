@@ -371,6 +371,40 @@
       etaEl.textContent = String((e && e.message) || e);
     });
   </script>
+
+  <script>
+    // iOS tab-suspension recovery. The wasm loop can't be revived in place after a real
+    // iOS/WebKit background (rAF, winit's postTask scheduler, and winit's own WakeUp
+    // channel all stay dead on return — proven on-device), so we reload to rebuild it.
+    // State survives the reload: the server remembers this player's position (keyed by a
+    // persistent id in localStorage) and the camera look is restored from sessionStorage,
+    // so the reload lands back in place (the held block drops — the server releases it on
+    // disconnect). A heavy wasm/WebGL tab backgrounded more than a moment almost always
+    // had its loop (or GPU context) torn down, so reload if it was hidden beyond a short
+    // threshold OR the `data-bs-tick` beacon proves the loop is dead. Triggered on both
+    // visibilitychange and pageshow for robustness.
+    (function () {
+      const beacon = () => (document.body && document.body.getAttribute('data-bs-tick')) || 'null';
+      const ready = () => document.body && document.body.getAttribute('data-game-ready') === '1';
+      let hiddenAt = 0;
+      let recovering = false;
+      const onReturn = () => {
+        if (document.visibilityState !== 'visible' || !ready() || recovering) return;
+        recovering = true;
+        const hiddenMs = hiddenAt ? performance.now() - hiddenAt : 0;
+        const before = beacon();
+        setTimeout(() => {
+          recovering = false;
+          if (hiddenMs > 3000 || beacon() === before) location.reload();
+        }, 600);
+      };
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'hidden') hiddenAt = performance.now();
+        else onReturn();
+      });
+      window.addEventListener('pageshow', onReturn);
+    })();
+  </script>
 </body>
 
 </html>

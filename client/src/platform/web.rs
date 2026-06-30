@@ -1,7 +1,7 @@
 use crate::gamepad::GamepadActive;
 use crate::mobile::MobileActive;
 use crate::AppState;
-use bad_spaceship_shared::Grass;
+use bad_spaceship_shared::{Grass, LookPitch, Player, Yaw};
 use bevy::prelude::*;
 use gloo::events::EventListener;
 use std::sync::{
@@ -39,6 +39,8 @@ impl Plugin for PlatformPlugin {
                     toggle_menu_on_pointer_lock
                         .run_if(|m: Res<MobileActive>, g: Res<GamepadActive>| !m.0 && !g.0),
                     signal_game_ready,
+                    heartbeat,
+                    write_look_beacon,
                 ),
             );
     }
@@ -115,6 +117,46 @@ fn signal_game_ready(
     if *frames_drawn >= 3 {
         *done = true;
         let _ = get_body().set_attribute("data-game-ready", "1");
+    }
+}
+
+/// Per-frame liveness beacon driving the page-visibility watchdog in `play.html`.
+/// Writes the `Update`-schedule frame counter to `<body data-bs-tick>` every frame so
+/// JS can tell, frame-by-frame, whether the wasm loop advanced. This is load-bearing
+/// for the recovery: on iOS, backgrounding the tab fires `pagehide(persisted=true)`
+/// (bfcache) which suspends Bevy, and on return iOS fires only `visibilitychange` —
+/// *not* the `pageshow(persisted=true)`/`Resumed` winit needs — so winit's own
+/// `requestAnimationFrame` loop never re-arms and the game stays frozen (verified via
+/// device telemetry). JS timers/rAF *do* keep firing, so `play.html` runs its own rAF
+/// watchdog that re-pumps winit (a synthetic canvas event) on any frame this counter
+/// didn't move — and stays dormant when it does, so healthy browsers never double-step.
+/// The per-frame write is the signal that lets that watchdog distinguish the two
+/// without misfiring (a throttled beacon would read as "stalled" between writes).
+fn heartbeat(mut frames: Local<u32>) {
+    *frames = frames.wrapping_add(1);
+    let _ = get_body().set_attribute("data-bs-tick", &frames.to_string());
+}
+
+/// Save the player's camera look (yaw, pitch) into `sessionStorage` so it survives
+/// the iOS reload — `read_resume_look` (`client/src/net.rs`) restores it on boot.
+/// Throttled (~5 Hz): the look barely changes faster than that, and this bounds the
+/// per-frame `sessionStorage` write cost. Position isn't saved here — the server
+/// remembers it (it's authoritative); only the client-owned camera angle is.
+fn write_look_beacon(
+    time: Res<Time>,
+    mut throttle: Local<f32>,
+    player: Query<(&Yaw, &LookPitch), With<Player>>,
+) {
+    *throttle -= time.delta_secs();
+    if *throttle > 0.0 {
+        return;
+    }
+    *throttle = 0.2;
+    let Ok((yaw, pitch)) = player.single() else {
+        return;
+    };
+    if let Some(storage) = web_sys::window().and_then(|w| w.session_storage().ok().flatten()) {
+        let _ = storage.set_item("bs-look", &format!("{},{}", yaw.0, pitch.0));
     }
 }
 
