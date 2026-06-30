@@ -162,9 +162,6 @@
 
   <div class="actions">
     <button class="btn primary" id="create">Create Match</button>
-    <input id="code" type="text" maxlength="6" placeholder="code" />
-    <button class="btn" id="join">Join by code</button>
-    <button class="btn" id="refresh" title="Refresh list">↻</button>
   </div>
 
   <div id="list"></div>
@@ -268,14 +265,13 @@
     }
 
     async function createMatch() {
-      const name = prompt('Match name (optional):', '');
-      // Cancel leaves name === null; an empty string just uses the default name.
-      if (name === null) return;
       try {
+        // No name prompt: an empty name tells the matchmaker to auto-name the
+        // room, and the room code itself is auto-generated server-side.
         const r = await api('/api/matches', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name }),
+          body: JSON.stringify({ name: '' }),
         });
         if (r.status === 503) {
           setStatus('Servers are updating to a new version — try again in a moment.', 'err');
@@ -310,13 +306,6 @@
     }
 
     document.getElementById('create').addEventListener('click', createMatch);
-    document.getElementById('refresh').addEventListener('click', refresh);
-    document.getElementById('join').addEventListener('click', () =>
-      joinById(document.getElementById('code').value)
-    );
-    document.getElementById('code').addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') joinById(e.target.value);
-    });
     document.getElementById('share-copy').addEventListener('click', async () => {
       try {
         await navigator.clipboard.writeText(shareLink.value);
@@ -327,14 +316,8 @@
       }
     });
 
-    // A `?room=CODE` on the lobby URL is a shared invite that lands here first;
-    // pre-fill the code box so the player just hits Join.
-    if (params.get('room')) {
-      document.getElementById('code').value = params.get('room').toUpperCase();
-    }
-
     refresh();
-    setInterval(refresh, 4000);
+    setInterval(refresh, 5000);
   </script>
 </body>
 
