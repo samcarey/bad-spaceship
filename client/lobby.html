@@ -307,14 +307,40 @@
       }
     }
 
+    // Copy text to the clipboard, robust across browsers. The async Clipboard API
+    // needs a secure context and can still reject (notably iOS Safari), so fall
+    // back to selecting the input and the legacy `execCommand('copy')` — which
+    // requires the field to be temporarily writable and explicitly selected.
+    async function copyToClipboard(input) {
+      const text = input.value;
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        try { await navigator.clipboard.writeText(text); return true; } catch (_) {}
+      }
+      try {
+        const wasReadOnly = input.readOnly;
+        input.readOnly = false;
+        input.focus();
+        input.setSelectionRange(0, text.length);
+        const ok = document.execCommand('copy');
+        input.readOnly = wasReadOnly;
+        return ok;
+      } catch (_) {
+        return false;
+      }
+    }
+
     document.getElementById('create').addEventListener('click', createMatch);
     document.getElementById('share-copy').addEventListener('click', async () => {
-      try {
-        await navigator.clipboard.writeText(shareLink.value);
-        document.getElementById('share-copy').textContent = 'Copied!';
-        setTimeout(() => (document.getElementById('share-copy').textContent = 'Copy'), 1500);
-      } catch (_) {
-        shareLink.select();
+      const btn = document.getElementById('share-copy');
+      if (await copyToClipboard(shareLink)) {
+        btn.textContent = 'Copied!';
+        setTimeout(() => (btn.textContent = 'Copy'), 1500);
+      } else {
+        // Couldn't copy programmatically — leave the link selected so the user can
+        // copy it by hand, and say so.
+        shareLink.focus();
+        shareLink.setSelectionRange(0, shareLink.value.length);
+        setStatus('Press ⌘/Ctrl-C to copy the selected link.', 'err');
       }
     });
 
