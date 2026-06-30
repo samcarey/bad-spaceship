@@ -220,6 +220,26 @@ pub struct NetJoint {
     pub anchor2: [f32; 3],
 }
 
+/// Replicated hold state for a part a player is currently holding: who holds it
+/// (their [`NetPlayer::client_id`]) and the hold point + target orientation the server
+/// is springing it toward (the holder's forwarded `hold_target`/`hold_rotation`). All
+/// loose parts are predicted on *every* client (`PredictionTarget::All`), but only the
+/// holder runs the hold spring locally — so without this a remote observer predicts the
+/// held part in **free-fall** and replication yanks it back up every snapshot, making it
+/// sag and bob for everyone except the holder. With it, each client springs the held
+/// part toward this target with the same `apply_hold_spring` the server uses, so the
+/// part floats smoothly for observers too. The holder ignores its own (it predicts with
+/// its local, zero-delay hold point); the component is removed when the part is released.
+#[derive(Component, Serialize, Deserialize, Clone, Copy, PartialEq, Debug, Default)]
+pub struct NetHold {
+    /// The holder's `NetPlayer::client_id`, so the holder's own client can skip it.
+    pub holder: u64,
+    /// Hold-point world position the part is sprung toward (the holder's `hold_target`).
+    pub target: [f32; 3],
+    /// Target orientation for the held part (the holder's `hold_rotation`).
+    pub rotation: [f32; 4],
+}
+
 /// An avatar's look yaw (radians), replicated **server → other clients** purely so
 /// remote avatars can be drawn facing the way they look. Deliberately a *separate*
 /// component from the local-input [`Yaw`]: the owner drives its own `Yaw` locally
@@ -442,6 +462,9 @@ impl Plugin for ProtocolPlugin {
         // The part shape is constant, so it only needs replicating (no interp).
         app.component::<NetPart>().replicate();
         app.component::<NetJoint>().replicate();
+        // Held-part hold state (see `NetHold`): replicated so every client can spring a
+        // held part toward the holder's hold point instead of predicting it in free-fall.
+        app.component::<NetHold>().replicate();
         // Replicate each avatar's facing (`NetFacing`, the server's mirror of its
         // look `Yaw`) so remote clients can draw it facing the way it looks. The body
         // is `ROTATION_LOCKED` at identity (the camera rig owns the look), so facing

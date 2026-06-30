@@ -27,8 +27,8 @@ use avian3d::prelude::{
 };
 use bad_spaceship_shared::character::{CharacterMovement, InitialPose, ServerAvatar};
 use bad_spaceship_shared::net::{
-    apply_hold_spring, apply_net_input, focused_part, NetFacing, NetInput, NetJoint, NetPart,
-    NetPlayer, ProtocolPlugin, RollbackReport, TICK,
+    apply_hold_spring, apply_net_input, focused_part, NetFacing, NetHold, NetInput, NetJoint,
+    NetPart, NetPlayer, ProtocolPlugin, RollbackReport, TICK,
 };
 use bad_spaceship_shared::map::GROUND_LAYER;
 use bad_spaceship_shared::part::{
@@ -315,7 +315,10 @@ impl Plugin for NetServerPlugin {
         // look yaw into its replicated facing. Parts and joints replicate their state
         // directly (predicted Avian `Position`/`Rotation`; `NetJoint` data) — nothing
         // to stream per-frame.
-        app.add_systems(Update, (replace_fallen_room_parts, sync_avatar_facing));
+        app.add_systems(
+            Update,
+            (replace_fallen_room_parts, sync_avatar_facing, sync_net_hold),
+        );
         // Assign each client (and its avatar) to its reported room on the first
         // input, lazily creating the room's world.
         app.add_systems(Update, assign_rooms);
@@ -765,6 +768,57 @@ fn sync_avatar_facing(mut avatars: Query<(&Yaw, &mut NetFacing)>) {
         if facing.0 != yaw.0 {
             facing.0 = yaw.0;
         }
+    }
+}
+
+/// Tag each held part with a replicated [`NetHold`] (holder + the hold point/orientation
+/// the server springs it toward) and strip it from parts that were released, so every
+/// client can run the same hold spring on a held part instead of predicting it in
+/// free-fall (the held-part sag/bob for non-holders). The target/orientation are the
+/// holder's forwarded `hold_target`/`hold_rotation` — the same values `server_hold`
+/// springs toward — so observers and the server agree. Only writes on change, so a held
+/// part the holder isn't moving stops generating traffic.
+fn sync_net_hold(
+    mut commands: Commands,
+    players: Query<(&HeldPart, &ActionState<NetInput>, &NetPlayer)>,
+    mut tagged: Query<(Entity, &mut NetHold)>,
+) {
+    // The hold state for every part held this tick, keyed by part entity. If two
+    // players somehow latch the same part (a contested grab — `server_grab` doesn't
+    // exclude it), last-writer-wins on the holder; a degenerate case that resolves
+    // when one of them releases.
+    let mut held_now: HashMap<Entity, NetHold> = HashMap::new();
+    for (held, state, net_player) in &players {
+        if let Some(part) = held.0 {
+            held_now.insert(
+                part,
+                NetHold {
+                    holder: net_player.client_id,
+                    target: state.0.hold_target,
+                    rotation: state.0.hold_rotation,
+                },
+            );
+        }
+    }
+    // Update parts that already carry a tag; drop the tag from any that were released.
+    // `set_if_neq` only dirties (and so re-replicates) `NetHold` on an actual change, so
+    // a held part the holder isn't moving stops generating traffic.
+    for (entity, mut hold) in &mut tagged {
+        match held_now.remove(&entity) {
+            Some(new) => {
+                hold.set_if_neq(new);
+            }
+            None => {
+                commands.entity(entity).remove::<NetHold>();
+            }
+        }
+    }
+    // Insert tags for parts newly held this tick (those still left in the map).
+    // `try_insert`, not `insert`: a held part can't fall, but if one is ever despawned
+    // the same frame (e.g. `replace_fallen_room_parts`) the deferred insert would hit a
+    // missing entity — `try_insert` no-ops instead of erroring.
+    for (entity, hold) in held_now {
+        commands.entity(entity).try_insert(hold);
     }
 }
 
