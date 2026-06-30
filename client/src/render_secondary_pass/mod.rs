@@ -35,16 +35,16 @@ impl Plugin for RenderSecondaryPassPlugin {
                 Update,
                 (
                     position_gizmo,
-                    // The hold-point delete-zone sphere is a local-build UI; in
-                    // multiplayer the local hold is suppressed, so skip it.
-                    add_hold_point_delete_zone_visualization
-                        .run_if(not(resource_exists::<SuppressLocalParts>)),
+                    // The hold-point delete-zone sphere shows in multiplayer too:
+                    // the predicted avatar carries the same `HoldPoint` child +
+                    // `Holding`/`Modifying`, and joint deletion is now server-
+                    // authoritative (`server_delete`), so the zone is meaningful.
+                    add_hold_point_delete_zone_visualization,
                     (
                         display_potential_joints,
                         display_existing_joints,
                         display_predelete_joints,
-                        delete_zone_visibility
-                            .run_if(not(resource_exists::<SuppressLocalParts>)),
+                        delete_zone_visibility,
                     )
                         .after(UpdateJointsLabel),
                 ),

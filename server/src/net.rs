@@ -31,7 +31,7 @@ use bad_spaceship_shared::net::{
     NetPlayer, ProtocolPlugin, RollbackReport, TICK,
 };
 use bad_spaceship_shared::part::{
-    local_contact_anchor, spawn_random_part, SuppressLocalParts, NUM_PARTS,
+    local_contact_anchor, spawn_random_part, SuppressLocalParts, DELETE_RADIUS, NUM_PARTS,
 };
 use bad_spaceship_shared::{SuppressLocalPlayer, Yaw};
 use bevy::prelude::*;
@@ -337,7 +337,7 @@ impl Plugin for NetServerPlugin {
             FixedUpdate,
             (
                 apply_net_input.before(CharacterMovement),
-                (server_grab, server_hold, server_attach).chain(),
+                (server_grab, server_hold, server_attach, server_delete).chain(),
             ),
         );
     }
@@ -668,6 +668,10 @@ fn server_attach(
                         },
                         Replicate::to_clients(NetworkTarget::All),
                         Rooms::single(member.0),
+                        // Server-only room tag so `server_delete` can scope a
+                        // delete to this room (rooms share coordinate space, so a
+                        // distance check alone could hit another room's joint).
+                        *member,
                     ));
                     attached = true;
                 }
@@ -678,6 +682,54 @@ fn server_attach(
             // block and the one you joined hangs below it on the new joint. Just close
             // the retry window so this press joins exactly once.
             attach.pending = 0;
+        }
+    }
+}
+
+/// Per-player delete-intent latch. Tracks the previous `delete` value so the
+/// despawn fires once on the **rising edge** of the gesture (the client asserts
+/// the intent for several ticks for packet-loss robustness, like `attach`).
+#[derive(Component, Default)]
+struct DeleteState {
+    prev: bool,
+}
+
+/// On the rising edge of the delete intent, despawn the joint inside the player's
+/// delete zone — the empty-handed counterpart to `server_attach`. Mirrors
+/// single-player's `update_predelete_joints`/`delete_joints`: a joint is "in the
+/// zone" when its `body2` anchor is within `DELETE_RADIUS` of the hold point
+/// (`hold_target`, forwarded on `NetInput`). Despawning the server joint entity
+/// removes its replication, so every client drops the joint and the assembly
+/// separates. Room-scoped via the joint's `RoomMember` (rooms share coordinate
+/// space, so the distance check alone could match another room's joint).
+fn server_delete(
+    mut commands: Commands,
+    bodies: Query<(&Position, &Rotation)>,
+    joints: Query<(Entity, &SphericalJoint, &RoomMember)>,
+    mut players: Query<(&ActionState<NetInput>, &RoomMember, &mut DeleteState)>,
+) {
+    for (state, member, mut del) in &mut players {
+        let rising = state.0.delete && !del.prev;
+        del.prev = state.0.delete;
+        if !rising {
+            continue;
+        }
+        let hold = Vec3::from_array(state.0.hold_target);
+        for (joint_entity, joint, joint_room) in &joints {
+            if joint_room.0 != member.0 {
+                continue;
+            }
+            // World position of the `body2` anchor — the same point
+            // `update_predelete_joints` measures against the hold point.
+            let (Some(anchor2), Ok((pos, rot))) =
+                (joint.local_anchor2(), bodies.get(joint.body2))
+            else {
+                continue;
+            };
+            let center = pos.0 + rot.0 * anchor2;
+            if (center - hold).length() < DELETE_RADIUS {
+                commands.entity(joint_entity).despawn();
+            }
         }
     }
 }
@@ -802,6 +854,7 @@ fn spawn_player_for_client(
         ServerAvatar,
         HeldPart::default(),
         AttachState::default(),
+        DeleteState::default(),
         // Telemetry: server-measured late/lost-input tally for this client (the
         // `InputBuffer` lightyear adds on first input lands on this same entity).
         LateInputStats::default(),

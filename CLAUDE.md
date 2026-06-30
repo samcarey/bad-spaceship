@@ -969,8 +969,24 @@ kinematic version tunnelled through the floor). The selection/hold helpers live 
 the **real** game gizmo: `highlight_grabbable` tints the focused part yellow (the
 single-player focus colour), and `position_gizmo` (secondary pass) was extended to
 place the existing `GizmoHub` (RGB axes) at the hold point in multiplayer (the
-local hold that normally drives it is suppressed). The delete-zone sphere overlay
-is gated off under `SuppressLocalParts`.
+local hold that normally drives it is suppressed).
+
+**Networked joint deletion (delete-zone parity).** Empty-handed, the modifier-click
+gesture deletes a joint in the delete zone — now server-authoritative, the
+empty-handed counterpart to attach. `read_grab_intent` splits the modifier click by
+hold state (holding → `WantAttach`, empty-handed → `WantDelete`); `write_input`
+forwards a one-shot `NetInput::delete`. On the rising edge, `server_delete` despawns
+the joint whose `body2` anchor is within `DELETE_RADIUS` of the hold point
+(`hold_target`) **in the player's room** — the joint is tagged with a server-only
+`RoomMember` at attach time because rooms share coordinate space, so a distance check
+alone could match another room's joint. Despawning the server joint entity drops its
+replication, so every client loses the joint and the assembly separates. The
+delete-zone **sphere overlay** and `delete_zone_visibility` are no longer gated off
+in multiplayer (the predicted avatar has the same `HoldPoint`/`Holding`/`Modifying`,
+and `update_predelete_joints`/`display_predelete_joints` already highlight the
+in-zone joint red over the replicated parts). The *local* `delete_joints` (shared
+`part.rs`) **is** gated off under `SuppressLocalParts` now — a local despawn of a
+replicated joint replica would fight the server.
 
 **Networked attach + orientation + joint visuals (slice 4).** Players can now
 *build* over the network — rotate a held block to a target orientation and attach
