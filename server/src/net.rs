@@ -30,6 +30,7 @@ use bad_spaceship_shared::net::{
     apply_hold_spring, apply_net_input, focused_part, NetFacing, NetInput, NetJoint, NetPart,
     NetPlayer, ProtocolPlugin, RollbackReport, TICK,
 };
+use bad_spaceship_shared::map::GROUND_LAYER;
 use bad_spaceship_shared::part::{
     local_contact_anchor, spawn_random_part, SuppressLocalParts, DELETE_RADIUS, NUM_PARTS,
 };
@@ -467,7 +468,7 @@ fn assign_rooms(
         commands.entity(entity).insert((
             Rooms::single(room.id),
             RoomMember(room.id),
-            CollisionLayers::from_bits(room.bit, room.bit | 1),
+            CollisionLayers::from_bits(room.bit, room.bit | GROUND_LAYER),
         ));
         commands.entity(controlled.owner).insert(Rooms::single(room.id));
         info!("client {:?} joined room {:?}", controlled.owner, room.id);
@@ -534,7 +535,7 @@ fn tag_room_part(commands: &mut Commands, entity: Entity, half_extents: Vec3, ro
         PredictionTarget::to_clients(NetworkTarget::All),
         Rooms::single(room.id),
         PartRoom { id: room.id, bit: room.bit },
-        CollisionLayers::from_bits(room.bit, room.bit | 1),
+        CollisionLayers::from_bits(room.bit, room.bit | GROUND_LAYER),
     ));
 }
 

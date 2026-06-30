@@ -13,6 +13,16 @@ impl Plugin for MapPlugin {
 pub const PLATFORM_WIDTH_M: f32 = 50.0; // meters
 pub const PLATFORM_THICKNESS_M: f32 = 3.0; // meters
 
+/// The Avian collision-layer bit the ground sits on: bit 0 (value 1), Avian's
+/// default membership for a collider with no explicit `CollisionLayers` — like the
+/// bowl spawned below. The multiplayer collision scheme reserves it for the ground
+/// so rooms never use it: room parts/avatars (`server::net`) put their `room.bit`
+/// in membership and add `GROUND_LAYER` to their *filter* (`room.bit | GROUND_LAYER`)
+/// so they still land on the ground while staying isolated from other rooms; a
+/// freshly-spawned, not-yet-roomed avatar (`build_server_avatar`) uses it as both
+/// membership and filter to collide with the ground *only*.
+pub const GROUND_LAYER: u32 = 1;
+
 fn spawn_map(mut commands: Commands) {
     // Create a bowl with a cosine cross-section
     let mut vertices: Vec<Vec3> = Vec::new();
