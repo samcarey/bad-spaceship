@@ -140,6 +140,8 @@
     #share .label { font-size: 0.78rem; color: var(--muted); letter-spacing: 0.08em; margin-bottom: 0.5rem; }
     #share .linkrow { display: flex; gap: 0.5rem; }
     #share input { flex: 1; width: auto; text-transform: none; letter-spacing: 0; }
+    /* Enter is the primary action — give it its own full-width row below the link. */
+    #share-enter { display: block; width: 100%; margin-top: 0.6rem; }
   </style>
 </head>
 
@@ -156,8 +158,8 @@
     <div class="linkrow">
       <input id="share-link" type="text" readonly />
       <button class="btn" id="share-copy">Copy</button>
-      <button class="btn primary" id="share-enter">Enter</button>
     </div>
+    <button class="btn primary" id="share-enter">Enter</button>
   </div>
 
   <div class="actions">

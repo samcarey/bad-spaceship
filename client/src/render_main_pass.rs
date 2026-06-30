@@ -165,13 +165,17 @@ fn assign_grass(
                     // The mesh UVs tile every `GRASS_TILE_M` metres (see
                     // `compute_mesh`), so the sampler must wrap rather than clamp —
                     // the default `ClampToEdge` would smear the edge texels across
-                    // the whole platform instead of repeating the image.
+                    // the whole platform instead of repeating the image. Use
+                    // `MirrorRepeat` rather than `Repeat`: each tile flips relative to
+                    // its neighbour, so adjacent edges hold identical texels and the
+                    // image fades from one tile into the next instead of showing a
+                    // hard seam wherever a non-tileable grass image wraps.
                     base_color_texture: Some(asset_server.load_with_settings(
                         "textures/grass.png",
                         |s: &mut ImageLoaderSettings| {
                             s.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
-                                address_mode_u: ImageAddressMode::Repeat,
-                                address_mode_v: ImageAddressMode::Repeat,
+                                address_mode_u: ImageAddressMode::MirrorRepeat,
+                                address_mode_v: ImageAddressMode::MirrorRepeat,
                                 ..Default::default()
                             });
                         },
@@ -184,9 +188,11 @@ fn assign_grass(
     }
 }
 
-/// World-space width of one grass texture tile, in metres. ≈ 4 × the player
-/// sphere's 1.5 m diameter (`character.character.ron` `size`), per design.
-const GRASS_TILE_M: f32 = 6.0;
+/// World-space width of one grass texture tile, in metres. ≈ 8 × the player
+/// sphere's 1.5 m diameter (`character.character.ron` `size`). With `MirrorRepeat`
+/// each image covers half a tile before mirroring, so the visible motif repeats
+/// every ~6 m.
+const GRASS_TILE_M: f32 = 12.0;
 
 fn compute_mesh(shape: &Collider) -> Mesh {
     let mut mesh = Mesh::new(
