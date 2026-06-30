@@ -242,8 +242,8 @@ Look at block within range to highlight it.
 Click while block is highlighted to pick it up.
 Click again to drop it.
 Hold shift and move mouse or scroll to rotate a held block.
-Hold block to touch another to display potential joints (in yellow).
-Shift-click to make potential joints real (displayed in blue).
+Hold block to touch another to display potential joints (in blue).
+Shift-click to make potential joints real (displayed in green).
 While not holding block, hold shift to display deletion zone.
 Hold deletion zone over existing joint to highlight it in red.
 Click while joint is highlighted red to delete it.
@@ -252,8 +252,8 @@ Click while joint is highlighted red to delete it.
 const TOUCH_INSTRUCTIONS: &str = "Instructions:
 Left stick to move, right stick to look (drag from where you touch).
 Aim a block within range and tap GRAB to pick it up; tap again to drop.
-Carry a block to touch another to show potential joints (yellow),
-then tap Join Parts to make them real (blue).
+Carry a block to touch another to show potential joints (blue),
+then tap Join Parts to make them real (green).
 Drag the open area while carrying to rotate the held block.
 Empty-handed, aim at a joint until it highlights red,
 then tap Delete Joints to remove it. Tap pause (top-right) for the menu.

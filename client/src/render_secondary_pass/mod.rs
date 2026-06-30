@@ -245,9 +245,12 @@ fn build_gizmo(
 #[derive(Default, Resource)]
 pub struct JointAppearance {
     pub mesh: Option<Handle<Mesh>>,
+    /// Candidate (potential) joints — drawn **blue**.
     valid_material: Option<Handle<GizmoMaterial>>,
-    /// The material single-player draws *existing* joints with.
+    /// The material both single-player and multiplayer draw *real* (existing)
+    /// joints with — **green**.
     pub invalid_material: Option<Handle<GizmoMaterial>>,
+    /// A joint inside the delete zone — drawn **red**.
     predelete_material: Option<Handle<GizmoMaterial>>,
 }
 
@@ -257,11 +260,13 @@ fn initialize_joint_appearance(
     mut joint_appearance: ResMut<JointAppearance>,
 ) {
     let (s, l, a) = (1.0, 0.5, 0.75);
+    // Joint state → hue: candidate = blue (240°), real = green (120°),
+    // delete-zone = red (0°).
     *joint_appearance = JointAppearance {
         mesh: Some(meshes.add(Sphere::new(0.1).mesh().ico(5).unwrap())),
-        valid_material: Some(materials.add(GizmoMaterial::from(Color::hsla(260.0, s, l, a)))),
-        invalid_material: Some(materials.add(GizmoMaterial::from(Color::hsla(20.0, s, l, a)))),
-        predelete_material: Some(materials.add(GizmoMaterial::from(Color::hsla(20.0, s, l, a)))),
+        valid_material: Some(materials.add(GizmoMaterial::from(Color::hsla(240.0, s, l, a)))),
+        invalid_material: Some(materials.add(GizmoMaterial::from(Color::hsla(120.0, s, l, a)))),
+        predelete_material: Some(materials.add(GizmoMaterial::from(Color::hsla(0.0, s, l, a)))),
     };
 }
 
