@@ -253,7 +253,7 @@ const TOUCH_INSTRUCTIONS: &str = "Instructions:
 Left stick to move, right stick to look (drag from where you touch).
 Aim a block within range and tap GRAB to pick it up; tap again to drop.
 Carry a block to touch another to show potential joints (blue),
-then tap Join Parts to make them real (green).
+then tap Create Joints to make them real (green).
 Drag the open area while carrying to rotate the held block.
 Empty-handed, aim at a joint until it highlights red,
 then tap Delete Joints to remove it. Tap pause (top-right) for the menu.

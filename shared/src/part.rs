@@ -581,8 +581,17 @@ fn attach(
     mut commands: Commands,
     mut attach_events: MessageReader<AttachEvent>,
     attach_points: Res<PotentialJoints>,
+    joints: Query<&SphericalJoint>,
+    mut new_part_events: MessageWriter<NewPart>,
 ) {
     if attach_events.read().next().is_some() {
+        // Parts that already had at least one joint before this attach. A part that
+        // gains its *first* joint is being consumed into a structure, so spawn a
+        // fresh random part to replace it in the loose-parts pool (keeps building
+        // from depleting the world). `commands.spawn` is deferred, so this query
+        // reflects the pre-attach state.
+        let had_joint: Vec<Entity> = joints.iter().flat_map(|j| [j.body1, j.body2]).collect();
+        let mut replaced: Vec<Entity> = Vec::new();
         for DisplayableJoint { points, entities } in attach_points.0.iter() {
             // Avian joints are standalone entities referencing both bodies (rapier
             // spawned the joint as a child of `entities.0`). Preserve the rapier
@@ -594,6 +603,12 @@ fn attach(
                     .with_local_anchor1(points.1)
                     .with_local_anchor2(points.0),
             );
+            for endpoint in [entities.0, entities.1] {
+                if !had_joint.contains(&endpoint) && !replaced.contains(&endpoint) {
+                    replaced.push(endpoint);
+                    new_part_events.write(NewPart);
+                }
+            }
         }
     }
 }

@@ -16,7 +16,7 @@
 //! (yaw + pitch). While moving and not actively looking, the pitch auto-levels back
 //! toward the default. A vertical stack of three buttons sits centered between the
 //! sticks, anchored at the bottom: jump (bottom),
-//! grab (DROP/GRAB), and the action button on top (Join Parts when holding / Delete
+//! grab (DROP/GRAB), and the action button on top (Create Joints when holding / Delete
 //! Joints when empty-handed). A small pause sits top-right. Rotating a held part is
 //! done by dragging the free area (no rotate button); the delete zone is always
 //! live when empty-handed. `apply_pointer` derives the `Modifying` flag from hold
@@ -469,7 +469,7 @@ fn draw_button(painter: &egui::Painter, center: Vec2, r: f32, label: &str, activ
     let lines: Vec<&str> = label.split('\n').collect();
     let n = lines.len().max(1) as f32;
     let longest = lines.iter().map(|l| l.len()).max().unwrap_or(1).max(1) as f32;
-    let font = (1.7 * r / longest).min(1.4 * r / n).clamp(9.0, r * 0.62);
+    let font = (1.95 * r / longest).min(1.6 * r / n).clamp(10.0, r * 0.72);
     let line_h = font * 1.1;
     for (i, line) in lines.iter().enumerate() {
         let y = c.y - (n - 1.0) * 0.5 * line_h + i as f32 * line_h;
@@ -537,7 +537,7 @@ fn draw_overlay(
     // Context labels: the top action button joins (holding) or deletes (empty),
     // the grab button drops (holding) or grabs (empty).
     let holding = holders.iter().next().map(|h| h.0).unwrap_or(false);
-    let action_label = if holding { "Join\nParts" } else { "Delete\nJoints" };
+    let action_label = if holding { "Create\nJoints" } else { "Delete\nJoints" };
     let grab_label = if holding { "DROP" } else { "GRAB" };
 
     let r = layout.btn_r;

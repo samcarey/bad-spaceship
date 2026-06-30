@@ -619,8 +619,17 @@ fn server_attach(
     rotations: Query<&Rotation>,
     coms: Query<&ComputedCenterOfMass>,
     net_parts: Query<(), With<NetPart>>,
+    // Existing joints (to tell which parts are joining for the FIRST time) and each
+    // part's room (to spawn the replacement in the same room).
+    joints: Query<&SphericalJoint>,
+    part_rooms: Query<&PartRoom>,
     mut players: Query<(&ActionState<NetInput>, &HeldPart, &RoomMember, &mut AttachState)>,
 ) {
+    // Parts that already had a joint before this tick. A part gaining its first
+    // joint is consumed into a structure, so spawn a fresh random part to replace
+    // it in the room's loose-parts pool (`commands.spawn` is deferred, so this
+    // reflects the pre-attach state). Mirrors single-player's `attach`.
+    let had_joint: Vec<Entity> = joints.iter().flat_map(|j| [j.body1, j.body2]).collect();
     for (state, held, member, mut attach) in &mut players {
         // Arm a retry window on the rising edge of the intent (see `AttachState`).
         if state.0.attach && !attach.prev {
@@ -634,7 +643,9 @@ fn server_attach(
         let Some(held_entity) = held.0 else {
             continue;
         };
+        let held_room = part_rooms.get(held_entity).ok().map(|pr| Room { id: pr.id, bit: pr.bit });
         let mut attached = false;
+        let mut replaced: Vec<Entity> = Vec::new();
         for pair in collisions.collisions_with(held_entity) {
             if !pair.is_touching() {
                 continue;
@@ -674,6 +685,16 @@ fn server_attach(
                         *member,
                     ));
                     attached = true;
+                    // Replenish the pool for each endpoint joining for the first time.
+                    for endpoint in [held_entity, other] {
+                        if !had_joint.contains(&endpoint) && !replaced.contains(&endpoint) {
+                            replaced.push(endpoint);
+                            if let Some(room) = held_room {
+                                let (new_entity, half_extents) = spawn_random_part(&mut commands);
+                                tag_room_part(&mut commands, new_entity, half_extents, room);
+                            }
+                        }
+                    }
                 }
             }
         }

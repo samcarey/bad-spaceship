@@ -9,6 +9,7 @@ use bad_spaceship_shared::{
 // → `bevy_asset` (`bevy::asset`).
 use bevy::{
     asset::RenderAssetUsages,
+    image::{ImageAddressMode, ImageLoaderSettings, ImageSampler, ImageSamplerDescriptor},
     light::CascadeShadowConfigBuilder,
     mesh::{Indices, VertexAttributeValues},
     prelude::*,
@@ -161,7 +162,20 @@ fn assign_grass(
                 global_transform.clone(),
                 Mesh3d(meshes.add(compute_mesh(&collider_shape))),
                 MeshMaterial3d(materials.add(StandardMaterial {
-                    base_color_texture: Some(asset_server.load("textures/grass.png")),
+                    // The mesh UVs tile every `GRASS_TILE_M` metres (see
+                    // `compute_mesh`), so the sampler must wrap rather than clamp —
+                    // the default `ClampToEdge` would smear the edge texels across
+                    // the whole platform instead of repeating the image.
+                    base_color_texture: Some(asset_server.load_with_settings(
+                        "textures/grass.png",
+                        |s: &mut ImageLoaderSettings| {
+                            s.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+                                address_mode_u: ImageAddressMode::Repeat,
+                                address_mode_v: ImageAddressMode::Repeat,
+                                ..Default::default()
+                            });
+                        },
+                    )),
                     perceptual_roughness: 1.0,
                     ..Default::default()
                 })),
@@ -169,6 +183,10 @@ fn assign_grass(
             .insert(AssignedMaterial);
     }
 }
+
+/// World-space width of one grass texture tile, in metres. ≈ 4 × the player
+/// sphere's 1.5 m diameter (`character.character.ron` `size`), per design.
+const GRASS_TILE_M: f32 = 6.0;
 
 fn compute_mesh(shape: &Collider) -> Mesh {
     let mut mesh = Mesh::new(
@@ -214,12 +232,16 @@ fn compute_mesh(shape: &Collider) -> Mesh {
     // There's nothing particularly meaningful we can do
     // for this one without knowing anything about the overall topology.
 
+    // Tile the grass texture instead of stretching one copy across the whole
+    // platform: one image tile spans `GRASS_TILE_M` metres of world space (the UV
+    // is just world position / tile size). The sampler is set to `Repeat` in
+    // `assign_grass`, so UVs outside [0,1] wrap and the image repeats.
     mesh.insert_attribute(
         Mesh::ATTRIBUTE_UV_0,
         VertexAttributeValues::from(
             verts
                 .iter()
-                .map(|v| [v.x / PLATFORM_WIDTH_M + 0.5, v.z / PLATFORM_WIDTH_M + 0.5])
+                .map(|v| [v.x / GRASS_TILE_M, v.z / GRASS_TILE_M])
                 .collect::<Vec<_>>(),
         ),
     );
