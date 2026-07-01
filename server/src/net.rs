@@ -27,9 +27,9 @@ use avian3d::prelude::{
 };
 use bad_spaceship_shared::character::{spawn_position, CharacterMovement, InitialPose, ServerAvatar};
 use bad_spaceship_shared::net::{
-    apply_hold_spring, apply_net_input, focused_part, sanitize_name, NetFacing, NetHold, NetInput,
-    NetJoint, NetName, NetPart, NetPlayer, ProtocolPlugin, ResetPosition, RollbackReport, SetName,
-    TICK,
+    apply_hold_spring, apply_net_input, focused_part, sanitize_name, DeleteZoneReport, NetFacing,
+    NetHold, NetInput, NetJoint, NetName, NetPart, NetPlayer, ProtocolPlugin, ResetPosition,
+    RollbackReport, SetName, TICK,
 };
 use bad_spaceship_shared::map::GROUND_LAYER;
 use bad_spaceship_shared::part::{
@@ -266,6 +266,34 @@ fn flush_telemetry(
     }
 }
 
+/// TEMPORARY: print each client's forwarded delete-zone detector output (`[dz] …`) to
+/// the version's `server.log`, so the MP red-highlight bug can be diagnosed from the
+/// build box without the player reading their screen. `b2`/`b1` are the nearest joint's
+/// `body2`/`body1` anchor distances in mm (`-` = none). A large `b2` while a joint is
+/// visibly inside the sphere means the detector tests the wrong point. Remove with
+/// [`DeleteZoneReport`].
+fn log_delete_zone(
+    mut links: Query<
+        (Entity, &mut MessageReceiver<DeleteZoneReport>),
+        (With<ClientOf>, With<Connected>),
+    >,
+) {
+    let d = |mm: u32| if mm == u32::MAX { "-".to_string() } else { format!("{}", mm) };
+    for (entity, mut receiver) in &mut links {
+        for r in receiver.receive() {
+            println!(
+                "[dz] client={} joints={} resolved={} in_zone={} b2={}mm b1={}mm",
+                entity.to_bits(),
+                r.joints,
+                r.resolved,
+                r.in_zone,
+                d(r.nearest_body2_mm),
+                d(r.nearest_body1_mm),
+            );
+        }
+    }
+}
+
 pub struct NetServerPlugin;
 
 impl Plugin for NetServerPlugin {
@@ -312,6 +340,7 @@ impl Plugin for NetServerPlugin {
         // + rollback load + late inputs) to the db + `[tel]` log line every ~2s.
         app.add_systems(FixedUpdate, count_late_inputs);
         app.add_systems(Update, flush_telemetry);
+        app.add_systems(Update, log_delete_zone);
         // Refill a room's parts that fall off its platform, and mirror each avatar's
         // look yaw into its replicated facing. Parts and joints replicate their state
         // directly (predicted Avian `Position`/`Rotation`; `NetJoint` data) — nothing
