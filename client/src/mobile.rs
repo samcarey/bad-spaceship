@@ -17,7 +17,7 @@
 //! toward the default. A vertical stack of three buttons sits centered between the
 //! sticks, anchored at the bottom: jump (bottom),
 //! grab (DROP/GRAB), and the action button on top (Create Joints when holding / Delete
-//! Joints when empty-handed). A small pause sits top-right. Rotating a held part is
+//! Joints when empty-handed). Rotating a held part is
 //! done by dragging the free area (no rotate button); the delete zone is always
 //! live when empty-handed. `apply_pointer` derives the `Modifying` flag from hold
 //! state + per-tap intent, so one `PlayerClick` routes to pickup/drop/attach/delete
@@ -28,7 +28,7 @@
 //! never see it. Two desktop assumptions don't hold on touch and are handled here:
 //! there is no pointer lock (so `web.rs`'s pointer-lock menu toggle is disabled in
 //! mobile mode — see `web.rs`) and no mouse click to enter the game (so the first
-//! tap drives `Initial → InGame`, and an on-screen Pause button drives the menu).
+//! tap drives `Initial → InGame`).
 //!
 //! Coordinates: Bevy reports touch positions in window *logical* pixels (top-left
 //! origin), the same space `Window::width()/height()` report and — at egui zoom
@@ -159,13 +159,12 @@ impl TouchControls {
 /// Fixed-position control geometry in window-logical pixels, recomputed each frame
 /// from the window size so the layout tracks rotation/resize. Two fixed joysticks
 /// in the bottom corners (move left, look right), a jump button low-center between
-/// them, the click + shift buttons centered above them, and a small pause top-right.
+/// them, and the click + shift buttons centered above them.
 #[derive(Resource, Default)]
 struct ControlLayout {
     width: f32,
     height: f32,
     btn_r: f32,
-    pause_r: f32,
     joystick_radius: f32,
     move_center: Vec2,
     look_center: Vec2,
@@ -173,7 +172,6 @@ struct ControlLayout {
     action: Vec2,
     grab: Vec2,
     jump: Vec2,
-    pause: Vec2,
 }
 
 impl ControlLayout {
@@ -186,7 +184,6 @@ impl ControlLayout {
         self.height = h;
         self.joystick_radius = jr;
         self.btn_r = r;
-        self.pause_r = r * 0.7;
         // Fixed sticks in the bottom corners.
         self.move_center = Vec2::new(jr + edge, h - jr - edge);
         self.look_center = Vec2::new(w - jr - edge, h - jr - edge);
@@ -198,7 +195,6 @@ impl ControlLayout {
         self.jump = Vec2::new(cx, h - r - edge);
         self.grab = Vec2::new(cx, self.jump.y - gap);
         self.action = Vec2::new(cx, self.grab.y - gap);
-        self.pause = Vec2::new(w - self.pause_r - 12.0, self.pause_r + 12.0);
     }
 
     /// Generous circular hit-test (touch target a bit larger than the drawn circle).
@@ -245,14 +241,13 @@ fn reset_controls(mut controls: ResMut<TouchControls>) {
 }
 
 /// Assigns newly-pressed fingers to roles, releases roles whose finger lifted,
-/// fires the momentary buttons (grab / modify-toggle / pause), and recomputes the
+/// fires the momentary buttons (grab / modify-toggle), and recomputes the
 /// joystick vector from the active move finger.
 fn classify_touches(
     touches: Res<Touches>,
     layout: Res<ControlLayout>,
     mut controls: ResMut<TouchControls>,
     mut clicks: MessageWriter<PlayerClick>,
-    mut next_state: ResMut<NextState<AppState>>,
 ) {
     // Per-frame button taps, recomputed each frame.
     controls.grab_tap = false;
@@ -284,11 +279,6 @@ fn classify_touches(
     for touch in touches.iter_just_pressed() {
         let p = touch.position();
         let id = touch.id();
-        if layout.hit(layout.pause, p) {
-            next_state.set(AppState::InGameMenu);
-            controls.clear_fingers();
-            continue;
-        }
         if layout.hit(layout.jump, p) {
             controls.jump_touch = Some(id);
             continue;
@@ -544,7 +534,6 @@ fn draw_overlay(
     draw_button(&painter, layout.action, r, action_label, false);
     draw_button(&painter, layout.grab, r, grab_label, false);
     draw_button(&painter, layout.jump, r, "JUMP", controls.jump_touch.is_some());
-    draw_button(&painter, layout.pause, layout.pause_r, "II", false);
 
     Ok(())
 }

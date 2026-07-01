@@ -267,7 +267,7 @@ Carry a block to touch another to show potential joints (blue),
 then tap Create Joints to make them real (green).
 Drag the open area while carrying to rotate the held block.
 Empty-handed, aim at a joint until it highlights red,
-then tap Delete Joints to remove it. Tap pause (top-right) for the menu.
+then tap Delete Joints to remove it. Use the top-left menu to change your name or reset your position.
 ";
 
 /// The instructions overlay, now **hidden by default** and revealed by the top-left
@@ -316,6 +316,38 @@ struct HudState {
 /// body is ~1.2 m tall centred on the origin, so this sits the label just overhead.
 const NAME_LABEL_HEIGHT: f32 = 1.6;
 
+/// Font size for the top-left "?" help button — roughly double egui's default so it's
+/// an easy touch target.
+const HUD_FONT_SIZE: f32 = 28.0;
+
+/// Side length (points) of the hamburger icon button, matched to `HUD_FONT_SIZE`.
+const HUD_ICON_SIZE: f32 = 30.0;
+
+/// Roster player-name colour: a light grey so names read clearly over the translucent
+/// panel (egui's default body text is a dimmer grey).
+const ROSTER_NAME_COLOR: Color32 = Color32::from_rgb(225, 230, 240);
+
+/// A hamburger (three horizontal lines) icon button — egui's default font can't render
+/// the ☰ glyph, so paint it. `size` is the square button's side in points. Returns the
+/// click `Response`. The line colour tracks egui's interaction visuals (brightens on
+/// hover/press) so it still reads as a button.
+fn hamburger_button(ui: &mut egui::Ui, size: f32) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::click());
+    if ui.is_rect_visible(rect) {
+        let color = ui.style().interact(&response).fg_stroke.color;
+        let painter = ui.painter();
+        painter.rect_filled(rect, egui::CornerRadius::same(4), Color32::from_black_alpha(120));
+        let stroke = egui::Stroke::new((size * 0.09).max(2.0), color);
+        let x0 = rect.left() + size * 0.22;
+        let x1 = rect.right() - size * 0.22;
+        for i in 0..3 {
+            let y = rect.top() + size * (0.30 + 0.20 * i as f32);
+            painter.line_segment([egui::pos2(x0, y), egui::pos2(x1, y)], stroke);
+        }
+    }
+    response
+}
+
 /// The one representative entity per player carrying its name: the owner's own
 /// avatar is `Predicted`, every remote avatar is `Interpolated`. This excludes the
 /// invisible `Confirmed` copies so each player appears exactly once (in the roster
@@ -354,27 +386,35 @@ fn show_name_hud(
 
     // Menu actions, applied after the egui closures (see the doc comment).
     let mut rename_to: Option<String> = None;
+    // On web, a submitted name arrives (a later frame) from the non-blocking DOM
+    // rename overlay opened below; collect it here to send like any other rename.
+    #[cfg(target_arch = "wasm32")]
+    if let Some(name) = crate::platform::take_name_edit() {
+        rename_to = Some(name);
+    }
     let mut toggle_menu = false;
+    let mut close_menu = false;
     let mut toggle_help = false;
     let mut open_rename = false;
     let mut do_reset = false;
 
-    // Top-left: hamburger menu (connected only) + help toggle.
+    // Top-left: hamburger menu (connected only) + help toggle, both drawn large.
     egui::Area::new(egui::Id::new("bs_top_left"))
         .anchor(Align2::LEFT_TOP, egui::vec2(8.0, 8.0))
         .show(ctx, |ui| {
             ui.horizontal(|ui| {
-                // "Menu" text, not the ☰ glyph — egui's default font can't render most
-                // symbol glyphs (they show as tofu boxes), same reason "?" isn't an icon.
-                if connected && ui.button("Menu").clicked() {
+                if connected && hamburger_button(ui, HUD_ICON_SIZE).clicked() {
                     toggle_menu = true;
                 }
-                if ui.button("?").clicked() {
+                if ui
+                    .button(egui::RichText::new("?").size(HUD_FONT_SIZE))
+                    .clicked()
+                {
                     toggle_help = true;
                 }
             });
             if connected && hud.show_menu {
-                Frame::default()
+                let menu = Frame::default()
                     .fill(Color32::from_black_alpha(160))
                     .inner_margin(egui::Margin::same(6))
                     .show(ui, |ui| {
@@ -386,11 +426,18 @@ fn show_name_hud(
                             do_reset = true;
                         }
                     });
+                // A click anywhere outside the open menu collapses it.
+                if menu.response.clicked_elsewhere() {
+                    close_menu = true;
+                }
             }
         });
 
     if toggle_menu {
         hud.show_menu = !hud.show_menu;
+    }
+    if close_menu {
+        hud.show_menu = false;
     }
     if toggle_help {
         hud.show_help = !hud.show_help;
@@ -400,12 +447,12 @@ fn show_name_hud(
         let current = my_id
             .and_then(|id| roster.get(&id).cloned())
             .unwrap_or_default();
-        // On web, use the browser's native prompt — it raises the iOS/Android soft
-        // keyboard (egui's in-canvas field doesn't) and freezes the page, so the
-        // character can't move behind it. On native, open the egui modal.
+        // On web, open the non-blocking DOM rename overlay (raises the mobile keyboard
+        // without freezing the loop; the result is polled above next frame). On native,
+        // open the egui modal (desktop text entry works fine).
         #[cfg(target_arch = "wasm32")]
         {
-            rename_to = crate::platform::prompt_text("Change name", &current);
+            crate::platform::begin_name_edit(&current);
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -472,14 +519,14 @@ fn show_name_hud(
                     .show(ui, |ui| {
                         // Extend to fit each name rather than wrapping it.
                         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-                        ui.label(egui::RichText::new("Players").strong());
+                        ui.label(egui::RichText::new("Lobby").strong());
                         for (id, name) in &roster {
                             let label = if Some(*id) == my_id {
                                 format!("{name} *")
                             } else {
                                 name.clone()
                             };
-                            ui.label(label);
+                            ui.label(egui::RichText::new(label).color(ROSTER_NAME_COLOR));
                         }
                     });
             });

@@ -1,9 +1,12 @@
 use crate::gamepad::GamepadActive;
 use crate::mobile::MobileActive;
 use crate::AppState;
+use bad_spaceship_shared::net::MAX_NAME_LEN;
 use bad_spaceship_shared::{Grass, LookPitch, Player, Yaw};
 use bevy::prelude::*;
 use gloo::events::EventListener;
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::{
     atomic::{AtomicBool, Ordering::SeqCst},
     Arc,
@@ -46,17 +49,132 @@ impl Plugin for PlatformPlugin {
     }
 }
 
-/// Prompt for a line of text using the **browser's native dialog** (`window.prompt`).
-/// Unlike egui's in-canvas text field, this raises the on-screen keyboard on
-/// iOS/Android (it's a real DOM input) and freezes the page while open — so the game
-/// can't read touch/keyboard input underneath it (which is why the character kept
-/// moving behind the old in-canvas modal). Returns the entered string, or `None` if
-/// the user cancelled. Used for the rename field (`ui::show_name_hud`).
-pub fn prompt_text(message: &str, default: &str) -> Option<String> {
-    web_sys::window()?
-        .prompt_with_message_and_default(message, default)
-        .ok()
-        .flatten()
+/// An in-progress name-edit overlay (a real DOM `<input>`), plus the DOM listeners
+/// (kept alive here) that record the outcome. Single-threaded wasm, so a
+/// `thread_local` is fine.
+struct NameEdit {
+    /// The full-screen overlay root, removed when the edit finishes.
+    root: web_sys::Element,
+    /// The text field, read for its value on submit.
+    input: web_sys::HtmlInputElement,
+    /// `None` while open; `Some(true)` = submit, `Some(false)` = cancel.
+    outcome: Rc<RefCell<Option<bool>>>,
+    _listeners: Vec<EventListener>,
+}
+
+thread_local! {
+    static NAME_EDIT: RefCell<Option<NameEdit>> = const { RefCell::new(None) };
+}
+
+/// Open a **non-blocking** name-edit overlay: a full-screen backdrop (captures all
+/// pointer input, so the character can't move behind it) with a text field the user
+/// taps to raise the mobile keyboard, plus Save/Cancel. Unlike `window.prompt`, this
+/// does NOT block the wasm event loop — the game keeps running and the connection
+/// stays alive. (A blocking `prompt` froze the loop for the whole time the dialog was
+/// open, which timed out the netcode session so the avatar vanished for others, and
+/// iOS then wouldn't resume the loop — the reported freeze/crash.) Poll `take_name_edit`
+/// each frame for the result. No-op if an edit is already open.
+pub fn begin_name_edit(initial: &str) {
+    if NAME_EDIT.with(|c| c.borrow().is_some()) {
+        return;
+    }
+    let document = get_document();
+    let make = |tag: &str, style: &str| -> Option<web_sys::Element> {
+        let el = document.create_element(tag).ok()?;
+        el.set_attribute("style", style).ok()?;
+        Some(el)
+    };
+    let (Some(root), Some(panel), Some(label), Some(input_el), Some(row), Some(save), Some(cancel)) = (
+        make(
+            "div",
+            "position:fixed;inset:0;z-index:2147483647;background:rgba(0,0,0,0.6);\
+             display:flex;align-items:center;justify-content:center;",
+        ),
+        make(
+            "div",
+            "display:flex;flex-direction:column;gap:14px;background:#222;color:#fff;\
+             padding:22px;border-radius:12px;min-width:min(320px,80vw);",
+        ),
+        make("div", "font-size:20px;"),
+        make(
+            "input",
+            "font-size:22px;padding:10px;border-radius:6px;border:1px solid #888;",
+        ),
+        make("div", "display:flex;gap:12px;justify-content:flex-end;"),
+        make("button", "font-size:18px;padding:8px 18px;"),
+        make("button", "font-size:18px;padding:8px 18px;"),
+    ) else {
+        return;
+    };
+    let Ok(input) = input_el.dyn_into::<web_sys::HtmlInputElement>() else {
+        return;
+    };
+    label.set_text_content(Some("Enter your name"));
+    save.set_text_content(Some("Save"));
+    cancel.set_text_content(Some("Cancel"));
+    input.set_value(initial);
+    input.set_max_length(MAX_NAME_LEN as i32);
+    let _ = input.set_attribute("autocomplete", "off");
+    let _ = input.set_attribute("autocapitalize", "off");
+    let _ = input.set_attribute("placeholder", "Tap here to type");
+    let _ = row.append_child(&cancel);
+    let _ = row.append_child(&save);
+    let _ = panel.append_child(&label);
+    let _ = panel.append_child(&input);
+    let _ = panel.append_child(&row);
+    let _ = root.append_child(&panel);
+    let _ = get_body().append_child(&root);
+
+    let outcome = Rc::new(RefCell::new(None));
+    let mut listeners = Vec::new();
+    // Enter in the field submits.
+    {
+        let outcome = outcome.clone();
+        listeners.push(EventListener::new(&input, "keydown", move |event| {
+            if let Some(key) = event.dyn_ref::<web_sys::KeyboardEvent>() {
+                if key.key() == "Enter" {
+                    *outcome.borrow_mut() = Some(true);
+                }
+            }
+        }));
+    }
+    // Save / Cancel buttons.
+    {
+        let outcome = outcome.clone();
+        listeners.push(EventListener::new(&save, "click", move |_| {
+            *outcome.borrow_mut() = Some(true);
+        }));
+    }
+    {
+        let outcome = outcome.clone();
+        listeners.push(EventListener::new(&cancel, "click", move |_| {
+            *outcome.borrow_mut() = Some(false);
+        }));
+    }
+
+    NAME_EDIT.with(|c| {
+        *c.borrow_mut() = Some(NameEdit {
+            root,
+            input,
+            outcome,
+            _listeners: listeners,
+        });
+    });
+}
+
+/// Poll the name-edit overlay opened by `begin_name_edit`. Returns `Some(name)` once,
+/// on submit (and tears the overlay down); `None` while it's still open, or on cancel
+/// (also torn down). Call each frame.
+pub fn take_name_edit() -> Option<String> {
+    NAME_EDIT.with(|cell| {
+        let outcome = cell.borrow().as_ref().and_then(|e| *e.outcome.borrow());
+        let submitted = outcome?;
+        // Finished (submit or cancel): tear the overlay down and report.
+        let edit = cell.borrow_mut().take()?;
+        let value = edit.input.value();
+        edit.root.remove();
+        submitted.then_some(value)
+    })
 }
 
 #[derive(Clone, Default, Resource)]
