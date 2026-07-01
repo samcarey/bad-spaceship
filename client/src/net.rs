@@ -23,10 +23,12 @@ use bad_spaceship_shared::net::{
 };
 use bad_spaceship_shared::part::{insert_part_physics, Holdable, SuppressLocalParts};
 use bad_spaceship_shared::player::make_local_player;
+use crate::render_secondary_pass::gizmo_material::GizmoMaterial;
 use crate::render_secondary_pass::JointAppearance;
 use bad_spaceship_shared::{
     CameraOrbitCenter, Character, DirectionalInput, FocusedInteractable, HoldPoint, Holding,
-    InputEvents, LookPitch, Modifying, PartRotation, Player, PlayerClick, SuppressLocalPlayer, Yaw,
+    InputEvents, LookPitch, Modifying, PartRotation, Player, PlayerClick, PredeleteJoints,
+    SuppressLocalPlayer, UpdateJointsLabel, Yaw,
 };
 use bevy::prelude::*;
 use lightyear::prelude::client::input::InputSystems as ClientInputSystems;
@@ -263,6 +265,9 @@ impl Plugin for NetClientPlugin {
                 face_replicated_players,
                 draw_replicated_parts,
                 (bind_replicated_joints, position_replicated_joints).chain(),
+                // Recolor each joint's own persistent gizmo sphere red while it's in the
+                // delete zone. Runs after the shared detector fills `PredeleteJoints`.
+                recolor_replicated_joints.after(UpdateJointsLabel),
                 // After the click → grab intent writes `Holding`, track the held part's
                 // target orientation, then highlight the focused part — in that order so
                 // each reads the previous one's freshly-written state this frame.
@@ -906,6 +911,37 @@ fn position_replicated_joints(
             if transform.translation != anchor {
                 transform.translation = anchor;
             }
+        }
+    }
+}
+
+/// Fix for the multiplayer delete-zone highlight: each replicated joint carries its own
+/// persistent green gizmo sphere (`bind_replicated_joints`), and the red predelete marker
+/// (`display_predelete_joints`) lands at the *same* point (the constraint pins body1 and
+/// body2 anchors together). Both are the same translucent `AlphaMode::Blend` sphere, so
+/// two coincident meshes sort unstably and the joint reads green or red at random — the
+/// reported "joints don't always turn red inside the sphere." (Single-player has no
+/// persistent joint sphere, so it never saw this.) Recolor the joint's *own* sphere red
+/// while it's in `PredeleteJoints`, so whichever coincident mesh wins the sort is red
+/// either way. Change-guarded to avoid re-uploading the material every frame.
+fn recolor_replicated_joints(
+    predelete: Res<PredeleteJoints>,
+    appearance: Res<JointAppearance>,
+    mut joints: Query<(Entity, &mut MeshMaterial3d<GizmoMaterial>), With<NetJoint>>,
+) {
+    let (Some(red), Some(green)) = (&appearance.predelete_material, &appearance.invalid_material)
+    else {
+        return;
+    };
+    for (entity, mut material) in &mut joints {
+        let want = if predelete.0.iter().any(|p| p.entity == entity) {
+            red
+        } else {
+            green
+        };
+        // Change-guarded: only reassign (and re-upload) when the target differs.
+        if material.0.id() != want.id() {
+            material.0 = want.clone();
         }
     }
 }
