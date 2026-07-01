@@ -2,8 +2,8 @@ use crate::map::PLATFORM_WIDTH_M;
 use crate::player::get_hold_point_entity;
 use crate::utils::{self, QuatExt, Vec3Ext};
 use crate::{
-    AttachEvent, Attachable, BoundingRadius, CameraOrbitCenter, DeleteZoneDebug, DisplayableJoint,
-    ExistingJoints, Focused, FocusedInteractable, HoldPoint, Holding, Modifying, Player, PlayerClick,
+    AttachEvent, Attachable, BoundingRadius, CameraOrbitCenter, DisplayableJoint, ExistingJoints,
+    Focused, FocusedInteractable, HoldPoint, Holding, Modifying, Player, PlayerClick,
     PotentialJoints, PredeleteJoint, PredeleteJoints, ToggleHoldingSystemLabel, UpdateJointsLabel,
 };
 use avian3d::prelude::{
@@ -62,8 +62,7 @@ impl Plugin for PartPlugin {
             .add_message::<NewPart>()
             .init_resource::<PotentialJoints>()
             .init_resource::<ExistingJoints>()
-            .init_resource::<PredeleteJoints>()
-            .init_resource::<DeleteZoneDebug>();
+            .init_resource::<PredeleteJoints>();
     }
 }
 
@@ -545,23 +544,8 @@ fn update_predelete_joints(
     hold_points0: Query<(), With<HoldPoint>>,
     hold_points1: Query<&GlobalTransform, With<HoldPoint>>,
     camera_orbit_centers: Query<&Children>,
-    mut debug: ResMut<DeleteZoneDebug>,
 ) {
     predelete_joints.0.clear();
-    *debug = DeleteZoneDebug::default();
-    debug.nearest_body2 = f32::INFINITY;
-    debug.nearest_body1 = f32::INFINITY;
-
-    // World position of a joint's anchor on a given body (rapier used the joint's
-    // parent body + `local_frame`). Returns `None` if the body has no `Holdable`
-    // transform (e.g. a stale predicted entity after rollback).
-    let anchor_world = |body: Entity, anchor: Option<Vec3>| -> Option<Vec3> {
-        let (Ok(gt), Some(a)) = (holdables.get(body), anchor) else {
-            return None;
-        };
-        let t = gt.compute_transform();
-        Some(t.translation + t.rotation.mul_vec3(a))
-    };
 
     if let Some((holding, modifying, player_children)) = players.iter().next() {
         if !holding.0 && modifying.0 {
@@ -569,29 +553,22 @@ fn update_predelete_joints(
                 get_hold_point_entity(player_children, camera_orbit_centers, &hold_points0)
             {
                 if let Ok(hold_point_position) = hold_points1.get(entity) {
-                    let hold = hold_point_position.translation();
-                    debug.active = true;
                     for (joint_entity, joint) in joints.iter() {
-                        debug.joints += 1;
-                        // Diagnostic: also measure the `body1` anchor (where the MP
-                        // gizmo is drawn) to compare against the `body2` anchor the
-                        // detector tests — a large gap means the tested point isn't
-                        // where the joint visually is.
-                        if let Some(p1) = anchor_world(joint.body1, joint.local_anchor1()) {
-                            debug.nearest_body1 = debug.nearest_body1.min((p1 - hold).length());
-                        }
-                        let Some(center) = anchor_world(joint.body2, joint.local_anchor2()) else {
-                            continue;
-                        };
-                        debug.resolved += 1;
-                        let dist = (center - hold).length();
-                        debug.nearest_body2 = debug.nearest_body2.min(dist);
-                        if dist < DELETE_RADIUS {
-                            debug.in_zone += 1;
-                            predelete_joints.0.push(PredeleteJoint {
-                                entity: joint_entity,
-                                translation: center,
-                            });
+                        // World position of the joint's anchor on `body2` (rapier
+                        // used the joint's parent body + `local_frame2`).
+                        if let (Ok(transform), Some(anchor2)) =
+                            (holdables.get(joint.body2), joint.local_anchor2())
+                        {
+                            let transform = transform.compute_transform();
+                            let center =
+                                transform.translation + transform.rotation.mul_vec3(anchor2);
+                            if (center - hold_point_position.translation()).length() < DELETE_RADIUS
+                            {
+                                predelete_joints.0.push(PredeleteJoint {
+                                    entity: joint_entity,
+                                    translation: center,
+                                });
+                            }
                         }
                     }
                 }

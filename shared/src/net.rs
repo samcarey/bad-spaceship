@@ -445,23 +445,6 @@ pub struct RollbackReport {
     pub pos_triggers: u32,
 }
 
-/// TEMPORARY client→server diagnostic for the delete-zone red-highlight bug (a joint
-/// fully inside the sphere intermittently stays green in multiplayer). The detection
-/// is client-local and on wasm the browser console is unreachable from the build box,
-/// so the client forwards its detector output and the server logs it (`[dz] …`) into
-/// the version's `server.log`. Distances are mm; `u32::MAX` = none/infinite. Remove
-/// with `DeleteZoneDebug` once the cause is found.
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug)]
-pub struct DeleteZoneReport {
-    pub joints: u32,
-    pub resolved: u32,
-    pub in_zone: u32,
-    /// Nearest joint's `body2`-anchor distance to the hold point (what the detector
-    /// tests) and its `body1`-anchor distance (where the MP gizmo is drawn).
-    pub nearest_body2_mm: u32,
-    pub nearest_body1_mm: u32,
-}
-
 /// TEMPORARY client-crash self-telemetry. A wasm Rust panic aborts silently to the
 /// browser console (unreachable from the build box), so the client stashes the panic
 /// message in `localStorage` and forwards it here on the next connect; the server logs
@@ -570,9 +553,6 @@ impl Plugin for ProtocolPlugin {
         // `register_message`, not Bevy's `add_message` (events→messages rename in
         // 0.17 gave `App` its own `add_message`, which would shadow this).
         app.register_message::<RollbackReport>()
-            .add_direction(NetworkDirection::ClientToServer);
-        // TEMPORARY delete-zone diagnostic on the same telemetry channel.
-        app.register_message::<DeleteZoneReport>()
             .add_direction(NetworkDirection::ClientToServer);
         // Reliable client→server control channel + the `SetName` rename message on it
         // (same channel-then-message `add_direction` pattern as the telemetry channel;

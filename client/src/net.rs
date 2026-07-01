@@ -17,9 +17,9 @@ use bad_spaceship_shared::character::{
     insert_character_body, CharacterMovement, Config as CharacterConfig,
 };
 use bad_spaceship_shared::net::{
-    apply_hold_spring, apply_net_input, focused_part, ClientPanicReport, ControlChannel,
-    DeleteZoneReport, NetFacing, NetHold, NetInput, NetJoint, NetPart, take_rollback_diag,
-    NetPlayer, ProtocolPlugin, RollbackReport, TelemetryChannel, TICK,
+    apply_hold_spring, apply_net_input, focused_part, ClientPanicReport, ControlChannel, NetFacing,
+    NetHold, NetInput, NetJoint, NetPart, take_rollback_diag, NetPlayer, ProtocolPlugin,
+    RollbackReport, TelemetryChannel, TICK,
 };
 use bad_spaceship_shared::part::{insert_part_physics, Holdable, SuppressLocalParts};
 use bad_spaceship_shared::player::make_local_player;
@@ -241,10 +241,7 @@ impl Plugin for NetClientPlugin {
         app.add_systems(Update, reconnect_dropped);
         // Report our prediction load to the server's log for measurement (see
         // `RollbackReport`); diagnostics only, off the gameplay path.
-        app.add_systems(
-            Update,
-            (report_rollbacks, report_delete_zone, report_stored_panic),
-        );
+        app.add_systems(Update, (report_rollbacks, report_stored_panic));
         // Each frame: track the look-focused part (empty-handed) into
         // `FocusedInteractable`, then read the click → grab/attach intent gated on it.
         // After `InputEvents` (mobile `apply_pointer` / desktop `get_modifying`) so
@@ -325,34 +322,6 @@ fn report_rollbacks(
         rollback_ticks: metrics.rollback_ticks,
         max_pos_err_mm,
         pos_triggers,
-    });
-}
-
-/// TEMPORARY: forward the client-local delete-zone detector output to the server so
-/// it lands in the version's `server.log` (`[dz] …`) — the highlight is computed
-/// client-side and wasm has no reachable console. Sends only while delete mode is
-/// active (empty-handed + modifier), a few times a second, so the log shows exactly
-/// what the detector saw when a joint inside the sphere failed to highlight. Remove
-/// with `DeleteZoneDebug`.
-fn report_delete_zone(
-    time: Res<Time>,
-    mut acc: Local<f32>,
-    debug: Res<bad_spaceship_shared::DeleteZoneDebug>,
-    mut sender: Query<&mut MessageSender<DeleteZoneReport>, With<Connected>>,
-) {
-    *acc += time.delta_secs();
-    if *acc < 0.4 || !debug.active {
-        return;
-    }
-    *acc = 0.0;
-    let Ok(mut sender) = sender.single_mut() else { return };
-    let mm = |d: f32| if d.is_finite() { (d * 1000.0) as u32 } else { u32::MAX };
-    sender.send::<TelemetryChannel>(DeleteZoneReport {
-        joints: debug.joints,
-        resolved: debug.resolved,
-        in_zone: debug.in_zone,
-        nearest_body2_mm: mm(debug.nearest_body2),
-        nearest_body1_mm: mm(debug.nearest_body1),
     });
 }
 
