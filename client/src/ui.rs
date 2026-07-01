@@ -346,17 +346,32 @@ fn show_name_hud(
             .or_insert_with(|| name.0.clone());
     }
 
+    // A committed rename, sent once at the end (from either the web prompt or the
+    // native modal), so the `MessageSender` is only borrowed in one place.
+    let mut rename_to: Option<String> = None;
+
     // Top-left: rename (connected only) + help toggle.
     egui::Area::new(egui::Id::new("bs_top_left"))
         .anchor(Align2::LEFT_TOP, egui::vec2(8.0, 8.0))
         .show(ctx, |ui| {
             ui.horizontal(|ui| {
                 if connected && ui.button("✎ Name").clicked() {
-                    // Seed the field with our current name (looked up only here).
-                    hud.editing = my_id
+                    let current = my_id
                         .and_then(|id| roster.get(&id).cloned())
                         .unwrap_or_default();
-                    hud.show_change_modal = true;
+                    // On web, use the browser's native prompt — it raises the iOS/
+                    // Android soft keyboard (egui's in-canvas field doesn't) and
+                    // freezes the page, so the character can't move behind it. On
+                    // native, open the egui modal (desktop text entry works fine).
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        rename_to = crate::platform::prompt_text("Change name", &current);
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        hud.editing = current;
+                        hud.show_change_modal = true;
+                    }
                 }
                 let help = if hud.show_help { "✕" } else { "?" };
                 if ui.button(help).clicked() {
@@ -365,7 +380,7 @@ fn show_name_hud(
             });
         });
 
-    // The rename modal.
+    // The native rename modal (never opened on web — the prompt above handles it).
     if hud.show_change_modal {
         let mut save = false;
         let mut close = false;
@@ -387,16 +402,21 @@ fn show_name_hud(
                 });
             });
         if save {
-            let cleaned = sanitize_name(&hud.editing);
-            // Ignore an empty rename (the server would too) — keeps the current name.
-            if !cleaned.is_empty() {
-                if let Ok(mut sender) = sender.single_mut() {
-                    sender.send::<ControlChannel>(SetName(cleaned));
-                }
-            }
+            rename_to = Some(hud.editing.clone());
         }
         if save || close {
             hud.show_change_modal = false;
+        }
+    }
+
+    // Send the committed rename once. `sanitize_name` + the empty check mirror the
+    // server, so a blank rename is a no-op (keeps the current name).
+    if let Some(name) = rename_to {
+        let cleaned = sanitize_name(&name);
+        if !cleaned.is_empty() {
+            if let Ok(mut sender) = sender.single_mut() {
+                sender.send::<ControlChannel>(SetName(cleaned));
+            }
         }
     }
 
