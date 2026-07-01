@@ -177,6 +177,41 @@ pub fn take_name_edit() -> Option<String> {
     })
 }
 
+/// Persist the player's display name in `localStorage` so it survives a page reload
+/// (the iOS tab-suspension reload, or the Reset action). Restored on connect by
+/// `ui::restore_persisted_name`.
+pub fn store_name(name: &str) {
+    if let Some(storage) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {
+        let _ = storage.set_item("bs-name", name);
+    }
+}
+
+/// The persisted display name, if any (see `store_name`). `None` if unset or blank.
+pub fn stored_name() -> Option<String> {
+    web_sys::window()?
+        .local_storage()
+        .ok()
+        .flatten()?
+        .get_item("bs-name")
+        .ok()
+        .flatten()
+        .filter(|s| !s.is_empty())
+}
+
+/// Reset position by reloading fresh: drop the resume id (`bs-rid`) so the server
+/// spawns us at a new spawn point instead of recalling our last position, then reload
+/// the page. The name is preserved separately (`store_name`) and re-applied on connect;
+/// a new resume id is minted on the next load. A full reload also clears any stale
+/// client-side prediction/camera state — cleaner than an in-place teleport.
+pub fn reset_position_reload() {
+    if let Some(window) = web_sys::window() {
+        if let Ok(Some(storage)) = window.local_storage() {
+            let _ = storage.remove_item("bs-rid");
+        }
+        let _ = window.location().reload();
+    }
+}
+
 #[derive(Clone, Default, Resource)]
 struct PointerLockTracker {
     lock: Arc<AtomicBool>,
