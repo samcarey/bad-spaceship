@@ -36,7 +36,10 @@ impl Plugin for UiPlugin {
             .add_plugins((EguiPlugin::default(), FrameTimeDiagnosticsPlugin::default()))
             .add_systems(
                 Update,
-                capture_mouse_on_click.run_if(in_state(AppState::Initial)),
+                (
+                    capture_mouse_on_click.run_if(in_state(AppState::Initial)),
+                    restore_persisted_name,
+                ),
             )
             .add_systems(
                 EguiPrimaryContextPass,
@@ -289,11 +292,15 @@ fn show_instructions(
     };
     let ctx = contexts.ctx_mut()?;
     egui::Area::new(egui::Id::new("bs_instructions"))
-        .anchor(Align2::LEFT_TOP, egui::vec2(8.0, 44.0))
+        .anchor(Align2::LEFT_TOP, egui::vec2(8.0, 48.0))
         .show(ctx, |ui| {
-            Frame::popup(ui.style()).show(ui, |ui| {
-                ui.colored_label(Color32::from_rgb(255, 0, 0), text);
-            });
+            // Translucent panel, no drop shadow — matches the roster.
+            Frame::default()
+                .fill(Color32::from_black_alpha(160))
+                .inner_margin(egui::Margin::same(6))
+                .show(ui, |ui| {
+                    ui.colored_label(Color32::from_rgb(255, 0, 0), text);
+                });
         });
     Ok(())
 }
@@ -316,34 +323,56 @@ struct HudState {
 /// body is ~1.2 m tall centred on the origin, so this sits the label just overhead.
 const NAME_LABEL_HEIGHT: f32 = 1.6;
 
-/// Font size for the top-left "?" help button — roughly double egui's default so it's
-/// an easy touch target.
-const HUD_FONT_SIZE: f32 = 28.0;
-
-/// Side length (points) of the hamburger icon button, matched to `HUD_FONT_SIZE`.
-const HUD_ICON_SIZE: f32 = 30.0;
+/// Side length (points) of the top-left icon buttons (hamburger + "?"). Both are drawn
+/// as equal squares at ~double egui's default control height for an easy touch target.
+const HUD_ICON_SIZE: f32 = 32.0;
 
 /// Roster player-name colour: a light grey so names read clearly over the translucent
 /// panel (egui's default body text is a dimmer grey).
 const ROSTER_NAME_COLOR: Color32 = Color32::from_rgb(225, 230, 240);
 
-/// A hamburger (three horizontal lines) icon button — egui's default font can't render
-/// the ☰ glyph, so paint it. `size` is the square button's side in points. Returns the
-/// click `Response`. The line colour tracks egui's interaction visuals (brightens on
-/// hover/press) so it still reads as a button.
-fn hamburger_button(ui: &mut egui::Ui, size: f32) -> egui::Response {
+/// Allocate a square, translucent icon-button background; return its rect, click
+/// `Response`, and the interaction-tinted foreground colour (brightens on hover/press).
+/// Shared by `hamburger_button` and `glyph_button` so the two are identical squares.
+fn icon_button(ui: &mut egui::Ui, size: f32) -> (egui::Rect, egui::Response, Color32) {
     let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::click());
+    let color = ui.style().interact(&response).fg_stroke.color;
     if ui.is_rect_visible(rect) {
-        let color = ui.style().interact(&response).fg_stroke.color;
-        let painter = ui.painter();
-        painter.rect_filled(rect, egui::CornerRadius::same(4), Color32::from_black_alpha(120));
+        ui.painter()
+            .rect_filled(rect, egui::CornerRadius::same(4), Color32::from_black_alpha(120));
+    }
+    (rect, response, color)
+}
+
+/// A hamburger (three horizontal lines) icon button — egui's default font can't render
+/// the ☰ glyph, so paint it. Square + translucent (see `icon_button`).
+fn hamburger_button(ui: &mut egui::Ui, size: f32) -> egui::Response {
+    let (rect, response, color) = icon_button(ui, size);
+    if ui.is_rect_visible(rect) {
         let stroke = egui::Stroke::new((size * 0.09).max(2.0), color);
         let x0 = rect.left() + size * 0.22;
         let x1 = rect.right() - size * 0.22;
         for i in 0..3 {
             let y = rect.top() + size * (0.30 + 0.20 * i as f32);
-            painter.line_segment([egui::pos2(x0, y), egui::pos2(x1, y)], stroke);
+            ui.painter()
+                .line_segment([egui::pos2(x0, y), egui::pos2(x1, y)], stroke);
         }
+    }
+    response
+}
+
+/// A square, translucent icon button showing a single centred glyph (e.g. "?"), the
+/// same size/style as `hamburger_button` so the two sit as equal squares.
+fn glyph_button(ui: &mut egui::Ui, size: f32, glyph: &str) -> egui::Response {
+    let (rect, response, color) = icon_button(ui, size);
+    if ui.is_rect_visible(rect) {
+        ui.painter().text(
+            rect.center(),
+            Align2::CENTER_CENTER,
+            glyph,
+            egui::FontId::proportional(size * 0.62),
+            color,
+        );
     }
     response
 }
@@ -406,10 +435,7 @@ fn show_name_hud(
                 if connected && hamburger_button(ui, HUD_ICON_SIZE).clicked() {
                     toggle_menu = true;
                 }
-                if ui
-                    .button(egui::RichText::new("?").size(HUD_FONT_SIZE))
-                    .clicked()
-                {
+                if glyph_button(ui, HUD_ICON_SIZE, "?").clicked() {
                     toggle_help = true;
                 }
             });
@@ -462,6 +488,19 @@ fn show_name_hud(
     }
     if do_reset {
         hud.show_menu = false;
+        // Keep whatever name we currently have across the reset (native no-op).
+        if let Some(name) = my_id.and_then(|id| roster.get(&id).cloned()) {
+            crate::platform::store_name(&name);
+        }
+        // On web, reload fresh: this drops the resume id so the server spawns us at a
+        // new spawn point instead of recalling our last position (the name is restored
+        // on connect). On native, teleport server-side via `ResetPosition`.
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = &mut reset_sender; // web reloads rather than messaging the dropped link
+            crate::platform::reset_position_reload();
+        }
+        #[cfg(not(target_arch = "wasm32"))]
         if let Ok(mut sender) = reset_sender.single_mut() {
             sender.send::<ControlChannel>(ResetPosition);
         }
@@ -501,6 +540,8 @@ fn show_name_hud(
     if let Some(name) = rename_to {
         let cleaned = sanitize_name(&name);
         if !cleaned.is_empty() {
+            // Persist so it survives a reload / reconnect (native no-op).
+            crate::platform::store_name(&cleaned);
             if let Ok(mut sender) = name_sender.single_mut() {
                 sender.send::<ControlChannel>(SetName(cleaned));
             }
@@ -519,7 +560,7 @@ fn show_name_hud(
                     .show(ui, |ui| {
                         // Extend to fit each name rather than wrapping it.
                         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-                        ui.label(egui::RichText::new("Lobby").strong());
+                        ui.label(egui::RichText::new("Lobby").strong().underline().size(18.0));
                         for (id, name) in &roster {
                             let label = if Some(*id) == my_id {
                                 format!("{name} *")
@@ -595,6 +636,40 @@ fn show_name_labels(
         );
     }
     Ok(())
+}
+
+/// Re-apply a persisted display name (`platform::stored_name`) once per connection, so
+/// a name chosen before an iOS reload / Reset survives the reconnect. Sends `SetName`
+/// as soon as we're connected and the sender is ready; the `sent` latch resets on
+/// disconnect so a background-reconnect re-applies it too. No-op on native (no stored
+/// name) and in single-player (never connected).
+fn restore_persisted_name(
+    local: Query<&LocalId, With<Connected>>,
+    mut sender: Query<&mut MessageSender<SetName>, With<Connected>>,
+    mut sent: Local<bool>,
+) {
+    if crate::net::my_netcode_id(&local).is_none() {
+        *sent = false;
+        return;
+    }
+    if *sent {
+        return;
+    }
+    let Some(name) = crate::platform::stored_name() else {
+        *sent = true; // nothing to restore; don't keep checking this connection
+        return;
+    };
+    let cleaned = sanitize_name(&name);
+    if cleaned.is_empty() {
+        *sent = true;
+        return;
+    }
+    // Retry next frame if the sender component isn't on the link yet.
+    let Ok(mut sender) = sender.single_mut() else {
+        return;
+    };
+    sender.send::<ControlChannel>(SetName(cleaned));
+    *sent = true;
 }
 
 fn capture_mouse_on_click(

@@ -13,6 +13,16 @@ impl Plugin for PlatformPlugin {
     }
 }
 
+/// Persisted display name — a no-op on native (no `localStorage`; the reset path uses
+/// a server teleport, not a reload, so there's nothing to persist across). Mirrors the
+/// web signature so `ui.rs` can call it unconditionally.
+pub fn store_name(_name: &str) {}
+
+/// See `store_name` — native has no persisted name.
+pub fn stored_name() -> Option<String> {
+    None
+}
+
 // Bevy 0.15 moved the cursor fields off `Window` into a `cursor_options` struct;
 // Bevy 0.17 promoted that struct to its own `CursorOptions` component on the
 // window entity, so query it directly. (`Query::single_mut` is fallible since 0.16.)
