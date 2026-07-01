@@ -27,9 +27,9 @@ use avian3d::prelude::{
 };
 use bad_spaceship_shared::character::{spawn_position, CharacterMovement, InitialPose, ServerAvatar};
 use bad_spaceship_shared::net::{
-    apply_hold_spring, apply_net_input, focused_part, sanitize_name, DeleteZoneReport, NetFacing,
-    NetHold, NetInput, NetJoint, NetName, NetPart, NetPlayer, ProtocolPlugin, ResetPosition,
-    RollbackReport, SetName, TICK,
+    apply_hold_spring, apply_net_input, focused_part, sanitize_name, ClientPanicReport,
+    DeleteZoneReport, NetFacing, NetHold, NetInput, NetJoint, NetName, NetPart, NetPlayer,
+    ProtocolPlugin, ResetPosition, RollbackReport, SetName, TICK,
 };
 use bad_spaceship_shared::map::GROUND_LAYER;
 use bad_spaceship_shared::part::{
@@ -294,6 +294,23 @@ fn log_delete_zone(
     }
 }
 
+/// TEMPORARY: print a client's forwarded panic (`[panic] …`) into the version's
+/// `server.log`. wasm client panics otherwise only reach the phone's browser console,
+/// unreachable from the build box; the client stashes the message and forwards it on the
+/// next connect. Remove with [`ClientPanicReport`].
+fn log_client_panics(
+    mut links: Query<
+        (Entity, &mut MessageReceiver<ClientPanicReport>),
+        (With<ClientOf>, With<Connected>),
+    >,
+) {
+    for (entity, mut receiver) in &mut links {
+        for ClientPanicReport(msg) in receiver.receive() {
+            println!("[panic] client={} {}", entity.to_bits(), msg);
+        }
+    }
+}
+
 pub struct NetServerPlugin;
 
 impl Plugin for NetServerPlugin {
@@ -341,6 +358,7 @@ impl Plugin for NetServerPlugin {
         app.add_systems(FixedUpdate, count_late_inputs);
         app.add_systems(Update, flush_telemetry);
         app.add_systems(Update, log_delete_zone);
+        app.add_systems(Update, log_client_panics);
         // Refill a room's parts that fall off its platform, and mirror each avatar's
         // look yaw into its replicated facing. Parts and joints replicate their state
         // directly (predicted Avian `Position`/`Rotation`; `NetJoint` data) — nothing

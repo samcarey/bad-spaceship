@@ -462,6 +462,14 @@ pub struct DeleteZoneReport {
     pub nearest_body1_mm: u32,
 }
 
+/// TEMPORARY client-crash self-telemetry. A wasm Rust panic aborts silently to the
+/// browser console (unreachable from the build box), so the client stashes the panic
+/// message in `localStorage` and forwards it here on the next connect; the server logs
+/// it (`[panic] …`). Sent on the reliable [`ControlChannel`] so a one-shot crash report
+/// isn't dropped. Remove once the freeze is diagnosed.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct ClientPanicReport(pub String);
+
 /// Low-rate diagnostics channel. Unreliable: a dropped telemetry sample just means one
 /// missing log line, and it must never contend with gameplay traffic for bandwidth.
 pub struct TelemetryChannel;
@@ -577,6 +585,9 @@ impl Plugin for ProtocolPlugin {
         app.register_message::<SetName>()
             .add_direction(NetworkDirection::ClientToServer);
         app.register_message::<ResetPosition>()
+            .add_direction(NetworkDirection::ClientToServer);
+        // TEMPORARY client-crash report on the reliable control channel.
+        app.register_message::<ClientPanicReport>()
             .add_direction(NetworkDirection::ClientToServer);
     }
 }
