@@ -451,11 +451,15 @@ fn show_name_hud(
 fn show_name_labels(
     mut contexts: EguiContexts,
     camera: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
-    avatars: Query<(&NetName, &GlobalTransform), (With<NetPlayer>, RenderedAvatar)>,
+    local: Query<&LocalId, With<Connected>>,
+    avatars: Query<(&NetPlayer, &NetName, &GlobalTransform), RenderedAvatar>,
 ) -> Result {
     let Ok((camera, cam_tf)) = camera.single() else {
         return Ok(());
     };
+    // Our own avatar is the one we're looking out of — don't label it (we'd see our
+    // own name floating in front of the camera). Everyone else gets a billboard.
+    let my_id = crate::net::my_netcode_id(&local);
     let ctx = contexts.ctx_mut()?;
     // The full render surface (not the panel-shrunk content area): the 3D camera
     // renders to the whole viewport, so NDC maps onto this rect.
@@ -463,8 +467,9 @@ fn show_name_labels(
     let painter =
         ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("bs_names")));
     let font = egui::FontId::proportional(16.0);
-    for (name, xf) in &avatars {
-        if name.0.is_empty() {
+    for (net_player, name, xf) in &avatars {
+        // Skip our own avatar and any not-yet-named one.
+        if Some(net_player.client_id) == my_id || name.0.is_empty() {
             continue;
         }
         let world = xf.translation() + Vec3::Y * NAME_LABEL_HEIGHT;
