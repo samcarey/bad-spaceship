@@ -24,7 +24,14 @@ gloo = { version = "0.7", optional = true }
 # state (persistent resume id + camera look across the iOS reload). Other web-sys
 # types used (Window/Document/HtmlElement/Event) are enabled transitively by the
 # graph (gloo/winit/wgpu); `Storage` isn't guaranteed, so list it explicitly.
-web-sys = { version = "0.3.40", optional = true, features = ["Storage"] }
+web-sys = { version = "0.3.40", optional = true, features = [
+    "Storage",
+    # The non-blocking rename overlay (`platform::web::begin_name_edit`) builds a DOM
+    # `<input>` dialog so the mobile keyboard rises without `window.prompt` freezing
+    # the wasm loop. These interfaces aren't guaranteed transitively, so list them.
+    "HtmlInputElement",
+    "KeyboardEvent",
+] }
 # Read the `window.__BS_NET__` config (set by play.html) on the web build to
 # decide the multiplayer server URL. js-sys is already in the graph via web-sys;
 # declared explicitly so `js_sys::Reflect` can be used directly.
