@@ -164,6 +164,18 @@ pub fn multiplayer_target() -> Option<String> {
     (!url.is_empty()).then_some(url)
 }
 
+/// Our own netcode id — the value the server stamps onto our avatar's
+/// `NetPlayer::client_id`. Read from `LocalId` (set the instant the connection
+/// reaches `Connected`, before any avatar replicates). `None` until connected, or if
+/// the peer isn't a netcode id. This is the client-side "who am I" used to adopt only
+/// our own avatar and to flag our own roster row — see `setup_predicted_avatar`.
+pub(crate) fn my_netcode_id(local: &Query<&LocalId, With<Connected>>) -> Option<u64> {
+    match local.iter().next().map(|l| l.0) {
+        Some(PeerId::Netcode(id)) => Some(id),
+        _ => None,
+    }
+}
+
 pub struct NetClientPlugin;
 
 impl Plugin for NetClientPlugin {
@@ -344,7 +356,7 @@ fn setup_predicted_avatar(
         return;
     };
     // Our own netcode id (the value the server stamps onto our avatar's `NetPlayer`).
-    let Some(PeerId::Netcode(my_id)) = local.iter().next().map(|l| l.0) else {
+    let Some(my_id) = my_netcode_id(&local) else {
         return;
     };
     for (entity, net_player) in &new {
@@ -582,7 +594,7 @@ fn predict_remote_hold(
     mut parts: Query<(&Position, &Rotation, &NetHold, Forces), With<NetPart>>,
     gravity: Res<Gravity>,
 ) {
-    let Some(PeerId::Netcode(my_id)) = local.iter().next().map(|l| l.0) else {
+    let Some(my_id) = my_netcode_id(&local) else {
         return;
     };
     for (position, rotation, hold, mut forces) in &mut parts {

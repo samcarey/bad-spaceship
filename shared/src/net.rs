@@ -240,6 +240,43 @@ pub struct NetHold {
     pub rotation: [f32; 4],
 }
 
+/// A player's display **name**, replicated to every client sharing the room so it
+/// can be drawn as a billboard over the avatar's head and listed in the on-screen
+/// roster. The server assigns a unique default (`"Player N"`, lowest free N within
+/// the room) when the avatar joins its room (`assign_rooms`); the owning client can
+/// rename it by sending a [`SetName`] message, which the server sanitises and writes
+/// back here. Not `Copy` (owns a `String`), so — unlike the other replicated
+/// components — it derives only `Clone`; replication clones it, which is all
+/// `.replicate()` needs. No interpolation (a name is discrete, not eased).
+#[derive(Component, Serialize, Deserialize, Clone, PartialEq, Debug, Default)]
+pub struct NetName(pub String);
+
+/// Client → server request to rename the sender's own avatar. The server resolves
+/// the sender's avatar (via `ControlledBy`), [`sanitize_name`]s the string, and
+/// writes it onto that avatar's [`NetName`] (from which it re-replicates to everyone
+/// in the room). Sent on the reliable [`ControlChannel`] so a one-shot rename isn't
+/// dropped.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct SetName(pub String);
+
+/// Reliable client → server control channel for one-shot user actions (currently
+/// [`SetName`]). Separate from the unreliable [`TelemetryChannel`] because a rename
+/// is a deliberate action that must not be silently lost.
+pub struct ControlChannel;
+
+/// Cap on a display name's length (characters). The server truncates to this and the
+/// client's edit field enforces it, so an over-long name can't bloat replication or
+/// overflow the label.
+pub const MAX_NAME_LEN: usize = 20;
+
+/// Normalise a user-supplied display name: trim surrounding whitespace and cap to
+/// [`MAX_NAME_LEN`] characters. Returns an empty string for an all-whitespace input,
+/// which the caller treats as "no change" (so a blank rename never wipes a name).
+/// Shared so the server and the client's edit field agree on the rules.
+pub fn sanitize_name(raw: &str) -> String {
+    raw.trim().chars().take(MAX_NAME_LEN).collect()
+}
+
 /// An avatar's look yaw (radians), replicated **server → other clients** purely so
 /// remote avatars can be drawn facing the way they look. Deliberately a *separate*
 /// component from the local-input [`Yaw`]: the owner drives its own `Yaw` locally
@@ -475,6 +512,10 @@ impl Plugin for ProtocolPlugin {
         app.component::<NetFacing>()
             .replicate()
             .add_interpolation_with(lerp_facing);
+        // Each player's display name (see `NetName`): replicated so every client can
+        // draw it over the avatar and list it in the roster. Changes rarely (only on
+        // rename), so it just needs replicating — no interpolation.
+        app.component::<NetName>().replicate();
 
         // Register `NetInput` as a networked native input. `InputPlugin` is
         // role-agnostic: it adds the client input plugin under lightyear's
@@ -496,6 +537,16 @@ impl Plugin for ProtocolPlugin {
         // `register_message`, not Bevy's `add_message` (events→messages rename in
         // 0.17 gave `App` its own `add_message`, which would shadow this).
         app.register_message::<RollbackReport>()
+            .add_direction(NetworkDirection::ClientToServer);
+        // Reliable client→server control channel + the `SetName` rename message on it
+        // (same channel-then-message `add_direction` pattern as the telemetry channel;
+        // reliable so a rename isn't dropped, sequenced so only the newest wins).
+        app.add_channel::<ControlChannel>(ChannelSettings {
+            mode: ChannelMode::SequencedReliable(ReliableSettings::default()),
+            ..default()
+        })
+        .add_direction(NetworkDirection::ClientToServer);
+        app.register_message::<SetName>()
             .add_direction(NetworkDirection::ClientToServer);
     }
 }
