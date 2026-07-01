@@ -22,13 +22,14 @@ use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use avian3d::prelude::{
-    CollisionLayers, Collisions, ComputedCenterOfMass, Forces, Gravity, Position, Rotation,
-    SphericalJoint,
+    AngularVelocity, CollisionLayers, Collisions, ComputedCenterOfMass, Forces, Gravity,
+    LinearVelocity, Position, Rotation, SphericalJoint,
 };
-use bad_spaceship_shared::character::{CharacterMovement, InitialPose, ServerAvatar};
+use bad_spaceship_shared::character::{spawn_position, CharacterMovement, InitialPose, ServerAvatar};
 use bad_spaceship_shared::net::{
     apply_hold_spring, apply_net_input, focused_part, sanitize_name, NetFacing, NetHold, NetInput,
-    NetJoint, NetName, NetPart, NetPlayer, ProtocolPlugin, RollbackReport, SetName, TICK,
+    NetJoint, NetName, NetPart, NetPlayer, ProtocolPlugin, ResetPosition, RollbackReport, SetName,
+    TICK,
 };
 use bad_spaceship_shared::map::GROUND_LAYER;
 use bad_spaceship_shared::part::{
@@ -320,8 +321,12 @@ impl Plugin for NetServerPlugin {
             (replace_fallen_room_parts, sync_avatar_facing, sync_net_hold),
         );
         // Assign each client (and its avatar) to its reported room on the first
-        // input, lazily creating the room's world, and apply client rename requests.
-        app.add_systems(Update, (assign_rooms, apply_name_changes));
+        // input, lazily creating the room's world, and apply client rename +
+        // reset-position requests.
+        app.add_systems(
+            Update,
+            (assign_rooms, apply_name_changes, apply_position_resets),
+        );
         // Session resume: continuously remember live avatars' positions (the reconnect
         // restore itself happens at connect, in `spawn_player_for_client`).
         app.add_systems(Update, record_resume_positions);
@@ -534,6 +539,38 @@ fn apply_name_changes(
         for (controlled, mut net_name) in &mut avatars {
             if controlled.owner == link {
                 net_name.set_if_neq(NetName(name.clone()));
+            }
+        }
+    }
+}
+
+/// Teleport a client's avatar back to a fresh spawn position on a `ResetPosition`
+/// request (the "Reset Position" menu action). Server-authoritative: move the
+/// avatar's `Position` and zero its velocity, so the reset replicates/corrects on the
+/// owner's predicted body. Maps the client link to its avatar via `ControlledBy`, the
+/// same way `apply_name_changes` does. `spawn_position` is the shared spawn rule, so a
+/// reset lands on the same valid on-platform disc a fresh join uses.
+fn apply_position_resets(
+    mut links: Query<
+        (Entity, &mut MessageReceiver<ResetPosition>),
+        (With<ClientOf>, With<Connected>),
+    >,
+    mut avatars: Query<
+        (&ControlledBy, &mut Position, &mut LinearVelocity, &mut AngularVelocity),
+        With<ServerAvatar>,
+    >,
+) {
+    for (link, mut receiver) in &mut links {
+        // Drain the window; act once if any reset was requested (a single teleport is
+        // idempotent, so coalescing repeats is correct).
+        if receiver.receive().count() == 0 {
+            continue;
+        }
+        for (controlled, mut position, mut linear, mut angular) in &mut avatars {
+            if controlled.owner == link {
+                position.0 = spawn_position();
+                linear.0 = Vec3::ZERO;
+                angular.0 = Vec3::ZERO;
             }
         }
     }

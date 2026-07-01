@@ -9,7 +9,7 @@ use bevy_egui::{
     EguiContexts, EguiPlugin, EguiPrimaryContextPass,
 };
 use bad_spaceship_shared::net::{
-    sanitize_name, ControlChannel, NetName, NetPlayer, SetName, MAX_NAME_LEN,
+    sanitize_name, ControlChannel, NetName, NetPlayer, ResetPosition, SetName, MAX_NAME_LEN,
 };
 use chrono::{DateTime, FixedOffset, Utc};
 use lightyear::prelude::client::Connected;
@@ -302,6 +302,8 @@ fn show_instructions(
 /// instructions overlay are open, and the in-progress text of the rename field.
 #[derive(Resource, Default)]
 struct HudState {
+    /// The top-left hamburger menu is expanded.
+    show_menu: bool,
     /// The rename modal is open.
     show_change_modal: bool,
     /// The instructions overlay is revealed (toggled by the "?" button).
@@ -320,20 +322,24 @@ const NAME_LABEL_HEIGHT: f32 = 1.6;
 /// and as a single billboard).
 type RenderedAvatar = Or<(With<Predicted>, With<Interpolated>)>;
 
-/// Draw the top-left controls (rename + help), the rename modal, and the top-right
-/// player roster. All name state is replicated (`NetPlayer` + `NetName`); the roster
-/// is deduped by `client_id` (a player has a `Confirmed` copy plus a rendered one)
-/// and the local player is found via `my_netcode_id` and flagged with an asterisk —
-/// the same self-identification the netcode uses (`NetPlayer::client_id == LocalId`).
-/// The rename button and roster only appear once connected; the "?" help toggle is
-/// always available (single-player included). A committed rename is sent inline over
-/// the reliable `ControlChannel`.
+/// Draw the top-left controls (a hamburger menu with Change Name + Reset Position,
+/// plus a "?" help toggle), the native rename modal, and the top-right player roster.
+/// All name state is replicated (`NetPlayer` + `NetName`); the roster is deduped by
+/// `client_id` (a player has a `Confirmed` copy plus a rendered one) and the local
+/// player is found via `my_netcode_id` and flagged with an asterisk — the same
+/// self-identification the netcode uses (`NetPlayer::client_id == LocalId`). The menu
+/// only appears once connected; the "?" help toggle is always available. A committed
+/// rename / reset is sent over the reliable `ControlChannel`.
+///
+/// Menu clicks set local flags that mutate `hud` and send messages *after* the egui
+/// closures return, so `hud`/senders aren't reborrowed inside nested `ui` closures.
 fn show_name_hud(
     mut contexts: EguiContexts,
     mut hud: ResMut<HudState>,
     local: Query<&LocalId, With<Connected>>,
     players: Query<(&NetPlayer, &NetName), RenderedAvatar>,
-    mut sender: Query<&mut MessageSender<SetName>, With<Connected>>,
+    mut name_sender: Query<&mut MessageSender<SetName>, With<Connected>>,
+    mut reset_sender: Query<&mut MessageSender<ResetPosition>, With<Connected>>,
 ) -> Result {
     let ctx = contexts.ctx_mut()?;
     let my_id = crate::net::my_netcode_id(&local);
@@ -346,41 +352,73 @@ fn show_name_hud(
             .or_insert_with(|| name.0.clone());
     }
 
-    // A committed rename, sent once at the end (from either the web prompt or the
-    // native modal), so the `MessageSender` is only borrowed in one place.
+    // Menu actions, applied after the egui closures (see the doc comment).
     let mut rename_to: Option<String> = None;
+    let mut toggle_menu = false;
+    let mut toggle_help = false;
+    let mut open_rename = false;
+    let mut do_reset = false;
 
-    // Top-left: rename (connected only) + help toggle.
+    // Top-left: hamburger menu (connected only) + help toggle.
     egui::Area::new(egui::Id::new("bs_top_left"))
         .anchor(Align2::LEFT_TOP, egui::vec2(8.0, 8.0))
         .show(ctx, |ui| {
             ui.horizontal(|ui| {
-                if connected && ui.button("Name").clicked() {
-                    let current = my_id
-                        .and_then(|id| roster.get(&id).cloned())
-                        .unwrap_or_default();
-                    // On web, use the browser's native prompt — it raises the iOS/
-                    // Android soft keyboard (egui's in-canvas field doesn't) and
-                    // freezes the page, so the character can't move behind it. On
-                    // native, open the egui modal (desktop text entry works fine).
-                    #[cfg(target_arch = "wasm32")]
-                    {
-                        rename_to = crate::platform::prompt_text("Change name", &current);
-                    }
-                    #[cfg(not(target_arch = "wasm32"))]
-                    {
-                        hud.editing = current;
-                        hud.show_change_modal = true;
-                    }
+                // "Menu" text, not the ☰ glyph — egui's default font can't render most
+                // symbol glyphs (they show as tofu boxes), same reason "?" isn't an icon.
+                if connected && ui.button("Menu").clicked() {
+                    toggle_menu = true;
                 }
-                // Plain "?" — egui's default font can't render most symbol glyphs
-                // (they show as tofu boxes). The instructions panel appearing is the
-                // toggle's state feedback.
                 if ui.button("?").clicked() {
-                    hud.show_help = !hud.show_help;
+                    toggle_help = true;
                 }
             });
+            if connected && hud.show_menu {
+                Frame::default()
+                    .fill(Color32::from_black_alpha(160))
+                    .inner_margin(egui::Margin::same(6))
+                    .show(ui, |ui| {
+                        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+                        if ui.button("Change Name").clicked() {
+                            open_rename = true;
+                        }
+                        if ui.button("Reset Position").clicked() {
+                            do_reset = true;
+                        }
+                    });
+            }
         });
+
+    if toggle_menu {
+        hud.show_menu = !hud.show_menu;
+    }
+    if toggle_help {
+        hud.show_help = !hud.show_help;
+    }
+    if open_rename {
+        hud.show_menu = false;
+        let current = my_id
+            .and_then(|id| roster.get(&id).cloned())
+            .unwrap_or_default();
+        // On web, use the browser's native prompt — it raises the iOS/Android soft
+        // keyboard (egui's in-canvas field doesn't) and freezes the page, so the
+        // character can't move behind it. On native, open the egui modal.
+        #[cfg(target_arch = "wasm32")]
+        {
+            rename_to = crate::platform::prompt_text("Change name", &current);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            hud.editing = current;
+            hud.show_change_modal = true;
+        }
+    }
+    if do_reset {
+        hud.show_menu = false;
+        if let Ok(mut sender) = reset_sender.single_mut() {
+            sender.send::<ControlChannel>(ResetPosition);
+        }
+    }
 
     // The native rename modal (never opened on web — the prompt above handles it).
     if hud.show_change_modal {
@@ -416,7 +454,7 @@ fn show_name_hud(
     if let Some(name) = rename_to {
         let cleaned = sanitize_name(&name);
         if !cleaned.is_empty() {
-            if let Ok(mut sender) = sender.single_mut() {
+            if let Ok(mut sender) = name_sender.single_mut() {
                 sender.send::<ControlChannel>(SetName(cleaned));
             }
         }

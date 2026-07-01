@@ -151,6 +151,18 @@ pub struct InitialPose(pub Vec3);
 /// apart while staying on the platform.
 const SPAWN_SPREAD_RADIUS: f32 = 8.0;
 
+/// A fresh spawn position: a random point on the spawn disc at ground level (NOT the
+/// shared origin — two avatars there overlap exactly and the solver explodes). Used
+/// for a fresh avatar's initial pose (`build_server_avatar`) and to teleport an
+/// avatar back on request (the server's "reset to spawn"), so both land on the same
+/// valid on-platform spot rule.
+pub fn spawn_position() -> Vec3 {
+    let mut rng = rand::thread_rng();
+    let angle = rng.gen_range(0.0..std::f32::consts::TAU);
+    let radius = rng.gen_range(2.0..SPAWN_SPREAD_RADIUS);
+    Vec3::new(radius * angle.cos(), 0.0, radius * angle.sin())
+}
+
 /// Assemble the character body for each `ServerAvatar` that doesn't have one yet,
 /// once the character `Config` (its size) is loaded. Mirrors `spawn`, but driven by
 /// the networked marker and seeded with the movement-input component the server's
@@ -172,12 +184,7 @@ fn build_server_avatar(
             // predicting client would mispredict in slow motion at the chaotic connect
             // moment). Seed both Transform and Position because Avian's transform-sync is
             // disabled in multiplayer.
-            let pos = initial.map(|p| p.0).unwrap_or_else(|| {
-                let mut rng = rand::thread_rng();
-                let angle = rng.gen_range(0.0..std::f32::consts::TAU);
-                let radius = rng.gen_range(2.0..SPAWN_SPREAD_RADIUS);
-                Vec3::new(radius * angle.cos(), 0.0, radius * angle.sin())
-            });
+            let pos = initial.map(|p| p.0).unwrap_or_else(spawn_position);
             let mut e = commands.entity(entity);
             insert_character_body(&mut e, config.size);
             e.insert((

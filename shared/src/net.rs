@@ -259,9 +259,17 @@ pub struct NetName(pub String);
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 pub struct SetName(pub String);
 
-/// Reliable client → server control channel for one-shot user actions (currently
-/// [`SetName`]). Separate from the unreliable [`TelemetryChannel`] because a rename
-/// is a deliberate action that must not be silently lost.
+/// Client → server request to teleport the sender's avatar back to a fresh spawn
+/// position (the "Reset Position" menu action — e.g. to recover after falling off or
+/// getting stuck). Server-authoritative: the server moves the avatar's `Position` and
+/// zeroes its velocity, from where the reset replicates/corrects on the owner. A unit
+/// message on the reliable [`ControlChannel`].
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct ResetPosition;
+
+/// Reliable client → server control channel for one-shot user actions ([`SetName`],
+/// [`ResetPosition`]). Separate from the unreliable [`TelemetryChannel`] because these
+/// are deliberate actions that must not be silently lost.
 pub struct ControlChannel;
 
 /// Cap on a display name's length (characters). The server truncates to this and the
@@ -547,6 +555,8 @@ impl Plugin for ProtocolPlugin {
         })
         .add_direction(NetworkDirection::ClientToServer);
         app.register_message::<SetName>()
+            .add_direction(NetworkDirection::ClientToServer);
+        app.register_message::<ResetPosition>()
             .add_direction(NetworkDirection::ClientToServer);
     }
 }
