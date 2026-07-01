@@ -46,6 +46,19 @@ impl Plugin for PlatformPlugin {
     }
 }
 
+/// Prompt for a line of text using the **browser's native dialog** (`window.prompt`).
+/// Unlike egui's in-canvas text field, this raises the on-screen keyboard on
+/// iOS/Android (it's a real DOM input) and freezes the page while open — so the game
+/// can't read touch/keyboard input underneath it (which is why the character kept
+/// moving behind the old in-canvas modal). Returns the entered string, or `None` if
+/// the user cancelled. Used for the rename field (`ui::show_name_hud`).
+pub fn prompt_text(message: &str, default: &str) -> Option<String> {
+    web_sys::window()?
+        .prompt_with_message_and_default(message, default)
+        .ok()
+        .flatten()
+}
+
 #[derive(Clone, Default, Resource)]
 struct PointerLockTracker {
     lock: Arc<AtomicBool>,
