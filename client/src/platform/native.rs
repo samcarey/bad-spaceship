@@ -13,6 +13,16 @@ impl Plugin for PlatformPlugin {
     }
 }
 
+/// No-op on native: panics print to stderr, which the build box reads directly (no need
+/// to round-trip through `localStorage` + the server). Mirrors the web signatures so the
+/// callers stay platform-agnostic.
+pub fn install_panic_hook() {}
+
+/// See `install_panic_hook` — native has nothing stored.
+pub fn take_stored_panic() -> Option<String> {
+    None
+}
+
 /// Persisted display name — a no-op on native (no `localStorage`; the reset path uses
 /// a server teleport, not a reload, so there's nothing to persist across). Mirrors the
 /// web signature so `ui.rs` can call it unconditionally.

@@ -177,6 +177,38 @@ pub fn take_name_edit() -> Option<String> {
     })
 }
 
+/// TEMPORARY client-crash self-telemetry. On wasm a Rust panic aborts silently to the
+/// browser console (unreachable from the build box), so install a hook that stashes the
+/// panic message + location in `localStorage`; `net::report_stored_panic` forwards it to
+/// the server on the next connect (logged `[panic] …`) and clears it. Chains the prior
+/// hook so the console still gets it. Remove once the freeze is fixed.
+pub fn install_panic_hook() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        let default = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            // `PanicHookInfo`'s `Display` already includes the message and `file:line`.
+            if let Some(storage) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {
+                let _ = storage.set_item("bs-panic", &info.to_string());
+            }
+            default(info);
+        }));
+    });
+}
+
+/// Take (and clear) the last stored client panic, if any (see `install_panic_hook`).
+pub fn take_stored_panic() -> Option<String> {
+    let storage = web_sys::window()?.local_storage().ok().flatten()?;
+    let v = storage
+        .get_item("bs-panic")
+        .ok()
+        .flatten()
+        .filter(|s| !s.is_empty())?;
+    let _ = storage.remove_item("bs-panic");
+    Some(v)
+}
+
 /// Persist the player's display name in `localStorage` so it survives a page reload
 /// (the iOS tab-suspension reload, or the Reset action). Restored on connect by
 /// `ui::restore_persisted_name`.

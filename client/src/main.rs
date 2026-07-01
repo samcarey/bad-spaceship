@@ -30,6 +30,12 @@ mod ui;
 
 #[bevy_main]
 fn main() {
+    // TEMPORARY: capture wasm client panics into localStorage (forwarded to the server
+    // on next connect) so a browser-console-only crash is visible from the build box.
+    // Installed before anything can panic. No-op on native (stderr is readable). Remove
+    // with `ClientPanicReport`.
+    platform::install_panic_hook();
+
     let mut app = App::new();
 
     app.insert_resource(GlobalAmbientLight {

@@ -17,9 +17,9 @@ use bad_spaceship_shared::character::{
     insert_character_body, CharacterMovement, Config as CharacterConfig,
 };
 use bad_spaceship_shared::net::{
-    apply_hold_spring, apply_net_input, focused_part, DeleteZoneReport, NetFacing, NetHold,
-    NetInput, NetJoint, NetPart, take_rollback_diag, NetPlayer, ProtocolPlugin, RollbackReport,
-    TelemetryChannel, TICK,
+    apply_hold_spring, apply_net_input, focused_part, ClientPanicReport, ControlChannel,
+    DeleteZoneReport, NetFacing, NetHold, NetInput, NetJoint, NetPart, take_rollback_diag,
+    NetPlayer, ProtocolPlugin, RollbackReport, TelemetryChannel, TICK,
 };
 use bad_spaceship_shared::part::{insert_part_physics, Holdable, SuppressLocalParts};
 use bad_spaceship_shared::player::make_local_player;
@@ -239,7 +239,10 @@ impl Plugin for NetClientPlugin {
         app.add_systems(Update, reconnect_dropped);
         // Report our prediction load to the server's log for measurement (see
         // `RollbackReport`); diagnostics only, off the gameplay path.
-        app.add_systems(Update, (report_rollbacks, report_delete_zone));
+        app.add_systems(
+            Update,
+            (report_rollbacks, report_delete_zone, report_stored_panic),
+        );
         // Each frame: track the look-focused part (empty-handed) into
         // `FocusedInteractable`, then read the click → grab/attach intent gated on it.
         // After `InputEvents` (mobile `apply_pointer` / desktop `get_modifying`) so
@@ -346,6 +349,29 @@ fn report_delete_zone(
         nearest_body2_mm: mm(debug.nearest_body2),
         nearest_body1_mm: mm(debug.nearest_body1),
     });
+}
+
+/// TEMPORARY: once connected, forward any panic captured on the previous run (stored in
+/// `localStorage` by the panic hook, surviving the reload) to the server, which logs it
+/// (`[panic] …`). Runs once per page load; `take_stored_panic` clears the store so it
+/// isn't re-sent. On native it's a no-op (stderr is read directly). Remove with
+/// [`ClientPanicReport`].
+fn report_stored_panic(
+    mut sender: Query<&mut MessageSender<ClientPanicReport>, With<Connected>>,
+    mut sent: Local<bool>,
+) {
+    if *sent {
+        return;
+    }
+    // Only consume the stored panic once the sender is actually ready, so a not-yet-
+    // connected frame doesn't clear it before it can be delivered.
+    let Ok(mut sender) = sender.single_mut() else {
+        return;
+    };
+    *sent = true;
+    if let Some(panic) = crate::platform::take_stored_panic() {
+        sender.send::<ControlChannel>(ClientPanicReport(panic));
+    }
 }
 
 /// Turn **our own** predicted networked avatar into the controllable local
