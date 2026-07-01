@@ -157,6 +157,27 @@ pub struct PredeleteJoint {
 #[derive(Default, Resource)]
 pub struct PredeleteJoints(pub Vec<PredeleteJoint>);
 
+/// TEMPORARY on-screen diagnostic for the delete-zone red-highlight bug (a joint
+/// fully inside the sphere intermittently stays green in multiplayer). Populated by
+/// `update_predelete_joints` from the *exact* same computation as the real detection,
+/// so the numbers can't diverge from the logic. Shown in the HUD when `active`.
+/// Remove once the root cause is found.
+#[derive(Default, Resource)]
+pub struct DeleteZoneDebug {
+    /// The empty-handed + modifier branch ran this frame (delete mode is active).
+    pub active: bool,
+    /// Total `SphericalJoint` entities seen.
+    pub joints: u32,
+    /// Of those, how many had a resolvable `body2` `Holdable` transform.
+    pub resolved: u32,
+    /// How many were within `DELETE_RADIUS` (i.e. would highlight red).
+    pub in_zone: u32,
+    /// Nearest joint's `body2`-anchor distance to the hold point (what the detector
+    /// actually tests), and its `body1`-anchor distance (where the MP gizmo is drawn).
+    pub nearest_body2: f32,
+    pub nearest_body1: f32,
+}
+
 #[derive(SystemSet, Clone, Hash, Debug, PartialEq, Eq)]
 struct ToggleHoldingSystemLabel;
 
