@@ -250,8 +250,9 @@ pub struct JointAppearance {
     /// The material both single-player and multiplayer draw *real* (existing)
     /// joints with — **green**.
     pub invalid_material: Option<Handle<GizmoMaterial>>,
-    /// A joint inside the delete zone — drawn **red**.
-    predelete_material: Option<Handle<GizmoMaterial>>,
+    /// A joint inside the delete zone — drawn **red**. `pub` so the multiplayer
+    /// recolor (`net::recolor_replicated_joints`) can swap a joint's own sphere to it.
+    pub predelete_material: Option<Handle<GizmoMaterial>>,
 }
 
 fn initialize_joint_appearance(
