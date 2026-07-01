@@ -16,7 +16,7 @@
 //! needs no TLS certs. Production / browser clients need `wss://` — swap in a
 //! real `Identity` (see `with_identity`) behind a public TLS endpoint.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -27,8 +27,8 @@ use avian3d::prelude::{
 };
 use bad_spaceship_shared::character::{CharacterMovement, InitialPose, ServerAvatar};
 use bad_spaceship_shared::net::{
-    apply_hold_spring, apply_net_input, focused_part, NetFacing, NetHold, NetInput, NetJoint,
-    NetPart, NetPlayer, ProtocolPlugin, RollbackReport, TICK,
+    apply_hold_spring, apply_net_input, focused_part, sanitize_name, NetFacing, NetHold, NetInput,
+    NetJoint, NetName, NetPart, NetPlayer, ProtocolPlugin, RollbackReport, SetName, TICK,
 };
 use bad_spaceship_shared::map::GROUND_LAYER;
 use bad_spaceship_shared::part::{
@@ -320,8 +320,8 @@ impl Plugin for NetServerPlugin {
             (replace_fallen_room_parts, sync_avatar_facing, sync_net_hold),
         );
         // Assign each client (and its avatar) to its reported room on the first
-        // input, lazily creating the room's world.
-        app.add_systems(Update, assign_rooms);
+        // input, lazily creating the room's world, and apply client rename requests.
+        app.add_systems(Update, (assign_rooms, apply_name_changes));
         // Session resume: continuously remember live avatars' positions (the reconnect
         // restore itself happens at connect, in `spawn_player_for_client`).
         app.add_systems(Update, record_resume_positions);
@@ -450,9 +450,26 @@ fn assign_rooms(
     mut commands: Commands,
     mut registry: ResMut<RoomRegistry>,
     mut allocator: ResMut<RoomAllocator>,
-    players: Query<(Entity, &ActionState<NetInput>, &ControlledBy), Without<RoomMember>>,
+    players: Query<(Entity, &ActionState<NetInput>, &ControlledBy, &NetName), Without<RoomMember>>,
+    // Already-assigned avatars' names, so a fresh join picks a default that's unique
+    // within its room.
+    named: Query<(&NetName, &RoomMember)>,
 ) {
-    for (entity, state, controlled) in &players {
+    // The `players` query is `Without<RoomMember>`, so on the vast majority of ticks
+    // nobody is joining — skip the whole name-bookkeeping scan then.
+    if players.iter().next().is_none() {
+        return;
+    }
+    // The default-name numbers already taken in each room (from existing avatars).
+    // Multiple clients can cross the first-input line on the same frame, so newly
+    // assigned numbers are folded back in as we go to keep this run's picks distinct.
+    let mut used: HashMap<RoomId, HashSet<u32>> = HashMap::new();
+    for (name, member) in &named {
+        if let Some(n) = default_name_number(&name.0) {
+            used.entry(member.0).or_default().insert(n);
+        }
+    }
+    for (entity, state, controlled, name) in &players {
         // Wait for the first real input — the all-zero seed carries no room (a
         // real input always has a unit-quaternion rotation, never `[0,0,0,0]`).
         if state.0 == NetInput::default() {
@@ -474,7 +491,51 @@ fn assign_rooms(
             CollisionLayers::from_bits(room.bit, room.bit | GROUND_LAYER),
         ));
         commands.entity(controlled.owner).insert(Rooms::single(room.id));
-        info!("client {:?} joined room {:?}", controlled.owner, room.id);
+        // Give a still-unnamed avatar the lowest free "Player N" in its room, reserving
+        // it for the run. Skip if it already carries a name — a rename that raced ahead
+        // of room assignment must not be clobbered by a default.
+        if name.0.is_empty() {
+            let room_used = used.entry(room.id).or_default();
+            let number = (1u32..).find(|n| !room_used.contains(n)).unwrap();
+            room_used.insert(number);
+            commands.entity(entity).insert(NetName(format!("Player {number}")));
+            info!("client {:?} joined room {:?} as Player {number}", controlled.owner, room.id);
+        } else {
+            info!("client {:?} joined room {:?} as {}", controlled.owner, room.id, name.0);
+        }
+    }
+}
+
+/// Parse the number out of a default `"Player N"` name, or `None` for a custom name.
+/// Used by `assign_rooms` to find which default numbers are taken in a room (so it
+/// can hand the next joiner the lowest free one).
+fn default_name_number(name: &str) -> Option<u32> {
+    name.strip_prefix("Player ").and_then(|n| n.parse::<u32>().ok())
+}
+
+/// Apply each client's `SetName` rename to its avatar's replicated [`NetName`].
+/// The message rides the reliable `ControlChannel` and lands on the client's link
+/// entity; map that link to the avatar it `ControlledBy`, sanitise the requested
+/// name, and (if non-empty) write it — from where it re-replicates to everyone in
+/// the room. `set_if_neq` avoids re-replicating an unchanged name.
+fn apply_name_changes(
+    mut links: Query<(Entity, &mut MessageReceiver<SetName>), (With<ClientOf>, With<Connected>)>,
+    mut avatars: Query<(&ControlledBy, &mut NetName)>,
+) {
+    for (link, mut receiver) in &mut links {
+        // Sequenced-reliable: only the newest rename this window matters.
+        let Some(msg) = receiver.receive().last() else {
+            continue;
+        };
+        let name = sanitize_name(&msg.0);
+        if name.is_empty() {
+            continue;
+        }
+        for (controlled, mut net_name) in &mut avatars {
+            if controlled.owner == link {
+                net_name.set_if_neq(NetName(name.clone()));
+            }
+        }
     }
 }
 
@@ -937,6 +998,9 @@ fn spawn_player_for_client(
         // Replicated facing (mirrored from the avatar's `Yaw` by
         // `sync_avatar_facing`) so remote clients can draw it facing its look.
         NetFacing::default(),
+        // Display name — replicated from spawn (empty until `assign_rooms` picks a
+        // unique per-room default), so the client never queries a nameless avatar.
+        NetName::default(),
     ));
     if let Some(pos) = resume_pos {
         avatar.insert(InitialPose(pos));

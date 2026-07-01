@@ -8,9 +8,15 @@ use bevy_egui::{
     egui::{self, Align, Align2, Color32, Frame, Layout},
     EguiContexts, EguiPlugin, EguiPrimaryContextPass,
 };
+use bad_spaceship_shared::net::{
+    sanitize_name, ControlChannel, NetName, NetPlayer, SetName, MAX_NAME_LEN,
+};
 use chrono::{DateTime, FixedOffset, Utc};
 use lightyear::prelude::client::Connected;
-use lightyear::prelude::{PingManager, PredictionMetrics};
+use lightyear::prelude::{
+    Interpolated, LocalId, MessageSender, PingManager, Predicted, PredictionMetrics,
+};
+use std::collections::BTreeMap;
 use once_cell::sync::Lazy;
 use shadow_rs::shadow;
 
@@ -26,7 +32,8 @@ impl Plugin for UiPlugin {
         // schedule rather than `Update`, and `EguiContexts::ctx_mut()` now returns
         // a `Result` (the systems below are fallible and use `?`). Systems that
         // only read input or egui settings (not the context) stay in `Update`.
-        app.add_plugins((EguiPlugin::default(), FrameTimeDiagnosticsPlugin::default()))
+        app.init_resource::<HudState>()
+            .add_plugins((EguiPlugin::default(), FrameTimeDiagnosticsPlugin::default()))
             .add_systems(
                 Update,
                 capture_mouse_on_click.run_if(in_state(AppState::Initial)),
@@ -38,6 +45,10 @@ impl Plugin for UiPlugin {
                     // egui pass alongside the panel-drawing systems, not in `Update`.
                     update_ui_scale_factor,
                     show_menu.run_if(in_state(AppState::InGameMenu)),
+                    // Top-left controls (rename + help toggle), the rename modal, and
+                    // the top-right player roster; billboard names over each avatar.
+                    show_name_hud,
+                    show_name_labels,
                     show_instructions,
                     show_bottom_panel,
                 ),
@@ -259,24 +270,212 @@ Empty-handed, aim at a joint until it highlights red,
 then tap Delete Joints to remove it. Tap pause (top-right) for the menu.
 ";
 
+/// The instructions overlay, now **hidden by default** and revealed by the top-left
+/// "?" help button (`HudState::show_help`). Drawn as a boxed panel just under the
+/// button row (an `Area` offset below the top-left controls) rather than the old
+/// full-width top panel, so it doesn't collide with the controls or the roster.
 fn show_instructions(
     mut contexts: EguiContexts,
+    hud: Res<HudState>,
     mobile: Res<crate::mobile::MobileActive>,
 ) -> Result {
+    if !hud.show_help {
+        return Ok(());
+    }
     let text = if mobile.0 {
         TOUCH_INSTRUCTIONS
     } else {
         INSTRUCTIONS
     };
-    egui::TopBottomPanel::top("top_panel")
-        .frame(Frame::default().multiply_with_opacity(0.0))
-        // Drop the hairline divider egui draws at the panel's edge.
-        .show_separator_line(false)
-        .show(contexts.ctx_mut()?, |ui| {
-            ui.horizontal(|ui| {
+    let ctx = contexts.ctx_mut()?;
+    egui::Area::new(egui::Id::new("bs_instructions"))
+        .anchor(Align2::LEFT_TOP, egui::vec2(8.0, 44.0))
+        .show(ctx, |ui| {
+            Frame::popup(ui.style()).show(ui, |ui| {
                 ui.colored_label(Color32::from_rgb(255, 0, 0), text);
             });
         });
+    Ok(())
+}
+
+/// Transient HUD state for the top-left controls: whether the rename modal and the
+/// instructions overlay are open, and the in-progress text of the rename field.
+#[derive(Resource, Default)]
+struct HudState {
+    /// The rename modal is open.
+    show_change_modal: bool,
+    /// The instructions overlay is revealed (toggled by the "?" button).
+    show_help: bool,
+    /// Live contents of the rename text field.
+    editing: String,
+}
+
+/// How high above an avatar's origin its name billboard floats (metres). The avatar
+/// body is ~1.2 m tall centred on the origin, so this sits the label just overhead.
+const NAME_LABEL_HEIGHT: f32 = 1.6;
+
+/// The one representative entity per player carrying its name: the owner's own
+/// avatar is `Predicted`, every remote avatar is `Interpolated`. This excludes the
+/// invisible `Confirmed` copies so each player appears exactly once (in the roster
+/// and as a single billboard).
+type RenderedAvatar = Or<(With<Predicted>, With<Interpolated>)>;
+
+/// Draw the top-left controls (rename + help), the rename modal, and the top-right
+/// player roster. All name state is replicated (`NetPlayer` + `NetName`); the roster
+/// is deduped by `client_id` (a player has a `Confirmed` copy plus a rendered one)
+/// and the local player is found via `my_netcode_id` and flagged with an asterisk —
+/// the same self-identification the netcode uses (`NetPlayer::client_id == LocalId`).
+/// The rename button and roster only appear once connected; the "?" help toggle is
+/// always available (single-player included). A committed rename is sent inline over
+/// the reliable `ControlChannel`.
+fn show_name_hud(
+    mut contexts: EguiContexts,
+    mut hud: ResMut<HudState>,
+    local: Query<&LocalId, With<Connected>>,
+    players: Query<(&NetPlayer, &NetName), RenderedAvatar>,
+    mut sender: Query<&mut MessageSender<SetName>, With<Connected>>,
+) -> Result {
+    let ctx = contexts.ctx_mut()?;
+    let my_id = crate::net::my_netcode_id(&local);
+    let connected = my_id.is_some();
+    // Dedup replicated copies into one row per player, ordered by id for stability.
+    let mut roster: BTreeMap<u64, String> = BTreeMap::new();
+    for (player, name) in &players {
+        roster
+            .entry(player.client_id)
+            .or_insert_with(|| name.0.clone());
+    }
+
+    // Top-left: rename (connected only) + help toggle.
+    egui::Area::new(egui::Id::new("bs_top_left"))
+        .anchor(Align2::LEFT_TOP, egui::vec2(8.0, 8.0))
+        .show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                if connected && ui.button("✎ Name").clicked() {
+                    // Seed the field with our current name (looked up only here).
+                    hud.editing = my_id
+                        .and_then(|id| roster.get(&id).cloned())
+                        .unwrap_or_default();
+                    hud.show_change_modal = true;
+                }
+                let help = if hud.show_help { "✕" } else { "?" };
+                if ui.button(help).clicked() {
+                    hud.show_help = !hud.show_help;
+                }
+            });
+        });
+
+    // The rename modal.
+    if hud.show_change_modal {
+        let mut save = false;
+        let mut close = false;
+        egui::Window::new("Change name")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label("Enter a new name:");
+                let field =
+                    ui.add(egui::TextEdit::singleline(&mut hud.editing).char_limit(MAX_NAME_LEN));
+                // Enter in the field submits, like clicking Save.
+                if field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    save = true;
+                }
+                ui.horizontal(|ui| {
+                    save |= ui.button("Save").clicked();
+                    close |= ui.button("Cancel").clicked();
+                });
+            });
+        if save {
+            let cleaned = sanitize_name(&hud.editing);
+            // Ignore an empty rename (the server would too) — keeps the current name.
+            if !cleaned.is_empty() {
+                if let Ok(mut sender) = sender.single_mut() {
+                    sender.send::<ControlChannel>(SetName(cleaned));
+                }
+            }
+        }
+        if save || close {
+            hud.show_change_modal = false;
+        }
+    }
+
+    // Top-right: the roster, self marked with an asterisk.
+    if connected && !roster.is_empty() {
+        egui::Area::new(egui::Id::new("bs_roster"))
+            .anchor(Align2::RIGHT_TOP, egui::vec2(-8.0, 8.0))
+            .show(ctx, |ui| {
+                Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.label(egui::RichText::new("Players").strong());
+                    for (id, name) in &roster {
+                        let label = if Some(*id) == my_id {
+                            format!("{name} *")
+                        } else {
+                            name.clone()
+                        };
+                        ui.label(label);
+                    }
+                });
+            });
+    }
+    Ok(())
+}
+
+/// Billboard each avatar's name in 2D over its head, always facing the viewer: the
+/// world point above the avatar is projected to the screen (`world_to_ndc` → egui's
+/// point-space `screen_rect`, which is resolution- and zoom-independent), and the
+/// name is painted there. Skips avatars behind/outside the frustum (`ndc.z`) and
+/// empty names (an avatar not yet assigned one). A drop shadow keeps it legible over
+/// the bright scene. Restricted to the rendered copies (own `Predicted` + remote
+/// `Interpolated`), so it uses each avatar's live rendered pose and draws once.
+fn show_name_labels(
+    mut contexts: EguiContexts,
+    camera: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
+    avatars: Query<(&NetName, &GlobalTransform), (With<NetPlayer>, RenderedAvatar)>,
+) -> Result {
+    let Ok((camera, cam_tf)) = camera.single() else {
+        return Ok(());
+    };
+    let ctx = contexts.ctx_mut()?;
+    // The full render surface (not the panel-shrunk content area): the 3D camera
+    // renders to the whole viewport, so NDC maps onto this rect.
+    let rect = ctx.viewport_rect();
+    let painter =
+        ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("bs_names")));
+    let font = egui::FontId::proportional(16.0);
+    for (name, xf) in &avatars {
+        if name.0.is_empty() {
+            continue;
+        }
+        let world = xf.translation() + Vec3::Y * NAME_LABEL_HEIGHT;
+        let Some(ndc) = camera.world_to_ndc(cam_tf, world) else {
+            continue;
+        };
+        // NDC z outside [0,1] is behind the camera or past the far plane — don't draw
+        // a label for something not on screen (a raw projection flips behind the eye).
+        if !(0.0..=1.0).contains(&ndc.z) {
+            continue;
+        }
+        let pos = egui::pos2(
+            rect.min.x + (ndc.x * 0.5 + 0.5) * rect.width(),
+            // NDC y is up; egui y is down.
+            rect.min.y + (0.5 - ndc.y * 0.5) * rect.height(),
+        );
+        painter.text(
+            pos + egui::vec2(1.0, 1.0),
+            Align2::CENTER_BOTTOM,
+            &name.0,
+            font.clone(),
+            Color32::from_black_alpha(190),
+        );
+        painter.text(
+            pos,
+            Align2::CENTER_BOTTOM,
+            &name.0,
+            font.clone(),
+            Color32::WHITE,
+        );
+    }
     Ok(())
 }
 
