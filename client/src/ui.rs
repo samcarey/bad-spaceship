@@ -355,7 +355,7 @@ fn show_name_hud(
         .anchor(Align2::LEFT_TOP, egui::vec2(8.0, 8.0))
         .show(ctx, |ui| {
             ui.horizontal(|ui| {
-                if connected && ui.button("✎ Name").clicked() {
+                if connected && ui.button("Name").clicked() {
                     let current = my_id
                         .and_then(|id| roster.get(&id).cloned())
                         .unwrap_or_default();
@@ -373,8 +373,10 @@ fn show_name_hud(
                         hud.show_change_modal = true;
                     }
                 }
-                let help = if hud.show_help { "✕" } else { "?" };
-                if ui.button(help).clicked() {
+                // Plain "?" — egui's default font can't render most symbol glyphs
+                // (they show as tofu boxes). The instructions panel appearing is the
+                // toggle's state feedback.
+                if ui.button("?").clicked() {
                     hud.show_help = !hud.show_help;
                 }
             });
@@ -425,17 +427,23 @@ fn show_name_hud(
         egui::Area::new(egui::Id::new("bs_roster"))
             .anchor(Align2::RIGHT_TOP, egui::vec2(-8.0, 8.0))
             .show(ctx, |ui| {
-                Frame::popup(ui.style()).show(ui, |ui| {
-                    ui.label(egui::RichText::new("Players").strong());
-                    for (id, name) in &roster {
-                        let label = if Some(*id) == my_id {
-                            format!("{name} *")
-                        } else {
-                            name.clone()
-                        };
-                        ui.label(label);
-                    }
-                });
+                // Translucent panel, no drop shadow (`Frame::popup` adds one).
+                Frame::default()
+                    .fill(Color32::from_black_alpha(160))
+                    .inner_margin(egui::Margin::same(6))
+                    .show(ui, |ui| {
+                        // Extend to fit each name rather than wrapping it.
+                        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+                        ui.label(egui::RichText::new("Players").strong());
+                        for (id, name) in &roster {
+                            let label = if Some(*id) == my_id {
+                                format!("{name} *")
+                            } else {
+                                name.clone()
+                            };
+                            ui.label(label);
+                        }
+                    });
             });
     }
     Ok(())
