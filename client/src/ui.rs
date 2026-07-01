@@ -11,7 +11,6 @@ use bevy_egui::{
 use bad_spaceship_shared::net::{
     sanitize_name, ControlChannel, NetName, NetPlayer, ResetPosition, SetName, MAX_NAME_LEN,
 };
-use bad_spaceship_shared::DeleteZoneDebug;
 use chrono::{DateTime, FixedOffset, Utc};
 use lightyear::prelude::client::Connected;
 use lightyear::prelude::{
@@ -55,7 +54,6 @@ impl Plugin for UiPlugin {
                     show_name_labels,
                     show_instructions,
                     show_bottom_panel,
-                    show_delete_debug,
                 ),
             );
     }
@@ -302,38 +300,6 @@ fn show_instructions(
                 .inner_margin(egui::Margin::same(6))
                 .show(ui, |ui| {
                     ui.colored_label(Color32::from_rgb(255, 0, 0), text);
-                });
-        });
-    Ok(())
-}
-
-/// TEMPORARY diagnostic overlay for the delete-zone red-highlight bug. Shows, only
-/// while delete mode is active (empty-handed + modifier), the counts and nearest
-/// anchor distances the detector computed this frame — so the on-device numbers can
-/// be read back to pinpoint why a joint inside the sphere isn't highlighting. Remove
-/// with `DeleteZoneDebug` once fixed.
-fn show_delete_debug(mut contexts: EguiContexts, debug: Res<DeleteZoneDebug>) -> Result {
-    if !debug.active {
-        return Ok(());
-    }
-    let fmt = |d: f32| if d.is_finite() { format!("{d:.2}") } else { "-".to_string() };
-    let text = format!(
-        "delete-zone: joints={} resolved={} in_zone={}\nnearest body2={} body1={} (radius=1.00)",
-        debug.joints,
-        debug.resolved,
-        debug.in_zone,
-        fmt(debug.nearest_body2),
-        fmt(debug.nearest_body1),
-    );
-    let ctx = contexts.ctx_mut()?;
-    egui::Area::new(egui::Id::new("bs_delete_debug"))
-        .anchor(Align2::LEFT_BOTTOM, egui::vec2(8.0, -8.0))
-        .show(ctx, |ui| {
-            Frame::default()
-                .fill(Color32::from_black_alpha(180))
-                .inner_margin(egui::Margin::same(6))
-                .show(ui, |ui| {
-                    ui.colored_label(Color32::from_rgb(255, 220, 80), text);
                 });
         });
     Ok(())
