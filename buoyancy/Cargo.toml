@@ -44,6 +44,8 @@ default = [
     "bevy/bevy_pbr",
     "bevy/bevy_core_pipeline",
     "bevy/bevy_log",
+    # Gizmo lines for the force-vector overlay (the 👁 vectors toggle).
+    "bevy/bevy_gizmos",
     "bevy/webgl2",
     # Touch input (one-finger orbit / pinch zoom). Bevy 0.18+ gates input sources
     # behind features and nothing pulls `touch` transitively — without it the
