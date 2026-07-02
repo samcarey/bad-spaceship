@@ -334,23 +334,22 @@ impl Default for ForceVectors {
 /// add up to the violet one. (An absolute scale can't work — forces span
 /// orders of magnitude across body densities and sizes.) The honest flip
 /// side: each element carries ~1/N of the total, so at fine voxel/hull
-/// resolutions the orange arrows are millimetres long — sub-pixel, and
-/// culled by the near-zero skip in `draw_force_vectors`.
+/// resolutions the orange arrows are millimetres long — culled by the
+/// near-zero skip in `draw_force_vectors` once truly degenerate, otherwise
+/// drawn short but at full line width (see `ARROW_LINE_WIDTH`).
 const MAX_ARROW_LEN: f32 = 1.5;
+/// Line width (px) for every force arrow, shaft and head alike — the width
+/// never encodes anything; only arrow *length* carries magnitude. In the
+/// clipped-volume method the single buoyancy arrow is collinear with — and
+/// at rest exactly as long as — the weight arrow, so their shafts contest
+/// the same pixels; the two heads sit at opposite ends, which keeps both
+/// arrows readable.
+const ARROW_LINE_WIDTH: f32 = 6.0;
 /// Buoyancy / hydro forces (per element, whatever the method).
 const ARROW_COLOR: Color = Color::srgb(1.0, 0.45, 0.1);
 /// The single gravity (weight) arrow — violet so it can't be read as one of
 /// the orange hydro arrows.
 const GRAVITY_COLOR: Color = Color::srgb(0.55, 0.2, 0.95);
-
-/// Separate gizmo group for the gravity arrow so it draws with a wider line
-/// than the hydro arrows: in the clipped-volume method the single buoyancy
-/// arrow (up from the centre of buoyancy) is collinear with — and at rest
-/// exactly as long as — the weight (down from the centre of mass), and at
-/// equal width whichever wins the depth tie hides the other; the extra width
-/// keeps a violet fringe visible around the orange.
-#[derive(Default, Reflect, GizmoConfigGroup)]
-struct GravityGizmos;
 
 /// Cost of the per-physics-step hydro-force computation, averaged over ~1 s
 /// windows for the overlay readout. Written by `apply_hydro_forces`, read by
@@ -494,10 +493,10 @@ fn main() {
         .init_resource::<OrbitCamera>()
         .init_resource::<ScreenLift>()
         .insert_gizmo_config(
-            GravityGizmos,
+            DefaultGizmoConfigGroup,
             GizmoConfig {
                 line: GizmoLineConfig {
-                    width: 6.0,
+                    width: ARROW_LINE_WIDTH,
                     ..default()
                 },
                 ..default()
@@ -1078,12 +1077,10 @@ fn apply_hydro_forces(
 /// of weight and net hydro force spans `MAX_ARROW_LEN` — so lengths are
 /// physically proportional across all arrows: the orange per-element forces
 /// vectorially add up to the violet weight when the body is at rest, the
-/// imbalance while it moves is the real net force.
-fn draw_force_vectors(
-    vis: Res<ForceVectors>,
-    mut gizmos: Gizmos,
-    mut gravity_gizmos: Gizmos<GravityGizmos>,
-) {
+/// imbalance while it moves is the real net force. Line width is uniform
+/// (`ARROW_LINE_WIDTH`, set on the default gizmo group) — length alone
+/// encodes magnitude.
+fn draw_force_vectors(vis: Res<ForceVectors>, mut gizmos: Gizmos) {
     if !vis.on {
         return;
     }
@@ -1105,7 +1102,7 @@ fn draw_force_vectors(
             gizmos.arrow(*point, tip, ARROW_COLOR);
         }
     }
-    gravity_gizmos.arrow(com, com + weight * scale, GRAVITY_COLOR);
+    gizmos.arrow(com, com + weight * scale, GRAVITY_COLOR);
 }
 
 /// Camera gestures: drag (mouse left / one finger) orbits yaw+pitch around the
