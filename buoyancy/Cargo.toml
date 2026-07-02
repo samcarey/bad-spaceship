@@ -22,6 +22,8 @@ bevy = { workspace = true }
 avian3d = { workspace = true }
 # `open_url` routes egui hyperlink clicks through the `webbrowser` crate (which
 # window.open()s on wasm) — used by the floating "source" permalink.
+# NO `default_fonts` (1.4 MB embedded): `install_fonts` (main.rs) supplies subset
+# fonts from `fonts/` covering exactly the glyphs the UI draws.
 bevy_egui = { workspace = true, features = ["open_url"] }
 
 # getrandom backends for wasm, mirroring the client: Bevy pulls `getrandom` 0.3
@@ -34,6 +36,12 @@ getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
 # Must match the wasm-bindgen CLI the Pages CI installs (see pages.yml).
 wasm-bindgen = "=0.2.125"
 
+# Already in the graph via bevy_log; declared directly only to turn on the
+# static level cap: in release builds every info!/debug!/trace! call site across
+# the whole graph (mostly Bevy's) compiles out, format strings and all. Size
+# lever, not a behavior need — warnings/errors still reach the console.
+tracing = { version = "0.1", default-features = false, features = ["release_max_level_warn"] }
+
 [features]
 # Bevy is pulled with `default-features = false` (workspace pin), so the renderer
 # crates are named explicitly — the same set the client's web build uses, minus the
@@ -45,7 +53,9 @@ default = [
     "bevy/bevy_core_pipeline",
     "bevy/bevy_log",
     # Gizmo lines for the force-vector overlay (the 👁 vectors toggle).
-    "bevy/bevy_gizmos",
+    # 0.19 split the API (`bevy_gizmos`) from the renderer — without the
+    # `_render` feature, arrows are recorded but silently never drawn.
+    "bevy/bevy_gizmos_render",
     "bevy/webgl2",
     # Touch input (one-finger orbit / pinch zoom). Bevy 0.18+ gates input sources
     # behind features and nothing pulls `touch` transitively — without it the

@@ -29,13 +29,19 @@ resolver = "2"
 [workspace.dependencies]
 bevy = { version = "0.19", default-features = false }
 # Avian (XPBD physics). 0.7.0 is the release that targets Bevy 0.19 (parry3d 0.27).
-# The base feature set is identical across all three crates; native/server re-add
-# `avian3d/simd` + `avian3d/parallel` via their own `[features]` lists. See
-# shared/Cargo.toml for the full rationale on each base feature (esp. xpbd_joints).
-avian3d = { version = "0.7.0", default-features = false, features = ["3d", "f32", "parry-f32", "xpbd_joints", "serialize"] }
+# Only the minimal common base lives here (workspace features are additive, so
+# members can't subtract them): `shared` adds `xpbd_joints` (joint solver) +
+# `serialize` (needed to replicate Position/Rotation) for the game crates, and
+# native/server re-add `simd`/`parallel` for perf; the size-sensitive `buoyancy`
+# wasm build takes just this base. See shared/Cargo.toml for the full rationale.
+avian3d = { version = "0.7.0", default-features = false, features = ["3d", "f32", "parry-f32"] }
 # bevy_egui 0.40 is the release that targets Bevy 0.19 (egui 0.34). Client-only,
-# but pinned here so all engine-coupled versions live in one place.
-bevy_egui = { version = "0.40", default-features = false, features = ["default_fonts", "render"] }
+# but pinned here so all engine-coupled versions live in one place. Workspace
+# features are additive (members can't subtract them), so only the universally
+# needed `render` lives here; `default_fonts` (1.4 MB of embedded fonts) is
+# opted into by the client, while wasm-size-sensitive `buoyancy` ships tiny
+# subset fonts instead (buoyancy/fonts/).
+bevy_egui = { version = "0.40", default-features = false, features = ["render"] }
 # Multiplayer netcode. 0.28 is the release that targets Bevy 0.19 (it requires
 # bevy_app/bevy_ecs ^0.19, aeronet_io ^0.21, avian3d ^0.7). `default-features
 # = false` so each crate opts into only what it needs: `shared` takes the
@@ -56,3 +62,14 @@ opt-level = 3
 # Recommended for rapier: https://rapier.rs/docs/user_guides/bevy_plugin/common_mistakes
 [profile.release]
 codegen-units = 1
+
+# Published-wasm profile: maximum size reduction. Separate from `release` so
+# the fast demo-iteration loop doesn't pay the fat-LTO link time on every
+# rebuild. (`panic = "abort"` is near-free on wasm32 — the target can't unwind
+# anyway — and drops all landing-pad code; the console panic hook still runs.)
+[profile.wasm-dist]
+inherits = "release"
+opt-level = "z"
+lto = "fat"
+strip = true
+panic = "abort"

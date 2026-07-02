@@ -63,11 +63,22 @@ jobs:
           --target wasm32-unknown-unknown --features web --release
 
       # Standalone buoyancy experiment — a separate crate + WASM bundle, published
-      # to /buoyancy/ and reached via the unlinked /buoyancy.html.
-      - name: Build WASM buoyancy (release)
+      # to /buoyancy/ and reached via the unlinked /buoyancy.html. Built with the
+      # size-optimized `wasm-dist` profile (fat LTO + opt-level z + strip) and
+      # shrunk further below with wasm-opt: 56.7 MB (plain release) → 18.9 MB.
+      - name: Build WASM buoyancy (wasm-dist)
         run: >-
           cargo build --locked --manifest-path buoyancy/Cargo.toml
-          --target wasm32-unknown-unknown --release
+          --target wasm32-unknown-unknown --profile wasm-dist
+
+      - name: Install binaryen (wasm-opt)
+        run: |
+          set -euo pipefail
+          url="https://github.com/WebAssembly/binaryen/releases/download/version_130/binaryen-version_130-x86_64-linux.tar.gz"
+          curl -fsSL "$url" -o /tmp/binaryen.tar.gz
+          tar -xzf /tmp/binaryen.tar.gz -C /tmp
+          sudo install -m755 /tmp/binaryen-version_130/bin/wasm-opt /usr/local/bin/wasm-opt
+          wasm-opt --version
 
       - name: Assemble site
         run: |
@@ -85,7 +96,23 @@ jobs:
           # loader page at /buoyancy.html (imports ./buoyancy/wasm.js).
           mkdir -p _site/buoyancy
           wasm-bindgen --out-dir _site/buoyancy --out-name wasm --target web --no-typescript \
-            target/wasm32-unknown-unknown/release/bad-spaceship-buoyancy.wasm
+            target/wasm32-unknown-unknown/wasm-dist/bad-spaceship-buoyancy.wasm
+          # Binaryen size pass (~30% on top of the compiler's output). The
+          # --enable-* list is exactly rustc's post-MVP ops (plain -Oz rejects
+          # them) plus gc + tail-call, which binaryen uses for ~3 MB of extra
+          # shrink and every stable browser ships. NEVER --all-features: it
+          # lets binaryen emit experimental "exact" heap types
+          # (custom-descriptors) that fail WebAssembly.compile in ALL current
+          # browsers. (And never --low-memory-unused: Rust keeps its shadow
+          # stack at low memory.)
+          wasm-opt -Oz --converge --generate-global-effects \
+            --enable-mutable-globals --enable-sign-ext --enable-bulk-memory \
+            --enable-nontrapping-float-to-int --enable-multivalue \
+            --enable-reference-types --enable-extended-const \
+            --enable-tail-call --enable-gc \
+            --strip-producers --strip-target-features \
+            --output _site/buoyancy/wasm_bg.wasm \
+            _site/buoyancy/wasm_bg.wasm
           cp buoyancy/buoyancy.html _site/
           # The in-sim "how it works" page (top-left info link).
           cp buoyancy/info.html _site/buoyancy/

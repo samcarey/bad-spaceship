@@ -41,9 +41,10 @@ js-sys = { version = "0.3", optional = true }
 # Version + features inherited from `[workspace.dependencies]` (root Cargo.toml).
 # That pin disables bevy_egui's clipboard/hyperlink extras (the menu uses neither;
 # drops the arboard→image and webbrowser→home native dep chains) while keeping
-# `default_fonts` and `render` — bevy_egui gates *all* egui drawing behind `render`,
-# so dropping it silently hides every egui panel/menu.
-bevy_egui = { workspace = true }
+# `render` — bevy_egui gates *all* egui drawing behind `render`, so dropping it
+# silently hides every egui panel/menu. `default_fonts` is added here (not in the
+# workspace pin) because the size-sensitive buoyancy crate opts out of it.
+bevy_egui = { workspace = true, features = ["default_fonts"] }
 bad-spaceship-shared = { path = "../shared" }
 # Client-side netcode: connects to the dedicated server over WebSocket (works in
 # both the native and wasm/browser builds). Version pinned in the root
