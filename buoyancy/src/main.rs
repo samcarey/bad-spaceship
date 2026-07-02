@@ -230,6 +230,34 @@ impl Default for SimParams {
 #[derive(Resource, Default)]
 struct ResetRequested(bool);
 
+/// The force-vector overlay: every hydro force applied this frame, as
+/// (application point, force) pairs in world space. Collected by
+/// `apply_hydro_forces` when `on`, drawn as gizmo arrows by
+/// `draw_force_vectors` — so what you see is exactly what was applied,
+/// per element, whatever the method (voxel centres, triangle centroids,
+/// or the single centre-of-buoyancy vector).
+#[derive(Resource)]
+struct ForceVectors {
+    on: bool,
+    arrows: Vec<(Vec3, Vec3)>,
+}
+
+impl Default for ForceVectors {
+    fn default() -> Self {
+        Self {
+            on: true,
+            arrows: Vec::new(),
+        }
+    }
+}
+
+/// Longest drawn arrow (m). Lengths are normalised to the frame's largest
+/// force so they stay proportional to each other at any scale — per-voxel
+/// forces and the clipped-volume method's one total-buoyancy vector differ
+/// by orders of magnitude.
+const MAX_ARROW_LEN: f32 = 1.5;
+const ARROW_COLOR: Color = Color::srgb(1.0, 0.45, 0.1);
+
 /// Cost of the per-frame hydro-force computation, averaged over ~1 s windows
 /// for the overlay readout. Written by `apply_hydro_forces`, read by `ui`.
 #[derive(Resource, Default)]
@@ -331,6 +359,7 @@ fn main() {
         })
         .init_resource::<SimParams>()
         .init_resource::<ResetRequested>()
+        .init_resource::<ForceVectors>()
         .init_resource::<PhysicsTiming>()
         .init_resource::<VoxelCache>()
         .init_resource::<HullCache>()
@@ -341,7 +370,14 @@ fn main() {
         // Chained so the frame's writes to mesh/collider/velocity/mass are deterministic.
         .add_systems(
             Update,
-            (rebuild_shape, handle_reset, sync_density, apply_hydro_forces).chain(),
+            (
+                rebuild_shape,
+                handle_reset,
+                sync_density,
+                apply_hydro_forces,
+                draw_force_vectors,
+            )
+                .chain(),
         )
         .add_systems(Update, (orbit_input, update_camera).chain())
         .add_systems(EguiPrimaryContextPass, ui)
@@ -607,10 +643,13 @@ fn apply_hydro_forces(
     // Reused frame-to-frame so clipping never allocates in steady state.
     mut clipped: Local<Vec<[Vec3; 3]>>,
     mut timing: ResMut<PhysicsTiming>,
+    mut vis: ResMut<ForceVectors>,
     mut bodies: Query<(&Position, &Rotation, &ComputedMass, Forces), With<Buoy>>,
 ) {
     let started = Instant::now();
     let dt = time.delta_secs().max(1e-4);
+    vis.arrows.clear();
+    let record = vis.on;
 
     for (pos, rot, mass, mut forces) in &mut bodies {
         // Thousands of points get transformed per frame: pre-expand the
@@ -643,6 +682,9 @@ fn apply_hydro_forces(
                             * forces.velocity_at_point(world);
                     }
                     forces.apply_force_at_point(f, world);
+                    if record {
+                        vis.arrows.push((world, f));
+                    }
                 }
             }
 
@@ -699,6 +741,9 @@ fn apply_hydro_forces(
                                 * params.pressure_drag_coeff;
                         }
                         forces.apply_force_at_point(f, g.centroid);
+                        if record {
+                            vis.arrows.push((g.centroid, f));
+                        }
                     }
 
                     if !params.slamming_on {
@@ -723,10 +768,11 @@ fn apply_hydro_forces(
                             let f_stop =
                                 mass.value() * speed_p * (2.0 * g.area / hull.total_area);
                             let scale = (gamma / params.gamma_max).clamp(0.0, 1.0).powi(2);
-                            forces.apply_force_at_point(
-                                -(scale * cos_theta * f_stop / speed_p) * v_p,
-                                center,
-                            );
+                            let f_slam = -(scale * cos_theta * f_stop / speed_p) * v_p;
+                            forces.apply_force_at_point(f_slam, center);
+                            if record {
+                                vis.arrows.push((center, f_slam));
+                            }
                         }
                     }
                 }
@@ -749,10 +795,11 @@ fn apply_hydro_forces(
                 if let Some((v_sub, center_of_buoyancy)) =
                     hydro::submerged_volume_centroid(&clipped, WATER_LEVEL)
                 {
-                    forces.apply_force_at_point(
-                        Vec3::Y * (WATER_DENSITY * GRAVITY * v_sub),
-                        center_of_buoyancy,
-                    );
+                    let f_buoy = Vec3::Y * (WATER_DENSITY * GRAVITY * v_sub);
+                    forces.apply_force_at_point(f_buoy, center_of_buoyancy);
+                    if record {
+                        vis.arrows.push((center_of_buoyancy, f_buoy));
+                    }
                     if params.drag_on {
                         // Body-level drag at the centre of buoyancy (this method
                         // has no per-element sites): quadratic + linear on the
@@ -764,6 +811,9 @@ fn apply_hydro_forces(
                             * v_lin
                             * params.drag_coeff;
                         forces.apply_force_at_point(f, center_of_buoyancy);
+                        if record {
+                            vis.arrows.push((center_of_buoyancy, f));
+                        }
                         let torque = -(0.02
                             * WATER_DENSITY
                             * v_sub
@@ -786,6 +836,28 @@ fn apply_hydro_forces(
         timing.accum = 0.0;
         timing.frames = 0;
         timing.window = 0.0;
+    }
+}
+
+/// Draw this frame's applied forces as gizmo arrows. Lengths are proportional
+/// to force magnitude, normalised so the frame's largest force spans
+/// `MAX_ARROW_LEN` (see the constant for why absolute scaling doesn't work).
+fn draw_force_vectors(vis: Res<ForceVectors>, mut gizmos: Gizmos) {
+    let max = vis
+        .arrows
+        .iter()
+        .map(|(_, f)| f.length())
+        .fold(0.0f32, f32::max);
+    if max <= 0.0 {
+        return;
+    }
+    let scale = MAX_ARROW_LEN / max;
+    for (point, force) in &vis.arrows {
+        let tip = *point + *force * scale;
+        // Skip near-zero arrows: a degenerate gizmo arrow still draws its head.
+        if point.distance_squared(tip) > 1e-6 {
+            gizmos.arrow(*point, tip, ARROW_COLOR);
+        }
     }
 }
 
@@ -913,6 +985,7 @@ fn ui(
     mut reset: ResMut<ResetRequested>,
     mut lift: ResMut<ScreenLift>,
     timing: Res<PhysicsTiming>,
+    mut vis: ResMut<ForceVectors>,
 ) -> Result {
     let ctx = contexts.ctx_mut()?;
     if (ctx.zoom_factor() - UI_ZOOM).abs() > 0.01 {
@@ -1073,6 +1146,25 @@ fn ui(
         )
         .show(ctx, |ui| {
             ui.label(format!("physics: {:.1} ms", timing.avg_ms));
+        });
+    // Force-vector overlay toggle, floating above the panel's right edge —
+    // fill/outline stripped so only the text shows, dimmed while off.
+    egui::Area::new(egui::Id::new("vectors-toggle"))
+        .anchor(
+            egui::Align2::RIGHT_BOTTOM,
+            [-10.0, -(panel.response.rect.height() + 6.0)],
+        )
+        .show(ctx, |ui| {
+            let mut text = egui::RichText::new("👁 vectors");
+            if !vis.on {
+                text = text.weak();
+            }
+            let button = egui::Button::new(text)
+                .fill(egui::Color32::TRANSPARENT)
+                .stroke(egui::Stroke::NONE);
+            if ui.add(button).clicked() {
+                vis.on = !vis.on;
+            }
         });
     // Centre the scene in the region *above* the panel: NDC shift =
     // panel_height / screen_height (see `ScreenLift`). Both rects are in egui
