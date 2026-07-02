@@ -38,6 +38,7 @@ use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::input::mouse::{MouseMotion, MouseScrollUnit, MouseWheel};
 use bevy::light::GlobalAmbientLight;
 use bevy::mesh::Indices;
+use bevy::platform::time::Instant;
 use bevy::prelude::*;
 use bevy::render::render_resource::PrimitiveTopology;
 use bevy_egui::{egui, input::EguiWantsInput, EguiContexts, EguiPlugin, EguiPrimaryContextPass};
@@ -229,6 +230,19 @@ impl Default for SimParams {
 #[derive(Resource, Default)]
 struct ResetRequested(bool);
 
+/// Cost of the per-frame hydro-force computation, averaged over ~1 s windows
+/// for the overlay readout. Written by `apply_hydro_forces`, read by `ui`.
+#[derive(Resource, Default)]
+struct PhysicsTiming {
+    /// Seconds of compute accumulated in the current window.
+    accum: f32,
+    frames: u32,
+    /// Wall-clock seconds elapsed in the current window.
+    window: f32,
+    /// Last completed window's per-frame average (ms) — the displayed value.
+    avg_ms: f32,
+}
+
 /// Cached voxelisation of the body in LOCAL space: occupied cell centres + the
 /// per-cell volume. Rebuilt only when the shape or grid resolution changes; the
 /// per-frame work is just transforming centres to world space.
@@ -317,6 +331,7 @@ fn main() {
         })
         .init_resource::<SimParams>()
         .init_resource::<ResetRequested>()
+        .init_resource::<PhysicsTiming>()
         .init_resource::<VoxelCache>()
         .init_resource::<HullCache>()
         .init_resource::<OrbitCamera>()
@@ -591,8 +606,10 @@ fn apply_hydro_forces(
     mut hull: ResMut<HullCache>,
     // Reused frame-to-frame so clipping never allocates in steady state.
     mut clipped: Local<Vec<[Vec3; 3]>>,
+    mut timing: ResMut<PhysicsTiming>,
     mut bodies: Query<(&Position, &Rotation, &ComputedMass, Forces), With<Buoy>>,
 ) {
+    let started = Instant::now();
     let dt = time.delta_secs().max(1e-4);
 
     for (pos, rot, mass, mut forces) in &mut bodies {
@@ -760,6 +777,16 @@ fn apply_hydro_forces(
             }
         }
     }
+
+    timing.accum += started.elapsed().as_secs_f32();
+    timing.frames += 1;
+    timing.window += time.delta_secs();
+    if timing.window >= 1.0 {
+        timing.avg_ms = timing.accum / timing.frames.max(1) as f32 * 1000.0;
+        timing.accum = 0.0;
+        timing.frames = 0;
+        timing.window = 0.0;
+    }
 }
 
 /// Camera gestures: drag (mouse left / one finger) orbits yaw+pitch around the
@@ -885,6 +912,7 @@ fn ui(
     mut params: ResMut<SimParams>,
     mut reset: ResMut<ResetRequested>,
     mut lift: ResMut<ScreenLift>,
+    timing: Res<PhysicsTiming>,
 ) -> Result {
     let ctx = contexts.ctx_mut()?;
     if (ctx.zoom_factor() - UI_ZOOM).abs() > 0.01 {
@@ -1036,6 +1064,15 @@ fn ui(
                 }
             });
             ui.add_space(6.0);
+        });
+    // Physics-cost readout, floating just above the panel's top edge.
+    egui::Area::new(egui::Id::new("physics-timing"))
+        .anchor(
+            egui::Align2::LEFT_BOTTOM,
+            [10.0, -(panel.response.rect.height() + 6.0)],
+        )
+        .show(ctx, |ui| {
+            ui.label(format!("physics: {:.1} ms", timing.avg_ms));
         });
     // Centre the scene in the region *above* the panel: NDC shift =
     // panel_height / screen_height (see `ScreenLift`). Both rects are in egui
