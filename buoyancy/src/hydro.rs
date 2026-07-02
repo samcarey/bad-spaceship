@@ -139,6 +139,21 @@ pub fn tri_geom(tri: &[Vec3; 3]) -> Option<TriGeom> {
     })
 }
 
+/// Volume-only variant of [`submerged_volume_centroid`] — the same volume
+/// term, without the second-moment accumulation (which costs ~3× the flops)
+/// for callers that never read the centroid, like a bisection loop.
+pub fn submerged_volume(clipped: &[[Vec3; 3]], level: f32) -> f32 {
+    let mut volume = 0.0;
+    for tri in clipped {
+        let cross = (tri[1] - tri[0]).cross(tri[2] - tri[0]);
+        if cross.length_squared() < 1e-18 {
+            continue;
+        }
+        volume += ((tri[0].y + tri[1].y + tri[2].y) / 3.0 - level) * (cross * 0.5).y;
+    }
+    volume
+}
+
 /// Exact submerged volume + centre of buoyancy of a clipped triangle list
 /// (divergence theorem; see the module docs for why no cap polygon is needed).
 /// Returns `None` when effectively nothing is submerged.
