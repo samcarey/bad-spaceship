@@ -838,6 +838,28 @@ fn update_camera(
     transform.rotate_local_x(-(lift.0 * half_fov.tan()).atan());
 }
 
+// `window.location.href`, for resolving same-site links to absolute URLs:
+// egui's open-url backend (`webbrowser`) only accepts absolute http(s) URLs,
+// so a relative link would silently do nothing on click.
+#[wasm_bindgen::prelude::wasm_bindgen(
+    inline_js = "export function page_href() { return window.location.href; }"
+)]
+extern "C" {
+    fn page_href() -> String;
+}
+
+/// Absolute URL of the "how it works" page, resolved once against the page
+/// location (works under both the root-served site and a sub-path deploy).
+fn info_url() -> &'static str {
+    static URL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    URL.get_or_init(|| {
+        let href = page_href();
+        let base = href.split(['?', '#']).next().unwrap_or(&href);
+        let dir_end = base.rfind('/').map(|i| i + 1).unwrap_or(base.len());
+        format!("{}buoyancy/info.html", &base[..dir_end])
+    })
+}
+
 /// UI zoom (egui 0.34 per-context zoom factor).
 const UI_ZOOM: f32 = 1.3;
 /// Fixed width of the label column to the left of each slider, in points.
@@ -888,7 +910,7 @@ fn ui(
     egui::Area::new(egui::Id::new("info-link"))
         .anchor(egui::Align2::LEFT_TOP, [10.0, 10.0])
         .show(ctx, |ui| {
-            ui.hyperlink_to("ⓘ how it works", "./buoyancy/info.html");
+            ui.hyperlink_to("how it works", info_url());
         });
     // Panel frame: the egui default side margin (8) widened by 50%.
     let frame = egui::Frame::side_top_panel(&ctx.global_style()).inner_margin(egui::Margin {
@@ -905,6 +927,14 @@ fn ui(
         .frame(frame)
         .show(ctx, |ui| {
             ui.add_space(6.0);
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("⟲  Reset (drop again)").clicked() {
+                    reset.0 = true;
+                }
+                ui.separator();
+                ui.label(format!("water: {WATER_DENSITY:.0} kg/m³"));
+            });
+            ui.add_space(4.0);
             labeled_slider(
                 ui,
                 "body density",
@@ -932,8 +962,8 @@ fn ui(
             );
 
             ui.separator();
+            ui.label("method:");
             ui.horizontal_wrapped(|ui| {
-                ui.label("method:");
                 // Selectable labels (highlight when active), tightly packed,
                 // each with a thin outline.
                 ui.spacing_mut().item_spacing.x = 3.0;
@@ -943,8 +973,8 @@ fn ui(
                     egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color);
                 for (value, text) in [
                     (Method::VoxelGrid, "voxel grid"),
-                    (Method::SurfacePressure, "surface pressure"),
-                    (Method::ClippedVolume, "clipped volume"),
+                    (Method::SurfacePressure, "surface press."),
+                    (Method::ClippedVolume, "clipped vol."),
                 ] {
                     egui::Frame::new()
                         .stroke(outline)
@@ -977,20 +1007,12 @@ fn ui(
             // add-on is enabled (the checkbox doubles as their label); the
             // pressure-drag / slamming add-ons need the per-face data only the
             // surface-pressure method produces.
+            let per_face = params.method == Method::SurfacePressure;
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().slider_width = 90.0;
                 ui.checkbox(&mut params.drag_on, "viscous drag");
                 if params.drag_on {
                     ui.add(egui::Slider::new(&mut params.drag_coeff, 0.0..=3.0));
-                }
-                let per_face = params.method == Method::SurfacePressure;
-                ui.separator();
-                ui.add_enabled(
-                    per_face,
-                    egui::Checkbox::new(&mut params.pressure_drag_on, "pressure drag"),
-                );
-                if per_face && params.pressure_drag_on {
-                    ui.add(egui::Slider::new(&mut params.pressure_drag_coeff, 0.0..=3.0));
                 }
                 ui.separator();
                 ui.add_enabled(
@@ -1003,14 +1025,15 @@ fn ui(
                     );
                 }
             });
-
-            ui.add_space(4.0);
             ui.horizontal_wrapped(|ui| {
-                if ui.button("⟲  Reset (drop again)").clicked() {
-                    reset.0 = true;
+                ui.spacing_mut().slider_width = 90.0;
+                ui.add_enabled(
+                    per_face,
+                    egui::Checkbox::new(&mut params.pressure_drag_on, "pressure drag"),
+                );
+                if per_face && params.pressure_drag_on {
+                    ui.add(egui::Slider::new(&mut params.pressure_drag_coeff, 0.0..=3.0));
                 }
-                ui.separator();
-                ui.label(format!("water: {WATER_DENSITY:.0} kg/m³"));
             });
             ui.add_space(6.0);
         });
