@@ -1145,7 +1145,7 @@ fn ui(
             [10.0, -(panel.response.rect.height() + 6.0)],
         )
         .show(ctx, |ui| {
-            ui.label(format!("physics: {:.1} ms", timing.avg_ms));
+            ui.label(format!("physics: {:.2} ms", timing.avg_ms));
         });
     // Force-vector overlay toggle, floating above the panel's right edge —
     // fill/outline stripped so only the text shows, dimmed while off.
