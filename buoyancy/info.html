@@ -82,6 +82,33 @@
     while the body is fully in the air.
   </p>
 
+  <h2>Interior water (fill &amp; slosh)</h2>
+
+  <p>
+    The shell's cavity can carry water (<em>fill</em> slider, a fraction of the cavity
+    volume \(V_{\text{cav}}\)). Each step the water's distribution is solved from pure
+    geometry: in the body's frame, the free surface is a plane perpendicular to "up", and
+    its level \(\ell\) is found by bisection so the cavity volume below it matches the
+    target,
+  </p>
+  $$ V_{\text{water}}(\ell) \;=\; f \, V_{\text{cav}}, $$
+  <p>
+    using the same mesh-clipping and divergence-theorem volume/centroid machinery as the
+    buoyancy methods. The water then joins the body's mass properties as a point mass
+    \(m_w = \rho_w V_{\text{water}}\) at the solved centroid — a <em>quasi-static</em>
+    (instantly re-settling) model, the free-surface approximation used in ship-stability
+    analysis. Because the combined centre of mass now moves with the body's orientation,
+    a load that pools to one side misaligns gravity and buoyancy and the righting torque
+    changes — cargo shift in a can.
+  </p>
+  <p>
+    The <em>slosh</em> slider is a demonstration knob: it tilts the direction the water
+    settles toward (as if gravity were tilted <em>for the water only</em>) while the
+    water's weight still pulls straight down. Sliding it piles the same mass to one side
+    and the whole system heels in response — proof that the distribution alone, not the
+    amount, changes the balance. The ⟲ button resets the tilt to zero.
+  </p>
+
   <h2>Buoyancy — the common principle</h2>
 
   <p>
@@ -232,6 +259,9 @@
     <tr><td>start angle</td><td>—</td><td>Initial tilt of the body's axis off vertical when dropped (applied on Reset).</td></tr>
     <tr><td>radius side 1 / 2</td><td>\(r_1, r_2\)</td><td>End radii of the frustum (equal = cylinder). Changes volume, mass, inertia, and where the centre of mass sits along the axis.</td></tr>
     <tr><td>length</td><td>\(L\)</td><td>Body length. Longer bodies are easier to tip but damp rotation harder.</td></tr>
+    <tr><td>wall thickness</td><td>—</td><td>Shell wall of the hollow sealed body. Thicker = heavier (mass, inertia, and centre of mass come from the shell = outer minus cavity); displacement stays the full outer volume.</td></tr>
+    <tr><td>fill</td><td>\(f\)</td><td>Fraction of the cavity filled with interior water; it weighs in at the solved water centroid and renders as the blue volume.</td></tr>
+    <tr><td>slosh</td><td>—</td><td>Tilts the interior water's settling direction only (demonstration). ⟲ resets to vertical.</td></tr>
     <tr><td>grid density</td><td>\(n\)</td><td>Voxel method: cells per longest axis. Higher = smoother waterline response and less volume error, at more per-frame work.</td></tr>
     <tr><td>hull resolution</td><td>—</td><td>Mesh methods: radial tessellation segments. Higher = finer clipping at the waterline, better torque accuracy.</td></tr>
     <tr><td>viscous drag</td><td>\(C_d\)</td><td>Scales the method-appropriate drag model above. 0 = ideal fluid (the body bobs forever).</td></tr>

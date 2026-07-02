@@ -27,6 +27,14 @@
 //! per-element where the method has elements), pressure drag and slamming
 //! (surface-pressure method only).
 //!
+//! The hollow shell can also carry **interior water** (fill slider): its
+//! distribution inside the cavity is solved from the cavity geometry and the
+//! body's orientation each step (free surface perpendicular to gravity), it
+//! rides the body's mass properties as a point mass at its centroid, and it
+//! renders as a translucent blue volume. A demonstration-only "slosh" slider
+//! tilts the direction the water settles toward — shifting its centroid to
+//! show that the load's distribution alone changes the whole system's balance.
+//!
 //! This is a SEPARATE crate + WASM bundle from the main game — it shares no game
 //! code, only the workspace engine version pins.
 
@@ -79,16 +87,28 @@ const LENGTH_RANGE: std::ops::RangeInclusive<f32> = 0.5..=6.4;
 /// Hollow-shell wall thickness slider default/range, in cm (the UI unit).
 const DEFAULT_WALL_CM: f32 = 1.0;
 const WALL_CM_RANGE: std::ops::RangeInclusive<f32> = 0.1..=25.0;
+/// Interior-water fill slider range, percent of the cavity's volume.
+const FILL_PCT_RANGE: std::ops::RangeInclusive<f32> = 0.0..=100.0;
+/// Slosh slider range: degrees the interior water's settling direction is
+/// tilted off vertical (about world Z, like the start-angle tilt).
+const SLOSH_RANGE: std::ops::RangeInclusive<f32> = -90.0..=90.0;
 
 /// Base opacity the water/body pair is tuned around.
 const BASE_ALPHA: f32 = 0.13125;
 /// Opacity of the water volume.
 const WATER_ALPHA: f32 = BASE_ALPHA * 1.7;
-/// Opacity of the body's shell — kept above the water's so the hollow interior
-/// (and the force vectors inside it) read through the walls.
-const BODY_ALPHA: f32 = BASE_ALPHA * 2.0;
-/// Colour of the water volume (sRGB). Also fed (linearised) to the shell's
-/// below-waterline tint shader via [`SubmergedTint`].
+/// Opacity of the body's shell — light enough that the hollow interior (the
+/// carried water and the force vectors) reads through the walls. Was
+/// `BASE_ALPHA * 2`; tuned down 20% once the near-opaque interior water
+/// carried the depth cue instead.
+const BODY_ALPHA: f32 = BASE_ALPHA * 1.6;
+/// Opacity of the interior water: the original `BASE_ALPHA * 4` see-through
+/// level with its transparency cut to a third, so the load reads as a nearly
+/// solid volume through the shell wall.
+const INTERIOR_WATER_ALPHA: f32 = 1.0 - (1.0 - BASE_ALPHA * 4.0) / 3.0;
+/// Colour of the water volume (sRGB), inside the body and out. Also fed
+/// (linearised) to the shell's below-waterline tint shader via
+/// [`SubmergedTint`].
 const WATER_COLOR: Color = Color::srgb(0.1, 0.45, 0.85);
 
 // ── Shape (conical frustum) ──────────────────────────────────────────────────
@@ -131,8 +151,8 @@ fn inner_shape(shape: Shape, wall: f32) -> Option<Shape> {
     (inner.r_top > 1e-4 && inner.r_bottom > 1e-4 && inner.length > 1e-4).then_some(inner)
 }
 
-/// Mass, angular inertia, and centre of mass of the hollow body: the outer
-/// frustum minus the internal cavity, both evaluated at the material density.
+/// Mass properties of the hollow shell alone: the outer frustum minus the
+/// internal cavity, both evaluated at the material density.
 /// `MassProperties3d - MassProperties3d` does the compound-body subtraction
 /// (mass-weighted COM, parallel-axis-shifted tensors), so the shell gets a
 /// true thin-wall inertia tensor (larger per unit mass than a solid's).
@@ -140,14 +160,19 @@ fn inner_shape(shape: Shape, wall: f32) -> Option<Shape> {
 /// The buoyancy methods keep using the sealed *outer* hull — a closed shell
 /// displaces its full outer volume; hollowness only changes how mass is
 /// distributed.
-fn shell_mass_props(shape: Shape, wall: f32, density: f32) -> (Mass, AngularInertia, CenterOfMass) {
+fn shell_mass_props(shape: Shape, wall: f32, density: f32) -> MassProperties3d {
     let outer = *ColliderMassProperties::from_shape(&frustum_collider(shape), density);
-    let props = match inner_shape(shape, wall) {
+    match inner_shape(shape, wall) {
         Some(cavity) => {
             outer - *ColliderMassProperties::from_shape(&frustum_collider(cavity), density)
         }
         None => outer,
-    };
+    }
+}
+
+/// The Avian component triple for a set of raw mass properties (explicit
+/// overrides of the collider-derived solid values).
+fn mass_components(props: MassProperties3d) -> (Mass, AngularInertia, CenterOfMass) {
     (
         Mass(props.mass),
         AngularInertia::from_tensor(props.angular_inertia_tensor()),
@@ -240,6 +265,13 @@ struct SimParams {
     /// Hollow-shell wall thickness, in cm (the slider's unit).
     wall_cm: f32,
 
+    /// Interior water: how much of the cavity's volume is filled, percent.
+    fill_pct: f32,
+    /// Demonstration-only tilt of the direction the interior water settles
+    /// toward, degrees. Tilts ONLY the water's distribution — its weight
+    /// still pulls straight down (see `solve_interior_water`).
+    slosh_deg: f32,
+
     method: Method,
     /// Voxel method quality: cells along the body's longest local dimension.
     voxel_res: u32,
@@ -280,6 +312,8 @@ impl Default for SimParams {
                 length: DEFAULT_LENGTH,
             },
             wall_cm: DEFAULT_WALL_CM,
+            fill_pct: 0.0,
+            slosh_deg: 0.0,
             method: Method::VoxelGrid,
             voxel_res: 12,
             hull_res: 24,
@@ -308,13 +342,18 @@ struct ResetRequested(bool);
 struct ForceVectors {
     on: bool,
     arrows: Vec<(Vec3, Vec3)>,
-    /// The weight vector (world centre of mass, m·g downward). Avian applies
-    /// gravity itself, so this is recorded for display only. Recorded before
-    /// any of the body's arrows, so `None` implies `arrows` is empty — which
-    /// is what lets `draw_force_vectors` gate the whole overlay on it. The
-    /// sim has a single `Buoy` body; with several, the last one recorded
-    /// would set the weight arrow *and* the shared arrow scale.
+    /// The shell's weight vector (world shell COM, m·g downward). Avian
+    /// applies gravity itself (through the body's mass properties), so this
+    /// is recorded for display only. Recorded before any of the body's
+    /// arrows, so `None` implies `arrows` is empty — which is what lets
+    /// `draw_force_vectors` gate the whole overlay on it. The sim has a
+    /// single `Buoy` body; with several, the last one recorded would set
+    /// the weight arrows *and* the shared arrow scale.
     gravity: Option<(Vec3, Vec3)>,
+    /// The interior water's weight (world water centroid, m·g downward) —
+    /// the second violet arrow; `None` when the cavity is dry. Display-only
+    /// like `gravity`: the water's mass rides the body's mass properties.
+    water_weight: Option<(Vec3, Vec3)>,
 }
 
 impl Default for ForceVectors {
@@ -323,6 +362,7 @@ impl Default for ForceVectors {
             on: true,
             arrows: Vec::new(),
             gravity: None,
+            water_weight: None,
         }
     }
 }
@@ -376,6 +416,46 @@ struct VoxelCache {
     cell_size: f32,
     cell_volume: f32,
 }
+
+/// Interior-water solve state. The cavity tessellation (local space) rebuilds
+/// when shape/wall/resolution change; the water solve — free-surface plane,
+/// volume, centroid, render triangles — additionally depends on fill, slosh,
+/// and the body's orientation, so it refreshes whenever any of those move
+/// (every step while the body tumbles, then goes quiet at rest thanks to the
+/// quantised-rotation key). `version` bumps on every solve so the downstream
+/// consumers (`sync_mass_props`, `update_water_mesh`) can key on it.
+#[derive(Resource, Default)]
+struct WaterCache {
+    /// (shape, wall_cm, hull_res) the cavity tessellation was built for.
+    cavity_key: Option<(Shape, f32, u32)>,
+    cavity_tris: Vec<[Vec3; 3]>,
+    /// Divergence-theorem volume of the closed cavity mesh — the fill target
+    /// is a fraction of this, so 100% is exactly "the tessellated mesh full".
+    cavity_volume: f32,
+    /// (fill_pct, slosh_deg, quantised rotation) of the last solve.
+    solve_key: Option<(f32, f32, IVec4)>,
+    /// Solved water volume (m³); 0 when dry.
+    volume: f32,
+    /// Local-space centroid of the water region.
+    centroid: Vec3,
+    /// Local-space render triangles: clipped cavity walls + free-surface cap.
+    render_tris: Vec<[Vec3; 3]>,
+    version: u64,
+}
+
+/// Shell-only mass properties (no interior water), stashed by
+/// `sync_mass_props`. With water aboard, the body's `ComputedMass`/
+/// `ComputedCenterOfMass` are combined values — but the overlay draws the
+/// shell's and the water's weights as separate arrows, so it needs the
+/// shell's own share.
+#[derive(Resource, Default)]
+struct ShellProps(MassProperties3d);
+
+/// Marker for the body's interior-water render mesh: a child of `Buoy`
+/// holding local-space geometry from `WaterCache` (rebuilt by
+/// `update_water_mesh`), so between rebuilds it rides the body's transform.
+#[derive(Component)]
+struct InteriorWaterMesh;
 
 /// Cached hull tessellation in LOCAL space for the mesh-based methods, plus
 /// per-triangle data the slamming model needs. Same rebuild policy as `VoxelCache`.
@@ -490,6 +570,7 @@ fn main() {
         .init_resource::<PhysicsTiming>()
         .init_resource::<VoxelCache>()
         .init_resource::<HullCache>()
+        .init_resource::<WaterCache>()
         .init_resource::<OrbitCamera>()
         .init_resource::<ScreenLift>()
         .insert_gizmo_config(
@@ -511,6 +592,8 @@ fn main() {
         )
         // No ordering constraint: it draws the last *fixed* step's recording.
         .add_systems(Update, draw_force_vectors)
+        // Likewise: rebuilds from the last fixed step's water solve.
+        .add_systems(Update, update_water_mesh)
         // Hydro forces MUST run at the fixed physics rate, not render rate:
         // Avian clears `Forces` after every physics step (FixedPostUpdate), so
         // an Update-schedule writer only forces the first step of a render
@@ -576,11 +659,10 @@ fn setup(
     ));
 
     // Floor at the bottom of the water so a dense (sinking) body comes to rest
-    // on it rather than falling out of view. Static collider + a grey slab.
+    // on it rather than falling out of view. Collider only — no mesh, so the
+    // pool bottom is invisible and only the water volume reads.
     let floor_top = WATER_LEVEL - WATER_DEPTH;
     commands.spawn((
-        Mesh3d(meshes.add(Cuboid::new(WATER_SIZE, 1.0, WATER_SIZE))),
-        MeshMaterial3d(materials.add(Color::srgb(0.45, 0.45, 0.45))),
         Transform::from_xyz(0.0, floor_top - 0.5, 0.0),
         RigidBody::Static,
         Collider::cuboid(WATER_SIZE, 1.0, WATER_SIZE),
@@ -619,7 +701,13 @@ fn setup(
     };
     let side_material = shell_material(Color::srgba(0.29, 0.33, 0.13, BODY_ALPHA)); // army green
     let cap_material = shell_material(Color::srgba(0.36, 0.40, 0.18, BODY_ALPHA)); // lighter green
-    let (mass, inertia, com) = shell_mass_props(shape, params.wall(), params.density);
+    let shell = shell_mass_props(shape, params.wall(), params.density);
+    // Seed the overlay's shell-only weight source before the first fixed step
+    // (FixedUpdate runs before Update, so `apply_hydro_forces` reads this
+    // ahead of `sync_mass_props`' first run — unseeded, frame 1's arrow
+    // scale would divide by a zero weight).
+    commands.insert_resource(ShellProps(shell));
+    let (mass, inertia, com) = mass_components(shell);
     commands
         .spawn((
             Buoy,
@@ -654,7 +742,34 @@ fn setup(
                     cap_transform(shape, sign),
                 ));
             }
+            // Interior water: an empty placeholder until the first solve
+            // (`update_water_mesh` swaps in the real geometry + visibility).
+            body.spawn((
+                InteriorWaterMesh,
+                Mesh3d(meshes.add(water_mesh(&[]))),
+                MeshMaterial3d(materials.add(StandardMaterial {
+                    base_color: WATER_COLOR.with_alpha(INTERIOR_WATER_ALPHA),
+                    alpha_mode: AlphaMode::Blend,
+                    perceptual_roughness: 0.1,
+                    double_sided: true,
+                    cull_mode: None,
+                    ..default()
+                })),
+                Visibility::Hidden,
+            ));
         });
+}
+
+/// Non-indexed flat-shaded mesh from a local-space triangle list.
+fn water_mesh(tris: &[[Vec3; 3]]) -> Mesh {
+    let positions: Vec<[f32; 3]> = tris.iter().flatten().map(|v| v.to_array()).collect();
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    )
+    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.compute_flat_normals();
+    mesh
 }
 
 /// End-disc mesh for one cap: side 1 (+Y) or side 2 (-Y).
@@ -724,19 +839,48 @@ fn rebuild_shape(
     }
 }
 
-/// Recompute the shell's explicit mass properties when density, shape, or wall
-/// thickness change (they override Avian's collider-derived solid values).
+/// Recompute the body's explicit mass properties when density, shape, wall
+/// thickness, or the interior water change. The water rides along as a point
+/// mass at its centroid (`MassProperties3d + …` does the mass-weighted COM and
+/// parallel-axis shift), so Avian itself applies its weight and the balance
+/// shift — quasi-static, re-settling instantly with no spread of its own: the
+/// free-surface approximation ship-stability models use. Shell-only values are
+/// stashed in `ShellProps` for the overlay's separate weight arrows.
 fn sync_mass_props(
     params: Res<SimParams>,
-    mut cache: Local<Option<(Shape, f32, f32)>>,
+    water: Res<WaterCache>,
+    mut shell: ResMut<ShellProps>,
+    mut shell_key: Local<Option<(Shape, f32, f32)>>,
+    mut cache: Local<Option<(Shape, f32, f32, u64)>>,
     mut bodies: Query<(&mut Mass, &mut AngularInertia, &mut CenterOfMass), With<Buoy>>,
 ) {
-    let key = (params.shape, params.wall_cm, params.density);
+    let key = (params.shape, params.wall_cm, params.density, water.version);
     if *cache == Some(key) {
         return;
     }
     *cache = Some(key);
-    let (mass, inertia, com) = shell_mass_props(params.shape, params.wall(), params.density);
+    // Two-level: the shell (two collider mass-property builds) depends only
+    // on the slider trio; a water-solve bump alone — every fixed step while
+    // the body tumbles — redoes just the cheap point-mass addition below.
+    let sk = (params.shape, params.wall_cm, params.density);
+    if *shell_key != Some(sk) {
+        *shell_key = Some(sk);
+        shell.0 = shell_mass_props(params.shape, params.wall(), params.density);
+    }
+    // The water folded in here is the latest FixedUpdate solve — up to one
+    // render frame stale relative to the steps that will use it (all of a
+    // frame's catch-up steps run on the previous frame's distribution).
+    // Acceptable for the quasi-static model: the error is one frame of
+    // orientation drift on an instantly-re-settling load.
+    let (mass, inertia, com) = mass_components(
+        shell.0
+            + MassProperties3d {
+                mass: WATER_DENSITY * water.volume,
+                principal_angular_inertia: Vec3::ZERO,
+                local_inertial_frame: Quat::IDENTITY,
+                center_of_mass: water.centroid,
+            },
+    );
     for (mut m, mut i, mut c) in &mut bodies {
         *m = mass;
         *i = inertia;
@@ -834,6 +978,145 @@ fn refresh_hull_cache(params: &SimParams, cache: &mut HullCache) {
     cache.prev_dv.resize(cache.tris.len(), 0.0);
 }
 
+/// Rotation quantisation for the water-solve cache key (~0.06° steps): at
+/// rest the key stops changing, so the solve — and the render-mesh rebuild
+/// downstream of it — go quiet.
+fn quantize_rot(rot: Quat) -> IVec4 {
+    (Vec4::from(rot) * 1024.0).round().as_ivec4()
+}
+
+/// Solve the interior water's distribution: the free-surface plane
+/// (perpendicular to the sloshed "up") at which the clipped cavity volume
+/// equals the fill target, then the water's volume, centroid, and render
+/// triangles. Runs in body-local space rotated into a gravity-aligned frame,
+/// so `hydro`'s horizontal-plane clipper and cap-free volume/centroid apply
+/// unchanged.
+///
+/// The slosh angle tilts only this settling direction — the solved water
+/// still *weighs* straight down (via the body's mass properties). That's the
+/// demonstration: redistributing the same load changes the system's balance.
+fn solve_interior_water(
+    params: &SimParams,
+    rot: Quat,
+    water: &mut WaterCache,
+    // Scratch buffers owned by the caller (reused across steps, like the
+    // buoyancy methods' clip scratch): cavity triangles rotated into the
+    // gravity-aligned frame, and the clip output.
+    aligned: &mut Vec<[Vec3; 3]>,
+    clipped: &mut Vec<[Vec3; 3]>,
+) {
+    let fill = params.fill_pct * 0.01;
+    let cavity = inner_shape(params.shape, params.wall()).filter(|_| fill > 0.0);
+    let Some(cavity) = cavity else {
+        // Dry (or solid): clear once, then stay quiet.
+        if water.volume > 0.0 || !water.render_tris.is_empty() {
+            water.volume = 0.0;
+            water.render_tris.clear();
+            water.solve_key = None;
+            water.version += 1;
+        }
+        return;
+    };
+
+    let cavity_key = (params.shape, params.wall_cm, params.hull_res);
+    if water.cavity_key != Some(cavity_key) {
+        water.cavity_key = Some(cavity_key);
+        water.solve_key = None;
+        water.cavity_tris = hydro::frustum_triangles(
+            cavity.r_top,
+            cavity.r_bottom,
+            cavity.length,
+            params.hull_res as usize,
+            params.hull_rings(),
+        );
+        // For a closed mesh the divergence-theorem sum gives the enclosed
+        // volume whatever the reference level.
+        water.cavity_volume = hydro::submerged_volume_centroid(&water.cavity_tris, 0.0)
+            .map_or(0.0, |(v, _)| v);
+    }
+    let solve_key = (params.fill_pct, params.slosh_deg, quantize_rot(rot));
+    if water.solve_key == Some(solve_key) {
+        return;
+    }
+    water.solve_key = Some(solve_key);
+    water.version += 1;
+    water.volume = 0.0;
+    water.render_tris.clear();
+    if water.cavity_volume <= 0.0 {
+        return;
+    }
+
+    // The direction the water settles against: real up tilted by the slosh
+    // angle, taken into the body's local frame, then a rotation mapping it
+    // onto +Y so the free surface is a constant-level horizontal plane.
+    let up_world = Quat::from_rotation_z(params.slosh_deg.to_radians()) * Vec3::Y;
+    let align = Quat::from_rotation_arc(rot.inverse() * up_world, Vec3::Y);
+    let align_m = Mat3::from_quat(align);
+    aligned.clear();
+    aligned.extend(water.cavity_tris.iter().map(|t| t.map(|v| align_m * v)));
+
+    let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
+    for tri in aligned.iter() {
+        for v in tri {
+            lo = lo.min(v.y);
+            hi = hi.max(v.y);
+        }
+    }
+    // Bisect the free-surface level: clipped volume is monotonic in it.
+    let target = fill.min(1.0) * water.cavity_volume;
+    let (mut a, mut b) = (lo, hi);
+    for _ in 0..24 {
+        let mid = 0.5 * (a + b);
+        clipped.clear();
+        for tri in aligned.iter() {
+            hydro::clip_triangle_below(*tri, mid, clipped);
+        }
+        if hydro::submerged_volume(clipped, mid) < target {
+            a = mid;
+        } else {
+            b = mid;
+        }
+    }
+    let level = 0.5 * (a + b);
+
+    clipped.clear();
+    for tri in aligned.iter() {
+        hydro::clip_triangle_below(*tri, level, clipped);
+    }
+    let Some((volume, centroid)) = hydro::submerged_volume_centroid(clipped, level) else {
+        return;
+    };
+    water.volume = volume;
+    water.centroid = align.inverse() * centroid;
+
+    // Render geometry, back in local space: the clipped walls plus a fan over
+    // the free surface. The clipper leaves the crossing vertices exactly at
+    // `level`; the cavity is convex, so the rim they trace is a convex planar
+    // polygon — angle-sort around its centre and fan out, +Y-facing.
+    let inv = align_m.transpose();
+    water
+        .render_tris
+        .extend(clipped.iter().map(|t| t.map(|v| inv * v)));
+    let mut rim: Vec<Vec3> = clipped
+        .iter()
+        .flatten()
+        .filter(|v| (v.y - level).abs() < 1e-4)
+        .copied()
+        .collect();
+    if rim.len() >= 3 {
+        let c = rim.iter().sum::<Vec3>() / rim.len() as f32;
+        rim.sort_by(|p, q| {
+            (p.z - c.z)
+                .atan2(p.x - c.x)
+                .total_cmp(&(q.z - c.z).atan2(q.x - c.x))
+        });
+        for i in 0..rim.len() {
+            let (p, q) = (rim[i], rim[(i + 1) % rim.len()]);
+            water.render_tris.push([c, q, p].map(|v| inv * v));
+        }
+    }
+}
+
 /// The active buoyancy method + enabled add-ons, applied through Avian's
 /// `Forces` helper (gravity comes from Avian itself via the body's mass).
 /// All distributed forces go through `apply_force_at_point`, which also
@@ -845,20 +1128,15 @@ fn apply_hydro_forces(
     params: Res<SimParams>,
     mut voxels: ResMut<VoxelCache>,
     mut hull: ResMut<HullCache>,
-    // Reused frame-to-frame so clipping never allocates in steady state.
+    mut water: ResMut<WaterCache>,
+    shell: Res<ShellProps>,
+    // Reused frame-to-frame so clipping and the water solve never allocate
+    // in steady state.
     mut clipped: Local<Vec<[Vec3; 3]>>,
+    mut aligned: Local<Vec<[Vec3; 3]>>,
     mut timing: ResMut<PhysicsTiming>,
     mut vis: ResMut<ForceVectors>,
-    mut bodies: Query<
-        (
-            &Position,
-            &Rotation,
-            &ComputedMass,
-            &ComputedCenterOfMass,
-            Forces,
-        ),
-        With<Buoy>,
-    >,
+    mut bodies: Query<(&Position, &Rotation, &ComputedMass, Forces), With<Buoy>>,
 ) {
     let started = Instant::now();
     let dt = time.delta_secs().max(1e-4);
@@ -871,9 +1149,10 @@ fn apply_hydro_forces(
     if record {
         vis.arrows.clear();
         vis.gravity = None;
+        vis.water_weight = None;
     }
 
-    for (pos, rot, mass, com, mut forces) in &mut bodies {
+    for (pos, rot, mass, mut forces) in &mut bodies {
         // Thousands of points get transformed per frame: pre-expand the
         // quaternion to a matrix, and keep its world-Y row separate so dry
         // elements can be rejected on a one-component transform.
@@ -881,9 +1160,19 @@ fn apply_hydro_forces(
         let row_y = Vec3::new(rot_m.x_axis.y, rot_m.y_axis.y, rot_m.z_axis.y);
         let world_y = |local: Vec3| pos.0.y + row_y.dot(local);
 
+        // Interior water: re-solve its distribution for this orientation and
+        // record its weight arrow. The solved volume/centroid feed the body's
+        // mass properties (`sync_mass_props`), so Avian applies the weight —
+        // like `gravity`, the arrow is display-only.
+        solve_interior_water(&params, rot.0, &mut water, &mut aligned, &mut clipped);
         if record {
-            let world_com = pos.0 + rot_m * com.0;
-            vis.gravity = Some((world_com, Vec3::NEG_Y * (mass.value() * GRAVITY)));
+            let world_com = pos.0 + rot_m * shell.0.center_of_mass;
+            vis.gravity = Some((world_com, Vec3::NEG_Y * (shell.0.mass * GRAVITY)));
+            if water.volume > 0.0 {
+                let point = pos.0 + rot_m * water.centroid;
+                let weight = Vec3::NEG_Y * (WATER_DENSITY * water.volume * GRAVITY);
+                vis.water_weight = Some((point, weight));
+            }
         }
 
         match params.method {
@@ -1090,8 +1379,11 @@ fn draw_force_vectors(vis: Res<ForceVectors>, mut gizmos: Gizmos) {
         return;
     };
     let net: Vec3 = vis.arrows.iter().map(|(_, f)| *f).sum();
+    // Total weight = shell + interior water (both straight down): at rest the
+    // orange arrows sum to the two violet ones combined.
+    let total_weight = weight + vis.water_weight.map_or(Vec3::ZERO, |(_, f)| f);
     // weight is m·g with m > 0, so the scale is always finite.
-    let scale = MAX_ARROW_LEN / weight.length().max(net.length());
+    let scale = MAX_ARROW_LEN / total_weight.length().max(net.length());
     for (point, force) in &vis.arrows {
         let tip = *point + *force * scale;
         // Skip sub-millimetre arrows: a degenerate gizmo arrow still draws
@@ -1103,6 +1395,34 @@ fn draw_force_vectors(vis: Res<ForceVectors>, mut gizmos: Gizmos) {
         }
     }
     gizmos.arrow(com, com + weight * scale, GRAVITY_COLOR);
+    if let Some((point, w)) = vis.water_weight {
+        gizmos.arrow(point, point + w * scale, GRAVITY_COLOR);
+    }
+}
+
+/// Swap the interior-water child's mesh when the solve produced new geometry
+/// (keyed on `WaterCache::version` — quiet while the body rests).
+fn update_water_mesh(
+    water: Res<WaterCache>,
+    mut last: Local<Option<u64>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut parts: Query<(&Mesh3d, &mut Visibility), With<InteriorWaterMesh>>,
+) {
+    if *last == Some(water.version) {
+        return;
+    }
+    *last = Some(water.version);
+    for (mesh, mut visibility) in &mut parts {
+        *visibility = if water.render_tris.is_empty() {
+            Visibility::Hidden
+        } else {
+            Visibility::Inherited
+        };
+        // Replace the asset in place: same handle, and the Modified event
+        // makes the renderer re-extract — no per-solve handle churn. (The
+        // returned value is the displaced old mesh, dropped here.)
+        let _ = meshes.insert(mesh.0.id(), water_mesh(&water.render_tris));
+    }
 }
 
 /// Camera gestures: drag (mouse left / one finger) orbits yaw+pitch around the
@@ -1215,12 +1535,29 @@ const SLIDER_VALUE_WIDTH: f32 = 80.0;
 /// A slider row: label on the left (fixed-width column so the sliders line up),
 /// slider stretched over the rest of the row's width.
 fn labeled_slider(ui: &mut egui::Ui, label: &str, slider: egui::Slider) {
+    labeled_slider_with(ui, label, slider, 0.0, |_| {});
+}
+
+/// [`labeled_slider`] with extra widgets after the value box: the slider
+/// shrinks by `trailing_width` and `trailing` renders in the gap. Returns the
+/// closure's value so the caller can react to it (the slider borrows the
+/// slid value, so `trailing` can't touch it directly).
+fn labeled_slider_with<R>(
+    ui: &mut egui::Ui,
+    label: &str,
+    slider: egui::Slider,
+    trailing_width: f32,
+    trailing: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
     ui.horizontal(|ui| {
         let r = ui.label(label);
         ui.add_space((SLIDER_LABEL_WIDTH - r.rect.width()).max(0.0));
-        ui.spacing_mut().slider_width = (ui.available_width() - SLIDER_VALUE_WIDTH).max(60.0);
+        ui.spacing_mut().slider_width =
+            (ui.available_width() - SLIDER_VALUE_WIDTH - trailing_width).max(60.0);
         ui.add(slider);
-    });
+        trailing(ui)
+    })
+    .inner
 }
 
 /// Minimal font set replacing egui's 1.4 MB `default_fonts` (disabled in
@@ -1381,6 +1718,26 @@ fn ui(
                             .logarithmic(true)
                             .suffix(" cm"),
                     );
+                    // Interior water fills the cavity, so both knobs grey out
+                    // when the walls meet and the body is solid.
+                    let has_cavity = inner_shape(params.shape, params.wall()).is_some();
+                    ui.add_enabled_ui(has_cavity, |ui| {
+                        labeled_slider(
+                            ui,
+                            "fill",
+                            egui::Slider::new(&mut params.fill_pct, FILL_PCT_RANGE).suffix(" %"),
+                        );
+                        let reset_slosh = labeled_slider_with(
+                            ui,
+                            "slosh",
+                            egui::Slider::new(&mut params.slosh_deg, SLOSH_RANGE).suffix("°"),
+                            30.0,
+                            |ui| ui.button("⟲").clicked(),
+                        );
+                        if reset_slosh {
+                            params.slosh_deg = 0.0;
+                        }
+                    });
                 });
 
             ui.separator();
@@ -1394,7 +1751,12 @@ fn ui(
                     // (`noninteractive.bg_stroke` is the theme's visible separator gray;
                     // the `inactive` widget stroke is transparent by default.)
                     let outline =
-                        egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color);
+                        // `_f32`: bare-literal f32 fallback is being phased out
+                        // (nightly's `float_literal_f32_fallback` lint).
+                        egui::Stroke::new(
+                            1.0_f32,
+                            ui.visuals().widgets.noninteractive.bg_stroke.color,
+                        );
                     for (value, text) in [
                         (Method::VoxelGrid, "voxel grid"),
                         (Method::SurfacePressure, "surface press."),
