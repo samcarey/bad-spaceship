@@ -1,5 +1,5 @@
 [workspace]
-members = ["client", "server", "shared", "matchmaker"]
+members = ["client", "server", "shared", "matchmaker", "buoyancy"]
 resolver = "2"
 
 # ─────────────────────────────────────────────────────────────────────────────

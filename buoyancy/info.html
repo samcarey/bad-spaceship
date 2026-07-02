@@ -1,0 +1,252 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Buoyancy Simulator — How the Forces Are Calculated</title>
+  <!-- The "how it works" page the sim's top-left ⓘ link opens. Hand-rendered
+       markdown-style HTML; equations are LaTeX rendered client-side by KaTeX. -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" />
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"
+    onload="renderMathInElement(document.body, {delimiters: [
+      {left: '$$', right: '$$', display: true},
+      {left: '\\(', right: '\\)', display: false}
+    ]});"></script>
+  <style>
+    :root {
+      --ink: #2a2f24;
+      --accent: #4b5320; /* army green, matching the sim */
+      --rule: #d8d8c8;
+    }
+    html { background: #fcfcf2; }
+    body {
+      max-width: 46rem;
+      margin: 0 auto;
+      padding: 2rem 1.2rem 4rem;
+      color: var(--ink);
+      font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    }
+    h1, h2, h3 { color: var(--accent); line-height: 1.25; }
+    h1 { font-size: 1.7rem; border-bottom: 2px solid var(--rule); padding-bottom: 0.4rem; }
+    h2 { font-size: 1.3rem; margin-top: 2.2rem; border-bottom: 1px solid var(--rule); padding-bottom: 0.25rem; }
+    h3 { font-size: 1.05rem; margin-top: 1.6rem; }
+    code {
+      background: rgba(75, 83, 32, 0.08);
+      padding: 0.1em 0.35em;
+      border-radius: 4px;
+      font-size: 0.9em;
+    }
+    table { border-collapse: collapse; margin: 1rem 0; width: 100%; }
+    th, td { border: 1px solid var(--rule); padding: 0.4rem 0.6rem; text-align: left; vertical-align: top; }
+    th { background: rgba(75, 83, 32, 0.07); }
+    .katex-display { overflow-x: auto; overflow-y: hidden; padding: 0.2rem 0; }
+    a { color: #3b6ea5; }
+    .top-links { margin-bottom: 1.5rem; font-size: 0.95rem; }
+    blockquote {
+      margin: 1rem 0; padding: 0.5rem 1rem;
+      border-left: 3px solid var(--accent);
+      background: rgba(75, 83, 32, 0.05);
+    }
+  </style>
+</head>
+
+<body>
+  <p class="top-links"><a href="../buoyancy.html">← back to the simulator</a></p>
+
+  <h1>How the Forces Are Calculated</h1>
+
+  <p>
+    The simulator drops a solid <strong>conical frustum</strong> (a cylinder whose two end
+    radii can differ) into still water with its surface at \(y = 0\). A rigid-body physics
+    engine (Avian) integrates the motion; every frame the simulation computes and applies
+    the water's forces. Everything below uses water density
+    \(\rho_w = 1000\ \mathrm{kg/m^3}\), gravity \(g = 9.81\ \mathrm{m/s^2}\), and the
+    body's pose (position, rotation) and velocities from the physics state.
+  </p>
+
+  <h2>Mass, gravity, and inertia</h2>
+
+  <p>
+    The <em>body density</em> slider \(\rho_b\) sets the (uniform) density of the solid.
+    The frustum's volume, with end radii \(r_1\) (side&nbsp;1), \(r_2\) (side&nbsp;2) and
+    length \(L\), is
+  </p>
+  $$ V = \frac{\pi L}{3}\left(r_1^2 + r_1 r_2 + r_2^2\right), \qquad m = \rho_b V. $$
+  <p>
+    The engine derives the mass \(m\), the centre of mass, <em>and</em> the angular inertia
+    tensor from the collision shape at that density, so translation and rotation stay
+    physically consistent as the sliders move. Gravity is then the engine's own
+    \(\mathbf{F}_g = -m g\,\hat{y}\), acting at the centre of mass. Nothing else is applied
+    while the body is fully in the air.
+  </p>
+
+  <h2>Buoyancy — the common principle</h2>
+
+  <p>
+    All three methods are estimates of the same integral: hydrostatic pressure over the
+    wetted surface. With gauge pressure \(p(y) = -\rho_w\, g\, y\) (zero at the surface),
+    the divergence theorem gives Archimedes' principle,
+  </p>
+  $$ \mathbf{F}_B \;=\; -\oint_{S_{\text{sub}}} p\,\hat{n}\, dA \;=\; \rho_w\, g\, V_{\text{sub}}\,\hat{y}, $$
+  <p>
+    acting at the <strong>centre of buoyancy</strong> \(\mathbf{c}_B\) (the centroid of the
+    displaced volume). Because gravity acts at the centre of <em>mass</em> and buoyancy at
+    \(\mathbf{c}_B\), any misalignment produces a torque
+    \(\boldsymbol{\tau} = (\mathbf{c}_B - \mathbf{c}_M) \times \mathbf{F}_B\) — this is
+    what rights (or capsizes) the floating body; no explicit torque model is needed. The
+    three methods differ in <em>how they discretise</em> the submerged region.
+  </p>
+
+  <h2>Method 1 — voxel grid</h2>
+
+  <p>
+    The body is sampled once (in its own local frame) on a regular 3D grid. The
+    <em>grid density</em> slider \(n\) sets the number of cells along the body's longest
+    dimension, so the cell edge is \(h = \max(2 r_{\max}, L)/n\). Cells whose centre lies
+    inside the frustum are kept. Each frame, every kept cell centre is transformed to world
+    space; a cell contributes an upward force at its own centre \(\mathbf{x}_i\):
+  </p>
+  $$ \mathbf{F}_i = \rho_w\, g\, k_i\, h^3\, \hat{y}, \qquad
+     k_i = \operatorname{clamp}\!\left(\frac{-y_i}{h} + \tfrac{1}{2},\; 0,\; 1\right), $$
+  <p>
+    where \(k_i\) is the cell's <em>fractional submersion</em>: 1 fully underwater, 0 fully
+    dry, and a linear ramp while the cell straddles the waterline (this is the standard fix
+    for force "popping" as cells cross the surface). Because each force is applied at the
+    cell's own position, the distribution of submerged cells automatically produces the
+    correct net torque about the centre of mass.
+  </p>
+  <p>
+    <strong>Viscous drag (add-on)</strong>, per cell, resists the velocity of the body
+    <em>at that cell</em> \(\mathbf{v}_i = \mathbf{v} + \boldsymbol{\omega} \times
+    (\mathbf{x}_i - \mathbf{c}_M)\):
+  </p>
+  $$ \mathbf{F}_{d,i} = -3\, C_d\, \rho_w\, k_i h^3\, \mathbf{v}_i, $$
+  <p>
+    with \(C_d\) the drag-coefficient slider. Since offset drag forces also produce torque,
+    rotation is damped for free.
+  </p>
+
+  <h2>Method 2 — surface pressure integration</h2>
+
+  <p>
+    The hull surface is tessellated into triangles — the <em>hull resolution</em> slider
+    sets the radial segment count (rings along the wall scale with it). Each frame every
+    triangle is transformed to world space and <strong>clipped against the water
+    plane</strong>, keeping only the submerged part. For each submerged (sub-)triangle with
+    area \(A\), outward unit normal \(\hat{n}\), and centroid at depth \(d\), the
+    hydrostatic pressure force is
+  </p>
+  $$ \mathbf{F} = -\rho_w\, g\, d\, A\, n_y\, \hat{y}, $$
+  <p>
+    applied at the centroid. Two deliberate details: no "cap" polygon is needed at the
+    waterline because gauge pressure is zero there, and only the <em>vertical</em> component
+    is kept — the horizontal components cancel exactly over a closed surface, and dropping
+    them removes numerical drift (the resulting torque matches the exact
+    centre-of-buoyancy torque to a fraction of a percent).
+  </p>
+
+  <h3>Viscous drag (add-on)</h3>
+  <p>
+    Skin friction on the tangential flow, using the ITTC-1957 friction line. Once per frame
+    the Reynolds number and friction coefficient are computed from the body speed \(v\) and
+    length \(L\) (water's kinematic viscosity \(\nu = 10^{-6}\ \mathrm{m^2/s}\)):
+  </p>
+  $$ \mathrm{Rn} = \frac{v L}{\nu}, \qquad
+     C_F = \frac{0.075}{(\log_{10} \mathrm{Rn} - 2)^2}, $$
+  <p>
+    then per submerged triangle, with \(\mathbf{v}_t\) the component of the local point
+    velocity tangent to the face:
+  </p>
+  $$ \mathbf{F}_{\text{visc}} = -\tfrac{1}{2}\, \rho_w\, C_F\, A\, |\mathbf{v}_t|\, \mathbf{v}_t \cdot C_d. $$
+
+  <h3>Pressure drag (add-on)</h3>
+  <p>
+    Quadratic drag on the flow <em>normal</em> to each face — the force that realistically
+    damps bobbing and gives a moving hull "grip". With \(v_n = \mathbf{v}_p \cdot \hat{n}\)
+    the normal speed of the face and \(C_{pd}\) the slider:
+  </p>
+  $$ \mathbf{F}_{\text{pd}} = -\tfrac{1}{2}\, \rho_w\, A\, v_n\, |v_n|\, \hat{n} \cdot C_{pd}. $$
+  <p>
+    The sign is symmetric: a face pushing into the water is resisted, a retreating face is
+    sucked back — both fall out of the \(v_n |v_n|\) form.
+  </p>
+
+  <h3>Slamming (add-on)</h3>
+  <p>
+    A water-entry impact force (after Kerner's boat model). For each <em>original</em> hull
+    triangle, the swept-volume rate is tracked between frames,
+    \(\dot{V} = A_{\text{sub}}\, |\mathbf{v}_p|\), and its rate of change — the
+    "violence" of the entry — is
+  </p>
+  $$ \Gamma = \frac{|\dot{V}(t) - \dot{V}(t - \Delta t)|}{A\, \Delta t}. $$
+  <p>
+    Triangles moving into the water (\(\cos\theta = \hat{v}_p \cdot \hat{n} > 0\)) receive a
+    stopping force scaled by how violent the entry is, saturating at the
+    \(\Gamma_{\max}\) slider:
+  </p>
+  $$ \mathbf{F}_{\text{slam}} = -\left(\operatorname{clamp}\!\frac{\Gamma}{\Gamma_{\max}}\right)^{\!2} \cos\theta\;
+     m\,|\mathbf{v}_p|\, \frac{2A}{S_{\text{total}}}\; \hat{v}_p, $$
+  <p>
+    where \(S_{\text{total}}\) is the whole hull's area. The \(m |\mathbf{v}_p|\, 2A /
+    S_{\text{total}}\) cap means the add-on can <em>stop</em> the body but never launch it.
+  </p>
+
+  <h2>Method 3 — clipped volume (exact)</h2>
+
+  <p>
+    The same clipped triangle list, but instead of per-face forces, the exact submerged
+    volume and centre of buoyancy are computed with the divergence theorem. For each
+    submerged triangle (centroid \(\bar{\mathbf{x}}\), normal \(\hat{n}\), area \(A\)):
+  </p>
+  $$ V_{\text{sub}} = \sum \bar{y}\, n_y\, A, \qquad
+     \mathbf{c}_B = \frac{1}{V_{\text{sub}}} \sum \frac{\overline{x^2}}{2}\, n_x A \;\hat{x} + \cdots $$
+  <p>
+    (the second moments use the exact mean of \(x^2\) over a triangle,
+    \(\overline{x^2} = \tfrac{1}{6}(x_1^2 + x_2^2 + x_3^2 + x_1 x_2 + x_1 x_3 + x_2 x_3)\),
+    and likewise for \(y\), \(z\)). The waterline cap again contributes nothing because
+    \(y = 0\) there. A single force
+    \(\mathbf{F}_B = \rho_w g V_{\text{sub}}\,\hat{y}\) is applied at \(\mathbf{c}_B\) —
+    for hydrostatics this reproduces the distributed pressure force <em>and torque</em>
+    exactly, with zero sampling noise. It is the reference the other two methods converge
+    toward as their sliders increase.
+  </p>
+  <p>
+    <strong>Viscous drag (add-on)</strong> has no per-face sites here, so it acts at
+    \(\mathbf{c}_B\) as a quadratic + linear pair with a separate rotational damping term
+    (the Jolt Physics pattern):
+  </p>
+  $$ \mathbf{F}_d = -\left(\tfrac{1}{2}\rho_w \cdot 0.5 \cdot V_{\text{sub}}^{2/3} |\mathbf{v}|
+     \;+\; 1.5\,\rho_w V_{\text{sub}}\right) \mathbf{v}\, C_d, \qquad
+     \boldsymbol{\tau}_d = -0.02\, \rho_w V_{\text{sub}} L^2\, C_d\, \boldsymbol{\omega}, $$
+  <p>
+    where \(V_{\text{sub}}^{2/3}\) stands in for the projected area of the wetted region.
+  </p>
+
+  <h2>What each parameter does</h2>
+
+  <table>
+    <tr><th>Control</th><th>Symbol</th><th>Effect</th></tr>
+    <tr><td>body density</td><td>\(\rho_b\)</td><td>Mass and inertia via \(m = \rho_b V\). Floats when \(\rho_b &lt; \rho_w\); the equilibrium submerged fraction is \(\rho_b / \rho_w\).</td></tr>
+    <tr><td>start angle</td><td>—</td><td>Initial tilt of the body's axis off vertical when dropped (applied on Reset).</td></tr>
+    <tr><td>radius side 1 / 2</td><td>\(r_1, r_2\)</td><td>End radii of the frustum (equal = cylinder). Changes volume, mass, inertia, and where the centre of mass sits along the axis.</td></tr>
+    <tr><td>length</td><td>\(L\)</td><td>Body length. Longer bodies are easier to tip but damp rotation harder.</td></tr>
+    <tr><td>grid density</td><td>\(n\)</td><td>Voxel method: cells per longest axis. Higher = smoother waterline response and less volume error, at more per-frame work.</td></tr>
+    <tr><td>hull resolution</td><td>—</td><td>Mesh methods: radial tessellation segments. Higher = finer clipping at the waterline, better torque accuracy.</td></tr>
+    <tr><td>viscous drag</td><td>\(C_d\)</td><td>Scales the method-appropriate drag model above. 0 = ideal fluid (the body bobs forever).</td></tr>
+    <tr><td>pressure drag</td><td>\(C_{pd}\)</td><td>Scales the quadratic normal-flow drag (surface-pressure method).</td></tr>
+    <tr><td>slamming, Γ max</td><td>\(\Gamma_{\max}\)</td><td>Entry violence at which the slamming force saturates; lower = harsher impacts.</td></tr>
+  </table>
+
+  <blockquote>
+    The math above is exactly what the code does — see the
+    <a href="https://github.com/samcarey/bad-spaceship/tree/master/buoyancy">source</a>
+    (the in-sim <code>&lt;/&gt; source</code> link pins the exact build commit). Further
+    reading: J.&nbsp;Kerner, <em>Water interaction model for boats in video games</em>
+    (Game Developer, 2015–16); the Jolt Physics buoyancy implementation; D.&nbsp;Eberly,
+    <em>Polyhedral Mass Properties</em>.
+  </blockquote>
+</body>
+
+</html>
