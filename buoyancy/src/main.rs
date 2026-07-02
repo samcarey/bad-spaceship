@@ -2,7 +2,7 @@
 //!
 //! A translucent-blue body of water sits in the middle of the screen; a conical
 //! frustum (a cylinder with independently adjustable end radii) spawns in the air
-//! and drops in. Each frame the buoyant force plus gravity, drag, and other
+//! and drops in. Each physics step the buoyant force plus gravity, drag, and other
 //! optional hydrodynamic effects are applied through Avian's `Forces` helper, so
 //! it bobs, tips, rights itself, and settles in real time.
 //!
@@ -33,14 +33,16 @@
 mod hydro;
 
 use avian3d::prelude::*;
-use bevy::asset::RenderAssetUsages;
+use bevy::asset::{load_internal_asset, uuid_handle, RenderAssetUsages};
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::input::mouse::{MouseMotion, MouseScrollUnit, MouseWheel};
 use bevy::light::GlobalAmbientLight;
 use bevy::mesh::Indices;
+use bevy::pbr::{ExtendedMaterial, MaterialExtension};
 use bevy::platform::time::Instant;
 use bevy::prelude::*;
-use bevy::render::render_resource::PrimitiveTopology;
+use bevy::render::render_resource::{AsBindGroup, PrimitiveTopology};
+use bevy::shader::ShaderRef;
 use bevy_egui::{egui, input::EguiWantsInput, EguiContexts, EguiPlugin, EguiPrimaryContextPass};
 
 // ── Scene / physics constants ────────────────────────────────────────────────
@@ -78,11 +80,16 @@ const LENGTH_RANGE: std::ops::RangeInclusive<f32> = 0.5..=6.4;
 const DEFAULT_WALL_CM: f32 = 1.0;
 const WALL_CM_RANGE: std::ops::RangeInclusive<f32> = 0.1..=25.0;
 
+/// Base opacity the water/body pair is tuned around.
+const BASE_ALPHA: f32 = 0.13125;
 /// Opacity of the water volume.
-const WATER_ALPHA: f32 = 0.13125;
-/// Opacity of the body's shell — double the water's, so the hollow interior
+const WATER_ALPHA: f32 = BASE_ALPHA * 1.7;
+/// Opacity of the body's shell — kept above the water's so the hollow interior
 /// (and the force vectors inside it) read through the walls.
-const BODY_ALPHA: f32 = WATER_ALPHA * 2.0;
+const BODY_ALPHA: f32 = BASE_ALPHA * 2.0;
+/// Colour of the water volume (sRGB). Also fed (linearised) to the shell's
+/// below-waterline tint shader via [`SubmergedTint`].
+const WATER_COLOR: Color = Color::srgb(0.1, 0.45, 0.85);
 
 // ── Shape (conical frustum) ──────────────────────────────────────────────────
 // The body's local axis is +Y: "side 1" is the top face (at +length/2), "side 2"
@@ -136,7 +143,9 @@ fn inner_shape(shape: Shape, wall: f32) -> Option<Shape> {
 fn shell_mass_props(shape: Shape, wall: f32, density: f32) -> (Mass, AngularInertia, CenterOfMass) {
     let outer = *ColliderMassProperties::from_shape(&frustum_collider(shape), density);
     let props = match inner_shape(shape, wall) {
-        Some(cavity) => outer - *ColliderMassProperties::from_shape(&frustum_collider(cavity), density),
+        Some(cavity) => {
+            outer - *ColliderMassProperties::from_shape(&frustum_collider(cavity), density)
+        }
         None => outer,
     };
     (
@@ -288,7 +297,8 @@ impl Default for SimParams {
 #[derive(Resource, Default)]
 struct ResetRequested(bool);
 
-/// The force-vector overlay: every hydro force applied this frame, as
+/// The force-vector overlay: every hydro force applied in the latest recorded
+/// physics step, as
 /// (application point, force) pairs in world space. Collected by
 /// `apply_hydro_forces` when `on`, drawn as gizmo arrows by
 /// `draw_force_vectors` — so what you see is exactly what was applied,
@@ -298,6 +308,14 @@ struct ResetRequested(bool);
 struct ForceVectors {
     on: bool,
     arrows: Vec<(Vec3, Vec3)>,
+    /// The weight vector (world centre of mass, m·g downward). Avian applies
+    /// gravity itself, so this is recorded for display only.
+    gravity: Option<(Vec3, Vec3)>,
+    /// Cached aggregates of `arrows`, computed once at record time (64 Hz)
+    /// rather than re-derived per render frame: the vector sum of the hydro
+    /// forces, and the largest single force's magnitude.
+    net: Vec3,
+    max_force: f32,
 }
 
 impl Default for ForceVectors {
@@ -305,6 +323,9 @@ impl Default for ForceVectors {
         Self {
             on: true,
             arrows: Vec::new(),
+            gravity: None,
+            net: Vec3::ZERO,
+            max_force: 0.0,
         }
     }
 }
@@ -314,19 +335,32 @@ impl Default for ForceVectors {
 /// forces and the clipped-volume method's one total-buoyancy vector differ
 /// by orders of magnitude.
 const MAX_ARROW_LEN: f32 = 1.5;
+/// Buoyancy / hydro forces (per element, whatever the method).
 const ARROW_COLOR: Color = Color::srgb(1.0, 0.45, 0.1);
+/// The single gravity (weight) arrow — violet so it can't be read as one of
+/// the orange hydro arrows.
+const GRAVITY_COLOR: Color = Color::srgb(0.55, 0.2, 0.95);
 
-/// Cost of the per-frame hydro-force computation, averaged over ~1 s windows
-/// for the overlay readout. Written by `apply_hydro_forces`, read by `ui`.
+/// Separate gizmo group for the gravity arrow so it draws with a wider line
+/// than the hydro arrows: for an upright symmetric body the weight (down from
+/// the centre of mass) and buoyancy (up from the centre of buoyancy) vectors
+/// are collinear, and at equal width whichever wins the depth tie hides the
+/// other — the extra width keeps a violet fringe visible around the orange.
+#[derive(Default, Reflect, GizmoConfigGroup)]
+struct GravityGizmos;
+
+/// Cost of the per-physics-step hydro-force computation, averaged over ~1 s
+/// windows for the overlay readout. Written by `apply_hydro_forces`, read by
+/// `ui`.
 #[derive(Resource, Default)]
 struct PhysicsTiming {
     /// Seconds of compute accumulated in the current window.
     accum: f32,
-    frames: u32,
-    /// Wall-clock seconds elapsed in the current window.
+    steps: u32,
+    /// Fixed-schedule seconds elapsed in the current window.
     window: f32,
-    /// Last completed window's per-frame average (ms) — the displayed value.
-    avg_ms: f32,
+    /// Last completed window's per-step average (µs) — the displayed value.
+    avg_us: f32,
 }
 
 /// Cached voxelisation of the body in LOCAL space: occupied cell centres + the
@@ -380,8 +414,7 @@ impl Default for OrbitCamera {
 }
 
 const ORBIT_SENS: f32 = 0.005; // rad per drag pixel
-const PITCH_RANGE: std::ops::RangeInclusive<f32> =
-    -std::f32::consts::FRAC_PI_4..=1.5; // -45°..~86°
+const PITCH_RANGE: std::ops::RangeInclusive<f32> = -std::f32::consts::FRAC_PI_4..=1.5; // -45°..~86°
 const ZOOM_RANGE: std::ops::RangeInclusive<f32> = 6.0..=72.0;
 /// Starting camera distance (the pre-widened zoom-out limit, not the new max).
 const DEFAULT_ZOOM: f32 = 60.0;
@@ -394,18 +427,53 @@ const DEFAULT_ZOOM: f32 = 60.0;
 #[derive(Resource, Default)]
 struct ScreenLift(f32);
 
+/// Shell material: `StandardMaterial` + the below-waterline tint pass
+/// (`submerged.wgsl`). Alpha-blended meshes are sorted whole-mesh, back to
+/// front — the GPU never composites the water volume over just the submerged
+/// part of an intersecting hull, so without this the shell reads identically
+/// above and below the surface. The extension tints per-pixel instead.
+#[derive(Asset, TypePath, AsBindGroup, Clone)]
+struct SubmergedTint {
+    /// rgb = the water's colour in LINEAR space (the fragment shader works
+    /// post-sRGB-decode), w = the waterline height (world y). Built from
+    /// `WATER_COLOR`/`WATER_LEVEL` so retuning those can't desync the tint.
+    #[uniform(100)]
+    water: Vec4,
+}
+
+impl MaterialExtension for SubmergedTint {
+    fn fragment_shader() -> ShaderRef {
+        SUBMERGED_SHADER_HANDLE.into()
+    }
+}
+
+type ShellMaterial = ExtendedMaterial<StandardMaterial, SubmergedTint>;
+
+const SUBMERGED_SHADER_HANDLE: Handle<Shader> =
+    uuid_handle!("6d1f4c2a-8b0e-4b0f-9a3d-52c8e07e2f11");
+
 #[bevy_main]
 fn main() {
     App::new()
-        .add_plugins(
-            DefaultPlugins.set(WindowPlugin {
-                primary_window: Some(Window {
-                    title: "Buoyancy Simulator".to_string(),
-                    ..default()
-                }),
+        .add_plugins(DefaultPlugins.set(WindowPlugin {
+            primary_window: Some(Window {
+                title: "Buoyancy Simulator".to_string(),
                 ..default()
             }),
-        )
+            ..default()
+        }))
+        // Function plugin registering the embedded below-waterline shader.
+        // Must sit after DefaultPlugins: it needs `Assets<Shader>` (from
+        // AssetPlugin) — earlier, the app dies at startup.
+        .add_plugins(|app: &mut App| {
+            load_internal_asset!(
+                app,
+                SUBMERGED_SHADER_HANDLE,
+                "submerged.wgsl",
+                Shader::from_wgsl
+            );
+        })
+        .add_plugins(MaterialPlugin::<ShellMaterial>::default())
         .add_plugins(PhysicsPlugins::default())
         .add_plugins(EguiPlugin::default())
         .insert_resource(ClearColor(Color::srgb(0.99, 0.99, 0.95)))
@@ -422,20 +490,32 @@ fn main() {
         .init_resource::<HullCache>()
         .init_resource::<OrbitCamera>()
         .init_resource::<ScreenLift>()
+        .insert_gizmo_config(
+            GravityGizmos,
+            GizmoConfig {
+                line: GizmoLineConfig {
+                    width: 6.0,
+                    ..default()
+                },
+                ..default()
+            },
+        )
         .add_systems(Startup, setup)
-        // Shape rebuild → reset (repositions) → mass props → buoyancy (writes Forces).
-        // Chained so the frame's writes to mesh/collider/velocity/mass are deterministic.
+        // Shape rebuild → reset (repositions) → mass props. Chained so the
+        // frame's writes to mesh/collider/velocity/mass are deterministic.
         .add_systems(
             Update,
-            (
-                rebuild_shape,
-                handle_reset,
-                sync_mass_props,
-                apply_hydro_forces,
-                draw_force_vectors,
-            )
-                .chain(),
+            (rebuild_shape, handle_reset, sync_mass_props).chain(),
         )
+        // No ordering constraint: it draws the last *fixed* step's recording.
+        .add_systems(Update, draw_force_vectors)
+        // Hydro forces MUST run at the fixed physics rate, not render rate:
+        // Avian clears `Forces` after every physics step (FixedPostUpdate), so
+        // an Update-schedule writer only forces the first step of a render
+        // frame — below 60 fps the catch-up steps run buoyancy-free and the
+        // body settles too deep (measured: at ~10 fps equilibrium sat where
+        // buoyancy = 6× weight, one forced step in 6).
+        .add_systems(FixedUpdate, apply_hydro_forces)
         .add_systems(Update, (orbit_input, update_camera).chain())
         // Fonts must land before the first `ui` frame — with `default_fonts`
         // off, egui panics on any text until definitions are installed.
@@ -450,6 +530,7 @@ fn setup(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut shell_materials: ResMut<Assets<ShellMaterial>>,
     params: Res<SimParams>,
 ) {
     // Camera: looks down at the centre of the water from an angle so the surface
@@ -470,7 +551,9 @@ fn setup(
     commands.spawn((
         DirectionalLight {
             illuminance: 9000.0,
-            shadow_maps_enabled: true,
+            // No shadow maps (they default off): the shadow blob under the
+            // body added nothing, and it darkened the whole water surface —
+            // much of what read as "deep water" was actually shadow.
             ..default()
         },
         Transform::from_xyz(6.0, 12.0, 4.0).looking_at(Vec3::ZERO, Vec3::Y),
@@ -482,7 +565,7 @@ fn setup(
     commands.spawn((
         Mesh3d(meshes.add(Cuboid::new(WATER_SIZE, WATER_DEPTH, WATER_SIZE))),
         MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgba(0.1, 0.45, 0.85, WATER_ALPHA),
+            base_color: WATER_COLOR.with_alpha(WATER_ALPHA),
             alpha_mode: AlphaMode::Blend,
             perceptual_roughness: 0.1,
             ..default()
@@ -510,14 +593,26 @@ fn setup(
     // materials render back faces (`cull_mode: None`) so the shell is visible
     // through itself.
     let shape = params.shape;
+    let water_linear = WATER_COLOR.to_linear();
+    let tint = SubmergedTint {
+        water: Vec4::new(
+            water_linear.red,
+            water_linear.green,
+            water_linear.blue,
+            WATER_LEVEL,
+        ),
+    };
     let mut shell_material = |color| {
-        materials.add(StandardMaterial {
-            base_color: color,
-            alpha_mode: AlphaMode::Blend,
-            perceptual_roughness: 0.6,
-            double_sided: true,
-            cull_mode: None,
-            ..default()
+        shell_materials.add(ExtendedMaterial {
+            base: StandardMaterial {
+                base_color: color,
+                alpha_mode: AlphaMode::Blend,
+                perceptual_roughness: 0.6,
+                double_sided: true,
+                cull_mode: None,
+                ..default()
+            },
+            extension: tint.clone(),
         })
     };
     let side_material = shell_material(Color::srgba(0.29, 0.33, 0.13, BODY_ALPHA)); // army green
@@ -562,7 +657,11 @@ fn setup(
 
 /// End-disc mesh for one cap: side 1 (+Y) or side 2 (-Y).
 fn cap_mesh(shape: Shape, sign: i8) -> Mesh {
-    let r = if sign > 0 { shape.r_top } else { shape.r_bottom };
+    let r = if sign > 0 {
+        shape.r_top
+    } else {
+        shape.r_bottom
+    };
     Circle::new(r)
         .mesh()
         .resolution(SHAPE_SEGMENTS as u32)
@@ -702,8 +801,8 @@ fn refresh_voxel_cache(params: &SimParams, cache: &mut VoxelCache) {
     for ix in 0..counts.x {
         for iy in 0..counts.y {
             for iz in 0..counts.z {
-                let c = origin
-                    + cell * Vec3::new(ix as f32 + 0.5, iy as f32 + 0.5, iz as f32 + 0.5);
+                let c =
+                    origin + cell * Vec3::new(ix as f32 + 0.5, iy as f32 + 0.5, iz as f32 + 0.5);
                 if frustum_contains(shape, c) {
                     cache.centers.push(c);
                 }
@@ -740,6 +839,7 @@ fn refresh_hull_cache(params: &SimParams, cache: &mut HullCache) {
 /// capsizing moments emerge without any explicit torque model.
 fn apply_hydro_forces(
     time: Res<Time>,
+    fixed: Res<Time<Fixed>>,
     params: Res<SimParams>,
     mut voxels: ResMut<VoxelCache>,
     mut hull: ResMut<HullCache>,
@@ -747,20 +847,42 @@ fn apply_hydro_forces(
     mut clipped: Local<Vec<[Vec3; 3]>>,
     mut timing: ResMut<PhysicsTiming>,
     mut vis: ResMut<ForceVectors>,
-    mut bodies: Query<(&Position, &Rotation, &ComputedMass, Forces), With<Buoy>>,
+    mut bodies: Query<
+        (
+            &Position,
+            &Rotation,
+            &ComputedMass,
+            &ComputedCenterOfMass,
+            Forces,
+        ),
+        With<Buoy>,
+    >,
 ) {
     let started = Instant::now();
     let dt = time.delta_secs().max(1e-4);
-    vis.arrows.clear();
-    let record = vis.on;
+    // Record the overlay only on the render frame's FINAL fixed step (once a
+    // step is expended, remaining overstep < timestep ⇒ no further step runs
+    // this frame): earlier catch-up steps' recordings would be overwritten
+    // unseen, and below 60 fps that discarded work grows with the very
+    // catch-up count that means the frame is already struggling.
+    let record = vis.on && fixed.overstep() < fixed.timestep();
+    if record {
+        vis.arrows.clear();
+        vis.gravity = None;
+    }
 
-    for (pos, rot, mass, mut forces) in &mut bodies {
+    for (pos, rot, mass, com, mut forces) in &mut bodies {
         // Thousands of points get transformed per frame: pre-expand the
         // quaternion to a matrix, and keep its world-Y row separate so dry
         // elements can be rejected on a one-component transform.
         let rot_m = Mat3::from_quat(rot.0);
         let row_y = Vec3::new(rot_m.x_axis.y, rot_m.y_axis.y, rot_m.z_axis.y);
         let world_y = |local: Vec3| pos.0.y + row_y.dot(local);
+
+        if record {
+            let world_com = pos.0 + rot_m * com.0;
+            vis.gravity = Some((world_com, Vec3::NEG_Y * (mass.value() * GRAVITY)));
+        }
 
         match params.method {
             // ── 1. Voxel grid ────────────────────────────────────────────────
@@ -770,8 +892,8 @@ fn apply_hydro_forces(
                     // Fractional submersion of the cell (treated as `cell_size`
                     // tall — exact for full/empty cells, softened at the
                     // waterline band, which is the standard anti-jitter fix).
-                    let frac = ((WATER_LEVEL - world_y(*local)) / voxels.cell_size + 0.5)
-                        .clamp(0.0, 1.0);
+                    let frac =
+                        ((WATER_LEVEL - world_y(*local)) / voxels.cell_size + 0.5).clamp(0.0, 1.0);
                     if frac <= 0.0 {
                         continue;
                     }
@@ -781,7 +903,10 @@ fn apply_hydro_forces(
                     if params.drag_on {
                         // Per-cell linear drag on the point velocity; the offset
                         // application makes angular damping fall out for free.
-                        f += -3.0 * params.drag_coeff * WATER_DENSITY * v_cell
+                        f += -3.0
+                            * params.drag_coeff
+                            * WATER_DENSITY
+                            * v_cell
                             * forces.velocity_at_point(world);
                     }
                     forces.apply_force_at_point(f, world);
@@ -813,7 +938,9 @@ fn apply_hydro_forces(
 
                     let mut sub_area = 0.0;
                     for sub in clipped.iter() {
-                        let Some(g) = hydro::tri_geom(sub) else { continue };
+                        let Some(g) = hydro::tri_geom(sub) else {
+                            continue;
+                        };
                         sub_area += g.area;
                         let depth = WATER_LEVEL - g.centroid.y;
                         // Hydrostatic pressure force. Only the vertical component
@@ -858,7 +985,9 @@ fn apply_hydro_forces(
                     // the triangle's area; the stopping force saturates at Γ_max
                     // and is capped at "this triangle's share of stopping the
                     // whole body in one frame".
-                    let Some(g) = &hull.tri_geoms[j] else { continue };
+                    let Some(g) = &hull.tri_geoms[j] else {
+                        continue;
+                    };
                     let center = pos.0 + rot_m * g.centroid;
                     let v_p = forces.velocity_at_point(center);
                     let speed_p = v_p.length();
@@ -868,8 +997,7 @@ fn apply_hydro_forces(
                     if speed_p > 1e-4 {
                         let cos_theta = (v_p / speed_p).dot(rot_m * g.normal);
                         if cos_theta > 0.0 && gamma > 0.0 {
-                            let f_stop =
-                                mass.value() * speed_p * (2.0 * g.area / hull.total_area);
+                            let f_stop = mass.value() * speed_p * (2.0 * g.area / hull.total_area);
                             let scale = (gamma / params.gamma_max).clamp(0.0, 1.0).powi(2);
                             let f_slam = -(scale * cos_theta * f_stop / speed_p) * v_p;
                             forces.apply_force_at_point(f_slam, center);
@@ -931,35 +1059,55 @@ fn apply_hydro_forces(
         }
     }
 
+    if record {
+        vis.net = vis.arrows.iter().map(|(_, f)| *f).sum();
+        vis.max_force = vis
+            .arrows
+            .iter()
+            .map(|(_, f)| f.length())
+            .fold(0.0f32, f32::max);
+    }
+
     timing.accum += started.elapsed().as_secs_f32();
-    timing.frames += 1;
+    timing.steps += 1;
     timing.window += time.delta_secs();
     if timing.window >= 1.0 {
-        timing.avg_ms = timing.accum / timing.frames.max(1) as f32 * 1000.0;
+        timing.avg_us = timing.accum / timing.steps.max(1) as f32 * 1_000_000.0;
         timing.accum = 0.0;
-        timing.frames = 0;
+        timing.steps = 0;
         timing.window = 0.0;
     }
 }
 
-/// Draw this frame's applied forces as gizmo arrows. Lengths are proportional
-/// to force magnitude, normalised so the frame's largest force spans
-/// `MAX_ARROW_LEN` (see the constant for why absolute scaling doesn't work).
-fn draw_force_vectors(vis: Res<ForceVectors>, mut gizmos: Gizmos) {
-    let max = vis
-        .arrows
-        .iter()
-        .map(|(_, f)| f.length())
-        .fold(0.0f32, f32::max);
-    if max <= 0.0 {
+/// Draw the latest recorded physics step's applied forces as gizmo arrows.
+/// Hydro arrows (orange) are proportional to force magnitude, normalised so
+/// the step's largest force spans `MAX_ARROW_LEN` (see the constant for why
+/// absolute scaling doesn't work). The gravity arrow (violet) gets its own
+/// scale — against the *net* hydro force rather than the largest per-element
+/// one — so weight vs total upthrust stay visually comparable (per-element
+/// forces are orders of magnitude smaller than either).
+fn draw_force_vectors(
+    vis: Res<ForceVectors>,
+    mut gizmos: Gizmos,
+    mut gravity_gizmos: Gizmos<GravityGizmos>,
+) {
+    if !vis.on {
         return;
     }
-    let scale = MAX_ARROW_LEN / max;
-    for (point, force) in &vis.arrows {
-        let tip = *point + *force * scale;
-        // Skip near-zero arrows: a degenerate gizmo arrow still draws its head.
-        if point.distance_squared(tip) > 1e-6 {
-            gizmos.arrow(*point, tip, ARROW_COLOR);
+    if vis.max_force > 0.0 {
+        let scale = MAX_ARROW_LEN / vis.max_force;
+        for (point, force) in &vis.arrows {
+            let tip = *point + *force * scale;
+            // Skip near-zero arrows: a degenerate gizmo arrow still draws its head.
+            if point.distance_squared(tip) > 1e-6 {
+                gizmos.arrow(*point, tip, ARROW_COLOR);
+            }
+        }
+    }
+    if let Some((com, weight)) = vis.gravity {
+        let denom = weight.length().max(vis.net.length());
+        if denom > 0.0 {
+            gravity_gizmos.arrow(com, com + weight * (MAX_ARROW_LEN / denom), GRAVITY_COLOR);
         }
     }
 }
@@ -1153,21 +1301,33 @@ fn ui(
     // Floating "source" permalink, top-right over the sim — a frameless Area, so
     // no background. Links to this crate's directory in the GitHub repo at the
     // exact commit this binary was built from (`BUILD_COMMIT`, from build.rs).
-    floating_area(ctx, "source-link", egui::Align2::RIGHT_TOP, [-10.0, 10.0], |ui| {
-        ui.hyperlink_to(
-            "</> source",
-            concat!(
-                "https://github.com/samcarey/bad-spaceship/tree/",
-                env!("BUILD_COMMIT"),
-                "/buoyancy"
-            ),
-        );
-    });
+    floating_area(
+        ctx,
+        "source-link",
+        egui::Align2::RIGHT_TOP,
+        [-10.0, 10.0],
+        |ui| {
+            ui.hyperlink_to(
+                "</> source",
+                concat!(
+                    "https://github.com/samcarey/bad-spaceship/tree/",
+                    env!("BUILD_COMMIT"),
+                    "/buoyancy"
+                ),
+            );
+        },
+    );
     // Floating "info" link, top-left — opens the rendered how-it-works page
     // (buoyancy/info.html) explaining every force calculation with equations.
-    floating_area(ctx, "info-link", egui::Align2::LEFT_TOP, [10.0, 10.0], |ui| {
-        ui.hyperlink_to("how it works", info_url());
-    });
+    floating_area(
+        ctx,
+        "info-link",
+        egui::Align2::LEFT_TOP,
+        [10.0, 10.0],
+        |ui| {
+            ui.hyperlink_to("how it works", info_url());
+        },
+    );
     // Panel frame: the egui default side margin (8) widened by 50%.
     let frame = egui::Frame::side_top_panel(&ctx.global_style()).inner_margin(egui::Margin {
         left: 12,
@@ -1303,7 +1463,10 @@ fn ui(
                         egui::Checkbox::new(&mut params.pressure_drag_on, "pressure drag"),
                     );
                     if per_face && params.pressure_drag_on {
-                        ui.add(egui::Slider::new(&mut params.pressure_drag_coeff, 0.0..=3.0));
+                        ui.add(egui::Slider::new(
+                            &mut params.pressure_drag_coeff,
+                            0.0..=3.0,
+                        ));
                     }
                 });
             });
@@ -1317,7 +1480,7 @@ fn ui(
         egui::Align2::LEFT_BOTTOM,
         [10.0, -above_panel],
         |ui| {
-            ui.label(format!("physics: {:.2} ms", timing.avg_ms));
+            ui.label(format!("physics: {:.0} µs", timing.avg_us));
         },
     );
     // Force-vector overlay toggle, floating above the panel's right edge —
