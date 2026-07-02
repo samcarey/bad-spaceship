@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>Buoyancy Simulator</title>
+  <!-- Standalone loader for the buoyancy experiment. Deliberately NOT linked from
+       index.html / the game pages — reachable only by knowing this URL. Its WASM
+       bundle is a separate crate (bad-spaceship-buoyancy) built into ./buoyancy/. -->
+  <style>
+    /* Match the in-app clear color (near-white) so load-in doesn't flash. */
+    html, body { height: 100%; margin: 0; background: #fcfcf2; overflow: hidden; }
+
+    /* Bevy/winit creates the canvas and appends it to <body>; size it to fill the
+       viewport via CSS (Bevy tracks the canvas's CSS size). `touch-action: none`
+       hands pinch/drag to the app (pinch = camera zoom) instead of the browser. */
+    canvas {
+      outline: none;
+      display: block;
+      width: 100% !important;
+      height: 100% !important;
+      touch-action: none;
+      -webkit-user-select: none;
+      user-select: none;
+    }
+
+    #loading {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 1.1rem;
+      color: #2a2f24;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      font-size: 0.9rem;
+      background: #fcfcf2;
+      transition: opacity 0.4s ease;
+    }
+    #loading.hidden { opacity: 0; pointer-events: none; }
+
+    #bar-track {
+      width: min(70vw, 420px);
+      height: 10px;
+      border-radius: 5px;
+      background: rgba(42, 47, 36, 0.15);
+      overflow: hidden;
+    }
+    #bar-fill {
+      width: 0%;
+      height: 100%;
+      border-radius: 5px;
+      background: #4b5320;
+      transition: width 0.15s ease;
+    }
+    #pct { font-size: 0.75rem; letter-spacing: 0.12em; }
+  </style>
+</head>
+
+<body>
+  <div id="loading">
+    <div>Loading buoyancy simulator…</div>
+    <div id="bar-track"><div id="bar-fill"></div></div>
+    <div id="pct"></div>
+  </div>
+
+  <script type="module">
+    import init from './buoyancy/wasm.js';
+
+    const loading = document.getElementById('loading');
+    const fill = document.getElementById('bar-fill');
+    const pct = document.getElementById('pct');
+    const WASM_URL = './buoyancy/wasm_bg.wasm';
+
+    // The served wasm may arrive gzip/br-compressed, in which case Content-Length
+    // is the compressed size — the manifest (written at deploy time) carries the
+    // honest uncompressed byte count for the progress denominator.
+    async function totalBytes(resp) {
+      try {
+        const r = await fetch('./buoyancy/manifest.json', { cache: 'no-cache' });
+        if (r.ok) {
+          const m = await r.json();
+          if (m && m.wasm_bytes > 0) return m.wasm_bytes;
+        }
+      } catch (_) { /* fall through */ }
+      const len = Number(resp.headers.get('Content-Length'));
+      return len > 0 ? len : 0;
+    }
+
+    async function fetchWithProgress(url) {
+      const resp = await fetch(url, { cache: 'default' });
+      if (!resp.ok) throw new Error('HTTP ' + resp.status + ' for ' + url);
+      const total = await totalBytes(resp);
+      if (!resp.body || !total) return new Uint8Array(await resp.arrayBuffer());
+
+      const reader = resp.body.getReader();
+      const chunks = [];
+      let received = 0;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        received += value.length;
+        const frac = Math.min(received / total, 1);
+        fill.style.width = (frac * 100).toFixed(1) + '%';
+        pct.textContent = Math.round(frac * 100) + '% · ' + (received / 1048576).toFixed(1) + ' MB';
+      }
+      const bytes = new Uint8Array(received);
+      let offset = 0;
+      for (const c of chunks) { bytes.set(c, offset); offset += c.length; }
+      return bytes;
+    }
+
+    async function run() {
+      const bytes = await fetchWithProgress(WASM_URL);
+      fill.style.width = '100%';
+      pct.textContent = 'starting engine…';
+      const module = await WebAssembly.compile(bytes.buffer);
+      try {
+        await init(module);
+      } catch (e) {
+        // Bevy/winit throws a benign "Using exceptions for control flow" to hand
+        // control to its event loop; anything else is a real error.
+        const msg = (e && e.message) || String(e);
+        if (!msg.startsWith('Using exceptions for control flow')) throw e;
+      }
+      // The engine is running; fade the overlay out once it has had a moment to
+      // put up the first frame.
+      setTimeout(() => loading.classList.add('hidden'), 400);
+    }
+
+    run().catch((e) => {
+      pct.textContent = '';
+      loading.firstElementChild.textContent = 'Failed to load: ' + ((e && e.message) || e);
+      console.error(e);
+    });
+  </script>
+</body>
+
+</html>

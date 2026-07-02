@@ -1,0 +1,52 @@
+[package]
+name = "bad-spaceship-buoyancy"
+version = "0.1.0"
+authors = ["Sam Carey <sam@samcarey.com>"]
+edition = "2021"
+
+# A standalone single-player physics experiment: a buoyancy simulator. It is a
+# SEPARATE crate + SEPARATE WASM bundle from the main game (`client`), reachable
+# from the site at a special, unlinked URL (`buoyancy.html`). It shares only the
+# engine version pins from the root `[workspace.dependencies]`, not any game code.
+#
+# WASM-ONLY: this crate is only ever built for `wasm32-unknown-unknown` (the web
+# deploy), so there is no native/web feature split — the default features are the
+# web build. Build/check it with:
+#   cargo check -p bad-spaceship-buoyancy --target wasm32-unknown-unknown
+#   cargo build -p bad-spaceship-buoyancy --target wasm32-unknown-unknown --release
+
+[dependencies]
+# Engine versions inherited from the root `[workspace.dependencies]` (the single
+# place bevy/avian/egui are pinned). Renderer features are selected in `default` below.
+bevy = { workspace = true }
+avian3d = { workspace = true }
+# `open_url` routes egui hyperlink clicks through the `webbrowser` crate (which
+# window.open()s on wasm) — used by the floating "source" permalink.
+bevy_egui = { workspace = true, features = ["open_url"] }
+
+# getrandom backends for wasm, mirroring the client: Bevy pulls `getrandom` 0.3
+# (needs the `wasm_js` feature + the global `getrandom_backend="wasm_js"` cfg from
+# `.cargo/config.toml`); the transitive `getrandom` 0.2 (via `rand`/parry) needs its
+# own `js` feature. Non-optional since this crate is wasm-only.
+getrandom = { version = "0.3", features = ["wasm_js"] }
+getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
+
+# Must match the wasm-bindgen CLI the Pages CI installs (see pages.yml).
+wasm-bindgen = "=0.2.125"
+
+[features]
+# Bevy is pulled with `default-features = false` (workspace pin), so the renderer
+# crates are named explicitly — the same set the client's web build uses, minus the
+# game-only extras (gltf, state, touch, gamepad). `webgl2` picks the broad-support
+# GLES backend (Bevy 0.19's wgpu 29 otherwise compiles WebGPU on wasm).
+default = [
+    "bevy/bevy_winit",
+    "bevy/bevy_pbr",
+    "bevy/bevy_core_pipeline",
+    "bevy/bevy_log",
+    "bevy/webgl2",
+    # Touch input (one-finger orbit / pinch zoom). Bevy 0.18+ gates input sources
+    # behind features and nothing pulls `touch` transitively — without it the
+    # `Touches` resource never exists (same gotcha as the game client).
+    "bevy/touch",
+]
