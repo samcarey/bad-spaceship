@@ -76,10 +76,10 @@
     const pct = document.getElementById('pct');
     const WASM_URL = './buoyancy/wasm_bg.wasm';
 
-    // The served wasm may arrive gzip/br-compressed, in which case Content-Length
-    // is the compressed size — the manifest (written at deploy time) carries the
-    // honest uncompressed byte count for the progress denominator.
-    async function totalBytes(resp) {
+    // Uncompressed byte count from the deploy-time manifest — the read loop
+    // counts *decompressed* bytes (fetch undoes Content-Encoding before
+    // handing over the stream), so the progress fraction needs this total.
+    async function manifestBytes() {
       try {
         const r = await fetch('./buoyancy/manifest.json', { cache: 'no-cache' });
         if (r.ok) {
@@ -87,15 +87,25 @@
           if (m && m.wasm_bytes > 0) return m.wasm_bytes;
         }
       } catch (_) { /* fall through */ }
-      const len = Number(resp.headers.get('Content-Length'));
-      return len > 0 ? len : 0;
+      return 0;
     }
 
     async function fetchWithProgress(url) {
       const resp = await fetch(url, { cache: 'default' });
       if (!resp.ok) throw new Error('HTTP ' + resp.status + ' for ' + url);
-      const total = await totalBytes(resp);
+      // Content-Length counts bytes as sent — the *actual download* size
+      // (compressed whenever the server sends Content-Encoding); the MB
+      // figures shown to the user are scaled to it. Absent (chunked
+      // on-the-fly compression), the uncompressed total is all we have.
+      const contentLength = Number(resp.headers.get('Content-Length'));
+      let total = await manifestBytes();
+      // No manifest: Content-Length only equals the stream we count when the
+      // response isn't compressed.
+      if (!total && contentLength > 0 && !resp.headers.get('Content-Encoding')) {
+        total = contentLength;
+      }
       if (!resp.body || !total) return new Uint8Array(await resp.arrayBuffer());
+      const wireTotal = contentLength > 0 ? contentLength : total;
 
       const reader = resp.body.getReader();
       const chunks = [];
@@ -107,7 +117,8 @@
         received += value.length;
         const frac = Math.min(received / total, 1);
         fill.style.width = (frac * 100).toFixed(1) + '%';
-        pct.textContent = Math.round(frac * 100) + '% · ' + (received / 1048576).toFixed(1) + ' MB';
+        pct.textContent = Math.round(frac * 100) + '% · '
+          + (frac * wireTotal / 1048576).toFixed(1) + ' / ' + (wireTotal / 1048576).toFixed(1) + ' MB';
       }
       const bytes = new Uint8Array(received);
       let offset = 0;

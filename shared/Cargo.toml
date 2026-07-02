@@ -15,15 +15,18 @@ build = "build.rs"
 # 0.18-vs-0.19 rationale and the upgrade checklist).
 bevy = { workspace = true }
 # Avian (XPBD physics) replaces bevy_rapier3d. The workspace pin sets the base
-# feature set `3d`/`f32`/`parry-f32`/`xpbd_joints`, chosen to keep the headless
-# server and the wasm client off Avian's `debug-plugin` (which pulls `bevy_render`)
-# and `parallel` (which pulls `multi_threaded`); `parry-f32` brings in the
-# parry-backed `Collider`. `xpbd_joints` is a *default* Avian feature that gates the
-# joint *solver* (`XpbdSolverPlugin`): without it the joint types (`SphericalJoint`,
-# …) still compile and spawn, but nothing enforces them, so attached parts never
-# move together — it must be re-added explicitly under `default-features = false`.
-# The native binary and server re-add `simd`/`parallel` for perf via their own lists.
-avian3d = { workspace = true }
+# feature set `3d`/`f32`/`parry-f32`, chosen to keep the headless server and the
+# wasm client off Avian's `debug-plugin` (which pulls `bevy_render`) and
+# `parallel` (which pulls `multi_threaded`); `parry-f32` brings in the
+# parry-backed `Collider`. The game-only features are added HERE (not in the
+# workspace pin) so the size-sensitive `buoyancy` crate doesn't inherit them:
+# `xpbd_joints` is a *default* Avian feature that gates the joint *solver*
+# (`XpbdSolverPlugin`): without it the joint types (`SphericalJoint`, …) still
+# compile and spawn, but nothing enforces them, so attached parts never move
+# together — it must be re-added explicitly under `default-features = false`.
+# `serialize` gives Avian's Position/Rotation the serde impls the replication
+# protocol needs. The native binary and server re-add `simd`/`parallel` for perf.
+avian3d = { workspace = true, features = ["xpbd_joints", "serialize"] }
 # Multiplayer protocol lives in `shared` so client and server register the exact
 # same components/messages/channels. `shared` only needs the protocol-building
 # APIs (register_component / register_message / add_channel / InputPlugin) plus
