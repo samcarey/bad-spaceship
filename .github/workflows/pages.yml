@@ -136,3 +136,9 @@ jobs:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
+        with:
+          # GitHub's Pages queue has been observed draining in 10-15 min while
+          # this action's default timeout is 10 min — four consecutive runs
+          # "failed" (and canceled their deployment) with the content going
+          # live anyway. Give slow queue days room to finish.
+          timeout: 1800000
