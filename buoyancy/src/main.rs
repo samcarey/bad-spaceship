@@ -747,12 +747,15 @@ fn setup(
             body.spawn((
                 InteriorWaterMesh,
                 Mesh3d(meshes.add(water_mesh(&[]))),
+                // Single-sided (default back-face culling), unlike the shell
+                // materials: the water mesh is a closed volume with outward
+                // winding, and rendering its interior faces too painted the
+                // free-surface and bottom caps through the walls as stacked
+                // disks from below-horizon angles.
                 MeshMaterial3d(materials.add(StandardMaterial {
                     base_color: WATER_COLOR.with_alpha(INTERIOR_WATER_ALPHA),
                     alpha_mode: AlphaMode::Blend,
                     perceptual_roughness: 0.1,
-                    double_sided: true,
-                    cull_mode: None,
                     ..default()
                 })),
                 Visibility::Hidden,
