@@ -309,12 +309,12 @@ struct ForceVectors {
     on: bool,
     arrows: Vec<(Vec3, Vec3)>,
     /// The weight vector (world centre of mass, m·g downward). Avian applies
-    /// gravity itself, so this is recorded for display only.
+    /// gravity itself, so this is recorded for display only. Recorded before
+    /// any of the body's arrows, so `None` implies `arrows` is empty — which
+    /// is what lets `draw_force_vectors` gate the whole overlay on it. The
+    /// sim has a single `Buoy` body; with several, the last one recorded
+    /// would set the weight arrow *and* the shared arrow scale.
     gravity: Option<(Vec3, Vec3)>,
-    /// The vector sum of the hydro forces, cached once at record time (64 Hz)
-    /// rather than re-derived per render frame. Sets the arrow scale together
-    /// with the weight (see `MAX_ARROW_LEN`).
-    net: Vec3,
 }
 
 impl Default for ForceVectors {
@@ -323,7 +323,6 @@ impl Default for ForceVectors {
             on: true,
             arrows: Vec::new(),
             gravity: None,
-            net: Vec3::ZERO,
         }
     }
 }
@@ -333,7 +332,10 @@ impl Default for ForceVectors {
 /// larger of weight and net hydro force spans this length. That keeps all
 /// lengths physically proportional: at rest the orange arrows vectorially
 /// add up to the violet one. (An absolute scale can't work — forces span
-/// orders of magnitude across body densities and sizes.)
+/// orders of magnitude across body densities and sizes.) The honest flip
+/// side: each element carries ~1/N of the total, so at fine voxel/hull
+/// resolutions the orange arrows are millimetres long — sub-pixel, and
+/// culled by the near-zero skip in `draw_force_vectors`.
 const MAX_ARROW_LEN: f32 = 1.5;
 /// Buoyancy / hydro forces (per element, whatever the method).
 const ARROW_COLOR: Color = Color::srgb(1.0, 0.45, 0.1);
@@ -1060,10 +1062,6 @@ fn apply_hydro_forces(
         }
     }
 
-    if record {
-        vis.net = vis.arrows.iter().map(|(_, f)| *f).sum();
-    }
-
     timing.accum += started.elapsed().as_secs_f32();
     timing.steps += 1;
     timing.window += time.delta_secs();
@@ -1089,17 +1087,20 @@ fn draw_force_vectors(
     if !vis.on {
         return;
     }
+    // `gravity` is recorded before any arrow, so returning here never hides
+    // recorded hydro arrows (see the field's doc).
     let Some((com, weight)) = vis.gravity else {
         return;
     };
-    let denom = weight.length().max(vis.net.length());
-    if denom <= 0.0 {
-        return;
-    }
-    let scale = MAX_ARROW_LEN / denom;
+    let net: Vec3 = vis.arrows.iter().map(|(_, f)| *f).sum();
+    // weight is m·g with m > 0, so the scale is always finite.
+    let scale = MAX_ARROW_LEN / weight.length().max(net.length());
     for (point, force) in &vis.arrows {
         let tip = *point + *force * scale;
-        // Skip near-zero arrows: a degenerate gizmo arrow still draws its head.
+        // Skip sub-millimetre arrows: a degenerate gizmo arrow still draws
+        // its head (near-zero drag forces at rest), and under the shared
+        // scale this also culls element arrows too small to see — at fine
+        // grid/hull resolutions that can be the entire orange field.
         if point.distance_squared(tip) > 1e-6 {
             gizmos.arrow(*point, tip, ARROW_COLOR);
         }
