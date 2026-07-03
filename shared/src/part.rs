@@ -34,7 +34,13 @@ impl Plugin for PartPlugin {
                 Update,
                 (
                     replace_fallen_parts.run_if(not(resource_exists::<SuppressLocalParts>)),
-                    update_focused,
+                    // Single-player focus. MUST be off in multiplayer: with zero
+                    // `Interactable` entities there (replicated parts are `Holdable`
+                    // only) it unconditionally clears `FocusedInteractable` every
+                    // frame, racing the multiplayer `update_focus` writer with
+                    // compile-dependent system order — on losing builds the focus
+                    // highlight and the grab gate were dead in multiplayer.
+                    update_focused.run_if(not(resource_exists::<SuppressLocalParts>)),
                     // Avian's `Forces` helper auto-clears after the physics step, so
                     // the old per-frame `zero_part_external_forces` system is gone.
                     // Both force systems write through `Forces` on the held part, so
