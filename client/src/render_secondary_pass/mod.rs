@@ -1,7 +1,6 @@
 use bad_spaceship_shared::{
     part::{Holdable, SuppressLocalParts, TargetOrientation, TargetPosition, DELETE_RADIUS},
-    player::get_hold_point_entity,
-    CameraOrbitCenter, DisplayableJoint, ExistingJoints, HoldPoint, Holding, Modifying, Player,
+    DisplayableJoint, ExistingJoints, HoldPoint, Holding, Modifying, Player, PlayerHoldPoint,
     PotentialJoints, PredeleteJoint, PredeleteJoints, UpdateJointsLabel,
 };
 // Bevy 0.17 moved `NotShadowCaster` from `bevy_pbr` to `bevy_light` (`bevy::light`).
@@ -407,22 +406,12 @@ fn add_hold_point_delete_zone_visualization(
 }
 
 fn delete_zone_visibility(
-    players: Query<(&Holding, &Modifying, &Children)>,
-    hold_points0: Query<(), With<HoldPoint>>,
-    mut hold_points1: Query<&mut Visibility, With<HoldPoint>>,
-    // mut hold_points: QuerySet<(
-    //     QueryState<(), With<HoldPoint>>,
-    //     QueryState<&mut Visibility, With<HoldPoint>>,
-    // )>,
-    camera_orbit_centers: Query<&Children, With<CameraOrbitCenter>>,
+    players: Query<(&Holding, &Modifying, &PlayerHoldPoint)>,
+    mut hold_points: Query<&mut Visibility, With<HoldPoint>>,
 ) {
-    if let Some((holding, modifying, player_children)) = players.iter().next() {
-        if let Some(entity) =
-            get_hold_point_entity(player_children, camera_orbit_centers, &hold_points0)
-        {
-            if let Ok(mut visible) = hold_points1.get_mut(entity) {
-                set_visible(&mut visible, modifying.0 && !holding.0);
-            }
+    if let Some((holding, modifying, hold_point)) = players.iter().next() {
+        if let Ok(mut visible) = hold_points.get_mut(hold_point.0) {
+            set_visible(&mut visible, modifying.0 && !holding.0);
         }
     }
 }

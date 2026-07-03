@@ -1,9 +1,8 @@
 use crate::map::PLATFORM_WIDTH_M;
-use crate::player::get_hold_point_entity;
 use crate::utils::{self, QuatExt, Vec3Ext};
 use crate::{
     AttachEvent, Attachable, BoundingRadius, CameraOrbitCenter, DisplayableJoint, ExistingJoints,
-    Focused, FocusedInteractable, HoldPoint, Holding, Modifying, Player, PlayerClick,
+    Focused, FocusedInteractable, HoldPoint, Holding, Modifying, Player, PlayerClick, PlayerHoldPoint,
     PotentialJoints, PredeleteJoint, PredeleteJoints, ToggleHoldingSystemLabel, UpdateJointsLabel,
 };
 use avian3d::prelude::{
@@ -548,36 +547,29 @@ fn update_active_joints(
 fn update_predelete_joints(
     holdables: Query<&GlobalTransform, With<Holdable>>,
     mut predelete_joints: ResMut<PredeleteJoints>,
-    players: Query<(&Holding, &Modifying, &Children)>,
+    players: Query<(&Holding, &Modifying, &PlayerHoldPoint)>,
     joints: Query<(Entity, &SphericalJoint)>,
-    hold_points0: Query<(), With<HoldPoint>>,
-    hold_points1: Query<&GlobalTransform, With<HoldPoint>>,
-    camera_orbit_centers: Query<&Children, With<CameraOrbitCenter>>,
+    hold_points: Query<&GlobalTransform, With<HoldPoint>>,
 ) {
     predelete_joints.0.clear();
 
-    if let Some((holding, modifying, player_children)) = players.iter().next() {
+    if let Some((holding, modifying, hold_point)) = players.iter().next() {
         if !holding.0 && modifying.0 {
-            if let Some(entity) =
-                get_hold_point_entity(player_children, camera_orbit_centers, &hold_points0)
-            {
-                if let Ok(hold_point_position) = hold_points1.get(entity) {
-                    for (joint_entity, joint) in joints.iter() {
-                        // World position of the joint's anchor on `body2` (rapier
-                        // used the joint's parent body + `local_frame2`).
-                        if let (Ok(transform), Some(anchor2)) =
-                            (holdables.get(joint.body2), joint.local_anchor2())
-                        {
-                            let transform = transform.compute_transform();
-                            let center =
-                                transform.translation + transform.rotation.mul_vec3(anchor2);
-                            if (center - hold_point_position.translation()).length() < DELETE_RADIUS
-                            {
-                                predelete_joints.0.push(PredeleteJoint {
-                                    entity: joint_entity,
-                                    translation: center,
-                                });
-                            }
+            if let Ok(hold_point_position) = hold_points.get(hold_point.0) {
+                for (joint_entity, joint) in joints.iter() {
+                    // World position of the joint's anchor on `body2` (rapier
+                    // used the joint's parent body + `local_frame2`).
+                    if let (Ok(transform), Some(anchor2)) =
+                        (holdables.get(joint.body2), joint.local_anchor2())
+                    {
+                        let transform = transform.compute_transform();
+                        let center =
+                            transform.translation + transform.rotation.mul_vec3(anchor2);
+                        if (center - hold_point_position.translation()).length() < DELETE_RADIUS {
+                            predelete_joints.0.push(PredeleteJoint {
+                                entity: joint_entity,
+                                translation: center,
+                            });
                         }
                     }
                 }
