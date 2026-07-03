@@ -65,7 +65,7 @@ pub struct Config {
 }
 
 impl Config {
-    /// The character ball's diameter, in metres. Exposed so the client's
+    /// The character's total height (capsule, round top and bottom), in metres. Exposed so the client's
     /// predicted-avatar setup can build the same body the single-player `spawn`
     /// does, from the loaded config asset.
     pub fn size(&self) -> f32 {
@@ -86,16 +86,22 @@ struct CharacterBundle {
 /// single-player `spawn`, the server's `build_server_avatar`, and the client's
 /// predicted-avatar setup. Does NOT set `Transform`/`Position` — the caller sets
 /// the spawn pose (single-player/server) or replication provides it (client
-/// predicted). The sphere collider, rotation lock, unit mass, and the
+/// predicted). The capsule collider, rotation lock, unit mass, and the
 /// movement-input component (`DirectionalInput`) plus `Character`/velocity/
 /// ground-contact (`CharacterBundle`) match what every controllable character needs.
 pub fn insert_character_body(entity: &mut EntityCommands, size: f32) {
     entity.insert((
         RigidBody::Dynamic,
         LockedAxes::ROTATION_LOCKED,
-        // Avian's sphere constructor (rapier's "ball"). Avian collides all collider
-        // pairs by default, so rapier's `ActiveCollisionTypes` opt-in is dropped.
-        Collider::sphere(size / 2.0),
+        // Pill body: a vertical capsule (round top and bottom) with the same
+        // TOTAL height as the old `size`-diameter sphere — radius size/3 plus a
+        // size/3 cylindrical middle = size tall, so the collider centre sits at
+        // the same height above ground contact and the camera/hold-point
+        // geometry tuned for the sphere carries over; the body just slims from
+        // `size` wide to (2/3)·size. Rotation stays locked, so it never tips.
+        // (Avian's `capsule` takes the radius and the cylindrical mid-section
+        // length, not the total height.)
+        Collider::capsule(size / 3.0, size / 3.0),
         // Pin mass to 1.0; movement sets velocity directly so this only scales how
         // the character shoves parts on contact.
         Mass(1.0),

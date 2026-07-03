@@ -23,6 +23,7 @@ use bad_spaceship_shared::net::{
 };
 use bad_spaceship_shared::part::{insert_part_physics, Holdable, SuppressLocalParts};
 use bad_spaceship_shared::player::make_local_player;
+use crate::render_main_pass::metal_material::{metal_tint, part_visual, MetalMaterial};
 use crate::render_secondary_pass::gizmo_material::GizmoMaterial;
 use crate::render_secondary_pass::JointAppearance;
 use bad_spaceship_shared::{
@@ -90,7 +91,7 @@ fn multiplayer_room() -> [u8; 6] {
 struct ResumeId(u64);
 
 #[cfg(not(target_arch = "wasm32"))]
-fn resume_id() -> u64 {
+pub(crate) fn resume_id() -> u64 {
     0
 }
 
@@ -98,7 +99,7 @@ fn resume_id() -> u64 {
 /// mint + persist one on first run. An app-level token (NOT the netcode `client_id`)
 /// so a quick reconnect isn't rejected as a duplicate connection.
 #[cfg(target_arch = "wasm32")]
-fn resume_id() -> u64 {
+pub(crate) fn resume_id() -> u64 {
     let Some(storage) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) else {
         return 0;
     };
@@ -354,7 +355,7 @@ fn report_stored_panic(
 /// (`insert_character_body`) so Avian simulates it locally with zero input delay,
 /// plus the player/input state (`make_local_player`) and the networked-input marker
 /// so `write_input` fills its `ActionState` and lightyear sends it. From there it's
-/// an ordinary `Character`: `assign_characters` renders it and `attach_camera_orbit`
+/// an ordinary `Character`: `monster::dress_characters` renders it and `attach_camera_orbit`
 /// mounts the camera — the same path single-player uses.
 ///
 /// Identify our avatar by `NetPlayer::client_id == our LocalId`, NOT by the bare
@@ -474,8 +475,8 @@ fn write_input(
 /// you look at next once you've grabbed.
 fn highlight_grabbable(
     player: Query<&FocusedInteractable, With<Player>>,
-    parts: Query<&MeshMaterial3d<StandardMaterial>, With<NetPart>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    parts: Query<(&MeshMaterial3d<MetalMaterial>, &NetPart)>,
+    mut materials: ResMut<Assets<MetalMaterial>>,
     // The previously-highlighted part, so we only re-colour on change. Mutating a
     // material flags it for GPU re-upload, so recolouring every part every frame
     // (when nothing moved) would needlessly re-upload all of them.
@@ -485,13 +486,15 @@ fn highlight_grabbable(
     if *lit == highlighted {
         return;
     }
-    let recolour = |entity, materials: &mut Assets<StandardMaterial>, lit: bool| {
-        if let Ok(material) = parts.get(entity) {
+    let recolour = |entity, materials: &mut Assets<MetalMaterial>, lit: bool| {
+        if let Ok((material, part)) = parts.get(entity) {
             if let Some(mut mat) = materials.get_mut(&material.0) {
-                (mat.base_color, mat.emissive) = if lit {
+                (mat.base.base_color, mat.base.emissive) = if lit {
                     (Color::srgb(1.0, 1.0, 0.0), LinearRgba::rgb(0.6, 0.6, 0.0))
                 } else {
-                    (Color::srgb(0.55, 0.6, 0.72), LinearRgba::BLACK)
+                    // The part's own colour re-derives from its seed (the
+                    // metal look is deterministic), so nothing is stored.
+                    (metal_tint(part.seed), LinearRgba::BLACK)
                 };
             }
         }
@@ -731,38 +734,26 @@ struct AvatarVisual(Entity);
 /// Give each *other* player's `Interpolated` copy a visible body, mounted on a yaw
 /// pivot so `face_replicated_players` can turn it to the player's look direction.
 /// Our own avatar is `Predicted`, not `Interpolated`, and renders via the
-/// single-player character path (`assign_characters`), so it's excluded here. The
+/// single-player character path (`monster::dress_characters`), so it's excluded here. The
 /// raw `Confirmed` entities stay invisible.
 fn draw_replicated_players(
     mut commands: Commands,
-    new_players: Query<Entity, (With<NetPlayer>, With<Interpolated>, Without<AvatarVisual>)>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    new_players: Query<(Entity, &NetPlayer), (With<Interpolated>, Without<AvatarVisual>)>,
+    asset_server: Res<AssetServer>,
 ) {
-    for entity in &new_players {
-        // A small contrasting "nose" on the front (+Z) so the avatar's facing is
-        // visible — the body's footprint alone can't show a yaw rotation.
-        let nose = commands
-            .spawn((
-                Mesh3d(meshes.add(Cuboid::new(0.3, 0.3, 0.6))),
-                MeshMaterial3d(materials.add(Color::srgb(1.0, 0.85, 0.2))),
-                Transform::from_xyz(0.0, 0.0, 0.9),
-            ))
-            .id();
-        // The pivot carries the body mesh and is rotated to the look yaw; the avatar
-        // entity itself keeps the Avian-driven Transform (translation only).
-        let pivot = commands
-            .spawn((
-                Mesh3d(meshes.add(Cuboid::new(0.8, 1.2, 1.6))),
-                MeshMaterial3d(materials.add(Color::srgb(0.9, 0.35, 0.35))),
-                Transform::default(),
-            ))
-            .add_children(&[nose])
-            .id();
+    for (entity, player) in &new_players {
+        // The player's assigned monster (server-replicated, so everyone sees
+        // the same one); its face shows the yaw the pivot is rotated to.
+        // `spawn_monster_visual` parents the pivot under the avatar itself.
+        let pivot = crate::monster::spawn_monster_visual(
+            &mut commands,
+            entity,
+            player.monster,
+            &asset_server,
+        );
         commands
             .entity(entity)
-            .insert(AvatarVisual(pivot))
-            .add_children(&[pivot]);
+            .insert((AvatarVisual(pivot), Visibility::default()));
     }
 }
 
@@ -795,15 +786,18 @@ fn draw_replicated_parts(
     mut commands: Commands,
     new_parts: Query<(Entity, &NetPart), (With<Predicted>, With<Position>, With<Rotation>, Without<Mesh3d>)>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut materials: ResMut<Assets<MetalMaterial>>,
 ) {
     for (entity, part) in &new_parts {
-        let [hx, hy, hz] = part.half_extents;
+        let half_extents = Vec3::from(part.half_extents);
         let mut e = commands.entity(entity);
-        insert_part_physics(&mut e, Vec3::new(hx, hy, hz));
+        insert_part_physics(&mut e, half_extents);
+        // Derived from the replicated seed via the same constructor as
+        // single-player, so every client renders this part identically.
+        let (mesh, material) = part_visual(half_extents, part.seed, &mut meshes, &mut materials);
         e.insert((
-            Mesh3d(meshes.add(Cuboid::new(hx * 2.0, hy * 2.0, hz * 2.0))),
-            MeshMaterial3d(materials.add(Color::srgb(0.55, 0.6, 0.72))),
+            mesh,
+            material,
             Holdable,
             // Render-interpolate the predicted block between fixed ticks (same reason
             // as the character) so loose/held blocks move smoothly.

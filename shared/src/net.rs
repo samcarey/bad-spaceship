@@ -47,6 +47,38 @@ pub const TICK: Duration = Duration::from_millis(1000 / 60);
 #[derive(Component, Serialize, Deserialize, Clone, Copy, PartialEq, Debug)]
 pub struct NetPlayer {
     pub client_id: u64,
+    /// Which of the client's monster models this player wears (assigned by the
+    /// server from the persistent resume id via `monster_index`, so it
+    /// survives reload/reset and every client renders the same one).
+    pub monster: u8,
+}
+
+/// How many monster models the client ships (`client/src/monster.rs`, which
+/// compile-time asserts its table length against this).
+pub const MONSTER_COUNT: u8 = 8;
+
+/// One splitmix64 step: advances `state` and returns a well-mixed u64. THE
+/// deterministic random primitive for everything derived from replicated
+/// seeds (monster assignment, part metal looks): hand-rolled because the
+/// derivation must be identical across platforms and versions — every client
+/// (wasm + native) must derive the same result from the same seed, and `rand`
+/// guarantees neither cross-version nor cross-platform stability for its
+/// small RNGs.
+pub fn splitmix64(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// Deterministically assign a monster from a player's persistent id. Used by
+/// the server (resume id from the connect token) AND the single-player client
+/// (the same resume id read locally), so a given browser is the same monster
+/// everywhere.
+pub fn monster_index(id: u64) -> u8 {
+    let mut state = id;
+    (splitmix64(&mut state) % MONSTER_COUNT as u64) as u8
 }
 
 /// Per-tick client → server **input intent** (not pose). The server runs the
@@ -201,6 +233,9 @@ impl MapEntities for NetInput {
 pub struct NetPart {
     pub half_extents: [f32; 3],
     pub id: u64,
+    /// Appearance seed (see `PartSeed`): clients derive the part's metal look
+    /// from it, so every client renders the same part identically.
+    pub seed: u32,
 }
 
 /// A replicated joint between two parts. Carries enough to reconstruct the joint

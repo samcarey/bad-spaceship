@@ -27,9 +27,9 @@ use avian3d::prelude::{
 };
 use bad_spaceship_shared::character::{spawn_position, CharacterMovement, InitialPose, ServerAvatar};
 use bad_spaceship_shared::net::{
-    apply_hold_spring, apply_net_input, focused_part, sanitize_name, ClientPanicReport, NetFacing,
-    NetHold, NetInput, NetJoint, NetName, NetPart, NetPlayer, ProtocolPlugin, ResetPosition,
-    RollbackReport, SetName, TICK,
+    apply_hold_spring, apply_net_input, focused_part, monster_index, sanitize_name,
+    ClientPanicReport, NetFacing, NetHold, NetInput, NetJoint, NetName, NetPart, NetPlayer,
+    ProtocolPlugin, ResetPosition, RollbackReport, SetName, TICK,
 };
 use bad_spaceship_shared::map::GROUND_LAYER;
 use bad_spaceship_shared::part::{
@@ -630,8 +630,8 @@ fn record_resume_positions(
 /// copy falls in sync rather than drifting.
 fn spawn_room_world(commands: &mut Commands, room: Room) {
     for _ in 0..NUM_PARTS {
-        let (entity, half_extents) = spawn_random_part(commands);
-        tag_room_part(commands, entity, half_extents, room);
+        let (entity, half_extents, seed) = spawn_random_part(commands);
+        tag_room_part(commands, entity, half_extents, seed, room);
     }
 }
 
@@ -640,12 +640,12 @@ fn spawn_room_world(commands: &mut Commands, room: Room) {
 /// replicated + predicted, scoped to the room's `Rooms`, and isolated to the
 /// room's collision layer (it collides only with same-room parts and the ground —
 /// default bit 0).
-fn tag_room_part(commands: &mut Commands, entity: Entity, half_extents: Vec3, room: Room) {
+fn tag_room_part(commands: &mut Commands, entity: Entity, half_extents: Vec3, seed: u32, room: Room) {
     commands.entity(entity).insert((
         // `id` is the part's stable cross-network identity (this entity's bits), so
         // a replicated `NetJoint` can name its two endpoints and the client can find
         // the matching *predicted* parts to joint locally.
-        NetPart { half_extents: half_extents.to_array(), id: entity.to_bits() },
+        NetPart { half_extents: half_extents.to_array(), id: entity.to_bits(), seed },
         Replicate::to_clients(NetworkTarget::All),
         // Predict the loose blocks on every client in the room: each client
         // simulates them locally (so shoving one is instant) and rollback reconciles
@@ -810,8 +810,8 @@ fn server_attach(
                         if !had_joint.contains(&endpoint) && !replaced.contains(&endpoint) {
                             replaced.push(endpoint);
                             if let Some(room) = held_room {
-                                let (new_entity, half_extents) = spawn_random_part(&mut commands);
-                                tag_room_part(&mut commands, new_entity, half_extents, room);
+                                let (new_entity, half_extents, seed) = spawn_random_part(&mut commands);
+                                tag_room_part(&mut commands, new_entity, half_extents, seed, room);
                             }
                         }
                     }
@@ -949,11 +949,12 @@ fn replace_fallen_room_parts(
     for (entity, transform, part_room) in &parts {
         if transform.translation.y < -10.0 {
             commands.entity(entity).despawn();
-            let (new_entity, half_extents) = spawn_random_part(&mut commands);
+            let (new_entity, half_extents, seed) = spawn_random_part(&mut commands);
             tag_room_part(
                 &mut commands,
                 new_entity,
                 half_extents,
+                seed,
                 Room { id: part_room.id, bit: part_room.bit },
             );
         }
@@ -1014,20 +1015,26 @@ fn spawn_player_for_client(
     // the avatar's body assembles and its first `Position` replicates — so a reconnecting
     // avatar is built directly at its saved spot (`InitialPose`), with no origin→saved
     // ease. Consume the record; `record_resume_positions` re-tracks the live avatar after.
-    let resume_pos = tokens.get(client).ok().and_then(|t| {
-        let rid = u64::from_le_bytes(t.0[..8].try_into().unwrap());
-        if rid == 0 {
-            return None;
-        }
-        resume.by_id.remove(&rid).and_then(|(pos, at)| {
-            at.elapsed()
-                .map(|e| e.as_secs() < RESUME_GRACE_SECS)
-                .unwrap_or(false)
-                .then_some(pos)
+    let rid = tokens
+        .get(client)
+        .ok()
+        .map(|t| u64::from_le_bytes(t.0[..8].try_into().unwrap()))
+        .unwrap_or(0);
+    let resume_pos = (rid != 0)
+        .then(|| {
+            resume.by_id.remove(&rid).and_then(|(pos, at)| {
+                at.elapsed()
+                    .map(|e| e.as_secs() < RESUME_GRACE_SECS)
+                    .unwrap_or(false)
+                    .then_some(pos)
+            })
         })
-    });
+        .flatten();
+    // The monster is keyed off the *persistent* resume id so a reload keeps it;
+    // clients without one (native) fall back to the per-session client id.
+    let monster = monster_index(if rid != 0 { rid } else { client_id });
     let mut avatar = commands.spawn((
-        NetPlayer { client_id },
+        NetPlayer { client_id, monster },
         // Replicate the avatar; its pose rides on Avian `Position`/`Rotation`
         // (`build_server_avatar` gives it a real body next frame, and the server
         // simulates it from the client's input intent).
