@@ -801,11 +801,10 @@ fn draw_replicated_parts(
     mut materials: ResMut<Assets<MetalMaterial>>,
 ) {
     for (entity, part) in &new_parts {
-        let [hx, hy, hz] = part.half_extents;
         let mut e = commands.entity(entity);
-        insert_part_physics(&mut e, Vec3::new(hx, hy, hz));
+        insert_part_physics(&mut e, part.shape);
         e.insert((
-            Mesh3d(meshes.add(Cuboid::new(hx * 2.0, hy * 2.0, hz * 2.0))),
+            Mesh3d(meshes.add(crate::render_main_pass::part_mesh(part.shape))),
             // Derived from the replicated seed, so every client renders this
             // part identically (and the same as single-player would).
             MeshMaterial3d(materials.add(metal_material(part.seed))),

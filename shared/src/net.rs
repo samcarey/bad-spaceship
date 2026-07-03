@@ -108,7 +108,8 @@ pub struct NetInput {
 // in `part.rs` (the single-player gameplay tunables) and reused here so the
 // multiplayer selection/hold matches single-player exactly.
 use crate::part::{
-    MAX_INTERACT_ANGLE, MAX_INTERACT_DISTANCE, ORIENTING_STIFFNESS, POSITIONING_STIFFNESS,
+    PartShape, MAX_INTERACT_ANGLE, MAX_INTERACT_DISTANCE, ORIENTING_STIFFNESS,
+    POSITIONING_STIFFNESS,
 };
 
 /// The part the player is most directly looking at (smallest look-angle within
@@ -190,7 +191,7 @@ impl MapEntities for NetInput {
     fn map_entities<M: EntityMapper>(&mut self, _entity_mapper: &mut M) {}
 }
 
-/// Replicated cuboid shape of a part (full extents = 2 × `half_extents`), plus a
+/// Replicated shape of a part (cuboid or cylinder, see `PartShape`), plus a
 /// stable cross-network id. The shape lets a client rebuild the render mesh; the
 /// part's live pose rides on the predicted Avian `Position`/`Rotation`. `id` is
 /// the server part entity's bits — a *stable* identity (replicated onto both the
@@ -199,7 +200,7 @@ impl MapEntities for NetInput {
 /// entities, without depending on lightyear's confirmed→predicted entity mapping.
 #[derive(Component, Serialize, Deserialize, Clone, Copy, PartialEq, Debug, Default)]
 pub struct NetPart {
-    pub half_extents: [f32; 3],
+    pub shape: PartShape,
     pub id: u64,
     /// Appearance seed (see `PartSeed`): clients derive the part's metal look
     /// from it, so every client renders the same part identically.
