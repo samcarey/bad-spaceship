@@ -1058,8 +1058,12 @@ change, not per frame), and a **per-room orb entity** (spawned in `spawn_room_wo
 settled assembly goes quiet). The client's `draw_center_of_mass_orb` (`client/src/net.rs`)
 renders a plain unlit white sphere on that entity — **half a character wide** (the body is
 `(2/3)·size` across, so the orb is a `size/3` diameter, `size/6` radius) — tracking the
-replicated position and shown only while `count >= 2`. No prediction/interpolation on the
-orb: it updates at the replication rate, smooth enough for a marker. The union-find /
+replicated position and shown only while `count >= 2`. The COM replicates at the network
+rate, so `draw_center_of_mass_orb` eases the orb toward it with a frame-rate-independent
+exponential smooth (`ORB_SMOOTH_RATE`, ~83 ms time constant) instead of snapping — it
+would otherwise step visibly between replicated positions. It snaps (no ease) when hidden
+or reappearing so it never slides in from a stale pose, and snaps the final sub-`ORB_SNAP_EPS`
+gap so a settled assembly stops dirtying `Transform`. The union-find /
 largest-component / weighted-COM math is factored into the pure `largest_assembly_per_room`
 helper with unit tests (`cargo test -p bad-spaceship-server`), since a live two-client
 joint-building session is the only other way to exercise it.

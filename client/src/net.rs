@@ -822,6 +822,7 @@ fn draw_replicated_parts(
 /// radius.
 fn draw_center_of_mass_orb(
     mut commands: Commands,
+    time: Res<Time>,
     // The orb's shared mesh + material, built lazily once the config size is loaded
     // (an asset, so not available at plugin build). One orb per room reuses them.
     mut appearance: Local<Option<(Handle<Mesh>, Handle<StandardMaterial>)>>,
@@ -831,14 +832,32 @@ fn draw_center_of_mass_orb(
     new: Query<(Entity, &NetCenterOfMass), Without<Mesh3d>>,
     mut existing: Query<(&NetCenterOfMass, &mut Transform, &mut Visibility), With<Mesh3d>>,
 ) {
-    // Track live orbs to their replicated COM + visibility every frame. Guard both
-    // writes so a settled/absent assembly stops dirtying `Transform`/`Visibility`.
+    // The COM replicates at the network rate, so snapping the orb straight to it steps
+    // visibly. Ease toward the target with a frame-rate-independent exponential smooth
+    // (~`1/ORB_SMOOTH_RATE`s time constant) so the marker glides. Snap (no ease) when
+    // it's hidden or reappearing so it never slides in from a stale pose, and snap the
+    // final sub-`ORB_SNAP_EPS` gap so a settled assembly stops dirtying `Transform`.
+    const ORB_SMOOTH_RATE: f32 = 12.0;
+    const ORB_SNAP_EPS: f32 = 1e-4;
+    let alpha = 1.0 - (-ORB_SMOOTH_RATE * time.delta_secs()).exp();
     for (com, mut transform, mut visibility) in &mut existing {
-        let position = Vec3::from_array(com.position);
-        if transform.translation != position {
-            transform.translation = position;
+        let target = Vec3::from_array(com.position);
+        let want_visible = com.count >= 2;
+        // Smooth only while it's staying visible; otherwise jump straight to the target.
+        let next = if want_visible && *visibility == Visibility::Visible {
+            let eased = transform.translation.lerp(target, alpha);
+            if eased.distance_squared(target) < ORB_SNAP_EPS * ORB_SNAP_EPS {
+                target
+            } else {
+                eased
+            }
+        } else {
+            target
+        };
+        if transform.translation != next {
+            transform.translation = next;
         }
-        let want = if com.count >= 2 { Visibility::Visible } else { Visibility::Hidden };
+        let want = if want_visible { Visibility::Visible } else { Visibility::Hidden };
         if *visibility != want {
             *visibility = want;
         }
