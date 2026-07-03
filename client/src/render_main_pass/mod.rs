@@ -1,7 +1,7 @@
 use bad_spaceship_shared::{
     map::PLATFORM_WIDTH_M,
     part::{Holdable, PartSeed, SuppressLocalParts},
-    Character, Grass,
+    Grass,
 };
 mod grass_material;
 pub mod metal_material;
@@ -60,7 +60,6 @@ impl Plugin for RenderMainPassPlugin {
                     // part renderer to avoid double meshes.
                     assign_parts.run_if(not(resource_exists::<SuppressLocalParts>)),
                     assign_grass,
-                    assign_characters,
                 ),
             );
     }
@@ -126,38 +125,6 @@ fn assign_parts(
                 // The whole look derives from the part's spawn seed — the same
                 // derivation the multiplayer client runs on `NetPart::seed`.
                 MeshMaterial3d(materials.add(metal_material(seed.0))),
-            ))
-            .insert(AssignedMaterial);
-    }
-}
-
-fn assign_characters(
-    mut commands: Commands,
-    unassigned: Query<
-        (Entity, &Collider, &Transform, &GlobalTransform),
-        (With<Character>, Without<AssignedMaterial>),
-    >,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    mut meshes: ResMut<Assets<Mesh>>,
-) {
-    for (entity, collider_shape, transform, global_transform) in unassigned.iter() {
-        commands
-            .entity(entity)
-            .insert((
-                transform.clone(),
-                global_transform.clone(),
-                Mesh3d(meshes.add({
-                    // Mirror the capsule collider (via Avian's `.shape()`): parry's
-                    // `Capsule` is a segment + radius; the segment length is the
-                    // cylindrical mid-section Bevy's `Capsule3d::new` wants.
-                    let capsule = collider_shape.shape().as_capsule().unwrap();
-                    let length = (capsule.segment.b - capsule.segment.a).length();
-                    Capsule3d::new(capsule.radius, length)
-                })),
-                MeshMaterial3d(materials.add(StandardMaterial {
-                    base_color: Color::srgb(0.8, 0.8, 0.8),
-                    ..Default::default()
-                })),
             ))
             .insert(AssignedMaterial);
     }

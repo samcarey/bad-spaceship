@@ -79,6 +79,13 @@ once_cell = "1.8"
 # renderer in via bevy_pbr (3D/lighting) + bevy_core_pipeline, plus glTF and winit.
 default = [
     "bevy/bevy_gltf",
+    # Skeletal animation for the player monster models (Idle/Walk clips from
+    # the glTFs in assets/monsters/). NOT plain `bevy/bevy_animation`: the glTF
+    # loader only imports clips and attaches `AnimationPlayer`s when its own
+    # optional animation dep is on, which only `gltf_animation` enables (it
+    # pulls `bevy_animation` too). Without it scenes load fine but silently
+    # carry no animations.
+    "bevy/gltf_animation",
     "bevy/bevy_winit",
     "bevy/bevy_pbr",
     "bevy/bevy_core_pipeline",

@@ -22,6 +22,7 @@ use ui::UiPlugin;
 mod gamepad;
 mod input;
 mod mobile;
+mod monster;
 mod net;
 mod platform;
 mod render_main_pass;
@@ -81,6 +82,7 @@ fn main() {
             PlatformPlugin,
             HighlightPlugin,
             RenderMainPassPlugin,
+            monster::MonsterPlugin,
             RenderSecondaryPassPlugin,
             CommonPlugins,
         ))

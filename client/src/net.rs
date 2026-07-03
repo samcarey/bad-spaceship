@@ -91,7 +91,7 @@ fn multiplayer_room() -> [u8; 6] {
 struct ResumeId(u64);
 
 #[cfg(not(target_arch = "wasm32"))]
-fn resume_id() -> u64 {
+pub(crate) fn resume_id() -> u64 {
     0
 }
 
@@ -99,7 +99,7 @@ fn resume_id() -> u64 {
 /// mint + persist one on first run. An app-level token (NOT the netcode `client_id`)
 /// so a quick reconnect isn't rejected as a duplicate connection.
 #[cfg(target_arch = "wasm32")]
-fn resume_id() -> u64 {
+pub(crate) fn resume_id() -> u64 {
     let Some(storage) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) else {
         return 0;
     };
@@ -738,33 +738,21 @@ struct AvatarVisual(Entity);
 /// raw `Confirmed` entities stay invisible.
 fn draw_replicated_players(
     mut commands: Commands,
-    new_players: Query<Entity, (With<NetPlayer>, With<Interpolated>, Without<AvatarVisual>)>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    new_players: Query<(Entity, &NetPlayer), (With<Interpolated>, Without<AvatarVisual>)>,
+    asset_server: Res<AssetServer>,
 ) {
-    for entity in &new_players {
-        // A small contrasting "nose" on the front (+Z) so the avatar's facing is
-        // visible — the body's footprint alone can't show a yaw rotation.
-        let nose = commands
-            .spawn((
-                Mesh3d(meshes.add(Cuboid::new(0.3, 0.3, 0.6))),
-                MeshMaterial3d(materials.add(Color::srgb(1.0, 0.85, 0.2))),
-                Transform::from_xyz(0.0, 0.0, 0.9),
-            ))
-            .id();
-        // The pivot carries the body mesh and is rotated to the look yaw; the avatar
-        // entity itself keeps the Avian-driven Transform (translation only).
-        let pivot = commands
-            .spawn((
-                Mesh3d(meshes.add(Cuboid::new(0.8, 1.2, 1.6))),
-                MeshMaterial3d(materials.add(Color::srgb(0.9, 0.35, 0.35))),
-                Transform::default(),
-            ))
-            .add_children(&[nose])
-            .id();
+    for (entity, player) in &new_players {
+        // The player's assigned monster (server-replicated, so everyone sees
+        // the same one); its face shows the yaw the pivot is rotated to.
+        let pivot = crate::monster::spawn_monster_visual(
+            &mut commands,
+            entity,
+            player.monster,
+            &asset_server,
+        );
         commands
             .entity(entity)
-            .insert(AvatarVisual(pivot))
+            .insert((AvatarVisual(pivot), Visibility::default()))
             .add_children(&[pivot]);
     }
 }
