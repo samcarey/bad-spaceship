@@ -198,6 +198,10 @@ pub fn metal_material(seed: u32) -> MetalMaterial {
         Finish::Circular => (range(110.0, 240.0), range(0.06, 0.2)),
         // Spangle crystals per face; strong contrast is the whole look.
         Finish::Galvanized => (range(6.0, 16.0), range(0.25, 0.5)),
+        // The random-part generator (`finish_and_tint`) never yields `Striped` —
+        // that finish is only built directly by `rocket_body_material` — so this
+        // arm is unreachable via this path; the band count lives there.
+        Finish::Striped => (ROCKET_STRIPE_BANDS, 0.0),
     };
     ExtendedMaterial {
         base: StandardMaterial {
