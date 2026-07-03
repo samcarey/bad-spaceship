@@ -22,7 +22,7 @@ MONSTERS = [
 OUTSIZE = 128      # final thumbnail size (px)
 SS = 4             # supersample factor
 FACE_DROP = 0.27   # center the crop this fraction of height below the top
-FACE_ZOOM = 0.36   # square half-size as fraction of model height
+FACE_ZOOM = 0.45   # square half-size as fraction of model height
 LIGHT = np.array([0.35, 0.55, 1.0]); LIGHT = LIGHT / np.linalg.norm(LIGHT)
 AMBIENT = 0.62
 
