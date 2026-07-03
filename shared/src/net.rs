@@ -201,6 +201,9 @@ impl MapEntities for NetInput {
 pub struct NetPart {
     pub half_extents: [f32; 3],
     pub id: u64,
+    /// Appearance seed (see `PartSeed`): clients derive the part's metal look
+    /// from it, so every client renders the same part identically.
+    pub seed: u32,
 }
 
 /// A replicated joint between two parts. Carries enough to reconstruct the joint

@@ -1,38 +1,56 @@
 use bad_spaceship_shared::{
     map::PLATFORM_WIDTH_M,
-    part::{Holdable, SuppressLocalParts},
+    part::{Holdable, PartSeed, SuppressLocalParts},
     Character, Grass,
 };
 mod grass_material;
+pub mod metal_material;
 
 // Bevy 0.17's render-crate split relocated several types out of `bevy_render`:
 // `CascadeShadowConfigBuilder` → `bevy_light` (`bevy::light`), `Indices` /
 // `VertexAttributeValues` → `bevy_mesh` (`bevy::mesh`), and `RenderAssetUsages`
 // → `bevy_asset` (`bevy::asset`).
 use bevy::{
-    asset::{load_internal_asset, RenderAssetUsages},
+    asset::{load_internal_asset, uuid_handle, RenderAssetUsages},
     light::CascadeShadowConfigBuilder,
     mesh::{Indices, VertexAttributeValues},
     pbr::ExtendedMaterial,
     prelude::*,
 };
 use grass_material::{GrassExtension, GrassMaterial, GRASS_SHADER_HANDLE};
+use metal_material::{metal_material, MetalMaterial, METAL_SHADER_HANDLE};
+
+/// The shared noise library both material shaders `#import` (see
+/// `bad_spaceship::noise` in the WGSL); registering it makes the import path
+/// resolvable when the material pipelines compile.
+const NOISE_SHADER_HANDLE: Handle<Shader> =
+    uuid_handle!("26176534-6a5e-4030-8788-5ebe6e74318d");
 use avian3d::prelude::Collider;
-use rand::Rng;
 
 pub struct RenderMainPassPlugin;
 
 impl Plugin for RenderMainPassPlugin {
     fn build(&self, app: &mut App) {
         // Embedded like the gizmo shader (`render_secondary_pass`): compiled
-        // into the binary under a weak handle, so the web build fetches nothing.
+        // into the binary under weak handles, so the web build fetches nothing.
+        // The noise library goes first — the material shaders `#import` it.
+        load_internal_asset!(app, NOISE_SHADER_HANDLE, "../../assets/noise.wgsl", Shader::from_wgsl);
         load_internal_asset!(
             app,
             GRASS_SHADER_HANDLE,
             "../../assets/grass_material.wgsl",
             Shader::from_wgsl
         );
-        app.add_plugins(MaterialPlugin::<GrassMaterial>::default())
+        load_internal_asset!(
+            app,
+            METAL_SHADER_HANDLE,
+            "../../assets/metal_material.wgsl",
+            Shader::from_wgsl
+        );
+        app.add_plugins((
+            MaterialPlugin::<GrassMaterial>::default(),
+            MaterialPlugin::<MetalMaterial>::default(),
+        ))
             .add_systems(Startup, add_lighting)
             .add_systems(
                 Update,
@@ -82,20 +100,16 @@ fn add_lighting(mut commands: Commands) {
 #[derive(Component)]
 struct AssignedMaterial;
 
-const COLOR_MIN: f32 = 0.2;
-const COLOR_MAX: f32 = 0.7;
-
 fn assign_parts(
     mut commands: Commands,
     unassigned: Query<
-        (Entity, &Collider, &Transform, &GlobalTransform),
+        (Entity, &Collider, &Transform, &GlobalTransform, &PartSeed),
         (With<Holdable>, Without<AssignedMaterial>),
     >,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut materials: ResMut<Assets<MetalMaterial>>,
     mut meshes: ResMut<Assets<Mesh>>,
 ) {
-    let mut rng = rand::thread_rng();
-    for (entity, collider_shape, transform, global_transform) in unassigned.iter() {
+    for (entity, collider_shape, transform, global_transform, seed) in unassigned.iter() {
         // Avian colliders expose their parry shape via `.shape()`; parry's
         // `Cuboid::half_extents` is a field (nalgebra `Vector3`, still indexable).
         let dims = collider_shape.shape().as_cuboid().unwrap().half_extents;
@@ -109,17 +123,9 @@ fn assign_parts(
                 // Bevy 0.13 deprecated `shape::*` in favour of `bevy_math`
                 // primitives; the collider half-extents map to a full-size cuboid.
                 Mesh3d(meshes.add(Cuboid::new(dims[0] * 2.0, dims[1] * 2.0, dims[2] * 2.0))),
-                MeshMaterial3d(materials.add(StandardMaterial {
-                    base_color: Color::srgb(
-                        rng.gen_range(COLOR_MIN..=COLOR_MAX),
-                        rng.gen_range(COLOR_MIN..=COLOR_MAX),
-                        rng.gen_range(COLOR_MIN..=COLOR_MAX),
-                    ),
-                    perceptual_roughness: rng.gen_range(0.0..=1.0),
-                    metallic: rng.gen_range(0.0..=1.0),
-                    reflectance: rng.gen_range(0.0..=1.0),
-                    ..Default::default()
-                })),
+                // The whole look derives from the part's spawn seed — the same
+                // derivation the multiplayer client runs on `NetPart::seed`.
+                MeshMaterial3d(materials.add(metal_material(seed.0))),
             ))
             .insert(AssignedMaterial);
     }

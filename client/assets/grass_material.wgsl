@@ -11,12 +11,9 @@
 //    procedural noise, and its tangent-space view offset is rebuilt in world
 //    space (the ground's grass-space UV is just world XZ, so no mesh
 //    tangents are needed).
-//  - tuxalin/procedural-tileable-shaders (github, MIT): `ihash1D` (Hugo
-//    Elias' integer hash) + `betterHash2D` + the quintic-interpolated value
-//    noise those textures would have contained. The GLSL hashes cast the
-//    position straight to uint, which is undefined for the negative world
-//    coordinates half our platform lives at — the port goes through i32
-//    first (two's-complement bitcast, well-defined in WGSL).
+//  - the shared noise library (`noise.wgsl`, ported from
+//    tuxalin/procedural-tileable-shaders, MIT) replaces the noise those
+//    textures would have contained.
 //
 // This is a `MaterialExtension` on StandardMaterial: only `base_color` is
 // computed here, then the standard PBR path (sun + ambient + received
@@ -27,6 +24,7 @@
     pbr_fragment::pbr_input_from_standard_material,
     mesh_view_bindings::view,
 }
+#import bad_spaceship::noise::{vnoise, fbm}
 
 #ifdef PREPASS_PIPELINE
 #import bevy_pbr::{
@@ -66,36 +64,6 @@ var<uniform> grass: GrassParams;
 // below is a statically-bounded, unrollable loop for mobile GLSL compilers.
 const LAYERS: i32 = 8;
 const INV_LAYERS: f32 = 1.0 / f32(LAYERS);
-
-// Hugo Elias' integer hash, 4 lanes (tuxalin `ihash1D`, MIT).
-fn ihash1d(q0: vec4<u32>) -> vec4<u32> {
-    var q = q0 * 747796405u + 2891336453u;
-    q = (q << vec4(13u)) ^ q;
-    return q * (q * q * 15731u + 789221u) + 1376312589u;
-}
-
-// One random value per cell corner (tuxalin `betterHash2D(vec4)`, MIT).
-// `cell` is (x0, y0, x1, y1); returns hashes of (x0,y0),(x1,y0),(x0,y1),(x1,y1).
-fn hash_corners(cell: vec4<f32>) -> vec4<f32> {
-    let i = bitcast<vec4<u32>>(vec4<i32>(floor(cell)));
-    let h = ihash1d(ihash1d(i.xzxz) + i.yyww);
-    return vec4<f32>(h) * (1.0 / 4294967295.0);
-}
-
-// 2D value noise, quintic-interpolated (tuxalin `noise(vec2,..)`, MIT —
-// minus the domain tiling: world space never wraps). Range [0, 1].
-fn vnoise(pos: vec2<f32>) -> f32 {
-    let ip = floor(pos);
-    let f = pos - ip;
-    let h = hash_corners(vec4(ip, ip + 1.0));
-    let u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
-    return mix(mix(h.x, h.y, u.x), mix(h.z, h.w, u.x), u.y);
-}
-
-// Two-octave FBM — stands in for the turf shader's authored noise texture.
-fn fbm(pos: vec2<f32>) -> f32 {
-    return vnoise(pos) * 0.6667 + vnoise(pos * 2.0 + vec2(37.2, 17.7)) * 0.3333;
-}
 
 @fragment
 fn fragment(

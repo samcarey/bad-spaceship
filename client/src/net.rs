@@ -23,6 +23,7 @@ use bad_spaceship_shared::net::{
 };
 use bad_spaceship_shared::part::{insert_part_physics, Holdable, SuppressLocalParts};
 use bad_spaceship_shared::player::make_local_player;
+use crate::render_main_pass::metal_material::{metal_material, metal_tint, MetalMaterial};
 use crate::render_secondary_pass::gizmo_material::GizmoMaterial;
 use crate::render_secondary_pass::JointAppearance;
 use bad_spaceship_shared::{
@@ -474,8 +475,8 @@ fn write_input(
 /// you look at next once you've grabbed.
 fn highlight_grabbable(
     player: Query<&FocusedInteractable, With<Player>>,
-    parts: Query<&MeshMaterial3d<StandardMaterial>, With<NetPart>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    parts: Query<(&MeshMaterial3d<MetalMaterial>, &NetPart)>,
+    mut materials: ResMut<Assets<MetalMaterial>>,
     // The previously-highlighted part, so we only re-colour on change. Mutating a
     // material flags it for GPU re-upload, so recolouring every part every frame
     // (when nothing moved) would needlessly re-upload all of them.
@@ -485,13 +486,15 @@ fn highlight_grabbable(
     if *lit == highlighted {
         return;
     }
-    let recolour = |entity, materials: &mut Assets<StandardMaterial>, lit: bool| {
-        if let Ok(material) = parts.get(entity) {
+    let recolour = |entity, materials: &mut Assets<MetalMaterial>, lit: bool| {
+        if let Ok((material, part)) = parts.get(entity) {
             if let Some(mut mat) = materials.get_mut(&material.0) {
-                (mat.base_color, mat.emissive) = if lit {
+                (mat.base.base_color, mat.base.emissive) = if lit {
                     (Color::srgb(1.0, 1.0, 0.0), LinearRgba::rgb(0.6, 0.6, 0.0))
                 } else {
-                    (Color::srgb(0.55, 0.6, 0.72), LinearRgba::BLACK)
+                    // The part's own colour re-derives from its seed (the
+                    // metal look is deterministic), so nothing is stored.
+                    (metal_tint(part.seed), LinearRgba::BLACK)
                 };
             }
         }
@@ -795,7 +798,7 @@ fn draw_replicated_parts(
     mut commands: Commands,
     new_parts: Query<(Entity, &NetPart), (With<Predicted>, With<Position>, With<Rotation>, Without<Mesh3d>)>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut materials: ResMut<Assets<MetalMaterial>>,
 ) {
     for (entity, part) in &new_parts {
         let [hx, hy, hz] = part.half_extents;
@@ -803,7 +806,9 @@ fn draw_replicated_parts(
         insert_part_physics(&mut e, Vec3::new(hx, hy, hz));
         e.insert((
             Mesh3d(meshes.add(Cuboid::new(hx * 2.0, hy * 2.0, hz * 2.0))),
-            MeshMaterial3d(materials.add(Color::srgb(0.55, 0.6, 0.72))),
+            // Derived from the replicated seed, so every client renders this
+            // part identically (and the same as single-player would).
+            MeshMaterial3d(materials.add(metal_material(part.seed))),
             Holdable,
             // Render-interpolate the predicted block between fixed ticks (same reason
             // as the character) so loose/held blocks move smoothly.

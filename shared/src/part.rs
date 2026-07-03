@@ -87,6 +87,13 @@ struct Interactable;
 #[derive(Default, Component)]
 pub struct Holdable;
 
+/// The part's random-appearance seed, minted at spawn. The client derives the
+/// whole metal look (tint, brushing, flakes, scratches) deterministically from
+/// it; in multiplayer it rides `NetPart` so every client renders the same part
+/// identically.
+#[derive(Component, Clone, Copy)]
+pub struct PartSeed(pub u32);
+
 #[derive(Default, Component)]
 struct GetsReplaced;
 
@@ -180,13 +187,13 @@ fn spawn_part(mut commands: Commands, mut new_part_events: MessageReader<NewPart
 
 /// Spawn one random dynamic part (the standard collider + physics props) at a
 /// random spawn-zone position, returning its entity and the cuboid's
-/// half-extents. Shared by the single-player spawner and the multiplayer server's
-/// per-room spawner; the caller adds any extra tagging (replication, room
-/// membership, collision layers). The half-extents let the server fill `NetPart`
-/// without re-reading the collider after the spawn flushes. Owns its RNG so the
-/// server doesn't need to depend on `rand` (a `ThreadRng` is a cheap thread-local
-/// handle).
-pub fn spawn_random_part(commands: &mut Commands) -> (Entity, Vec3) {
+/// half-extents plus its appearance seed. Shared by the single-player spawner
+/// and the multiplayer server's per-room spawner; the caller adds any extra
+/// tagging (replication, room membership, collision layers). The half-extents
+/// and seed let the server fill `NetPart` without re-reading components after
+/// the spawn flushes. Owns its RNG so the server doesn't need to depend on
+/// `rand` (a `ThreadRng` is a cheap thread-local handle).
+pub fn spawn_random_part(commands: &mut Commands) -> (Entity, Vec3, u32) {
     let mut rng = rand::thread_rng();
     let collider = get_random_shape(&mut rng);
     // Every random shape is a cuboid (see `get_random_shape`); recover its
@@ -201,9 +208,11 @@ pub fn spawn_random_part(commands: &mut Commands) -> (Entity, Vec3) {
         rng.gen_range(5.0..=15.0),
         rng.gen_range(-SPAWN_ZONE_HALF_WIDTH..=SPAWN_ZONE_HALF_WIDTH),
     );
+    let seed = rng.gen();
     let mut e = commands.spawn_empty();
     insert_part_physics(&mut e, half_extents);
     e.insert((
+        PartSeed(seed),
         // Bevy 0.15: bare `Transform` (it now requires `GlobalTransform`).
         // Set Avian `Position` too, not just `Transform`: in multiplayer the server
         // disables Avian's `PhysicsTransformPlugin` (lightyear_avian owns the sync),
@@ -215,7 +224,7 @@ pub fn spawn_random_part(commands: &mut Commands) -> (Entity, Vec3) {
         Position(spawn),
         PartBundle::default(),
     ));
-    (e.id(), half_extents)
+    (e.id(), half_extents, seed)
 }
 
 /// Insert the shared dynamic-part physics (collider + mass/friction/restitution +

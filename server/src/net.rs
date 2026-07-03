@@ -630,8 +630,8 @@ fn record_resume_positions(
 /// copy falls in sync rather than drifting.
 fn spawn_room_world(commands: &mut Commands, room: Room) {
     for _ in 0..NUM_PARTS {
-        let (entity, half_extents) = spawn_random_part(commands);
-        tag_room_part(commands, entity, half_extents, room);
+        let (entity, half_extents, seed) = spawn_random_part(commands);
+        tag_room_part(commands, entity, half_extents, seed, room);
     }
 }
 
@@ -640,12 +640,12 @@ fn spawn_room_world(commands: &mut Commands, room: Room) {
 /// replicated + predicted, scoped to the room's `Rooms`, and isolated to the
 /// room's collision layer (it collides only with same-room parts and the ground —
 /// default bit 0).
-fn tag_room_part(commands: &mut Commands, entity: Entity, half_extents: Vec3, room: Room) {
+fn tag_room_part(commands: &mut Commands, entity: Entity, half_extents: Vec3, seed: u32, room: Room) {
     commands.entity(entity).insert((
         // `id` is the part's stable cross-network identity (this entity's bits), so
         // a replicated `NetJoint` can name its two endpoints and the client can find
         // the matching *predicted* parts to joint locally.
-        NetPart { half_extents: half_extents.to_array(), id: entity.to_bits() },
+        NetPart { half_extents: half_extents.to_array(), id: entity.to_bits(), seed },
         Replicate::to_clients(NetworkTarget::All),
         // Predict the loose blocks on every client in the room: each client
         // simulates them locally (so shoving one is instant) and rollback reconciles
@@ -810,8 +810,8 @@ fn server_attach(
                         if !had_joint.contains(&endpoint) && !replaced.contains(&endpoint) {
                             replaced.push(endpoint);
                             if let Some(room) = held_room {
-                                let (new_entity, half_extents) = spawn_random_part(&mut commands);
-                                tag_room_part(&mut commands, new_entity, half_extents, room);
+                                let (new_entity, half_extents, seed) = spawn_random_part(&mut commands);
+                                tag_room_part(&mut commands, new_entity, half_extents, seed, room);
                             }
                         }
                     }
@@ -949,11 +949,12 @@ fn replace_fallen_room_parts(
     for (entity, transform, part_room) in &parts {
         if transform.translation.y < -10.0 {
             commands.entity(entity).despawn();
-            let (new_entity, half_extents) = spawn_random_part(&mut commands);
+            let (new_entity, half_extents, seed) = spawn_random_part(&mut commands);
             tag_room_part(
                 &mut commands,
                 new_entity,
                 half_extents,
+                seed,
                 Room { id: part_room.id, bit: part_room.bit },
             );
         }

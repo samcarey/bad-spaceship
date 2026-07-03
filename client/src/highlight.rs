@@ -1,3 +1,4 @@
+use crate::render_main_pass::metal_material::MetalMaterial;
 use bad_spaceship_shared::{Attachable, Focused};
 use bevy::prelude::*;
 
@@ -30,17 +31,17 @@ struct FocusedHighlight {
 fn attacheable_add_highlight(
     mut commands: Commands,
     attachables: Query<
-        (Entity, &MeshMaterial3d<StandardMaterial>),
+        (Entity, &MeshMaterial3d<MetalMaterial>),
         (
             With<Attachable>,
             Without<AttachableHighlight>,
             Without<FocusedHighlight>,
         ),
     >,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut materials: ResMut<Assets<MetalMaterial>>,
 ) {
     for (entity, material_handle) in attachables.iter() {
-        let color = &mut materials.get_mut(material_handle.id()).unwrap().base_color;
+        let color = &mut materials.get_mut(material_handle.id()).unwrap().base.base_color;
         commands.entity(entity).insert(AttachableHighlight {
             base_color: *color,
         });
@@ -54,17 +55,17 @@ fn attacheable_add_highlight(
 fn focused_add_highlight(
     mut commands: Commands,
     newly_focused: Query<
-        (Entity, &MeshMaterial3d<StandardMaterial>),
+        (Entity, &MeshMaterial3d<MetalMaterial>),
         (
             With<Focused>,
             Without<FocusedHighlight>,
             Without<AttachableHighlight>,
         ),
     >,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut materials: ResMut<Assets<MetalMaterial>>,
 ) {
     for (entity, material_handle) in newly_focused.iter() {
-        let color = &mut materials.get_mut(material_handle.id()).unwrap().base_color;
+        let color = &mut materials.get_mut(material_handle.id()).unwrap().base.base_color;
         commands.entity(entity).insert(FocusedHighlight {
             base_color: *color,
         });
@@ -77,13 +78,13 @@ fn focused_add_highlight(
 fn focused_remove_highlight(
     mut commands: Commands,
     higlighted: Query<
-        (Entity, &MeshMaterial3d<StandardMaterial>, &FocusedHighlight),
+        (Entity, &MeshMaterial3d<MetalMaterial>, &FocusedHighlight),
         Without<Focused>,
     >,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut materials: ResMut<Assets<MetalMaterial>>,
 ) {
     for (entity, material_handle, highlight) in higlighted.iter() {
-        let color = &mut materials.get_mut(material_handle.id()).unwrap().base_color;
+        let color = &mut materials.get_mut(material_handle.id()).unwrap().base.base_color;
         *color = highlight.base_color;
         commands.entity(entity).remove::<FocusedHighlight>();
     }
@@ -92,13 +93,13 @@ fn focused_remove_highlight(
 fn attachable_remove_highlight(
     mut commands: Commands,
     higlighted: Query<
-        (Entity, &MeshMaterial3d<StandardMaterial>, &AttachableHighlight),
+        (Entity, &MeshMaterial3d<MetalMaterial>, &AttachableHighlight),
         Without<Attachable>,
     >,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut materials: ResMut<Assets<MetalMaterial>>,
 ) {
     for (entity, material_handle, highlight) in higlighted.iter() {
-        let color = &mut materials.get_mut(material_handle.id()).unwrap().base_color;
+        let color = &mut materials.get_mut(material_handle.id()).unwrap().base.base_color;
         *color = highlight.base_color;
         commands.entity(entity).remove::<AttachableHighlight>();
     }
