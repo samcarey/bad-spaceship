@@ -93,9 +93,15 @@ pub fn insert_character_body(entity: &mut EntityCommands, size: f32) {
     entity.insert((
         RigidBody::Dynamic,
         LockedAxes::ROTATION_LOCKED,
-        // Avian's sphere constructor (rapier's "ball"). Avian collides all collider
-        // pairs by default, so rapier's `ActiveCollisionTypes` opt-in is dropped.
-        Collider::sphere(size / 2.0),
+        // Pill body: a vertical capsule (round top and bottom) with the same
+        // TOTAL height as the old `size`-diameter sphere — radius size/3 plus a
+        // size/3 cylindrical middle = size tall, so the collider centre sits at
+        // the same height above ground contact and the camera/hold-point
+        // geometry tuned for the sphere carries over; the body just slims from
+        // `size` wide to (2/3)·size. Rotation stays locked, so it never tips.
+        // (Avian's `capsule` takes the radius and the cylindrical mid-section
+        // length, not the total height.)
+        Collider::capsule(size / 3.0, size / 3.0),
         // Pin mass to 1.0; movement sets velocity directly so this only scales how
         // the character shoves parts on contact.
         Mass(1.0),

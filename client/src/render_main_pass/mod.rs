@@ -146,13 +146,14 @@ fn assign_characters(
             .insert((
                 transform.clone(),
                 global_transform.clone(),
-                Mesh3d(meshes.add(
-                    // parry's `Ball::radius` is a field (via Avian's `.shape()`).
-                    Sphere::new(collider_shape.shape().as_ball().unwrap().radius)
-                        .mesh()
-                        .ico(5)
-                        .unwrap(),
-                )),
+                Mesh3d(meshes.add({
+                    // Mirror the capsule collider (via Avian's `.shape()`): parry's
+                    // `Capsule` is a segment + radius; the segment length is the
+                    // cylindrical mid-section Bevy's `Capsule3d::new` wants.
+                    let capsule = collider_shape.shape().as_capsule().unwrap();
+                    let length = (capsule.segment.b - capsule.segment.a).length();
+                    Capsule3d::new(capsule.radius, length)
+                })),
                 MeshMaterial3d(materials.add(StandardMaterial {
                     base_color: Color::srgb(0.8, 0.8, 0.8),
                     ..Default::default()
