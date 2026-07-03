@@ -15,7 +15,10 @@
 
 use std::time::Duration;
 
-use bad_spaceship_shared::{net::monster_index, Character, Yaw};
+use bad_spaceship_shared::{
+    net::{monster_index, MONSTER_COUNT},
+    Character, Yaw,
+};
 use bevy::{
     gltf::GltfAssetLabel, prelude::*, world_serialization::WorldAssetRoot,
     world_serialization::WorldInstanceReady,
@@ -24,7 +27,7 @@ use bevy::{
 /// (asset path, uniform scale). The scale normalizes each model's rest-pose
 /// height (measured from the glTF POSITION bounds) to the capsule's 1.5 m so
 /// every monster stands exactly as tall as the body it dresses.
-pub const MONSTERS: [(&str, f32); 8] = [
+const MONSTERS: [(&str, f32); 8] = [
     ("monsters/Alien.glb", 1.5 / 2.06),
     ("monsters/Alien_Tall.glb", 1.5 / 2.11),
     ("monsters/Ghost.glb", 1.5 / 1.40),
@@ -34,6 +37,11 @@ pub const MONSTERS: [(&str, f32); 8] = [
     ("monsters/Yeti.glb", 1.5 / 1.67),
     ("monsters/Mushroom.glb", 1.5 / 2.07),
 ];
+
+// The assignment hash (shared, so the server agrees) reduces modulo
+// MONSTER_COUNT; tie the table to it so adding a model without bumping the
+// shared count is a build error instead of a silently unreachable monster.
+const _: () = assert!(MONSTERS.len() == MONSTER_COUNT as usize);
 
 /// Animation indices in the packs' glTF: identical across all 8 shipped
 /// models (verified from the JSON: Bite_Front, Bite_InPlace, Dance, Death,
@@ -55,13 +63,21 @@ pub struct MonsterPlugin;
 
 impl Plugin for MonsterPlugin {
     fn build(&self, app: &mut App) {
-        // The world-asset (glTF scene) spawner instantiates through reflection
-        // and panics on any scene component missing from the type registry.
-        // Bevy's default `reflect_auto_register` feature would register
-        // everything (and bloat the wasm with reflection metadata for the
-        // whole engine); this build runs `default-features = false`, so
-        // register exactly what the monster GLBs contain.
-        app.register_type::<Transform>()
+        register_gltf_scene_types(app);
+        app.insert_resource(LocalMonster(local_monster()))
+            .add_systems(Update, (dress_characters, face_own_monster, animate_monsters));
+    }
+}
+
+/// The world-asset (glTF scene) spawner instantiates through reflection and
+/// panics on any scene component missing from the type registry. Bevy's
+/// default `reflect_auto_register` feature would register everything (and
+/// bloat the wasm with reflection metadata for the whole engine); this build
+/// runs `default-features = false`, so register exactly what glTF
+/// scene-worlds contain. Named for what it is: anything else that loads a
+/// glTF scene needs this too.
+fn register_gltf_scene_types(app: &mut App) {
+    app.register_type::<Transform>()
             .register_type::<bevy::transform::components::TransformTreeChanged>()
             .register_type::<GlobalTransform>()
             .register_type::<Name>()
@@ -82,9 +98,6 @@ impl Plugin for MonsterPlugin {
             .register_type::<bevy::gltf::GltfMeshName>()
             .register_type::<bevy::gltf::GltfMaterialName>()
             .register_type::<bevy::gltf::GltfExtras>();
-        app.insert_resource(LocalMonster(local_monster()))
-            .add_systems(Update, (dress_characters, face_own_monster, animate_monsters));
-    }
 }
 
 /// The monster used when no replicated assignment exists (single-player): same
@@ -102,19 +115,20 @@ fn local_monster() -> u8 {
 
 /// Marks a body (own character or remote avatar) as dressed.
 #[derive(Component)]
-pub struct MonsterVisual;
+struct MonsterVisual;
 
-/// The yaw pivot on the *own* body, rotated from `Yaw` each frame (remote
-/// avatars' pivots are rotated by `face_replicated_players` instead).
+/// On the *own* body: its yaw pivot entity, rotated from `Yaw` each frame
+/// (remote avatars' pivots ride `AvatarVisual` and are rotated by
+/// `face_replicated_players` instead — same shape, same sign convention).
 #[derive(Component)]
-struct OwnMonsterPivot;
+struct OwnMonsterPivot(Entity);
 
-/// On the scene-root entity: which body/monster it dresses, so the
+/// On the scene-root entity: which body it dresses and its model path, so the
 /// `WorldInstanceReady` observer can wire the animations.
 #[derive(Component)]
 struct MonsterScene {
     body: Entity,
-    monster: u8,
+    path: &'static str,
 }
 
 /// On the body once its scene is ready: the `AnimationPlayer` entity plus the
@@ -144,7 +158,7 @@ pub fn spawn_monster_visual(
     let (path, scale) = MONSTERS[monster as usize % MONSTERS.len()];
     let scene = commands
         .spawn((
-            MonsterScene { body, monster },
+            MonsterScene { body, path },
             WorldAssetRoot(asset_server.load(GltfAssetLabel::Scene(0).from_asset(path))),
             Transform::from_xyz(0.0, FEET_Y, 0.0).with_scale(Vec3::splat(scale)),
         ))
@@ -171,28 +185,32 @@ fn dress_characters(
     local: Res<LocalMonster>,
     asset_server: Res<AssetServer>,
 ) {
+    // Ordering note: in multiplayer, `Character` is only ever inserted by
+    // `setup_predicted_avatar`, whose query requires `NetPlayer` — so the
+    // `unwrap_or(local)` fallback can only fire in genuine single-player.
     for (entity, net) in &undressed {
         let monster = net.map(|n| n.monster).unwrap_or(local.0);
         let pivot = spawn_monster_visual(&mut commands, entity, monster, &asset_server);
-        commands.entity(pivot).insert(OwnMonsterPivot);
         // The body root never had a mesh (the capsule is collider-only), so
         // give it the visibility components the mesh children inherit through.
         commands
             .entity(entity)
-            .insert((MonsterVisual, Visibility::default()));
+            .insert((MonsterVisual, OwnMonsterPivot(pivot), Visibility::default()));
     }
 }
 
 /// Turn the own monster to the look yaw (same sign convention as
-/// `face_replicated_players`: the models face +Z).
+/// `face_replicated_players`: the models face +Z). Compare-before-write so a
+/// stationary look doesn't dirty the pivot's transform tree every frame.
 fn face_own_monster(
-    own: Query<(&Yaw, &Children), With<MonsterVisual>>,
-    mut pivots: Query<&mut Transform, With<OwnMonsterPivot>>,
+    own: Query<(&Yaw, &OwnMonsterPivot)>,
+    mut pivots: Query<&mut Transform>,
 ) {
-    for (yaw, children) in &own {
-        for child in children.iter() {
-            if let Ok(mut transform) = pivots.get_mut(child) {
-                transform.rotation = Quat::from_rotation_y(-yaw.0);
+    for (yaw, pivot) in &own {
+        if let Ok(mut transform) = pivots.get_mut(pivot.0) {
+            let rotation = Quat::from_rotation_y(-yaw.0);
+            if transform.rotation != rotation {
+                transform.rotation = rotation;
             }
         }
     }
@@ -212,7 +230,7 @@ fn setup_monster_animation(
     let Ok(scene) = scenes.get(ready.entity) else {
         return;
     };
-    let (path, _) = MONSTERS[scene.monster as usize % MONSTERS.len()];
+    let path = scene.path;
     for child in children.iter_descendants(ready.entity) {
         let Ok(mut player) = players.get_mut(child) else {
             continue;

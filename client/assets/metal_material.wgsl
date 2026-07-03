@@ -11,8 +11,10 @@
 // is also what lets the focus-highlight systems keep recoloring parts by
 // writing `base.base_color`/`emissive` exactly as before.
 //
-// Cost: three value-noise evaluations per fragment, no loops, no textures —
-// cheaper than the grass turf march (mobile WebGL2 is the floor).
+// Cost: 1-2 value-noise evaluations per fragment for brushed/circular (flake
+// and scratch layers are skipped entirely for parts whose strength is zero —
+// a uniform branch, no divergence), or one 3x3 Voronoi cell loop for
+// galvanized. No textures. Mobile WebGL2 is the floor this runs on.
 
 #import bevy_pbr::{
     pbr_fragment::pbr_input_from_standard_material,
@@ -135,17 +137,22 @@ fn fragment(
         + edge * 0.1;
 
     // Galvanized/flake sparkle: rare bright cells of high-frequency noise get a
-    // brightness kick and a polished (low-roughness) spot.
-    let flake = step(0.82, vnoise(uv * metal.flake_freq)) * metal.flake_strength;
-    color += vec3(flake * 0.35);
-    roughness -= flake * 0.5;
+    // brightness kick and a polished (low-roughness) spot. Half the parts have
+    // zero flake — the branch is uniform per draw, so they skip the noise.
+    if metal.flake_strength > 0.0 {
+        let flake = step(0.82, vnoise(uv * metal.flake_freq)) * metal.flake_strength;
+        color += vec3(flake * 0.35);
+        roughness -= flake * 0.5;
+    }
 
     // Scratches: sparse thin lines across the brushing direction — bright,
-    // rough gouges down to bare metal.
-    let scratch = smoothstep(0.87, 0.93, vnoise(vec2(uv.x * 2.3, uv.y * metal.brush_freq * 0.6) + 13.7))
-        * metal.scratch_strength;
-    color = mix(color, vec3(0.75), scratch);
-    roughness += scratch * 0.4;
+    // rough gouges down to bare metal. Pristine parts skip the noise.
+    if metal.scratch_strength > 0.0 {
+        let scratch = smoothstep(0.87, 0.93, vnoise(vec2(uv.x * 2.3, uv.y * metal.brush_freq * 0.6) + 13.7))
+            * metal.scratch_strength;
+        color = mix(color, vec3(0.75), scratch);
+        roughness += scratch * 0.4;
+    }
 
     pbr_input.material.base_color = vec4(color, pbr_input.material.base_color.a);
     pbr_input.material.perceptual_roughness = clamp(roughness, 0.04, 1.0);

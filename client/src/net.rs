@@ -23,7 +23,7 @@ use bad_spaceship_shared::net::{
 };
 use bad_spaceship_shared::part::{insert_part_physics, Holdable, SuppressLocalParts};
 use bad_spaceship_shared::player::make_local_player;
-use crate::render_main_pass::metal_material::{metal_material, metal_tint, MetalMaterial};
+use crate::render_main_pass::metal_material::{metal_tint, part_visual, MetalMaterial};
 use crate::render_secondary_pass::gizmo_material::GizmoMaterial;
 use crate::render_secondary_pass::JointAppearance;
 use bad_spaceship_shared::{
@@ -355,7 +355,7 @@ fn report_stored_panic(
 /// (`insert_character_body`) so Avian simulates it locally with zero input delay,
 /// plus the player/input state (`make_local_player`) and the networked-input marker
 /// so `write_input` fills its `ActionState` and lightyear sends it. From there it's
-/// an ordinary `Character`: `assign_characters` renders it and `attach_camera_orbit`
+/// an ordinary `Character`: `monster::dress_characters` renders it and `attach_camera_orbit`
 /// mounts the camera — the same path single-player uses.
 ///
 /// Identify our avatar by `NetPlayer::client_id == our LocalId`, NOT by the bare
@@ -734,7 +734,7 @@ struct AvatarVisual(Entity);
 /// Give each *other* player's `Interpolated` copy a visible body, mounted on a yaw
 /// pivot so `face_replicated_players` can turn it to the player's look direction.
 /// Our own avatar is `Predicted`, not `Interpolated`, and renders via the
-/// single-player character path (`assign_characters`), so it's excluded here. The
+/// single-player character path (`monster::dress_characters`), so it's excluded here. The
 /// raw `Confirmed` entities stay invisible.
 fn draw_replicated_players(
     mut commands: Commands,
@@ -744,6 +744,7 @@ fn draw_replicated_players(
     for (entity, player) in &new_players {
         // The player's assigned monster (server-replicated, so everyone sees
         // the same one); its face shows the yaw the pivot is rotated to.
+        // `spawn_monster_visual` parents the pivot under the avatar itself.
         let pivot = crate::monster::spawn_monster_visual(
             &mut commands,
             entity,
@@ -752,8 +753,7 @@ fn draw_replicated_players(
         );
         commands
             .entity(entity)
-            .insert((AvatarVisual(pivot), Visibility::default()))
-            .add_children(&[pivot]);
+            .insert((AvatarVisual(pivot), Visibility::default()));
     }
 }
 
@@ -789,14 +789,15 @@ fn draw_replicated_parts(
     mut materials: ResMut<Assets<MetalMaterial>>,
 ) {
     for (entity, part) in &new_parts {
-        let [hx, hy, hz] = part.half_extents;
+        let half_extents = Vec3::from(part.half_extents);
         let mut e = commands.entity(entity);
-        insert_part_physics(&mut e, Vec3::new(hx, hy, hz));
+        insert_part_physics(&mut e, half_extents);
+        // Derived from the replicated seed via the same constructor as
+        // single-player, so every client renders this part identically.
+        let (mesh, material) = part_visual(half_extents, part.seed, &mut meshes, &mut materials);
         e.insert((
-            Mesh3d(meshes.add(Cuboid::new(hx * 2.0, hy * 2.0, hz * 2.0))),
-            // Derived from the replicated seed, so every client renders this
-            // part identically (and the same as single-player would).
-            MeshMaterial3d(materials.add(metal_material(part.seed))),
+            mesh,
+            material,
             Holdable,
             // Render-interpolate the predicted block between fixed ticks (same reason
             // as the character) so loose/held blocks move smoothly.

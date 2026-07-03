@@ -15,6 +15,23 @@ pub const METAL_SHADER_HANDLE: Handle<Shader> =
 
 pub type MetalMaterial = ExtendedMaterial<StandardMaterial, MetalExtension>;
 
+/// The render components for a part: cuboid mesh + seed-derived metal. The
+/// single constructor for BOTH the single-player renderer (`assign_parts`)
+/// and the multiplayer client (`draw_replicated_parts`), so the two modes can
+/// never drift apart visually.
+pub fn part_visual(
+    half_extents: Vec3,
+    seed: u32,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<MetalMaterial>,
+) -> (Mesh3d, MeshMaterial3d<MetalMaterial>) {
+    let [x, y, z] = half_extents.to_array();
+    (
+        Mesh3d(meshes.add(Cuboid::new(x * 2.0, y * 2.0, z * 2.0))),
+        MeshMaterial3d(materials.add(metal_material(seed))),
+    )
+}
+
 /// The part's surface finish. Discriminants match the `FINISH_*` consts in
 /// the WGSL.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -68,17 +85,10 @@ impl MaterialExtension for MetalExtension {
     }
 }
 
-/// splitmix64 step, folded to a uniform f32 in [0, 1). Hand-rolled (5 lines)
-/// rather than a `rand` PRNG because the derivation must be *deterministic
-/// across platforms and versions* — every multiplayer client (wasm + native)
-/// derives the same look from the same replicated seed, and `rand` guarantees
-/// neither cross-version nor cross-platform stability for its small RNGs.
+/// One shared-`splitmix64` draw folded to a uniform f32 in [0, 1) — see that
+/// helper for why it must be splitmix and not `rand`.
 fn next_unit(state: &mut u64) -> f32 {
-    *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
-    let mut z = *state;
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    ((z ^ (z >> 31)) >> 40) as f32 / (1u64 << 24) as f32
+    (bad_spaceship_shared::net::splitmix64(state) >> 40) as f32 / (1u64 << 24) as f32
 }
 
 /// The part's finish and metal tint, derived from its seed alone — their own

@@ -18,14 +18,14 @@ use bevy::{
     prelude::*,
 };
 use grass_material::{GrassExtension, GrassMaterial, GRASS_SHADER_HANDLE};
-use metal_material::{metal_material, MetalMaterial, METAL_SHADER_HANDLE};
+use metal_material::{part_visual, MetalMaterial, METAL_SHADER_HANDLE};
+use avian3d::prelude::Collider;
 
 /// The shared noise library both material shaders `#import` (see
 /// `bad_spaceship::noise` in the WGSL); registering it makes the import path
 /// resolvable when the material pipelines compile.
 const NOISE_SHADER_HANDLE: Handle<Shader> =
     uuid_handle!("26176534-6a5e-4030-8788-5ebe6e74318d");
-use avian3d::prelude::Collider;
 
 pub struct RenderMainPassPlugin;
 
@@ -112,20 +112,17 @@ fn assign_parts(
         // Avian colliders expose their parry shape via `.shape()`; parry's
         // `Cuboid::half_extents` is a field (nalgebra `Vector3`, still indexable).
         let dims = collider_shape.shape().as_cuboid().unwrap().half_extents;
+        // Mesh + seed-derived metal from the shared constructor — the same one
+        // the multiplayer client runs on `NetPart` (`draw_replicated_parts`).
+        let (mesh, material) = part_visual(
+            Vec3::new(dims[0], dims[1], dims[2]),
+            seed.0,
+            &mut meshes,
+            &mut materials,
+        );
         commands
             .entity(entity)
-            .insert((
-                transform.clone(),
-                global_transform.clone(),
-                // Bevy 0.15 replaced `PbrBundle` with the `Mesh3d` / `MeshMaterial3d`
-                // required-components wrappers — `Handle<T>` is no longer a component.
-                // Bevy 0.13 deprecated `shape::*` in favour of `bevy_math`
-                // primitives; the collider half-extents map to a full-size cuboid.
-                Mesh3d(meshes.add(Cuboid::new(dims[0] * 2.0, dims[1] * 2.0, dims[2] * 2.0))),
-                // The whole look derives from the part's spawn seed — the same
-                // derivation the multiplayer client runs on `NetPart::seed`.
-                MeshMaterial3d(materials.add(metal_material(seed.0))),
-            ))
+            .insert((transform.clone(), global_transform.clone(), mesh, material))
             .insert(AssignedMaterial);
     }
 }

@@ -27,9 +27,9 @@ use avian3d::prelude::{
 };
 use bad_spaceship_shared::character::{spawn_position, CharacterMovement, InitialPose, ServerAvatar};
 use bad_spaceship_shared::net::{
-    apply_hold_spring, apply_net_input, focused_part, sanitize_name, ClientPanicReport, NetFacing,
-    NetHold, NetInput, NetJoint, NetName, NetPart, NetPlayer, ProtocolPlugin, ResetPosition,
-    RollbackReport, SetName, TICK,
+    apply_hold_spring, apply_net_input, focused_part, monster_index, sanitize_name,
+    ClientPanicReport, NetFacing, NetHold, NetInput, NetJoint, NetName, NetPart, NetPlayer,
+    ProtocolPlugin, ResetPosition, RollbackReport, SetName, TICK,
 };
 use bad_spaceship_shared::map::GROUND_LAYER;
 use bad_spaceship_shared::part::{

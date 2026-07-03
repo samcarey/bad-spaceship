@@ -65,7 +65,7 @@ pub struct Config {
 }
 
 impl Config {
-    /// The character ball's diameter, in metres. Exposed so the client's
+    /// The character's total height (capsule, round top and bottom), in metres. Exposed so the client's
     /// predicted-avatar setup can build the same body the single-player `spawn`
     /// does, from the loaded config asset.
     pub fn size(&self) -> f32 {
@@ -86,7 +86,7 @@ struct CharacterBundle {
 /// single-player `spawn`, the server's `build_server_avatar`, and the client's
 /// predicted-avatar setup. Does NOT set `Transform`/`Position` — the caller sets
 /// the spawn pose (single-player/server) or replication provides it (client
-/// predicted). The sphere collider, rotation lock, unit mass, and the
+/// predicted). The capsule collider, rotation lock, unit mass, and the
 /// movement-input component (`DirectionalInput`) plus `Character`/velocity/
 /// ground-contact (`CharacterBundle`) match what every controllable character needs.
 pub fn insert_character_body(entity: &mut EntityCommands, size: f32) {
