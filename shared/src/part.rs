@@ -99,6 +99,13 @@ pub const ROCKET_BODY_HEIGHT: f32 = 1.8;
 /// The flare's wide (bottom) radius; its narrow (top) radius is the body radius.
 pub const ROCKET_FLARE_BOTTOM_RADIUS: f32 = 0.8;
 pub const ROCKET_FLARE_HEIGHT: f32 = 0.7;
+/// Local-Y offset from the body centre (the entity origin) to the flare centre.
+/// Shared by the flare's collider (`spawn_rocket_engine`) and its child mesh (the
+/// client renderer) so the physics and visual flare stay aligned.
+pub const ROCKET_FLARE_Y_OFFSET: f32 = -(ROCKET_BODY_HEIGHT / 2.0 + ROCKET_FLARE_HEIGHT / 2.0);
+
+/// Below this Y a part/rocket has fallen off the platform and is recycled.
+const PART_FALL_Y: f32 = -10.0;
 
 #[derive(Default, Component)]
 struct Interactable;
@@ -261,7 +268,6 @@ pub fn spawn_random_part(commands: &mut Commands) -> (Entity, Vec3, u32) {
 /// corrects divergence; matching physics keeps that divergence tiny).
 pub fn insert_part_physics(entity: &mut EntityCommands, half_extents: Vec3) {
     entity.insert((
-        RigidBody::Dynamic,
         // The cuboid's bounding-sphere radius (centre at origin → `half_extents.norm()`,
         // identical to parry's `compute_local_bounding_sphere().radius`). Attached here,
         // in the *shared* part-physics helper, so every part carries it from one source —
@@ -271,15 +277,27 @@ pub fn insert_part_physics(entity: &mut EntityCommands, half_extents: Vec3) {
         BoundingRadius(half_extents.length()),
         // Avian's `Collider::cuboid` takes FULL extents (= 2 × half_extents).
         Collider::cuboid(half_extents.x * 2.0, half_extents.y * 2.0, half_extents.z * 2.0),
+    ));
+    insert_part_dynamics(entity);
+}
+
+/// The physics props every dynamic part shares regardless of shape: the
+/// rigid-body kind, the density/friction/restitution tuning, and CCD. Both the
+/// cuboid `insert_part_physics` and the rocket engine's `spawn_rocket_engine`
+/// apply these, so the one tuning set lives in a single place; each caller adds
+/// its own shape-specific `Collider` + `BoundingRadius`.
+fn insert_part_dynamics(entity: &mut EntityCommands) {
+    entity.insert((
+        RigidBody::Dynamic,
         // rapier's `ColliderMassProperties::Density` / `Friction::coefficient` /
         // `Restitution::coefficient` → Avian's `ColliderDensity` / `Friction::new`
         // / `Restitution::new`.
         ColliderDensity(2.0),
         Friction::new(1.0),
         Restitution::new(0.1),
-        // Blocks spawn high and hit the thin trimesh ground fast; without CCD a fast
+        // Parts spawn high and hit the thin trimesh ground fast; without CCD a fast
         // impact penetrates deeply in one solver step and soft-contact recovery
-        // leaves the block embedded. CCD catches it so blocks rest flush.
+        // leaves the body embedded. CCD catches it so parts rest flush.
         SweptCcd::default(),
     ));
 }
@@ -296,15 +314,19 @@ fn spawn_initial_parts(mut new_part_events: MessageWriter<NewPart>) {
 /// cone for the flared nozzle) and, on the client, the mesh drawn for it. The
 /// entity origin is the body centre; the flare's collider is offset below so the
 /// engine rests upright on its nozzle. Returns the spawned entity.
+///
+/// **Single-player only for now:** the spawner is gated on `SuppressLocalParts`,
+/// so rockets are never created in multiplayer. Networking them needs a shape
+/// discriminant on `NetPart` (which today carries cuboid `half_extents` only) —
+/// deferred until rockets go multiplayer or a second rendered part type lands.
 pub fn spawn_rocket_engine(commands: &mut Commands, position: Vec3) -> Entity {
     // Flare cone: Avian's `Collider::cone` is centred on its own origin, base
-    // (wide) at -Y and apex at +Y — so offset it below the body with the apex
-    // (narrow end) meeting the body's bottom face.
-    let flare_offset = Vec3::new(0.0, -(ROCKET_BODY_HEIGHT / 2.0 + ROCKET_FLARE_HEIGHT / 2.0), 0.0);
+    // (wide) at -Y and apex at +Y — so offset it below the body (`ROCKET_FLARE_Y_OFFSET`)
+    // with the apex (narrow end) meeting the body's bottom face.
     let collider = Collider::compound(vec![
         (Vec3::ZERO, Quat::IDENTITY, Collider::cylinder(ROCKET_BODY_RADIUS, ROCKET_BODY_HEIGHT)),
         (
-            flare_offset,
+            Vec3::new(0.0, ROCKET_FLARE_Y_OFFSET, 0.0),
             Quat::IDENTITY,
             Collider::cone(ROCKET_FLARE_BOTTOM_RADIUS, ROCKET_FLARE_HEIGHT),
         ),
@@ -313,26 +335,21 @@ pub fn spawn_rocket_engine(commands: &mut Commands, position: Vec3) -> Entity {
     // the body centre is the flare's bottom rim.
     let flare_bottom_y = ROCKET_BODY_HEIGHT / 2.0 + ROCKET_FLARE_HEIGHT;
     let bounding_radius = (ROCKET_FLARE_BOTTOM_RADIUS.powi(2) + flare_bottom_y.powi(2)).sqrt();
-    commands
-        .spawn((
-            RocketEngine,
-            Interactable,
-            Holdable,
-            RigidBody::Dynamic,
-            collider,
-            BoundingRadius(bounding_radius),
-            // Same physics props as the cuboid parts (see `insert_part_physics`).
-            ColliderDensity(2.0),
-            Friction::new(1.0),
-            Restitution::new(0.1),
-            SweptCcd::default(),
-            LinearVelocity::default(),
-            AngularVelocity::default(),
-            // Seed both `Transform` and Avian `Position` (see `spawn_random_part`).
-            Transform::from_translation(position),
-            Position(position),
-        ))
-        .id()
+    let mut entity = commands.spawn((
+        RocketEngine,
+        Interactable,
+        Holdable,
+        collider,
+        BoundingRadius(bounding_radius),
+        LinearVelocity::default(),
+        AngularVelocity::default(),
+        // Seed both `Transform` and Avian `Position` (see `spawn_random_part`).
+        Transform::from_translation(position),
+        Position(position),
+    ));
+    // Density/friction/restitution/CCD/rigid-body — shared with the cuboid parts.
+    insert_part_dynamics(&mut entity);
+    entity.id()
 }
 
 fn random_rocket_spawn(rng: &mut ThreadRng) -> Vec3 {
@@ -359,7 +376,7 @@ fn replace_fallen_rocket_engines(
 ) {
     let mut rng = rand::thread_rng();
     for (transform, entity) in rockets.iter() {
-        if transform.translation.y < -10.0 {
+        if transform.translation.y < PART_FALL_Y {
             commands.entity(entity).despawn();
             spawn_rocket_engine(&mut commands, random_rocket_spawn(&mut rng));
         }
@@ -372,7 +389,7 @@ fn replace_fallen_parts(
     mut new_part_events: MessageWriter<NewPart>,
 ) {
     for (transform, entity) in parts.iter() {
-        if transform.translation.y < -10.0 {
+        if transform.translation.y < PART_FALL_Y {
             commands.entity(entity).despawn();
             new_part_events.write(NewPart);
         }

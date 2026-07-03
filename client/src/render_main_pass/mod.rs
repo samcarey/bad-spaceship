@@ -2,7 +2,7 @@ use bad_spaceship_shared::{
     map::PLATFORM_WIDTH_M,
     part::{
         Holdable, PartSeed, RocketEngine, SuppressLocalParts, ROCKET_BODY_HEIGHT,
-        ROCKET_BODY_RADIUS, ROCKET_FLARE_BOTTOM_RADIUS, ROCKET_FLARE_HEIGHT,
+        ROCKET_BODY_RADIUS, ROCKET_FLARE_BOTTOM_RADIUS, ROCKET_FLARE_HEIGHT, ROCKET_FLARE_Y_OFFSET,
     },
     Grass,
 };
@@ -174,12 +174,9 @@ fn assign_rocket_engines(
                 parent.spawn((
                     Mesh3d(flare_mesh),
                     MeshMaterial3d(flare_material),
-                    // The flare's narrow (top) end meets the body's bottom face.
-                    Transform::from_xyz(
-                        0.0,
-                        -(ROCKET_BODY_HEIGHT / 2.0 + ROCKET_FLARE_HEIGHT / 2.0),
-                        0.0,
-                    ),
+                    // The flare's narrow (top) end meets the body's bottom face
+                    // (same offset the collider uses in `spawn_rocket_engine`).
+                    Transform::from_xyz(0.0, ROCKET_FLARE_Y_OFFSET, 0.0),
                 ));
             });
     }
