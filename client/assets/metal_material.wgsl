@@ -56,6 +56,7 @@ var<uniform> metal: MetalParams;
 const FINISH_BRUSHED: u32 = 0u;
 const FINISH_CIRCULAR: u32 = 1u;
 const FINISH_GALVANIZED: u32 = 2u;
+const FINISH_STRIPED: u32 = 3u;
 
 // Four independent random values for one integer cell (chained from the
 // shared library's `ihash1d`, same i32 bitcast rule for negative coords).
@@ -124,6 +125,10 @@ fn fragment(
         // grinding rings around a per-part centre (per-face UV space).
         let r = distance(in.uv, vec2(metal.center_x, metal.center_y));
         streak = vnoise(vec2(r * metal.brush_freq, metal.noise_offset)) - 0.5;
+    } else if metal.finish == FINISH_STRIPED {
+        // Painted candy-stripe: flat bands (no machining streak); the base/white
+        // mix is applied to `color` below.
+        streak = 0.0;
     } else {
         // Brushed: value noise squeezed hard along one axis reads as fine
         // parallel grinding lines.
@@ -135,6 +140,13 @@ fn fragment(
     var roughness = pbr_input.material.perceptual_roughness
         + streak * metal.brush_strength * 0.5
         + edge * 0.1;
+
+    // Candy-stripe bands (rocket-engine body): alternate the base tint with
+    // white rings along V. `brush_freq` sets the number of band pairs.
+    if metal.finish == FINISH_STRIPED {
+        let band = step(0.5, fract(in.uv.y * metal.brush_freq));
+        color = mix(pbr_input.material.base_color.rgb, vec3<f32>(0.95, 0.95, 0.95), band);
+    }
 
     // Galvanized/flake sparkle: rare bright cells of high-frequency noise get a
     // brightness kick and a polished (low-roughness) spot. Half the parts have

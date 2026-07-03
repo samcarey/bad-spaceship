@@ -28,12 +28,15 @@ impl Plugin for PartPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
             Startup,
-            spawn_initial_parts.run_if(not(resource_exists::<SuppressLocalParts>)),
+            (spawn_initial_parts, spawn_initial_rocket_engines)
+                .run_if(not(resource_exists::<SuppressLocalParts>)),
         )
             .add_systems(
                 Update,
                 (
                     replace_fallen_parts.run_if(not(resource_exists::<SuppressLocalParts>)),
+                    replace_fallen_rocket_engines
+                        .run_if(not(resource_exists::<SuppressLocalParts>)),
                     // Single-player focus. MUST be off in multiplayer: with zero
                     // `Interactable` entities there (replicated parts are `Holdable`
                     // only) it unconditionally clears `FocusedInteractable` every
@@ -86,11 +89,29 @@ pub const ORIENTING_STIFFNESS: f32 = 5.0;
 const MIN_JOINT_SPACING: f32 = MIN_PART_SIZE / 2.0;
 pub const DELETE_RADIUS: f32 = 1.0;
 
+// Rocket-engine part geometry (a tall cylinder body with a flared nozzle at the
+// base). `pub` so the client renderer builds the matching mesh from the same
+// numbers the collider is built from here. The entity origin is the *body*
+// centre; the flare hangs below it (the narrow end of the flare meets the body).
+pub const NUM_ROCKET_ENGINES: i32 = 3;
+pub const ROCKET_BODY_RADIUS: f32 = 0.4;
+pub const ROCKET_BODY_HEIGHT: f32 = 1.8;
+/// The flare's wide (bottom) radius; its narrow (top) radius is the body radius.
+pub const ROCKET_FLARE_BOTTOM_RADIUS: f32 = 0.8;
+pub const ROCKET_FLARE_HEIGHT: f32 = 0.7;
+
 #[derive(Default, Component)]
 struct Interactable;
 
 #[derive(Default, Component)]
 pub struct Holdable;
+
+/// Marks a part as a rocket engine rather than a random cuboid. The physics and
+/// grab/join logic are collider-agnostic, so a rocket engine behaves like any
+/// other part; this marker only steers *rendering* (the client draws a
+/// cylinder+flare instead of a cuboid, and skips the cuboid renderer for it).
+#[derive(Default, Component)]
+pub struct RocketEngine;
 
 /// The part's random-appearance seed, minted at spawn. The client derives the
 /// whole metal look (tint, brushing, flakes, scratches) deterministically from
@@ -266,6 +287,82 @@ pub fn insert_part_physics(entity: &mut EntityCommands, half_extents: Vec3) {
 fn spawn_initial_parts(mut new_part_events: MessageWriter<NewPart>) {
     for _ in 0..NUM_PARTS {
         new_part_events.write(NewPart);
+    }
+}
+
+/// Spawn one dynamic rocket-engine part at `position`. It's `Holdable` +
+/// `Interactable` like a cuboid part, so it grabs and joins identically — the
+/// only difference is the collider shape (a compound of the cylinder body plus a
+/// cone for the flared nozzle) and, on the client, the mesh drawn for it. The
+/// entity origin is the body centre; the flare's collider is offset below so the
+/// engine rests upright on its nozzle. Returns the spawned entity.
+pub fn spawn_rocket_engine(commands: &mut Commands, position: Vec3) -> Entity {
+    // Flare cone: Avian's `Collider::cone` is centred on its own origin, base
+    // (wide) at -Y and apex at +Y — so offset it below the body with the apex
+    // (narrow end) meeting the body's bottom face.
+    let flare_offset = Vec3::new(0.0, -(ROCKET_BODY_HEIGHT / 2.0 + ROCKET_FLARE_HEIGHT / 2.0), 0.0);
+    let collider = Collider::compound(vec![
+        (Vec3::ZERO, Quat::IDENTITY, Collider::cylinder(ROCKET_BODY_RADIUS, ROCKET_BODY_HEIGHT)),
+        (
+            flare_offset,
+            Quat::IDENTITY,
+            Collider::cone(ROCKET_FLARE_BOTTOM_RADIUS, ROCKET_FLARE_HEIGHT),
+        ),
+    ]);
+    // Bounding radius (for the camera/hold-point "feel"): the farthest point from
+    // the body centre is the flare's bottom rim.
+    let flare_bottom_y = ROCKET_BODY_HEIGHT / 2.0 + ROCKET_FLARE_HEIGHT;
+    let bounding_radius = (ROCKET_FLARE_BOTTOM_RADIUS.powi(2) + flare_bottom_y.powi(2)).sqrt();
+    commands
+        .spawn((
+            RocketEngine,
+            Interactable,
+            Holdable,
+            RigidBody::Dynamic,
+            collider,
+            BoundingRadius(bounding_radius),
+            // Same physics props as the cuboid parts (see `insert_part_physics`).
+            ColliderDensity(2.0),
+            Friction::new(1.0),
+            Restitution::new(0.1),
+            SweptCcd::default(),
+            LinearVelocity::default(),
+            AngularVelocity::default(),
+            // Seed both `Transform` and Avian `Position` (see `spawn_random_part`).
+            Transform::from_translation(position),
+            Position(position),
+        ))
+        .id()
+}
+
+fn random_rocket_spawn(rng: &mut ThreadRng) -> Vec3 {
+    Vec3::new(
+        rng.gen_range(-SPAWN_ZONE_HALF_WIDTH..=SPAWN_ZONE_HALF_WIDTH),
+        rng.gen_range(5.0..=12.0),
+        rng.gen_range(-SPAWN_ZONE_HALF_WIDTH..=SPAWN_ZONE_HALF_WIDTH),
+    )
+}
+
+fn spawn_initial_rocket_engines(mut commands: Commands) {
+    let mut rng = rand::thread_rng();
+    for _ in 0..NUM_ROCKET_ENGINES {
+        spawn_rocket_engine(&mut commands, random_rocket_spawn(&mut rng));
+    }
+}
+
+/// A rocket engine that falls off the platform is despawned and a fresh one
+/// dropped back in — the rocket-engine counterpart to `replace_fallen_parts`
+/// (rockets carry no `GetsReplaced`, since that path respawns a *cuboid*).
+fn replace_fallen_rocket_engines(
+    mut commands: Commands,
+    rockets: Query<(&Transform, Entity), With<RocketEngine>>,
+) {
+    let mut rng = rand::thread_rng();
+    for (transform, entity) in rockets.iter() {
+        if transform.translation.y < -10.0 {
+            commands.entity(entity).despawn();
+            spawn_rocket_engine(&mut commands, random_rocket_spawn(&mut rng));
+        }
     }
 }
 

@@ -43,6 +43,9 @@ enum Finish {
     /// Hot-dip galvanized steel: splotchy zinc-crystal spangle (Voronoi cells
     /// with a random brightness per crystal + darkened boundaries).
     Galvanized = 2,
+    /// Painted candy-stripe bands (the rocket-engine body): alternating base
+    /// tint and white rings along the mesh's V axis (`brush_freq` = band count).
+    Striped = 3,
 }
 
 /// Mirrors `MetalParams` in the WGSL field-for-field. Everything here is
@@ -82,6 +85,36 @@ pub struct MetalExtension {
 impl MaterialExtension for MetalExtension {
     fn fragment_shader() -> ShaderRef {
         METAL_SHADER_HANDLE.into()
+    }
+}
+
+/// Number of candy-stripe bands along the rocket-engine body (see the striped
+/// finish in `metal_material.wgsl`).
+const ROCKET_STRIPE_BANDS: f32 = 5.0;
+
+/// The rocket engine's body material: a striped orange finish. Uses the same
+/// `MetalMaterial` as the cuboid parts so the focus/attach highlight
+/// (`highlight.rs`, which recolours `base.base_color`) lights the body up just
+/// like any other part. The flare is a separate dark-grey `StandardMaterial`
+/// (built by the renderer), and is intentionally not highlighted.
+pub fn rocket_body_material() -> MetalMaterial {
+    ExtendedMaterial {
+        base: StandardMaterial {
+            // A strong safety-orange; the shader paints white bands over it.
+            base_color: Color::srgb(0.95, 0.42, 0.05),
+            metallic: 0.3,
+            perceptual_roughness: 0.5,
+            ..Default::default()
+        },
+        extension: MetalExtension {
+            params: MetalParams {
+                // The striped branch only reads `brush_freq` (band count) and the
+                // finish discriminant; the noise-texture fields are all inert.
+                brush_freq: ROCKET_STRIPE_BANDS,
+                finish: Finish::Striped as u32,
+                ..Default::default()
+            },
+        },
     }
 }
 
