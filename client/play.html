@@ -222,18 +222,21 @@
       return Math.floor(s / 60) + 'm ' + (s % 60).toString().padStart(2, '0') + 's';
     };
 
-    // Authoritative *uncompressed* sizes, emitted by the Pages CI. Streaming a
-    // gzip/br-compressed response yields decompressed bytes while Content-Length
-    // reports the compressed size, so the manifest is what keeps the percentage
-    // and ETA honest. Falls back to Content-Length when the manifest is absent
-    // (e.g. local builds).
+    // Authoritative sizes, emitted by the CI / deploy script. `bytes` is the
+    // *uncompressed* size: streaming a gzip/br-compressed response yields
+    // decompressed bytes while Content-Length reports the compressed size, so
+    // this is what keeps the percentage and ETA honest. `wire_bytes` is the
+    // build-time compressed size — the fallback for *displaying* what actually
+    // crosses the network when the response is chunked with no Content-Length
+    // (GitHub Pages' on-the-fly compression). Falls back to Content-Length when
+    // the manifest is absent (e.g. local builds).
     async function loadManifest() {
       try {
         const r = await fetch('./loader-manifest.json', { cache: 'no-cache' });
         if (!r.ok) return null;
         const m = await r.json();
         const sizes = {};
-        for (const e of m.resources) sizes[e.url] = e.bytes;
+        for (const e of m.resources) sizes[e.url] = e;
         return sizes;
       } catch (_) {
         return null;
@@ -256,14 +259,25 @@
 
       let total = 0;
       let known = true;
+      // What actually crosses the network — the size the bar reports. Progress
+      // *fraction* still uses uncompressed totals (the stream below yields
+      // decompressed bytes), but the byte labels show the compressed download.
+      // Per resource: Content-Length is the wire size whenever present (exact —
+      // e.g. Caddy serving a precompressed .br, or an uncompressed response);
+      // absent (chunked on-the-fly compression, e.g. GitHub Pages), fall back
+      // to the manifest's build-time estimate, then to the uncompressed size.
+      let wireTotal = 0;
       RESOURCES.forEach((u, i) => {
-        let size = manifest ? manifest[u] : null;
-        if (size == null) {
-          const cl = responses[i].headers.get('content-length');
-          size = cl ? parseInt(cl, 10) : null;
-        }
+        const entry = (manifest && manifest[u]) || {};
+        const cl = responses[i].headers.get('content-length');
+        const clBytes = cl ? parseInt(cl, 10) : null;
+        const size = entry.bytes != null ? entry.bytes : clBytes;
+        const encoded = !!responses[i].headers.get('content-encoding');
         if (size == null) known = false;
-        else total += size;
+        else {
+          total += size;
+          wireTotal += clBytes ?? (encoded ? entry.wire_bytes : null) ?? size;
+        }
       });
 
       const start = performance.now();
@@ -276,8 +290,10 @@
           const frac = Math.min(loaded / total, 1);
           const pct = Math.floor(frac * 100);
           barInner.style.width = pct + '%';
+          // Report the *compressed* download (what the network actually moves),
+          // scaled by the honest decompressed-progress fraction.
           statusEl.textContent =
-            `Loading… ${pct}%  (${fmtBytes(Math.min(loaded, total))} / ${fmtBytes(total)})`;
+            `Loading… ${pct}%  (${fmtBytes(frac * wireTotal)} / ${fmtBytes(wireTotal)})`;
           const elapsed = (performance.now() - start) / 1000;
           if (frac >= 1) {
             etaEl.textContent = 'starting engine…';
