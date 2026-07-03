@@ -203,11 +203,11 @@
       }
     }
 
-    // Heavy resources to download up front, with combined progress. The WASM
-    // game binary dominates; the grass texture is prefetched so it lands in the
-    // HTTP cache and the in-game asset load is instant.
+    // Heavy resources to download up front, with combined progress. Today
+    // that's just the WASM game binary (the old grass texture is now a
+    // procedural shader compiled into it).
     const WASM_URL = './target/wasm_bg.wasm';
-    const RESOURCES = [WASM_URL, './assets/textures/grass.png'];
+    const RESOURCES = [WASM_URL];
 
     const fmtBytes = (n) => {
       if (n >= 1048576) return (n / 1048576).toFixed(1) + ' MB';

@@ -139,13 +139,10 @@ jobs:
           # back to. Keep the URLs in sync with play.html's RESOURCES.
           wasm_bytes=$(stat -c%s _site/target/wasm_bg.wasm)
           wasm_wire=$(gzip -9 -c _site/target/wasm_bg.wasm | wc -c | tr -d ' ')
-          grass_bytes=$(stat -c%s _site/assets/textures/grass.png)
-          grass_wire=$(gzip -9 -c _site/assets/textures/grass.png | wc -c | tr -d ' ')
           cat > _site/loader-manifest.json <<EOF
           {
             "resources": [
-              { "url": "./target/wasm_bg.wasm", "bytes": $wasm_bytes, "wire_bytes": $wasm_wire },
-              { "url": "./assets/textures/grass.png", "bytes": $grass_bytes, "wire_bytes": $grass_wire }
+              { "url": "./target/wasm_bg.wasm", "bytes": $wasm_bytes, "wire_bytes": $wasm_wire }
             ]
           }
           EOF
