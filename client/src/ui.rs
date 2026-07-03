@@ -6,10 +6,11 @@ use bevy::{
 };
 use bevy_egui::{
     egui::{self, Align, Align2, Color32, Frame, Layout},
-    EguiContexts, EguiPlugin, EguiPrimaryContextPass,
+    EguiContexts, EguiPlugin, EguiPrimaryContextPass, EguiTextureHandle,
 };
 use bad_spaceship_shared::net::{
-    sanitize_name, ControlChannel, NetName, NetPlayer, ResetPosition, SetName, MAX_NAME_LEN,
+    sanitize_name, ControlChannel, NetName, NetPlayer, ResetPosition, SetAvatar, SetName,
+    MAX_NAME_LEN, MONSTER_COUNT,
 };
 use chrono::{DateTime, FixedOffset, Utc};
 use lightyear::prelude::client::Connected;
@@ -34,11 +35,13 @@ impl Plugin for UiPlugin {
         // only read input or egui settings (not the context) stay in `Update`.
         app.init_resource::<HudState>()
             .add_plugins((EguiPlugin::default(), FrameTimeDiagnosticsPlugin::default()))
+            .add_systems(Startup, load_avatar_thumbnails)
             .add_systems(
                 Update,
                 (
                     capture_mouse_on_click.run_if(in_state(AppState::Initial)),
                     restore_persisted_name,
+                    restore_persisted_avatar,
                 ),
             )
             .add_systems(
@@ -59,6 +62,7 @@ impl Plugin for UiPlugin {
                     // Top-left controls (rename + help toggle), the rename modal, and
                     // the top-right player roster; billboard names over each avatar.
                     show_name_hud,
+                    show_avatar_picker,
                     show_name_labels,
                     show_instructions,
                     show_bottom_panel,
@@ -353,6 +357,8 @@ struct HudState {
     show_menu: bool,
     /// The rename modal is open.
     show_change_modal: bool,
+    /// The avatar-picker modal is open.
+    show_avatar_modal: bool,
     /// The instructions overlay is revealed (toggled by the "?" button).
     show_help: bool,
     /// Live contents of the rename text field.
@@ -465,6 +471,7 @@ fn show_name_hud(
     let mut close_menu = false;
     let mut toggle_help = false;
     let mut open_rename = false;
+    let mut open_avatar = false;
     let mut do_reset = false;
 
     // Top-left: hamburger menu (connected only) + help toggle, both drawn large.
@@ -487,6 +494,9 @@ fn show_name_hud(
                         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
                         if ui.button("Change Name").clicked() {
                             open_rename = true;
+                        }
+                        if ui.button("Change Avatar").clicked() {
+                            open_avatar = true;
                         }
                         if ui.button("Reset Position").clicked() {
                             do_reset = true;
@@ -525,6 +535,12 @@ fn show_name_hud(
             hud.editing = current;
             hud.show_change_modal = true;
         }
+    }
+    if open_avatar {
+        hud.show_menu = false;
+        // The picker is a plain thumbnail grid (no text entry), so the same egui modal
+        // works on web and native — unlike rename, no DOM overlay is needed.
+        hud.show_avatar_modal = true;
     }
     if do_reset {
         hud.show_menu = false;
@@ -710,6 +726,145 @@ fn restore_persisted_name(
     };
     sender.send::<ControlChannel>(SetName(cleaned));
     *sent = true;
+}
+
+/// Re-apply a persisted avatar pick (`platform::stored_avatar`) once per connection, so
+/// an avatar chosen before an iOS reload / Reset survives the reconnect. The mirror of
+/// `restore_persisted_name`: sends `SetAvatar` as soon as we're connected and the sender
+/// is ready; the `sent` latch resets on disconnect so a background-reconnect re-applies
+/// it too. No-op on native (no stored avatar) and in single-player (never connected).
+fn restore_persisted_avatar(
+    local: Query<&LocalId, With<Connected>>,
+    mut sender: Query<&mut MessageSender<SetAvatar>, With<Connected>>,
+    mut sent: Local<bool>,
+) {
+    if crate::net::my_netcode_id(&local).is_none() {
+        *sent = false;
+        return;
+    }
+    if *sent {
+        return;
+    }
+    let Some(monster) = crate::platform::stored_avatar() else {
+        *sent = true; // nothing to restore; don't keep checking this connection
+        return;
+    };
+    // Retry next frame if the sender component isn't on the link yet.
+    let Ok(mut sender) = sender.single_mut() else {
+        return;
+    };
+    sender.send::<ControlChannel>(SetAvatar(monster % MONSTER_COUNT));
+    *sent = true;
+}
+
+/// Side length (points) of each avatar thumbnail in the picker grid, and how many sit
+/// per row (8 avatars → two rows of four).
+const AVATAR_THUMB_SIZE: f32 = 72.0;
+const AVATAR_COLS: u8 = 4;
+
+/// The loaded thumbnail image handles, one per avatar in `monster::MONSTERS` order. Kept
+/// alive here (dropping a handle would unload the asset); the picker registers each as an
+/// egui texture on demand. Handles load lazily, so a thumbnail simply pops in once ready.
+#[derive(Resource)]
+struct AvatarThumbnails(Vec<Handle<Image>>);
+
+/// Kick off loading the eight avatar face thumbnails at startup so they're ready (or
+/// nearly) by the time the picker is first opened.
+fn load_avatar_thumbnails(mut commands: Commands, asset_server: Res<AssetServer>) {
+    let handles = (0..MONSTER_COUNT)
+        .map(|i| asset_server.load::<Image>(crate::monster::avatar_thumbnail_path(i)))
+        .collect();
+    commands.insert_resource(AvatarThumbnails(handles));
+}
+
+/// Draw the avatar-picker modal (opened from the "Change Avatar" menu button): a grid of
+/// the monster face thumbnails. Clicking one sends a `SetAvatar` to the server — which
+/// re-replicates `NetPlayer::monster`, re-dressing the avatar for everyone — and persists
+/// the pick (web `localStorage`). Avatars already worn by *other* players are greyed out
+/// and unclickable; the local player's current avatar is shown selected. Runs on web and
+/// native alike (no text entry, so no DOM overlay).
+fn show_avatar_picker(
+    mut contexts: EguiContexts,
+    mut hud: ResMut<HudState>,
+    thumbs: Res<AvatarThumbnails>,
+    local: Query<&LocalId, With<Connected>>,
+    players: Query<&NetPlayer, RenderedAvatar>,
+    mut avatar_sender: Query<&mut MessageSender<SetAvatar>, With<Connected>>,
+) -> Result {
+    if !hud.show_avatar_modal {
+        return Ok(());
+    }
+    let my_id = crate::net::my_netcode_id(&local);
+    // Split the roster: which avatar is mine (shown selected) and which are worn by
+    // everyone else (greyed out). Deduping isn't needed — a doubled entry sets the same
+    // flags twice.
+    let mut mine: Option<u8> = None;
+    let mut in_use = [false; MONSTER_COUNT as usize];
+    for player in &players {
+        if Some(player.client_id) == my_id {
+            mine = Some(player.monster);
+        } else {
+            in_use[player.monster as usize % in_use.len()] = true;
+        }
+    }
+    // Register each thumbnail as an egui texture (idempotent — `add_image` returns the
+    // existing id for a handle it's already seen) BEFORE borrowing the context, since
+    // both `add_image` and `ctx_mut` take `&mut contexts`.
+    let texture_ids: Vec<egui::TextureId> = thumbs
+        .0
+        .iter()
+        .map(|h| contexts.add_image(EguiTextureHandle::Strong(h.clone())))
+        .collect();
+    let ctx = contexts.ctx_mut()?;
+
+    let mut picked: Option<u8> = None;
+    let mut close = false;
+    egui::Window::new("Choose avatar")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
+            egui::Grid::new("avatar_grid")
+                .spacing([10.0, 10.0])
+                .show(ui, |ui| {
+                    for i in 0..MONSTER_COUNT {
+                        let taken = in_use[i as usize];
+                        let size = egui::vec2(AVATAR_THUMB_SIZE, AVATAR_THUMB_SIZE);
+                        let source = egui::load::SizedTexture::new(texture_ids[i as usize], size);
+                        // Grey out avatars another player already wears.
+                        let tint = if taken { Color32::from_gray(70) } else { Color32::WHITE };
+                        let image = egui::Image::new(source).tint(tint);
+                        let button = egui::Button::image(image).selected(mine == Some(i));
+                        ui.vertical(|ui| {
+                            if ui.add_enabled(!taken, button).clicked() {
+                                picked = Some(i);
+                            }
+                            let name = egui::RichText::new(crate::monster::avatar_name(i)).size(12.0);
+                            ui.label(if taken { name.weak() } else { name });
+                        });
+                        if (i + 1) % AVATAR_COLS == 0 {
+                            ui.end_row();
+                        }
+                    }
+                });
+            ui.separator();
+            if ui.button("Close").clicked() {
+                close = true;
+            }
+        });
+
+    if let Some(monster) = picked {
+        // Persist so it survives a reload / reconnect (native no-op), then request it.
+        crate::platform::store_avatar(monster);
+        if let Ok(mut sender) = avatar_sender.single_mut() {
+            sender.send::<ControlChannel>(SetAvatar(monster));
+        }
+        close = true;
+    }
+    if close {
+        hud.show_avatar_modal = false;
+    }
+    Ok(())
 }
 
 fn capture_mouse_on_click(

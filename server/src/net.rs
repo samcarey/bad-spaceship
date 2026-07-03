@@ -29,7 +29,7 @@ use bad_spaceship_shared::character::{spawn_position, CharacterMovement, Initial
 use bad_spaceship_shared::net::{
     apply_hold_spring, apply_net_input, focused_part, monster_index, sanitize_name,
     ClientPanicReport, NetFacing, NetHold, NetInput, NetJoint, NetName, NetPart, NetPlayer,
-    ProtocolPlugin, ResetPosition, RollbackReport, SetName, TICK,
+    ProtocolPlugin, ResetPosition, RollbackReport, SetAvatar, SetName, MONSTER_COUNT, TICK,
 };
 use bad_spaceship_shared::map::GROUND_LAYER;
 use bad_spaceship_shared::part::{
@@ -340,10 +340,10 @@ impl Plugin for NetServerPlugin {
         );
         // Assign each client (and its avatar) to its reported room on the first
         // input, lazily creating the room's world, and apply client rename +
-        // reset-position requests.
+        // avatar-pick + reset-position requests.
         app.add_systems(
             Update,
-            (assign_rooms, apply_name_changes, apply_position_resets),
+            (assign_rooms, apply_name_changes, apply_avatar_changes, apply_position_resets),
         );
         // Session resume: continuously remember live avatars' positions (the reconnect
         // restore itself happens at connect, in `spawn_player_for_client`).
@@ -557,6 +557,31 @@ fn apply_name_changes(
         for (controlled, mut net_name) in &mut avatars {
             if controlled.owner == link {
                 net_name.set_if_neq(NetName(name.clone()));
+            }
+        }
+    }
+}
+
+/// Apply each client's `SetAvatar` pick to its avatar's replicated [`NetPlayer::monster`].
+/// Mirrors [`apply_name_changes`]: the message rides the reliable `ControlChannel`, lands
+/// on the client's link entity, and is mapped to the avatar it `ControlledBy`. The index
+/// is reduced modulo [`MONSTER_COUNT`] (defensive against a malformed pick), and only
+/// written when it changed — the `if` guard reads through `Deref` without dirtying the
+/// component, so an unchanged pick doesn't re-replicate. The change replicates to every
+/// client in the room, where the monster-dressing systems rebuild the visual.
+fn apply_avatar_changes(
+    mut links: Query<(Entity, &mut MessageReceiver<SetAvatar>), (With<ClientOf>, With<Connected>)>,
+    mut avatars: Query<(&ControlledBy, &mut NetPlayer)>,
+) {
+    for (link, mut receiver) in &mut links {
+        // Sequenced-reliable: only the newest pick this window matters.
+        let Some(msg) = receiver.receive().last() else {
+            continue;
+        };
+        let monster = msg.0 % MONSTER_COUNT;
+        for (controlled, mut player) in &mut avatars {
+            if controlled.owner == link && player.monster != monster {
+                player.monster = monster;
             }
         }
     }
