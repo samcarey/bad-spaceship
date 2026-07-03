@@ -57,10 +57,15 @@ jobs:
           sudo install -m755 "/tmp/wasm-bindgen-${WASM_BINDGEN_VERSION}-x86_64-unknown-linux-musl/wasm-bindgen" /usr/local/bin/wasm-bindgen
           wasm-bindgen --version
 
-      - name: Build WASM client (release)
+      # Size-optimized `wasm-dist` profile (fat LTO + opt-level z + strip +
+      # panic=abort), same treatment as buoyancy below — shrunk further with
+      # wasm-opt in the assemble step. Stays on the stable pinned toolchain
+      # (NOT buoyancy's nightly immediate-abort lever): the client's panic
+      # net (`net.rs` stored-panic reporting) needs real panic messages.
+      - name: Build WASM client (wasm-dist)
         run: >-
           cargo build --locked --manifest-path client/Cargo.toml
-          --target wasm32-unknown-unknown --features web --release
+          --target wasm32-unknown-unknown --features web --profile wasm-dist
 
       # Standalone buoyancy experiment — a separate crate + WASM bundle, published
       # to /buoyancy/ and reached via the unlinked /buoyancy.html. Built with the
@@ -88,7 +93,18 @@ jobs:
           # Generate JS bindings straight into the published target/ directory
           # (client/index.html loads `./target/wasm.js`).
           wasm-bindgen --out-dir _site/target --out-name wasm --target web --no-typescript \
-            target/wasm32-unknown-unknown/release/bad-spaceship-client.wasm
+            target/wasm32-unknown-unknown/wasm-dist/bad-spaceship-client.wasm
+          # Binaryen size pass on the game client (same flags + rationale as the
+          # buoyancy pass below — see that step's comment for the --enable-*
+          # list and the --all-features / --low-memory-unused warnings).
+          wasm-opt -Oz --converge --generate-global-effects \
+            --enable-mutable-globals --enable-sign-ext --enable-bulk-memory \
+            --enable-nontrapping-float-to-int --enable-multivalue \
+            --enable-reference-types --enable-extended-const \
+            --enable-tail-call --enable-gc \
+            --strip-producers --strip-target-features \
+            --output _site/target/wasm_bg.wasm \
+            _site/target/wasm_bg.wasm
           # index.html (landing), play.html (game loader), lobby.html (lobby browser).
           cp client/*.html _site/
           cp -r client/assets _site/assets
@@ -122,17 +138,21 @@ jobs:
           # Publish any committed archive builds (e.g. the playable Bevy 0.12
           # build under legacy/v0.12) verbatim alongside the current site.
           if [ -d legacy ]; then cp -r legacy _site/legacy; fi
-          # Emit the loader manifest with *uncompressed* byte sizes so the
-          # loading bar reports an honest percentage/ETA even when the assets
-          # are served gzip/br-compressed (Content-Length would be the
-          # compressed size). Keep the URLs in sync with index.html's RESOURCES.
+          # Emit the loader manifest. `bytes` = *uncompressed* size, keeping the
+          # loading bar's percentage/ETA honest when assets are served
+          # compressed (the fetch stream yields decompressed bytes).
+          # `wire_bytes` = the compressed download the bar *displays*; Pages
+          # (Fastly) compresses on the fly with no Content-Length, so this
+          # build-time gzip -9 measurement is the estimate the loader falls
+          # back to. Keep the URLs in sync with play.html's RESOURCES.
           wasm_bytes=$(stat -c%s _site/target/wasm_bg.wasm)
+          wasm_wire=$(gzip -9 -c _site/target/wasm_bg.wasm | wc -c | tr -d ' ')
           grass_bytes=$(stat -c%s _site/assets/textures/grass.png)
           cat > _site/loader-manifest.json <<EOF
           {
             "resources": [
-              { "url": "./target/wasm_bg.wasm", "bytes": $wasm_bytes },
-              { "url": "./assets/textures/grass.png", "bytes": $grass_bytes }
+              { "url": "./target/wasm_bg.wasm", "bytes": $wasm_bytes, "wire_bytes": $wasm_wire },
+              { "url": "./assets/textures/grass.png", "bytes": $grass_bytes, "wire_bytes": $grass_bytes }
             ]
           }
           EOF

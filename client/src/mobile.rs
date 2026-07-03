@@ -96,7 +96,10 @@ impl Plugin for MobilePlugin {
             )
             .add_systems(
                 EguiPrimaryContextPass,
+                // In `EguiDrawSystems` so the one-shot subset-font install
+                // (`ui::install_fonts`) is guaranteed to precede it.
                 draw_overlay
+                    .in_set(crate::ui::EguiDrawSystems)
                     .run_if(mobile_active)
                     .run_if(in_state(AppState::InGame)),
             )

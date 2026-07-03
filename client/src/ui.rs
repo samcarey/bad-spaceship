@@ -43,6 +43,14 @@ impl Plugin for UiPlugin {
             )
             .add_systems(
                 EguiPrimaryContextPass,
+                // The subset fonts must be installed before the first text layout
+                // anywhere (there are no other fonts — `default_fonts` is off), so
+                // every egui-drawing system sits in `EguiDrawSystems` and the
+                // one-shot install is ordered before the whole set.
+                install_fonts.run_if(run_once).before(EguiDrawSystems),
+            )
+            .add_systems(
+                EguiPrimaryContextPass,
                 (
                     // Touches an egui context (zoom factor), so it must run in the
                     // egui pass alongside the panel-drawing systems, not in `Update`.
@@ -54,9 +62,41 @@ impl Plugin for UiPlugin {
                     show_name_labels,
                     show_instructions,
                     show_bottom_panel,
-                ),
+                )
+                    .in_set(EguiDrawSystems),
             );
     }
+}
+
+/// Every system that draws egui (here and in `mobile.rs`) belongs to this set,
+/// so `install_fonts` can be ordered before all of them.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct EguiDrawSystems;
+
+/// The game's egui fonts: one subset of Ubuntu-Light (egui's default face)
+/// replacing bevy_egui's `default_fonts` — 1.4 MB of embedded fonts, the wasm
+/// binary's largest data item, cut to ~110 KB. The subset keeps full Latin
+/// (incl. Extended Additional for Vietnamese), Greek, Cyrillic, and general
+/// punctuation so typed player names render; other scripts and emoji fall back
+/// to the font's notdef box (CJK already did with egui's defaults). Both egui
+/// families map to it — the game only uses proportional text.
+fn subset_fonts() -> egui::FontDefinitions {
+    let mut fonts = egui::FontDefinitions::empty();
+    fonts.font_data.insert(
+        "ubuntu-subset".to_owned(),
+        egui::FontData::from_static(include_bytes!("../fonts/ubuntu-light-game-subset.ttf"))
+            .into(),
+    );
+    for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+        fonts.families.insert(family, vec!["ubuntu-subset".to_owned()]);
+    }
+    fonts
+}
+
+/// One-shot (`run_once`): install the subset fonts on the egui context.
+fn install_fonts(mut contexts: EguiContexts) -> Result {
+    contexts.ctx_mut()?.set_fonts(subset_fonts());
+    Ok(())
 }
 
 struct CustomScaleFactor(f64);
