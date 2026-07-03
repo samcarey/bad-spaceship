@@ -564,13 +564,19 @@ fn update_predelete_joints(
             if let Ok(hold_point_position) = hold_points.get(hold_point.0) {
                 for (joint_entity, joint) in joints.iter() {
                     // World position of the joint's anchor on `body2` (rapier
-                    // used the joint's parent body + `local_frame2`).
-                    if let (Ok(transform), Some(anchor2)) =
-                        (holdables.get(joint.body2), joint.local_anchor2())
+                    // used the joint's parent body + `local_frame2`). Fall back to
+                    // the `body1` anchor when `body2` isn't a holdable part — a
+                    // ground joint's ground endpoint — the constraint pins both
+                    // anchors to the same point, so either side works.
+                    let anchor_world = |body, anchor: Option<Vec3>| {
+                        holdables.get(body).ok().zip(anchor).map(|(transform, anchor)| {
+                            let transform = transform.compute_transform();
+                            transform.translation + transform.rotation.mul_vec3(anchor)
+                        })
+                    };
+                    if let Some(center) = anchor_world(joint.body2, joint.local_anchor2())
+                        .or_else(|| anchor_world(joint.body1, joint.local_anchor1()))
                     {
-                        let transform = transform.compute_transform();
-                        let center =
-                            transform.translation + transform.rotation.mul_vec3(anchor2);
                         if (center - hold_point_position.translation()).length() < DELETE_RADIUS {
                             predelete_joints.0.push(PredeleteJoint {
                                 entity: joint_entity,

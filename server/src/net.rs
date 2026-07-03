@@ -29,13 +29,13 @@ use bad_spaceship_shared::character::{spawn_position, CharacterMovement, Initial
 use bad_spaceship_shared::net::{
     apply_hold_spring, apply_net_input, focused_part, monster_index, sanitize_name,
     ClientPanicReport, NetFacing, NetHold, NetInput, NetJoint, NetName, NetPart, NetPlayer,
-    ProtocolPlugin, ResetPosition, RollbackReport, SetName, TICK,
+    ProtocolPlugin, ResetPosition, RollbackReport, SetName, GROUND_JOINT_ID, TICK,
 };
 use bad_spaceship_shared::map::GROUND_LAYER;
 use bad_spaceship_shared::part::{
     local_contact_anchor, spawn_random_part, SuppressLocalParts, DELETE_RADIUS, NUM_PARTS,
 };
-use bad_spaceship_shared::{SuppressLocalPlayer, Yaw};
+use bad_spaceship_shared::{Grass, SuppressLocalPlayer, Yaw};
 use bevy::prelude::*;
 use lightyear::prelude::input::native::ActionState;
 use lightyear::prelude::input::InputBuffer;
@@ -722,10 +722,11 @@ fn server_hold(
     }
 }
 
-/// On the attach intent, joint the held part to whatever (other) part it's
-/// touching, at the contact anchors — then release it (it's now part of the
-/// assembly). Cross-room parts can't touch (collision layers isolate rooms), so
-/// the join is room-scoped automatically. Ports single-player's
+/// On the attach intent, joint the held part to whatever (other) part — or the
+/// ground — it's touching, at the contact anchors — then release it (it's now part
+/// of the assembly). Cross-room parts can't touch (collision layers isolate rooms)
+/// and the ground is shared but the joint itself is room-tagged, so the join is
+/// room-scoped automatically. Ports single-player's
 /// `update_active_joints`/`attach`, recovering each body-local anchor via the shared
 /// `local_contact_anchor` (the COM-relative anchor convention lives there). Joints
 /// are server physics, so the joined parts move together and their replicated poses
@@ -739,6 +740,7 @@ fn server_attach(
     rotations: Query<&Rotation>,
     coms: Query<&ComputedCenterOfMass>,
     net_parts: Query<(), With<NetPart>>,
+    grounds: Query<(), With<Grass>>,
     // Existing joints (to tell which parts are joining for the FIRST time) and each
     // part's room (to spawn the replacement in the same room).
     joints: Query<&SphericalJoint>,
@@ -771,9 +773,9 @@ fn server_attach(
                 continue;
             }
             let (c1, c2) = (pair.collider1, pair.collider2);
-            // Only attach to another replicated part (not the ground/character).
+            // Only attach to another replicated part or the ground (not a character).
             let other = if c1 == held_entity { c2 } else { c1 };
-            if net_parts.get(other).is_err() {
+            if net_parts.get(other).is_err() && grounds.get(other).is_err() {
                 continue;
             }
             let rot = |e| rotations.get(e).map(|r| r.0).unwrap_or(Quat::IDENTITY);
@@ -782,20 +784,33 @@ fn server_attach(
                 for contact in &manifold.points {
                     let p1 = local_contact_anchor(rot(c1), com(c1), contact.anchor1);
                     let p2 = local_contact_anchor(rot(c2), com(c2), contact.anchor2);
+                    // Default order body1=c2, body2=c1 — but a ground joint is
+                    // normalized so the *part* is body1: the client anchors the
+                    // joint gizmo to body1 (`position_replicated_joints` looks it
+                    // up as a `NetPart`), and the ground endpoint is named by the
+                    // `GROUND_JOINT_ID` sentinel (it has no `NetPart::id`).
+                    let ((b1, a1), (b2, a2)) = if grounds.get(c2).is_ok() {
+                        ((c1, p1), (c2, p2))
+                    } else {
+                        ((c2, p2), (c1, p1))
+                    };
+                    let net_id = |e: Entity| {
+                        if grounds.get(e).is_ok() { GROUND_JOINT_ID } else { e.to_bits() }
+                    };
                     commands.spawn((
-                        // The server's authoritative joint (body1=c2, body2=c1).
-                        SphericalJoint::new(c2, c1)
-                            .with_local_anchor1(p2)
-                            .with_local_anchor2(p1),
+                        // The server's authoritative joint.
+                        SphericalJoint::new(b1, b2)
+                            .with_local_anchor1(a1)
+                            .with_local_anchor2(a2),
                         // Replicate the joint's data (endpoints by stable id +
                         // anchors, matching the SphericalJoint above) so each client
                         // can rebuild it as real predicted physics between its
                         // predicted parts — and draw it — scoped to the holder's room.
                         NetJoint {
-                            body1: c2.to_bits(),
-                            body2: c1.to_bits(),
-                            anchor1: p2.to_array(),
-                            anchor2: p1.to_array(),
+                            body1: net_id(b1),
+                            body2: net_id(b2),
+                            anchor1: a1.to_array(),
+                            anchor2: a2.to_array(),
                         },
                         Replicate::to_clients(NetworkTarget::All),
                         Rooms::single(member.0),
@@ -805,9 +820,13 @@ fn server_attach(
                         *member,
                     ));
                     attached = true;
-                    // Replenish the pool for each endpoint joining for the first time.
+                    // Replenish the pool for each *part* endpoint joining for the
+                    // first time (the ground isn't a loose part — no replacement).
                     for endpoint in [held_entity, other] {
-                        if !had_joint.contains(&endpoint) && !replaced.contains(&endpoint) {
+                        if net_parts.get(endpoint).is_ok()
+                            && !had_joint.contains(&endpoint)
+                            && !replaced.contains(&endpoint)
+                        {
                             replaced.push(endpoint);
                             if let Some(room) = held_room {
                                 let (new_entity, half_extents, seed) = spawn_random_part(&mut commands);
