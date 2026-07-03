@@ -30,11 +30,9 @@
 //! The surface can carry **waves** (Waves menu): a single sinusoidal wave train
 //! travelling along +X, so the water level is a function of position and time,
 //! `η(x,t) = A·sin(kx − ωt)` above [`WATER_LEVEL`]. Every method measures
-//! submersion against the *local* surface height: the voxel method per cell,
-//! surface pressure by clipping each triangle against per-vertex distances to
-//! the surface, and clipped volume through a volume-preserving vertical shear
-//! that flattens the wave surface back into a plane (see [`WaveField`]).
-//! Amplitude defaults to zero, which reproduces flat-water behaviour exactly.
+//! submersion against the *local* surface height — how each one generalises is
+//! documented on [`WaveField`]. Amplitude defaults to zero, which reproduces
+//! flat-water behaviour exactly.
 //!
 //! The hollow shell can also carry **interior water** (fill slider): its
 //! distribution inside the cavity is solved from the cavity geometry and the
@@ -403,12 +401,20 @@ struct WaveField {
 
 impl WaveField {
     /// Water-surface height (world y) above the point at world `x`.
+    /// Short-circuits at zero amplitude: flat water — the default state —
+    /// must not pay a `sin()` per voxel/vertex at 60 Hz in the physics path.
     fn height(&self, x: f32) -> f32 {
+        if self.amp == 0.0 {
+            return WATER_LEVEL;
+        }
         WATER_LEVEL + self.amp * (self.k * x - self.phase).sin()
     }
 
     /// Surface slope ∂η/∂x at world `x` — the water mesh's analytic normals.
     fn slope(&self, x: f32) -> f32 {
+        if self.amp == 0.0 {
+            return 0.0;
+        }
         self.amp * self.k * (self.k * x - self.phase).cos()
     }
 
@@ -899,20 +905,24 @@ fn water_volume_mesh(wave: &WaveField) -> Mesh {
     let n = WATER_MESH_COLUMNS;
     let half = WATER_SIZE * 0.5;
     let bottom = WATER_LEVEL - WATER_DEPTH;
-    let mut positions: Vec<[f32; 3]> = Vec::new();
-    let mut normals: Vec<[f32; 3]> = Vec::new();
-    let mut indices: Vec<u32> = Vec::new();
+    // Exact counts: top strip + two ±Z walls at 2(n+1) vertices each, then
+    // 4 + 4 + 4 for the ±X walls and bottom; 6 indices per quad.
+    let mut positions: Vec<[f32; 3]> = Vec::with_capacity(6 * (n + 1) + 12);
+    let mut normals: Vec<[f32; 3]> = Vec::with_capacity(6 * (n + 1) + 12);
+    let mut indices: Vec<u32> = Vec::with_capacity(18 * n + 18);
     let x_at = |i: usize| -half + WATER_SIZE * i as f32 / n as f32;
+    // Column surface heights, shared by the top strip and both ±Z walls.
+    let heights: Vec<f32> = (0..=n).map(|i| wave.height(x_at(i))).collect();
     fn quad(indices: &mut Vec<u32>, a: u32, b: u32, c: u32, d: u32) {
         indices.extend([a, b, c, b, d, c]);
     }
 
     // Top strip: two vertices per column (z = ∓half), smooth analytic normal.
     for i in 0..=n {
-        let (x, y) = (x_at(i), wave.height(x_at(i)));
+        let x = x_at(i);
         let normal = Vec3::new(-wave.slope(x), 1.0, 0.0).normalize().to_array();
         for z in [-half, half] {
-            positions.push([x, y, z]);
+            positions.push([x, heights[i], z]);
             normals.push(normal);
         }
     }
@@ -926,18 +936,17 @@ fn water_volume_mesh(wave: &WaveField) -> Mesh {
     for (z, normal) in [(-half, [0.0, 0.0, -1.0]), (half, [0.0, 0.0, 1.0])] {
         let base = positions.len() as u32;
         for i in 0..=n {
-            let x = x_at(i);
-            positions.push([x, wave.height(x), z]);
-            positions.push([x, bottom, z]);
+            positions.push([x_at(i), heights[i], z]);
+            positions.push([x_at(i), bottom, z]);
             normals.extend([normal, normal]);
         }
         for i in 0..n as u32 {
             let (t0, b0) = (base + 2 * i, base + 2 * i + 1);
             let (t1, b1) = (t0 + 2, b0 + 2);
             if z < 0.0 {
-                indices.extend([t0, t1, b0, b0, t1, b1]);
+                quad(&mut indices, t0, t1, b0, b1); // outward = -Z
             } else {
-                indices.extend([t0, b0, t1, t1, b0, b1]);
+                quad(&mut indices, t0, b0, t1, b1); // outward = +Z
             }
         }
     }
