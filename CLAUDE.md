@@ -655,14 +655,16 @@ the one effect it powered was hand-rolled:
   component plus a `quadratic_in_out` helper, both in `player.rs`. The trigger systems
   `insert` a `CameraTween` (replacing any in-progress one, so re-triggering restarts
   from the current position); `ease_camera` advances `elapsed` by `time.delta_secs()`,
-  writes `start.lerp(end, quadratic_in_out(t))` into the orbit center's
-  `Transform.translation`, and `remove`s the component once `t >= 1` (snapping exactly
+  writes `start.lerp(end, quadratic_in_out(t))` into the orbit center's look-frame
+  `OrbitOffset` (the character body never yaws, so a raw child translation would be a
+  fixed *world* offset — `mouse_motion` composes `Ry(-yaw) · offset` into the
+  translation each frame), and `remove`s the component once `t >= 1` (snapping exactly
   to `end`). This matches the old `EasingType::Once` semantics (eases once, then holds).
 - The old `Translation` newtype + its `bevy_easings::Lerp` impl, the
   `custom_ease_system::<(), Translation>` registration, and the `easing: Translation`
   bundle field are all gone. `ease_camera` stays in the `EaseLabel` set so
-  `mouse_motion.after(EaseLabel)` ordering (rotation written after translation) is
-  preserved.
+  `mouse_motion.after(EaseLabel)` ordering (the freshly-eased offset is folded into
+  the translation the same frame) is preserved.
 - Removing the dep also pruned its unique transitive crate `interpolation` from the
   lockfile; nothing else moved.
 

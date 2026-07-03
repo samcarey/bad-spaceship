@@ -74,6 +74,14 @@ pub struct CameraOrbitCenter;
 #[derive(Component)]
 pub struct PlayerCameraOrbitCenter(pub Entity);
 
+/// On the player: its `HoldPoint` entity (spawned with the orbit centre by
+/// `attach_camera_orbit`). A direct handle like [`PlayerCameraOrbitCenter`] —
+/// the player's children must NOT be scanned for it positionally: the
+/// multiplayer predicted avatar carries a lightyear-internal child and the
+/// monster pivot, so child order is compile-dependent.
+#[derive(Component)]
+pub struct PlayerHoldPoint(pub Entity);
+
 #[derive(Default, Component)]
 pub struct FocusedInteractable(pub Option<Entity>);
 

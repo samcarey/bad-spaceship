@@ -16,7 +16,7 @@ use crate::{
     GameStickDirectionalInput, HoldPoint, Holding, InputEvents,
     KeyboardDirectionalInput, LeftClicked, LookPitch, Modifying, MouseMotionDelta, MouseWheelDelta,
     MouseWheelLabel, OriginalPosition, PartRotation, Player, PlayerCameraOrbitCenter, PlayerClick,
-    PlayerInput, ToggleHoldingSystemLabel, Yaw, INITIAL_CAMERA_PITCH,
+    PlayerHoldPoint, PlayerInput, ToggleHoldingSystemLabel, Yaw, INITIAL_CAMERA_PITCH,
 };
 
 const MAX_CAMERA_PITCH_DEGREES: f32 = 89.;
@@ -83,6 +83,17 @@ pub struct CameraOrbitCenterBundle {
     pub global_transform: GlobalTransform,
     camera_orbit_center: CameraOrbitCenter,
 }
+
+/// The orbit centre's offset from the character, in the LOOK frame (+y up,
+/// +z toward the look direction). The character body never yaws (rotation-
+/// locked; the look yaw lives on the orbit centre's rotation), so a raw child
+/// translation is a fixed *world* offset — the rig would orbit an axis
+/// displaced from the character. `mouse_motion` is the ONLY translation
+/// writer: it composes `Ry(-yaw) * offset` into the translation each frame.
+/// The pickup tween (`adjust_camera_on_hold`/`ease_camera`) eases this
+/// offset, never the raw translation.
+#[derive(Component)]
+struct OrbitOffset(Vec3);
 
 #[derive(Bundle, Default)]
 pub struct HoldPointBundle {
@@ -207,22 +218,16 @@ fn attach_camera_orbit(
                 Transform::from_translation(camera_orbit_offset.min);
             camera_orbit_center_transform.rotation = Quat::from_rotation_x(INITIAL_CAMERA_PITCH);
             let camera_orbit_center = commands
-                .spawn(CameraOrbitCenterBundle {
-                    transform: camera_orbit_center_transform,
-                    ..Default::default()
-                })
+                .spawn((
+                    CameraOrbitCenterBundle {
+                        transform: camera_orbit_center_transform,
+                        ..Default::default()
+                    },
+                    // See `OrbitOffset`. Yaw starts at 0, so the raw translation
+                    // above matches the first composed one.
+                    OrbitOffset(camera_orbit_offset.min),
+                ))
                 .id();
-
-            // Mount the camera center to the player
-            commands
-                .entity(character_entity)
-                .add_children(&[camera_orbit_center])
-                .insert(PlayerCameraOrbitCenter(camera_orbit_center));
-
-            // Mount the camera to the camera orbit center
-            // commands
-            //     .entity(camera_orbit_center)
-            //     .push_children(&[camera]);
 
             let hold_point_transform = Transform::from_translation(Vec3::Z * 5.0);
             // GlobalTransform lost `translation_mut()` in Bevy 0.10; offset the
@@ -244,6 +249,17 @@ fn attach_camera_orbit(
             commands
                 .entity(camera_orbit_center)
                 .add_children(&[hold_point]);
+
+            // Mount the rig on the player, with direct handles to both pieces —
+            // the player's children may NOT be scanned positionally for them
+            // (see `PlayerHoldPoint`).
+            commands
+                .entity(character_entity)
+                .add_children(&[camera_orbit_center])
+                .insert((
+                    PlayerCameraOrbitCenter(camera_orbit_center),
+                    PlayerHoldPoint(hold_point),
+                ));
         }
     }
 }
@@ -257,7 +273,7 @@ fn mouse_motion(
         &Holding,
         &Modifying,
     )>,
-    mut camera_orbit_center_transforms: Query<&mut Transform, With<CameraOrbitCenter>>,
+    mut camera_orbit_center_transforms: Query<(&mut Transform, &OrbitOffset)>,
     configs: ResMut<Assets<Config>>,
 ) {
     if let Some((_, config)) = configs.iter().next() {
@@ -274,36 +290,24 @@ fn mouse_motion(
             }
             // The camera orbit center carries the full look orientation. Yaw used
             // to be applied by rotating the character body, but that body is a
-            // Rapier-owned ROTATION_LOCKED ball whose rotation the physics writeback
+            // rotation-locked physics body whose rotation the physics writeback
             // overwrites — so yaw is applied here too (the composition `Ry(-yaw) *
-            // Rx(pitch)` matches the old `body(Ry(-yaw)) * orbit(Rx(pitch))`).
-            if let Some(mut transform) = camera_orbit_center_transforms.iter_mut().next() {
-                transform.rotation =
-                    Quat::from_rotation_y(-yaw.0) * Quat::from_rotation_x(pitch.0);
-            }
-        }
-    }
-}
-
-pub fn get_hold_point_entity(
-    player_children: &Children,
-    camera_orbit_centers: Query<&Children>,
-    hold_points: &Query<(), With<HoldPoint>>,
-) -> Option<Entity> {
-    // TODO: eliminate need for this function
-    let mut held_entity: Option<Entity> = None;
-    // Bevy 0.16's `Children::iter()` (a `RelationshipTarget` method) yields
-    // `Entity` by value now, not `&Entity`, so these no longer need dereferencing.
-    if let Some(camera_orbit_center) = player_children.iter().next() {
-        if let Ok(potential_hold_points) = camera_orbit_centers.get(camera_orbit_center) {
-            for potential_hold_point in potential_hold_points.iter() {
-                if hold_points.get(potential_hold_point).is_ok() {
-                    held_entity = Some(potential_hold_point);
+            // Rx(pitch)` matches the old `body(Ry(-yaw)) * orbit(Rx(pitch))`),
+            // and the offset is rotated along with it (see `OrbitOffset`).
+            // Compare-before-write: an identical write would still dirty the
+            // orbit centre's whole subtree (camera, hold point) every frame.
+            if let Some((mut transform, offset)) = camera_orbit_center_transforms.iter_mut().next()
+            {
+                let look_yaw = Quat::from_rotation_y(-yaw.0);
+                let rotation = look_yaw * Quat::from_rotation_x(pitch.0);
+                let translation = look_yaw * offset.0;
+                if transform.rotation != rotation || transform.translation != translation {
+                    transform.rotation = rotation;
+                    transform.translation = translation;
                 }
             }
         }
     }
-    held_entity
 }
 
 #[derive(Bundle)]
@@ -324,39 +328,36 @@ impl HeldBundle {
 fn toggle_holding(
     mut clicks: MessageReader<PlayerClick>,
     mut commands: Commands,
-    mut players: Query<(&mut Holding, &FocusedInteractable, &Children, &Modifying), With<Player>>,
-    camera_orbit_centers: Query<&Children>,
-    hold_points: Query<(), With<HoldPoint>>,
+    mut players: Query<
+        (&mut Holding, &FocusedInteractable, &PlayerHoldPoint, &Modifying),
+        With<Player>,
+    >,
     holdables: Query<&GlobalTransform, With<Holdable>>,
     mut attach_events: MessageWriter<AttachEvent>,
 ) {
     if clicks.read().next().is_some() {
-        if let Some((mut holding, interactable, player_children, modifying)) =
+        if let Some((mut holding, interactable, hold_point, modifying)) =
             players.iter_mut().next()
         {
             if let Some(current_interactable) = interactable.0 {
                 if let Ok(original_transform) = holdables.get(current_interactable) {
-                    if let Some(hold_point_entity) =
-                        get_hold_point_entity(player_children, camera_orbit_centers, &hold_points)
-                    {
-                        if holding.0 {
-                            if modifying.0 {
-                                attach_events.write(AttachEvent);
-                            } else {
-                                holding.0 = false;
-                                commands
-                                    .entity(current_interactable)
-                                    .remove::<HeldBundle>();
-                            }
-                        } else if !modifying.0 {
-                            holding.0 = true;
+                    if holding.0 {
+                        if modifying.0 {
+                            attach_events.write(AttachEvent);
+                        } else {
+                            holding.0 = false;
                             commands
                                 .entity(current_interactable)
-                                .insert(HeldBundle::new(
-                                    hold_point_entity,
-                                    original_transform.compute_transform().rotation,
-                                ));
+                                .remove::<HeldBundle>();
                         }
+                    } else if !modifying.0 {
+                        holding.0 = true;
+                        commands
+                            .entity(current_interactable)
+                            .insert(HeldBundle::new(
+                                hold_point.0,
+                                original_transform.compute_transform().rotation,
+                            ));
                     }
                 }
             }
@@ -364,11 +365,12 @@ fn toggle_holding(
     }
 }
 
-/// A self-contained translation tween for the camera orbit center, replacing the
-/// former `bevy_easings` dependency (which lagged Bevy releases). It eases the
-/// orbit center's `Transform.translation` from `start` to `end` over `duration`
-/// seconds with a quadratic in-out curve; `ease_camera` advances it and removes
-/// the component when the tween completes.
+/// A self-contained tween for the camera orbit center, replacing the former
+/// `bevy_easings` dependency (which lagged Bevy releases). It eases the orbit
+/// center's look-frame [`OrbitOffset`] from `start` to `end` over `duration`
+/// seconds with a quadratic in-out curve (`mouse_motion` folds the offset into
+/// the translation each frame); `ease_camera` advances it and removes the
+/// component when the tween completes.
 #[derive(Component)]
 struct CameraTween {
     start: Vec3,
@@ -434,16 +436,16 @@ fn adjust_camera_on_hold(
     mut commands: Commands,
     changed: Query<(&Holding, &FocusedInteractable), (With<Player>, Changed<Holding>)>,
     camera_orbit_offset: Res<CameraOrbitOffset>,
-    camera_orbit_centers: Query<(Entity, &Transform), With<CameraOrbitCenter>>,
+    camera_orbit_centers: Query<(Entity, &OrbitOffset)>,
     radiuses: Query<&BoundingRadius>,
 ) {
     let Ok((holding, focused)) = changed.single() else {
         return;
     };
     let rise = held_radius(holding, focused, &radiuses);
-    for (entity, transform) in camera_orbit_centers.iter() {
+    for (entity, offset) in camera_orbit_centers.iter() {
         commands.entity(entity).insert(CameraTween::new(
-            transform.translation,
+            offset.0,
             camera_orbit_offset.min + Vec3::Y * rise,
         ));
     }
@@ -452,12 +454,12 @@ fn adjust_camera_on_hold(
 fn ease_camera(
     mut commands: Commands,
     time: Res<Time>,
-    mut cameras: Query<(Entity, &mut Transform, &mut CameraTween), With<CameraOrbitCenter>>,
+    mut cameras: Query<(Entity, &mut OrbitOffset, &mut CameraTween)>,
 ) {
-    for (entity, mut transform, mut tween) in cameras.iter_mut() {
+    for (entity, mut offset, mut tween) in cameras.iter_mut() {
         tween.elapsed += time.delta_secs();
         let progress = (tween.elapsed / tween.duration).clamp(0.0, 1.0);
-        transform.translation = tween.start.lerp(tween.end, quadratic_in_out(progress));
+        offset.0 = tween.start.lerp(tween.end, quadratic_in_out(progress));
         // Tween done: snap exactly to the target and drop the component so it stops.
         if progress >= 1.0 {
             commands.entity(entity).remove::<CameraTween>();
@@ -483,38 +485,36 @@ fn adjust_hold_point_on_hold(
 }
 
 fn set_part_rotation(
-    mut players: Query<(&mut PartRotation, &Children, &Modifying, &MouseWheelDelta)>,
+    mut players: Query<(&mut PartRotation, &PlayerCameraOrbitCenter, &Modifying, &MouseWheelDelta)>,
     camera_orbit_centers: Query<&GlobalTransform, With<CameraOrbitCenter>>,
     mouse_deltas: Query<&MouseMotionDelta>,
 ) {
-    if let Some((mut rotation, player_children, modifying, mouse_wheel_delta)) =
+    if let Some((mut rotation, orbit_center, modifying, mouse_wheel_delta)) =
         players.iter_mut().next()
     {
         rotation.0 = Quat::default();
         if modifying.0 {
-            for child in player_children.iter() {
-                if let Ok(camera_orbit_center) = camera_orbit_centers.get(child) {
-                    let camera_orbit_center = camera_orbit_center.compute_transform();
-                    rotation.0 = Quat::from_axis_angle(
-                        // `Transform::back` returns a direction type (`Dir3`
-                        // since Bevy 0.14, formerly `Direction3d`); deref to `Vec3`.
-                        *camera_orbit_center.back(),
-                        mouse_wheel_delta.0 / 10.,
-                    ) * rotation.0;
-                    for mouse_delta in mouse_deltas.iter() {
-                        if mouse_delta.0 != Vec2::ZERO {
-                            let rotation_input = camera_orbit_center.rotation.mul_vec3(Vec3::new(
-                                -mouse_delta.0.x,
-                                -mouse_delta.0.y,
-                                0.0,
-                            ));
-                            let rotation_axis =
-                                rotation_input.cross(*camera_orbit_center.back()).normalize();
-                            rotation.0 = Quat::from_axis_angle(
-                                rotation_axis,
-                                rotation_input.length() / 100.,
-                            ) * rotation.0;
-                        }
+            if let Ok(camera_orbit_center) = camera_orbit_centers.get(orbit_center.0) {
+                let camera_orbit_center = camera_orbit_center.compute_transform();
+                rotation.0 = Quat::from_axis_angle(
+                    // `Transform::back` returns a direction type (`Dir3`
+                    // since Bevy 0.14, formerly `Direction3d`); deref to `Vec3`.
+                    *camera_orbit_center.back(),
+                    mouse_wheel_delta.0 / 10.,
+                ) * rotation.0;
+                for mouse_delta in mouse_deltas.iter() {
+                    if mouse_delta.0 != Vec2::ZERO {
+                        let rotation_input = camera_orbit_center.rotation.mul_vec3(Vec3::new(
+                            -mouse_delta.0.x,
+                            -mouse_delta.0.y,
+                            0.0,
+                        ));
+                        let rotation_axis =
+                            rotation_input.cross(*camera_orbit_center.back()).normalize();
+                        rotation.0 = Quat::from_axis_angle(
+                            rotation_axis,
+                            rotation_input.length() / 100.,
+                        ) * rotation.0;
                     }
                 }
             }
