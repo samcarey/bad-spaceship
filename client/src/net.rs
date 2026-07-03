@@ -19,7 +19,7 @@ use bad_spaceship_shared::character::{
 use bad_spaceship_shared::net::{
     apply_hold_spring, apply_net_input, focused_part, ClientPanicReport, ControlChannel, NetFacing,
     NetHold, NetInput, NetJoint, NetPart, take_rollback_diag, NetPlayer, ProtocolPlugin,
-    RollbackReport, TelemetryChannel, TICK,
+    RollbackReport, TelemetryChannel, GROUND_JOINT_ID, TICK,
 };
 use bad_spaceship_shared::part::{insert_part_physics, Holdable, SuppressLocalParts};
 use bad_spaceship_shared::player::make_local_player;
@@ -27,9 +27,9 @@ use crate::render_main_pass::metal_material::{metal_tint, part_visual, MetalMate
 use crate::render_secondary_pass::gizmo_material::GizmoMaterial;
 use crate::render_secondary_pass::JointAppearance;
 use bad_spaceship_shared::{
-    CameraOrbitCenter, Character, DirectionalInput, FocusedInteractable, HoldPoint, Holding,
-    InputEvents, LookPitch, Modifying, PartRotation, Player, PlayerClick, PredeleteJoints,
-    SuppressLocalPlayer, UpdateJointsLabel, Yaw,
+    CameraOrbitCenter, Character, DirectionalInput, FocusedInteractable, Grass, HoldPoint,
+    Holding, InputEvents, LookPitch, Modifying, PartRotation, Player, PlayerClick,
+    PredeleteJoints, SuppressLocalPlayer, UpdateJointsLabel, Yaw,
 };
 use bevy::prelude::*;
 use lightyear::prelude::client::input::InputSystems as ClientInputSystems;
@@ -832,6 +832,9 @@ fn bind_replicated_joints(
     mut commands: Commands,
     new_joints: Query<(Entity, &NetJoint), Without<JointAnchorBody>>,
     parts: Query<(Entity, &NetPart), (With<Predicted>, With<RigidBody>)>,
+    // The local ground body: ground joints name it via the `GROUND_JOINT_ID`
+    // sentinel (the ground is spawned locally by `MapPlugin`, not replicated).
+    grounds: Query<Entity, (With<Grass>, With<RigidBody>)>,
     appearance: Res<JointAppearance>,
 ) {
     let (Some(mesh), Some(material)) = (&appearance.mesh, &appearance.invalid_material) else {
@@ -839,6 +842,9 @@ fn bind_replicated_joints(
     };
     for (joint_entity, joint) in &new_joints {
         let find = |id: u64| {
+            if id == GROUND_JOINT_ID {
+                return grounds.iter().next();
+            }
             parts
                 .iter()
                 .find(|(_, part)| part.id == id)

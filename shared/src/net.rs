@@ -255,6 +255,13 @@ pub struct NetJoint {
     pub anchor2: [f32; 3],
 }
 
+/// Sentinel [`NetJoint`] endpoint id meaning "the ground" (the `Grass` bowl). The
+/// ground is spawned locally on every peer by `MapPlugin` rather than replicated,
+/// so it has no `NetPart::id`; each client resolves this sentinel to its own local
+/// ground entity. Never collides with a real id: part ids are live `Entity` bits,
+/// and `u64::MAX` is not a valid entity encoding.
+pub const GROUND_JOINT_ID: u64 = u64::MAX;
+
 /// Replicated hold state for a part a player is currently holding: who holds it
 /// (their [`NetPlayer::client_id`]) and the hold point + target orientation the server
 /// is springing it toward (the holder's forwarded `hold_target`/`hold_rotation`). All
