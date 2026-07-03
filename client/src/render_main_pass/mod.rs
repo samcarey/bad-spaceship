@@ -1,6 +1,6 @@
 use bad_spaceship_shared::{
     map::PLATFORM_WIDTH_M,
-    part::{Holdable, PartSeed, PartShape, SuppressLocalParts},
+    part::{Holdable, PartSeed, SuppressLocalParts},
     Character, Grass,
 };
 mod grass_material;
@@ -100,31 +100,19 @@ fn add_lighting(mut commands: Commands) {
 #[derive(Component)]
 struct AssignedMaterial;
 
-/// Render mesh for a part shape (used by single-player's `assign_parts` AND
-/// the multiplayer client's `draw_replicated_parts`, so the two modes always
-/// draw a given `PartShape` identically).
-pub fn part_mesh(shape: PartShape) -> Mesh {
-    match shape {
-        // Bevy's primitives take FULL extents/height (= 2 x the halves).
-        PartShape::Cuboid { half_extents: [x, y, z] } => {
-            Cuboid::new(x * 2.0, y * 2.0, z * 2.0).into()
-        }
-        PartShape::Cylinder { radius, half_height } => {
-            Cylinder::new(radius, half_height * 2.0).into()
-        }
-    }
-}
-
 fn assign_parts(
     mut commands: Commands,
     unassigned: Query<
-        (Entity, &PartShape, &Transform, &GlobalTransform, &PartSeed),
+        (Entity, &Collider, &Transform, &GlobalTransform, &PartSeed),
         (With<Holdable>, Without<AssignedMaterial>),
     >,
     mut materials: ResMut<Assets<MetalMaterial>>,
     mut meshes: ResMut<Assets<Mesh>>,
 ) {
-    for (entity, shape, transform, global_transform, seed) in unassigned.iter() {
+    for (entity, collider_shape, transform, global_transform, seed) in unassigned.iter() {
+        // Avian colliders expose their parry shape via `.shape()`; parry's
+        // `Cuboid::half_extents` is a field (nalgebra `Vector3`, still indexable).
+        let dims = collider_shape.shape().as_cuboid().unwrap().half_extents;
         commands
             .entity(entity)
             .insert((
@@ -132,7 +120,9 @@ fn assign_parts(
                 global_transform.clone(),
                 // Bevy 0.15 replaced `PbrBundle` with the `Mesh3d` / `MeshMaterial3d`
                 // required-components wrappers — `Handle<T>` is no longer a component.
-                Mesh3d(meshes.add(part_mesh(*shape))),
+                // Bevy 0.13 deprecated `shape::*` in favour of `bevy_math`
+                // primitives; the collider half-extents map to a full-size cuboid.
+                Mesh3d(meshes.add(Cuboid::new(dims[0] * 2.0, dims[1] * 2.0, dims[2] * 2.0))),
                 // The whole look derives from the part's spawn seed — the same
                 // derivation the multiplayer client runs on `NetPart::seed`.
                 MeshMaterial3d(materials.add(metal_material(seed.0))),

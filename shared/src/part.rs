@@ -13,7 +13,6 @@ use avian3d::prelude::{
 };
 use bevy::prelude::*;
 use rand::prelude::ThreadRng;
-use serde::{Deserialize, Serialize};
 use rand::Rng;
 use std::f32;
 
@@ -95,48 +94,6 @@ pub struct Holdable;
 #[derive(Component, Clone, Copy)]
 pub struct PartSeed(pub u32);
 
-/// A part's shape, minted at spawn — the single source both the physics
-/// (collider, bounding radius) and the render mesh derive from, on the spawning
-/// side AND, via `NetPart`, on every multiplayer client. All variants are
-/// centred on the entity origin, so COM == origin and the attach-anchor math
-/// (`local_contact_anchor`) stays exact for every shape.
-#[derive(Component, Serialize, Deserialize, Clone, Copy, PartialEq, Debug)]
-pub enum PartShape {
-    Cuboid { half_extents: [f32; 3] },
-    Cylinder { radius: f32, half_height: f32 },
-}
-
-impl Default for PartShape {
-    fn default() -> Self {
-        PartShape::Cuboid { half_extents: [0.5; 3] }
-    }
-}
-
-impl PartShape {
-    pub fn collider(&self) -> Collider {
-        match *self {
-            // Avian's constructors take FULL extents/height (= 2 × the halves).
-            PartShape::Cuboid { half_extents: [x, y, z] } => {
-                Collider::cuboid(x * 2.0, y * 2.0, z * 2.0)
-            }
-            PartShape::Cylinder { radius, half_height } => {
-                Collider::cylinder(radius, half_height * 2.0)
-            }
-        }
-    }
-
-    /// Radius of the bounding sphere about the origin (parry's
-    /// `compute_local_bounding_sphere().radius` for these centred shapes).
-    pub fn bounding_radius(&self) -> f32 {
-        match *self {
-            PartShape::Cuboid { half_extents } => Vec3::from(half_extents).length(),
-            PartShape::Cylinder { radius, half_height } => {
-                (radius * radius + half_height * half_height).sqrt()
-            }
-        }
-    }
-}
-
 #[derive(Default, Component)]
 struct GetsReplaced;
 
@@ -206,11 +163,8 @@ struct PartBundle {
 #[derive(Message)]
 struct NewPart;
 
-fn get_random_shape(rng: &mut ThreadRng) -> PartShape {
+fn get_random_shape(rng: &mut ThreadRng) -> Collider {
     loop {
-        // Cylinders draw from the same size window as the blocks (diameter and
-        // length each MIN..MAX), with the same bounding-box volume constraint,
-        // so the two classes mix at comparable scales.
         let (x, y, z) = (
             rng.gen_range(MIN_PART_SIZE..=MAX_PART_SIZE),
             rng.gen_range(MIN_PART_SIZE..=MAX_PART_SIZE),
@@ -218,12 +172,9 @@ fn get_random_shape(rng: &mut ThreadRng) -> PartShape {
         );
         let volume = x * y * z;
         if volume < MAX_PART_VOLUME && volume > MIN_PART_VOLUME {
-            return if rng.gen_bool(0.5) {
-                PartShape::Cuboid { half_extents: [x / 2.0, y / 2.0, z / 2.0] }
-            } else {
-                // Diameter x, length y (the z draw only shaped the volume gate).
-                PartShape::Cylinder { radius: x / 2.0, half_height: y / 2.0 }
-            };
+            // Avian's `Collider::cuboid` takes FULL extents (rapier's cuboid took
+            // half-extents, hence the old `/ 2.0`); the resulting box is identical.
+            return Collider::cuboid(x, y, z);
         }
     }
 }
@@ -235,16 +186,23 @@ fn spawn_part(mut commands: Commands, mut new_part_events: MessageReader<NewPart
 }
 
 /// Spawn one random dynamic part (the standard collider + physics props) at a
-/// random spawn-zone position, returning its entity, shape, and appearance
-/// seed. Shared by the single-player spawner and the multiplayer server's
-/// per-room spawner; the caller adds any extra tagging (replication, room
-/// membership, collision layers). The shape and seed let the server fill
-/// `NetPart` without re-reading components after the spawn flushes. Owns its
-/// RNG so the server doesn't need to depend on `rand` (a `ThreadRng` is a
-/// cheap thread-local handle).
-pub fn spawn_random_part(commands: &mut Commands) -> (Entity, PartShape, u32) {
+/// random spawn-zone position, returning its entity and the cuboid's
+/// half-extents plus its appearance seed. Shared by the single-player spawner
+/// and the multiplayer server's per-room spawner; the caller adds any extra
+/// tagging (replication, room membership, collision layers). The half-extents
+/// and seed let the server fill `NetPart` without re-reading components after
+/// the spawn flushes. Owns its RNG so the server doesn't need to depend on
+/// `rand` (a `ThreadRng` is a cheap thread-local handle).
+pub fn spawn_random_part(commands: &mut Commands) -> (Entity, Vec3, u32) {
     let mut rng = rand::thread_rng();
-    let shape = get_random_shape(&mut rng);
+    let collider = get_random_shape(&mut rng);
+    // Every random shape is a cuboid (see `get_random_shape`); recover its
+    // half-extents for `NetPart`. Falls back to a unit box if that ever changes.
+    let half_extents = collider
+        .shape()
+        .as_cuboid()
+        .map(|c| Vec3::new(c.half_extents[0], c.half_extents[1], c.half_extents[2]))
+        .unwrap_or(Vec3::ONE);
     let spawn = Vec3::new(
         rng.gen_range(-SPAWN_ZONE_HALF_WIDTH..=SPAWN_ZONE_HALF_WIDTH),
         rng.gen_range(5.0..=15.0),
@@ -252,10 +210,9 @@ pub fn spawn_random_part(commands: &mut Commands) -> (Entity, PartShape, u32) {
     );
     let seed = rng.gen();
     let mut e = commands.spawn_empty();
-    insert_part_physics(&mut e, shape);
+    insert_part_physics(&mut e, half_extents);
     e.insert((
         PartSeed(seed),
-        shape,
         // Bevy 0.15: bare `Transform` (it now requires `GlobalTransform`).
         // Set Avian `Position` too, not just `Transform`: in multiplayer the server
         // disables Avian's `PhysicsTransformPlugin` (lightyear_avian owns the sync),
@@ -267,25 +224,27 @@ pub fn spawn_random_part(commands: &mut Commands) -> (Entity, PartShape, u32) {
         Position(spawn),
         PartBundle::default(),
     ));
-    (e.id(), shape, seed)
+    (e.id(), half_extents, seed)
 }
 
 /// Insert the shared dynamic-part physics (collider + mass/friction/restitution +
-/// CCD) onto an entity from its shape. Used by `spawn_random_part`
+/// CCD) onto an entity from its cuboid half-extents. Used by `spawn_random_part`
 /// (single-player + the server's authoritative parts) AND the multiplayer client's
 /// predicted-part setup, so both ends simulate an *identical* body — essential for
 /// client-side prediction to stay close to the server (state replication only
 /// corrects divergence; matching physics keeps that divergence tiny).
-pub fn insert_part_physics(entity: &mut EntityCommands, shape: PartShape) {
+pub fn insert_part_physics(entity: &mut EntityCommands, half_extents: Vec3) {
     entity.insert((
         RigidBody::Dynamic,
-        // The bounding-sphere radius about the origin. Attached here,
+        // The cuboid's bounding-sphere radius (centre at origin → `half_extents.norm()`,
+        // identical to parry's `compute_local_bounding_sphere().radius`). Attached here,
         // in the *shared* part-physics helper, so every part carries it from one source —
         // single-player/server (`spawn_random_part`) AND the multiplayer client's
         // predicted parts (`draw_replicated_parts`) — rather than only the spawner. The
         // pickup camera/hold-point "feel" reads this, so it now works in both modes.
-        BoundingRadius(shape.bounding_radius()),
-        shape.collider(),
+        BoundingRadius(half_extents.length()),
+        // Avian's `Collider::cuboid` takes FULL extents (= 2 × half_extents).
+        Collider::cuboid(half_extents.x * 2.0, half_extents.y * 2.0, half_extents.z * 2.0),
         // rapier's `ColliderMassProperties::Density` / `Friction::coefficient` /
         // `Restitution::coefficient` → Avian's `ColliderDensity` / `Friction::new`
         // / `Restitution::new`.
