@@ -54,6 +54,12 @@ lightyear = { version = "0.28", default-features = false }
 # net plugins (it is NOT part of Client/ServerPlugins); the protocol registers
 # Position/Rotation in `shared`. State-replication mode, so no `deterministic`.
 lightyear_avian3d = { version = "0.28", default-features = false, features = ["3d", "f32", "std"] }
+# Wasm-size lever, not a behavior need: the `release_max_level_warn` feature is
+# a *static* cap — in release builds every info!/debug!/trace! call site across
+# the whole graph (mostly Bevy's) compiles out, format strings and all;
+# warnings/errors still reach the console. Pinned here so the two crates that
+# pull it (buoyancy unconditionally, the client wasm-only) can't drift.
+tracing = { version = "0.1", default-features = false, features = ["release_max_level_warn"] }
 
 # Recommended for rapier: https://rapier.rs/docs/user_guides/bevy_plugin/common_mistakes
 [profile.dev.package."*"]

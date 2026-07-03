@@ -37,10 +37,8 @@ getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
 wasm-bindgen = "=0.2.125"
 
 # Already in the graph via bevy_log; declared directly only to turn on the
-# static level cap: in release builds every info!/debug!/trace! call site across
-# the whole graph (mostly Bevy's) compiles out, format strings and all. Size
-# lever, not a behavior need — warnings/errors still reach the console.
-tracing = { version = "0.1", default-features = false, features = ["release_max_level_warn"] }
+# static release_max_level_warn size cap (see the workspace pin's comment).
+tracing = { workspace = true }
 
 [features]
 # Bevy is pulled with `default-features = false` (workspace pin), so the renderer

@@ -90,21 +90,28 @@ jobs:
           set -euo pipefail
           rm -rf _site
           mkdir -p _site/target
+          # Binaryen size pass (~30% on top of the compiler's output), applied
+          # to both wasm bundles below. The --enable-* list is exactly rustc's
+          # post-MVP ops (plain -Oz rejects them) plus gc + tail-call, which
+          # binaryen uses for ~3 MB of extra shrink and every stable browser
+          # ships. NEVER --all-features: it lets binaryen emit experimental
+          # "exact" heap types (custom-descriptors) that fail
+          # WebAssembly.compile in ALL current browsers. (And never
+          # --low-memory-unused: Rust keeps its shadow stack at low memory.)
+          wasm_opt_dist() {
+            wasm-opt -Oz --converge --generate-global-effects \
+              --enable-mutable-globals --enable-sign-ext --enable-bulk-memory \
+              --enable-nontrapping-float-to-int --enable-multivalue \
+              --enable-reference-types --enable-extended-const \
+              --enable-tail-call --enable-gc \
+              --strip-producers --strip-target-features \
+              --output "$1" "$1"
+          }
           # Generate JS bindings straight into the published target/ directory
           # (client/index.html loads `./target/wasm.js`).
           wasm-bindgen --out-dir _site/target --out-name wasm --target web --no-typescript \
             target/wasm32-unknown-unknown/wasm-dist/bad-spaceship-client.wasm
-          # Binaryen size pass on the game client (same flags + rationale as the
-          # buoyancy pass below — see that step's comment for the --enable-*
-          # list and the --all-features / --low-memory-unused warnings).
-          wasm-opt -Oz --converge --generate-global-effects \
-            --enable-mutable-globals --enable-sign-ext --enable-bulk-memory \
-            --enable-nontrapping-float-to-int --enable-multivalue \
-            --enable-reference-types --enable-extended-const \
-            --enable-tail-call --enable-gc \
-            --strip-producers --strip-target-features \
-            --output _site/target/wasm_bg.wasm \
-            _site/target/wasm_bg.wasm
+          wasm_opt_dist _site/target/wasm_bg.wasm
           # index.html (landing), play.html (game loader), lobby.html (lobby browser).
           cp client/*.html _site/
           cp -r client/assets _site/assets
@@ -113,22 +120,7 @@ jobs:
           mkdir -p _site/buoyancy
           wasm-bindgen --out-dir _site/buoyancy --out-name wasm --target web --no-typescript \
             target/wasm32-unknown-unknown/wasm-dist/bad-spaceship-buoyancy.wasm
-          # Binaryen size pass (~30% on top of the compiler's output). The
-          # --enable-* list is exactly rustc's post-MVP ops (plain -Oz rejects
-          # them) plus gc + tail-call, which binaryen uses for ~3 MB of extra
-          # shrink and every stable browser ships. NEVER --all-features: it
-          # lets binaryen emit experimental "exact" heap types
-          # (custom-descriptors) that fail WebAssembly.compile in ALL current
-          # browsers. (And never --low-memory-unused: Rust keeps its shadow
-          # stack at low memory.)
-          wasm-opt -Oz --converge --generate-global-effects \
-            --enable-mutable-globals --enable-sign-ext --enable-bulk-memory \
-            --enable-nontrapping-float-to-int --enable-multivalue \
-            --enable-reference-types --enable-extended-const \
-            --enable-tail-call --enable-gc \
-            --strip-producers --strip-target-features \
-            --output _site/buoyancy/wasm_bg.wasm \
-            _site/buoyancy/wasm_bg.wasm
+          wasm_opt_dist _site/buoyancy/wasm_bg.wasm
           cp buoyancy/buoyancy.html _site/
           # The in-sim "how it works" page (top-left info link).
           cp buoyancy/info.html _site/buoyancy/
@@ -148,11 +140,12 @@ jobs:
           wasm_bytes=$(stat -c%s _site/target/wasm_bg.wasm)
           wasm_wire=$(gzip -9 -c _site/target/wasm_bg.wasm | wc -c | tr -d ' ')
           grass_bytes=$(stat -c%s _site/assets/textures/grass.png)
+          grass_wire=$(gzip -9 -c _site/assets/textures/grass.png | wc -c | tr -d ' ')
           cat > _site/loader-manifest.json <<EOF
           {
             "resources": [
               { "url": "./target/wasm_bg.wasm", "bytes": $wasm_bytes, "wire_bytes": $wasm_wire },
-              { "url": "./assets/textures/grass.png", "bytes": $grass_bytes, "wire_bytes": $grass_bytes }
+              { "url": "./assets/textures/grass.png", "bytes": $grass_bytes, "wire_bytes": $grass_wire }
             ]
           }
           EOF

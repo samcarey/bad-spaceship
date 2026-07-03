@@ -128,13 +128,12 @@ native = [
 # `Gamepad` entities are never spawned on web and `gamepad.rs` reads nothing.
 web = ["web-sys", "gloo", "js-sys", "bevy/webgl2", "bevy/bevy_gilrs", "getrandom", "getrandom_02", "getrandom_04"]
 
-# Web-only: cap tracing's *static* max level at `warn` in release builds, which
-# compiles out every info/debug call site and its format strings across the whole
-# graph (bevy internals included) — worth a few hundred KB of wasm. Scoped to the
-# wasm target so native release builds keep their info logs for local debugging;
-# warn/error (and the panic hook — see the panic net in `net.rs`) still emit.
+# Web-only: the static release_max_level_warn size cap (see the workspace pin's
+# comment). Scoped to the wasm target so native release builds keep their info
+# logs for local debugging; warn/error (and the panic hook — see the panic net
+# in `net.rs`) still emit.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-tracing = { version = "0.1", features = ["release_max_level_warn"] }
+tracing = { workspace = true }
 
 [build-dependencies]
 shadow-rs = { version = "0.8", default-features = false }

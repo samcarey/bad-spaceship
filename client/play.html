@@ -262,25 +262,22 @@
       // What actually crosses the network — the size the bar reports. Progress
       // *fraction* still uses uncompressed totals (the stream below yields
       // decompressed bytes), but the byte labels show the compressed download.
+      // Per resource: Content-Length is the wire size whenever present (exact —
+      // e.g. Caddy serving a precompressed .br, or an uncompressed response);
+      // absent (chunked on-the-fly compression, e.g. GitHub Pages), fall back
+      // to the manifest's build-time estimate, then to the uncompressed size.
       let wireTotal = 0;
-      let wireKnown = true;
       RESOURCES.forEach((u, i) => {
         const entry = (manifest && manifest[u]) || {};
         const cl = responses[i].headers.get('content-length');
         const clBytes = cl ? parseInt(cl, 10) : null;
         const size = entry.bytes != null ? entry.bytes : clBytes;
-        if (size == null) known = false;
-        else total += size;
-        // Compressed response: Content-Length *is* the wire size (exact, e.g.
-        // Caddy serving a precompressed .br). No Content-Length (chunked
-        // on-the-fly compression): use the manifest's build-time estimate.
-        // Uncompressed response: the wire size is just the size.
         const encoded = !!responses[i].headers.get('content-encoding');
-        const wire = clBytes != null ? clBytes
-          : encoded ? entry.wire_bytes
-          : size;
-        if (wire == null) wireKnown = false;
-        else wireTotal += wire;
+        if (size == null) known = false;
+        else {
+          total += size;
+          wireTotal += clBytes ?? (encoded ? entry.wire_bytes : null) ?? size;
+        }
       });
 
       const start = performance.now();
@@ -295,9 +292,8 @@
           barInner.style.width = pct + '%';
           // Report the *compressed* download (what the network actually moves),
           // scaled by the honest decompressed-progress fraction.
-          const shownTotal = wireKnown ? wireTotal : total;
           statusEl.textContent =
-            `Loading… ${pct}%  (${fmtBytes(Math.min(frac * shownTotal, shownTotal))} / ${fmtBytes(shownTotal)})`;
+            `Loading… ${pct}%  (${fmtBytes(frac * wireTotal)} / ${fmtBytes(wireTotal)})`;
           const elapsed = (performance.now() - start) / 1000;
           if (frac >= 1) {
             etaEl.textContent = 'starting engine…';
