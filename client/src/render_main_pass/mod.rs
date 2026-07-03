@@ -3,17 +3,20 @@ use bad_spaceship_shared::{
     part::{Holdable, SuppressLocalParts},
     Character, Grass,
 };
+mod grass_material;
+
 // Bevy 0.17's render-crate split relocated several types out of `bevy_render`:
 // `CascadeShadowConfigBuilder` → `bevy_light` (`bevy::light`), `Indices` /
 // `VertexAttributeValues` → `bevy_mesh` (`bevy::mesh`), and `RenderAssetUsages`
 // → `bevy_asset` (`bevy::asset`).
 use bevy::{
-    asset::RenderAssetUsages,
-    image::{ImageAddressMode, ImageLoaderSettings, ImageSampler, ImageSamplerDescriptor},
+    asset::{load_internal_asset, RenderAssetUsages},
     light::CascadeShadowConfigBuilder,
     mesh::{Indices, VertexAttributeValues},
+    pbr::ExtendedMaterial,
     prelude::*,
 };
+use grass_material::{GrassExtension, GrassMaterial, GRASS_SHADER_HANDLE};
 use avian3d::prelude::Collider;
 use rand::Rng;
 
@@ -21,7 +24,16 @@ pub struct RenderMainPassPlugin;
 
 impl Plugin for RenderMainPassPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, add_lighting)
+        // Embedded like the gizmo shader (`render_secondary_pass`): compiled
+        // into the binary under a weak handle, so the web build fetches nothing.
+        load_internal_asset!(
+            app,
+            GRASS_SHADER_HANDLE,
+            "../../assets/grass_material.wgsl",
+            Shader::from_wgsl
+        );
+        app.add_plugins(MaterialPlugin::<GrassMaterial>::default())
+            .add_systems(Startup, add_lighting)
             .add_systems(
                 Update,
                 (
@@ -146,9 +158,8 @@ fn assign_characters(
 
 fn assign_grass(
     mut commands: Commands,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut materials: ResMut<Assets<GrassMaterial>>,
     mut meshes: ResMut<Assets<Mesh>>,
-    asset_server: Res<AssetServer>,
     unassigned: Query<
         (Entity, &Collider, &Transform, &GlobalTransform),
         (With<Grass>, Without<AssignedMaterial>),
@@ -161,38 +172,20 @@ fn assign_grass(
                 transform.clone(),
                 global_transform.clone(),
                 Mesh3d(meshes.add(compute_mesh(&collider_shape))),
-                MeshMaterial3d(materials.add(StandardMaterial {
-                    // The mesh UVs tile every `GRASS_TILE_M` metres (see
-                    // `compute_mesh`), so the sampler must wrap rather than clamp —
-                    // the default `ClampToEdge` would smear the edge texels across
-                    // the whole platform instead of repeating the image. Use
-                    // `MirrorRepeat` rather than `Repeat`: each tile flips relative to
-                    // its neighbour, so adjacent edges hold identical texels and the
-                    // image fades from one tile into the next instead of showing a
-                    // hard seam wherever a non-tileable grass image wraps.
-                    base_color_texture: Some(asset_server.load_with_settings(
-                        "textures/grass.png",
-                        |s: &mut ImageLoaderSettings| {
-                            s.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
-                                address_mode_u: ImageAddressMode::MirrorRepeat,
-                                address_mode_v: ImageAddressMode::MirrorRepeat,
-                                ..Default::default()
-                            });
-                        },
-                    )),
-                    perceptual_roughness: 1.0,
-                    ..Default::default()
+                MeshMaterial3d(materials.add(ExtendedMaterial {
+                    base: StandardMaterial {
+                        // The turf original ships ROUGHNESS 0.9 / SPECULAR 0.05;
+                        // grass is a diffuse surface, so kill the specular sheen.
+                        perceptual_roughness: 1.0,
+                        reflectance: 0.05,
+                        ..Default::default()
+                    },
+                    extension: GrassExtension::default(),
                 })),
             ))
             .insert(AssignedMaterial);
     }
 }
-
-/// World-space width of one grass texture tile, in metres. ≈ 8 × the player
-/// sphere's 1.5 m diameter (`character.character.ron` `size`). With `MirrorRepeat`
-/// each image covers half a tile before mirroring, so the visible motif repeats
-/// every ~6 m.
-const GRASS_TILE_M: f32 = 12.0;
 
 fn compute_mesh(shape: &Collider) -> Mesh {
     let mut mesh = Mesh::new(
@@ -235,22 +228,8 @@ fn compute_mesh(shape: &Collider) -> Mesh {
         })
         .collect();
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, VertexAttributeValues::from(normals));
-    // There's nothing particularly meaningful we can do
-    // for this one without knowing anything about the overall topology.
-
-    // Tile the grass texture instead of stretching one copy across the whole
-    // platform: one image tile spans `GRASS_TILE_M` metres of world space (the UV
-    // is just world position / tile size). The sampler is set to `Repeat` in
-    // `assign_grass`, so UVs outside [0,1] wrap and the image repeats.
-    mesh.insert_attribute(
-        Mesh::ATTRIBUTE_UV_0,
-        VertexAttributeValues::from(
-            verts
-                .iter()
-                .map(|v| [v.x / GRASS_TILE_M, v.z / GRASS_TILE_M])
-                .collect::<Vec<_>>(),
-        ),
-    );
+    // No UVs: the grass shader works in world-space XZ (the old texture tiling
+    // derived its UVs from world position anyway).
     mesh.insert_indices(Indices::U32(
         tris.iter().flat_map(|t| t.iter().copied()).collect(),
     ));
