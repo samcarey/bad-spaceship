@@ -552,7 +552,7 @@ fn update_predelete_joints(
     joints: Query<(Entity, &SphericalJoint)>,
     hold_points0: Query<(), With<HoldPoint>>,
     hold_points1: Query<&GlobalTransform, With<HoldPoint>>,
-    camera_orbit_centers: Query<&Children>,
+    camera_orbit_centers: Query<&Children, With<CameraOrbitCenter>>,
 ) {
     predelete_joints.0.clear();
 

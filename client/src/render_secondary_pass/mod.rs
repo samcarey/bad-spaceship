@@ -1,8 +1,8 @@
 use bad_spaceship_shared::{
     part::{Holdable, SuppressLocalParts, TargetOrientation, TargetPosition, DELETE_RADIUS},
     player::get_hold_point_entity,
-    DisplayableJoint, ExistingJoints, HoldPoint, Holding, Modifying, Player, PotentialJoints,
-    PredeleteJoint, PredeleteJoints, UpdateJointsLabel,
+    CameraOrbitCenter, DisplayableJoint, ExistingJoints, HoldPoint, Holding, Modifying, Player,
+    PotentialJoints, PredeleteJoint, PredeleteJoints, UpdateJointsLabel,
 };
 // Bevy 0.17 moved `NotShadowCaster` from `bevy_pbr` to `bevy_light` (`bevy::light`).
 use bevy::{asset::load_internal_asset, light::NotShadowCaster, prelude::*};
@@ -414,7 +414,7 @@ fn delete_zone_visibility(
     //     QueryState<(), With<HoldPoint>>,
     //     QueryState<&mut Visibility, With<HoldPoint>>,
     // )>,
-    camera_orbit_centers: Query<&Children>,
+    camera_orbit_centers: Query<&Children, With<CameraOrbitCenter>>,
 ) {
     if let Some((holding, modifying, player_children)) = players.iter().next() {
         if let Some(entity) =
