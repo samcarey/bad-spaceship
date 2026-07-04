@@ -149,9 +149,16 @@ pub struct MovementTuning {
 impl Default for MovementTuning {
     fn default() -> Self {
         Self {
-            model: MovementModel::Smooth,
+            // Locked-in defaults (2026-07-04): the Accel/platformer model with the
+            // knobs Sam dialed in. Because the *server* inits this same resource, the
+            // authoritative sim now matches the client's prediction by default (no
+            // reconciliation bounce), whereas a non-default model picked in the panel
+            // would still diverge from the server — the multiplayer caveat.
+            // `max_speed`/`jump_force` mirror `character.character.ron`, which the
+            // one-shot `seed_movement_tuning` copies over these on config load.
+            model: MovementModel::Accel,
             seeded: false,
-            max_speed: 13.0,
+            max_speed: 11.0,
             air_control: 0.25,
             smooth_rate: 14.0,
             accel: 140.0,
@@ -160,7 +167,7 @@ impl Default for MovementTuning {
             ground_accel: 14.0,
             air_accel: 2.0,
             stop_speed: 1.5,
-            jump_force: 10.0,
+            jump_force: 7.5,
             fall_multiplier: 0.0,
         }
     }

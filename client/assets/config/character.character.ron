@@ -1,5 +1,5 @@
 (
     size: 1.5,
-    max_speed: 13,
-    jump_force: 10,
+    max_speed: 11,
+    jump_force: 7.5,
 )
