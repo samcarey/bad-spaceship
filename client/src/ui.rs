@@ -67,16 +67,26 @@ impl Plugin for UiPlugin {
                     show_name_labels,
                     show_instructions,
                     show_bottom_panel,
-                    // Live movement-feel tuner. Shown whenever we're past the initial
-                    // click-to-start screen (so it's usable both in-game and in the
-                    // desktop pause menu, where the cursor is free).
-                    show_movement_panel
-                        .run_if(|s: Res<State<AppState>>| *s.get() != AppState::Initial),
+                    // Live movement-feel tuner. Disabled by default (the movement feel
+                    // is locked in — see `character::MovementTuning`'s Default); flip
+                    // `SHOW_MOVEMENT_PANEL` to bring the panel back for experimentation.
+                    // When on, it's shown whenever we're past the initial click-to-start
+                    // screen (usable both in-game and in the desktop pause menu, where
+                    // the cursor is free).
+                    show_movement_panel.run_if(|s: Res<State<AppState>>| {
+                        SHOW_MOVEMENT_PANEL && *s.get() != AppState::Initial
+                    }),
                 )
                     .in_set(EguiDrawSystems),
             );
     }
 }
+
+/// Master switch for the in-game Movement panel below. `false` hides it (the
+/// movement feel is locked in via `character::MovementTuning`'s Default); set it to
+/// `true` to bring the live tuner back for experimentation — the panel code is kept
+/// intact for exactly that.
+const SHOW_MOVEMENT_PANEL: bool = false;
 
 /// The in-game Movement panel: a live A/B tuner for how the character accelerates.
 /// Pick a model from the combo box and the sliders below reveal exactly that model's
