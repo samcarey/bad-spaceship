@@ -230,6 +230,28 @@ pub fn stored_name() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// Persist the player's chosen avatar (monster index) in `localStorage` so a pick made
+/// in the avatar picker survives a page reload (the iOS tab-suspension reload, or the
+/// Reset action). Re-applied on connect by `ui::restore_persisted_avatar`.
+pub fn store_avatar(monster: u8) {
+    if let Some(storage) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {
+        let _ = storage.set_item("bs-avatar", &monster.to_string());
+    }
+}
+
+/// The persisted avatar index, if any (see `store_avatar`). `None` if unset or malformed.
+pub fn stored_avatar() -> Option<u8> {
+    web_sys::window()?
+        .local_storage()
+        .ok()
+        .flatten()?
+        .get_item("bs-avatar")
+        .ok()
+        .flatten()?
+        .parse()
+        .ok()
+}
+
 /// Reset position by reloading fresh: drop the resume id (`bs-rid`) so the server
 /// spawns us at a new spawn point instead of recalling our last position, then reload
 /// the page. The name is preserved separately (`store_name`) and re-applied on connect;

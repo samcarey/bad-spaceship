@@ -260,6 +260,7 @@ impl Plugin for NetClientPlugin {
             (
                 setup_predicted_avatar,
                 draw_replicated_players,
+                redress_replicated_players,
                 face_replicated_players,
                 draw_replicated_parts,
                 draw_center_of_mass_orb,
@@ -755,6 +756,29 @@ fn draw_replicated_players(
         commands
             .entity(entity)
             .insert((AvatarVisual(pivot), Visibility::default()));
+    }
+}
+
+/// Rebuild a remote avatar's visual when that player picks a new one: the server
+/// re-replicates `NetPlayer::monster` onto the `Interpolated` copy, so on a mismatch
+/// with the shown monster, despawn the old visual pivot and drop the dress marker —
+/// `draw_replicated_players` re-dresses it next frame from the new index. Mirrors the
+/// own-avatar `redress_own_monster` (`monster.rs`).
+fn redress_replicated_players(
+    mut commands: Commands,
+    changed: Query<
+        (Entity, &NetPlayer, &crate::monster::DisplayedMonster, &AvatarVisual),
+        (With<Interpolated>, Changed<NetPlayer>),
+    >,
+) {
+    for (entity, player, displayed, visual) in &changed {
+        if player.monster == displayed.0 {
+            continue;
+        }
+        commands.entity(visual.0).despawn();
+        commands
+            .entity(entity)
+            .remove::<(AvatarVisual, crate::monster::DisplayedMonster)>();
     }
 }
 

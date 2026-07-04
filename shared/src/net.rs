@@ -329,6 +329,17 @@ pub struct NetName(pub String);
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 pub struct SetName(pub String);
 
+/// Client → server request to change the sender's avatar (monster skin) to the given
+/// index. The server resolves the sender's avatar (via `ControlledBy`), reduces the
+/// index modulo [`MONSTER_COUNT`], and writes it onto that avatar's
+/// [`NetPlayer::monster`] — from which it re-replicates to everyone in the room, so
+/// every client re-dresses the avatar. Sent on the reliable [`ControlChannel`] so a
+/// one-shot pick isn't dropped. The picker greys out avatars other players already
+/// wear, but the server does not *enforce* uniqueness (assignment can already collide
+/// by hash) — the choice is applied as sent.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug)]
+pub struct SetAvatar(pub u8);
+
 /// Client → server request to teleport the sender's avatar back to a fresh spawn
 /// position (the "Reset Position" menu action — e.g. to recover after falling off or
 /// getting stuck). Server-authoritative: the server moves the avatar's `Position` and
@@ -642,6 +653,8 @@ impl Plugin for ProtocolPlugin {
         })
         .add_direction(NetworkDirection::ClientToServer);
         app.register_message::<SetName>()
+            .add_direction(NetworkDirection::ClientToServer);
+        app.register_message::<SetAvatar>()
             .add_direction(NetworkDirection::ClientToServer);
         app.register_message::<ResetPosition>()
             .add_direction(NetworkDirection::ClientToServer);

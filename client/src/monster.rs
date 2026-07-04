@@ -43,6 +43,25 @@ const MONSTERS: [(&str, f32); 8] = [
 // shared count is a build error instead of a silently unreachable monster.
 const _: () = assert!(MONSTERS.len() == MONSTER_COUNT as usize);
 
+/// The model filename stem for avatar `index` (e.g. `"Alien_Tall"`), sliced out of its
+/// table path so the picker's names/thumbnails stay in lockstep with `MONSTERS`.
+fn avatar_stem(index: u8) -> &'static str {
+    let path = MONSTERS[index as usize % MONSTERS.len()].0; // "monsters/Alien_Tall.glb"
+    let start = path.rfind('/').map_or(0, |i| i + 1);
+    &path[start..path.len() - 4] // strip the directory prefix and the ".glb" suffix
+}
+
+/// Human-facing name for avatar `index` (e.g. `"Alien Tall"`), for the picker labels.
+pub fn avatar_name(index: u8) -> String {
+    avatar_stem(index).replace('_', " ")
+}
+
+/// Asset path of avatar `index`'s picker thumbnail, a square face portrait rendered by
+/// `tools/render_avatar_thumbnails.py` (lower-cased stem, matching the PNG filenames).
+pub fn avatar_thumbnail_path(index: u8) -> String {
+    format!("monsters/thumbnails/{}.png", avatar_stem(index).to_lowercase())
+}
+
 /// Animation indices in the packs' glTF: identical across all 8 shipped
 /// models (verified from the JSON: Bite_Front, Bite_InPlace, Dance, Death,
 /// HitRecieve, Idle, Jump, No, Walk, Yes).
@@ -64,8 +83,10 @@ pub struct MonsterPlugin;
 impl Plugin for MonsterPlugin {
     fn build(&self, app: &mut App) {
         register_gltf_scene_types(app);
-        app.insert_resource(LocalMonster(local_monster()))
-            .add_systems(Update, (dress_characters, face_own_monster, animate_monsters));
+        app.insert_resource(LocalMonster(local_monster())).add_systems(
+            Update,
+            (dress_characters, redress_own_monster, face_own_monster, animate_monsters),
+        );
     }
 }
 
@@ -116,6 +137,13 @@ fn local_monster() -> u8 {
 /// Marks a body (own character or remote avatar) as dressed.
 #[derive(Component)]
 struct MonsterVisual;
+
+/// The monster index currently shown on a dressed body (own or remote). Inserted by
+/// `spawn_monster_visual`, so a change to the replicated `NetPlayer::monster` — a player
+/// picking a new avatar — can be detected and the visual rebuilt (`redress_own_monster`
+/// here for the own avatar, `redress_replicated_players` in `net.rs` for remotes).
+#[derive(Component)]
+pub struct DisplayedMonster(pub u8);
 
 /// On the *own* body: its yaw pivot entity, rotated from `Yaw` each frame
 /// (remote avatars' pivots ride `AvatarVisual` and are rotated by
@@ -168,8 +196,35 @@ pub fn spawn_monster_visual(
         .spawn((Transform::default(), Visibility::default()))
         .add_children(&[scene])
         .id();
-    commands.entity(body).add_children(&[pivot]);
+    commands
+        .entity(body)
+        .insert(DisplayedMonster(monster))
+        .add_children(&[pivot]);
     pivot
+}
+
+/// Rebuild the *own* avatar's visual when the player picks a new one: the server
+/// re-replicates `NetPlayer::monster`, which lands on the predicted body (kept synced
+/// like `NetName`), so on a mismatch with what's shown, despawn the old pivot (and its
+/// glTF instance) and drop the dress markers — `dress_characters` re-dresses next frame
+/// from the new index. `MonsterAnim` is overwritten by the new scene's setup, so it
+/// isn't cleared here. Remote avatars re-dress the same way via `redress_replicated_players`.
+fn redress_own_monster(
+    mut commands: Commands,
+    changed: Query<
+        (Entity, &bad_spaceship_shared::net::NetPlayer, &DisplayedMonster, &OwnMonsterPivot),
+        (With<Character>, Changed<bad_spaceship_shared::net::NetPlayer>),
+    >,
+) {
+    for (entity, net, displayed, pivot) in &changed {
+        if net.monster == displayed.0 {
+            continue;
+        }
+        commands.entity(pivot.0).despawn();
+        commands
+            .entity(entity)
+            .remove::<(MonsterVisual, OwnMonsterPivot, DisplayedMonster)>();
+    }
 }
 
 /// Dress the own character (single-player AND the multiplayer predicted

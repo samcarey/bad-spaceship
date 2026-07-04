@@ -759,6 +759,58 @@ methods (keyboard+mouse, touch, gamepad) compose without special-casing.
   sensitivity) and the stick dead zone (`STICK_DEADZONE`). Pitch is non-inverted
   (stick up → look up); flip the `-ry` in `gamepad_pointer` for inverted.
 
+## Avatar picker (choosing your monster)
+
+The monster skin is no longer *only* hash-assigned — the hamburger menu's "Change
+Avatar" button (next to "Change Name") opens a picker modal that lets a player choose
+one of the eight monsters. Server-authoritative, built on the existing replicated
+`NetPlayer::monster`:
+
+- **Protocol.** A `SetAvatar(u8)` message on the reliable `ControlChannel` (the exact
+  twin of `SetName`): the client sends the picked index, the server's
+  `apply_avatar_changes` maps the sender's link to its avatar via `ControlledBy`,
+  reduces the index modulo `MONSTER_COUNT`, and writes it onto `NetPlayer::monster`
+  (guarded by `!=` so an unchanged pick doesn't re-replicate). The change replicates to
+  every client in the room.
+- **Runtime re-dress.** The dressing systems (`dress_characters`,
+  `draw_replicated_players`) only ran *once* (`Without<MonsterVisual>` /
+  `Without<AvatarVisual>`), so a mid-session `monster` change wouldn't rebuild the
+  visual. A new `DisplayedMonster(u8)` component (inserted by `spawn_monster_visual`)
+  records what's shown; `redress_own_monster` (own predicted avatar, `monster.rs`) and
+  `redress_replicated_players` (remote interpolated avatars, `net.rs`) watch
+  `Changed<NetPlayer>`, and on a mismatch despawn the old visual pivot (recursive) and
+  drop the dress marker so the dresser re-runs next frame from the new index.
+  `MonsterAnim` is overwritten by the new scene's setup, so it isn't cleared. This
+  relies on the replicated `NetPlayer` staying synced onto the owner's *predicted*
+  entity — the same property that makes renaming yourself update your own roster row.
+- **Persistence** mirrors the name path: `platform::store_avatar`/`stored_avatar`
+  (`localStorage["bs-avatar"]`, native no-op) + `restore_persisted_avatar` re-sends
+  `SetAvatar` once per connection, so a pick survives the iOS reload / Reset. The
+  server's spawn-time monster is still the resume-id hash; the restore overwrites it a
+  beat after connect (exactly how the persisted name works).
+- **Thumbnails.** The picker shows a square, face-framed portrait of each monster,
+  greying out (and disabling) avatars *other* players already wear and marking your own
+  current one selected. These are **static PNGs** under
+  `client/assets/monsters/thumbnails/<stem>.png` (lower-cased model stem), regenerated
+  by `tools/render_avatar_thumbnails.py` — a pure-numpy software rasterizer (no
+  GPU/GL/system libs; runs anywhere Python does, e.g. the Mac box) that loads each glTF
+  via `trimesh`, samples the texture atlas per face, orthographically renders a front
+  view zoomed on the head, and 4×-supersamples to a transparent 128px PNG. `monster.rs`
+  exposes `avatar_name`/`avatar_thumbnail_path` (derived from the `MONSTERS` table so
+  names/paths stay in lockstep); `ui.rs` loads the PNGs into `AvatarThumbnails`, registers
+  each as an egui texture (`EguiContexts::add_image`, idempotent), and draws them with
+  `egui::Button::image(...).selected(...)`.
+- **`bevy/png` is required.** `bevy` is pulled `default-features = false`, so no image
+  format decoder is on by default. The monster glTFs carry their textures *inside* the
+  `.glb`, but a loose `.png` thumbnail needs the standalone loader — hence `bevy/png`
+  added to the client's `default` features (the `png` crate is already in the lock, so
+  `--locked` is unaffected). Symptom if missing: thumbnails silently never load (blank
+  buttons), no compile error.
+- **Availability.** Like "Change Name", the menu (and thus the picker) only appears when
+  `connected`, so it's a multiplayer feature; single-player keeps the hash-assigned
+  monster. The picker is a plain thumbnail grid (no text entry), so the same egui modal
+  works on web *and* native — no DOM overlay like rename needs.
+
 ## Pull request workflow
 
 Whenever the user asks to open a pull request, do all of the following before
