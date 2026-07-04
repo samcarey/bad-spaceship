@@ -759,6 +759,58 @@ methods (keyboard+mouse, touch, gamepad) compose without special-casing.
   sensitivity) and the stick dead zone (`STICK_DEADZONE`). Pitch is non-inverted
   (stick up → look up); flip the `-ry` in `gamepad_pointer` for inverted.
 
+## Avatar picker (choosing your monster)
+
+The monster skin is no longer *only* hash-assigned — the hamburger menu's "Change
+Avatar" button (next to "Change Name") opens a picker modal that lets a player choose
+one of the eight monsters. Server-authoritative, built on the existing replicated
+`NetPlayer::monster`:
+
+- **Protocol.** A `SetAvatar(u8)` message on the reliable `ControlChannel` (the exact
+  twin of `SetName`): the client sends the picked index, the server's
+  `apply_avatar_changes` maps the sender's link to its avatar via `ControlledBy`,
+  reduces the index modulo `MONSTER_COUNT`, and writes it onto `NetPlayer::monster`
+  (guarded by `!=` so an unchanged pick doesn't re-replicate). The change replicates to
+  every client in the room.
+- **Runtime re-dress.** The dressing systems (`dress_characters`,
+  `draw_replicated_players`) only ran *once* (`Without<MonsterVisual>` /
+  `Without<AvatarVisual>`), so a mid-session `monster` change wouldn't rebuild the
+  visual. A new `DisplayedMonster(u8)` component (inserted by `spawn_monster_visual`)
+  records what's shown; `redress_own_monster` (own predicted avatar, `monster.rs`) and
+  `redress_replicated_players` (remote interpolated avatars, `net.rs`) watch
+  `Changed<NetPlayer>`, and on a mismatch despawn the old visual pivot (recursive) and
+  drop the dress marker so the dresser re-runs next frame from the new index.
+  `MonsterAnim` is overwritten by the new scene's setup, so it isn't cleared. This
+  relies on the replicated `NetPlayer` staying synced onto the owner's *predicted*
+  entity — the same property that makes renaming yourself update your own roster row.
+- **Persistence** mirrors the name path: `platform::store_avatar`/`stored_avatar`
+  (`localStorage["bs-avatar"]`, native no-op) + `restore_persisted_avatar` re-sends
+  `SetAvatar` once per connection, so a pick survives the iOS reload / Reset. The
+  server's spawn-time monster is still the resume-id hash; the restore overwrites it a
+  beat after connect (exactly how the persisted name works).
+- **Thumbnails.** The picker shows a square, face-framed portrait of each monster,
+  greying out (and disabling) avatars *other* players already wear and marking your own
+  current one selected. These are **static PNGs** under
+  `client/assets/monsters/thumbnails/<stem>.png` (lower-cased model stem), regenerated
+  by `tools/render_avatar_thumbnails.py` — a pure-numpy software rasterizer (no
+  GPU/GL/system libs; runs anywhere Python does, e.g. the Mac box) that loads each glTF
+  via `trimesh`, samples the texture atlas per face, orthographically renders a front
+  view zoomed on the head, and 4×-supersamples to a transparent 128px PNG. `monster.rs`
+  exposes `avatar_name`/`avatar_thumbnail_path` (derived from the `MONSTERS` table so
+  names/paths stay in lockstep); `ui.rs` loads the PNGs into `AvatarThumbnails`, registers
+  each as an egui texture (`EguiContexts::add_image`, idempotent), and draws them with
+  `egui::Button::image(...).selected(...)`.
+- **`bevy/png` is required.** `bevy` is pulled `default-features = false`, so no image
+  format decoder is on by default. The monster glTFs carry their textures *inside* the
+  `.glb`, but a loose `.png` thumbnail needs the standalone loader — hence `bevy/png`
+  added to the client's `default` features (the `png` crate is already in the lock, so
+  `--locked` is unaffected). Symptom if missing: thumbnails silently never load (blank
+  buttons), no compile error.
+- **Availability.** Like "Change Name", the menu (and thus the picker) only appears when
+  `connected`, so it's a multiplayer feature; single-player keeps the hash-assigned
+  monster. The picker is a plain thumbnail grid (no text entry), so the same egui modal
+  works on web *and* native — no DOM overlay like rename needs.
+
 ## Pull request workflow
 
 Whenever the user asks to open a pull request, do all of the following before
@@ -1037,6 +1089,36 @@ game's own systems engage instead of being re-implemented:
   GPU re-upload). `position_gizmo`'s multiplayer branch orients the `GizmoHub` to
   `HeldRotation` (the target orientation), shown only while holding — so the RGB
   axes indicate the orientation the part is being rotated toward, like single-player.
+
+**Largest-assembly center-of-mass orb (server-authoritative).** A floating white orb
+marks the center of mass of each room's **largest assembly** — the biggest set of parts
+joined together (directly or transitively) through joints. The whole calculation is
+server-side: `update_assembly_center_of_mass` (`server/src/net.rs`, every frame, which
+covers "on joint create/delete" *and* keeps the orb tracking the moving assembly) runs a
+tiny union-find over the parts, unions them by their `SphericalJoint` edges, and per room
+picks the largest connected component of ≥ 2 parts, then mass-weights its center of mass
+(density is uniform, so the cuboid volume is the weight). The graph is purely part-to-part
+— the server never joints a part to the *ground* (`server_attach` attaches only to other
+`NetPart`s) and cross-room parts can't collide (collision layers) — so "blocks connected
+through the ground" and cross-room assemblies simply can't arise, satisfying the "not
+counting the ground" rule for free. The result is published two ways: each member part
+gets a replicated `InLargestAssembly` marker (the "tell the clients which parts are in it"
+half — added/removed only when membership actually flips, so it re-replicates on joint
+change, not per frame), and a **per-room orb entity** (spawned in `spawn_room_world`,
+`Rooms`-scoped, no physics body — a pure data holder) carries a replicated
+`NetCenterOfMass { position, count }` the server rewrites each frame (`set_if_neq`, so a
+settled assembly goes quiet). The client's `draw_center_of_mass_orb` (`client/src/net.rs`)
+renders a plain unlit white sphere on that entity — **half a character wide** (the body is
+`(2/3)·size` across, so the orb is a `size/3` diameter, `size/6` radius) — tracking the
+replicated position and shown only while `count >= 2`. The COM replicates at the network
+rate, so `draw_center_of_mass_orb` eases the orb toward it with a frame-rate-independent
+exponential smooth (`ORB_SMOOTH_RATE`, ~83 ms time constant) instead of snapping — it
+would otherwise step visibly between replicated positions. It snaps (no ease) when hidden
+or reappearing so it never slides in from a stale pose, and snaps the final sub-`ORB_SNAP_EPS`
+gap so a settled assembly stops dirtying `Transform`. The union-find /
+largest-component / weighted-COM math is factored into the pure `largest_assembly_per_room`
+helper with unit tests (`cargo test -p bad-spaceship-server`), since a live two-client
+joint-building session is the only other way to exercise it.
 
 **lightyear API gotchas worth remembering** (the published book lags the crate; the
 ground truth is the crate source in `~/.cargo/registry/src/.../lightyear*-0.28.0`).

@@ -255,6 +255,41 @@ pub struct NetJoint {
     pub anchor2: [f32; 3],
 }
 
+/// Sentinel [`NetJoint`] endpoint id meaning "the ground" (the `Grass` bowl). The
+/// ground is spawned locally on every peer by `MapPlugin` rather than replicated,
+/// so it has no `NetPart::id`; each client resolves this sentinel to its own local
+/// ground entity. Never collides with a real id: part ids are live `Entity` bits,
+/// and `u64::MAX` is not a valid entity encoding.
+pub const GROUND_JOINT_ID: u64 = u64::MAX;
+
+/// Replicated center of mass of a room's **largest assembly** — the biggest set of
+/// parts joined together (directly or transitively) through joints. One of these
+/// rides on a per-room server-owned entity (`spawn_room_world`); the server
+/// recomputes it whenever a joint is created or deleted (and streams the position as
+/// the assembly moves), and each client draws a floating white orb at `position`
+/// while `count >= 2` (an assembly exists). The whole determination is
+/// server-authoritative — the client only renders what it's told. Parts jointed only
+/// *through the ground* never count, because the server never joints a part to the
+/// ground (`server_attach` attaches to other `NetPart`s only), so the assembly graph
+/// is purely part-to-part.
+#[derive(Component, Serialize, Deserialize, Clone, Copy, PartialEq, Debug, Default)]
+pub struct NetCenterOfMass {
+    /// World position of the largest assembly's (mass-weighted) center of mass.
+    pub position: [f32; 3],
+    /// How many parts are in the largest assembly. `0` (never `1` — a lone part isn't
+    /// an assembly) means no assembly exists this room, so the client hides the orb.
+    pub count: u32,
+}
+
+/// Marks a replicated part as a member of its room's largest assembly (see
+/// [`NetCenterOfMass`]). The server adds/removes it as the assembly's membership
+/// changes on joint create/delete, and it replicates to every client in the room —
+/// the "tell the clients which parts are in it" half of the feature. The orb itself
+/// is driven by [`NetCenterOfMass`]; this marker is the per-part membership the
+/// client can key future assembly visuals off.
+#[derive(Component, Serialize, Deserialize, Clone, Copy, PartialEq, Debug, Default)]
+pub struct InLargestAssembly;
+
 /// Replicated hold state for a part a player is currently holding: who holds it
 /// (their [`NetPlayer::client_id`]) and the hold point + target orientation the server
 /// is springing it toward (the holder's forwarded `hold_target`/`hold_rotation`). All
@@ -293,6 +328,17 @@ pub struct NetName(pub String);
 /// dropped.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 pub struct SetName(pub String);
+
+/// Client → server request to change the sender's avatar (monster skin) to the given
+/// index. The server resolves the sender's avatar (via `ControlledBy`), reduces the
+/// index modulo [`MONSTER_COUNT`], and writes it onto that avatar's
+/// [`NetPlayer::monster`] — from which it re-replicates to everyone in the room, so
+/// every client re-dresses the avatar. Sent on the reliable [`ControlChannel`] so a
+/// one-shot pick isn't dropped. The picker greys out avatars other players already
+/// wear, but the server does not *enforce* uniqueness (assignment can already collide
+/// by hash) — the choice is applied as sent.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug)]
+pub struct SetAvatar(pub u8);
 
 /// Client → server request to teleport the sender's avatar back to a fresh spawn
 /// position (the "Reset Position" menu action — e.g. to recover after falling off or
@@ -550,6 +596,15 @@ impl Plugin for ProtocolPlugin {
         // The part shape is constant, so it only needs replicating (no interp).
         app.component::<NetPart>().replicate();
         app.component::<NetJoint>().replicate();
+        // Largest-assembly center of mass (see `NetCenterOfMass`): one per room,
+        // recomputed on joint create/delete and streamed as the assembly moves, so
+        // clients can draw the floating orb. The per-part membership marker
+        // (`InLargestAssembly`) replicates which parts form that assembly. Both just
+        // need replicating — the orb position is authored by the server each frame
+        // (no interpolation; it updates at the replication rate, smooth enough for a
+        // marker), and the marker is discrete.
+        app.component::<NetCenterOfMass>().replicate();
+        app.component::<InLargestAssembly>().replicate();
         // Held-part hold state (see `NetHold`): replicated so every client can spring a
         // held part toward the holder's hold point instead of predicting it in free-fall.
         app.component::<NetHold>().replicate();
@@ -598,6 +653,8 @@ impl Plugin for ProtocolPlugin {
         })
         .add_direction(NetworkDirection::ClientToServer);
         app.register_message::<SetName>()
+            .add_direction(NetworkDirection::ClientToServer);
+        app.register_message::<SetAvatar>()
             .add_direction(NetworkDirection::ClientToServer);
         app.register_message::<ResetPosition>()
             .add_direction(NetworkDirection::ClientToServer);

@@ -105,6 +105,12 @@ default = [
     # compile-only check missed it). The mobile touch controls need this on every
     # build, hence `default`, not just `web`.
     "bevy/touch",
+    # Standalone PNG image loading, for the avatar-picker face thumbnails
+    # (assets/monsters/thumbnails/*.png, shown as egui textures). `bevy` is pulled
+    # `default-features = false`, so no image format is on by default; the monster
+    # glTFs carry their textures inside the .glb, but a loose .png file needs the
+    # decoder enabled explicitly. Small wasm-size cost, required for the thumbnails.
+    "bevy/png",
 ]
 
 native = [

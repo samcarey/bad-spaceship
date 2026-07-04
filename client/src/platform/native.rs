@@ -33,6 +33,15 @@ pub fn stored_name() -> Option<String> {
     None
 }
 
+/// Persisted avatar pick — a no-op on native (no `localStorage`), mirroring the web
+/// signature so `ui.rs` can call it unconditionally.
+pub fn store_avatar(_monster: u8) {}
+
+/// See `store_avatar` — native has no persisted avatar.
+pub fn stored_avatar() -> Option<u8> {
+    None
+}
+
 // Bevy 0.15 moved the cursor fields off `Window` into a `cursor_options` struct;
 // Bevy 0.17 promoted that struct to its own `CursorOptions` component on the
 // window entity, so query it directly. (`Query::single_mut` is fallible since 0.16.)
