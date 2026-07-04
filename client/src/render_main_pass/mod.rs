@@ -6,6 +6,7 @@ use bad_spaceship_shared::{
     },
     Grass,
 };
+mod ash_material;
 mod grass_material;
 pub mod metal_material;
 
@@ -20,6 +21,7 @@ use bevy::{
     pbr::ExtendedMaterial,
     prelude::*,
 };
+use ash_material::{spawn_ash_field, AshMaterial, ASH_SHADER_HANDLE};
 use grass_material::{GrassExtension, GrassMaterial, GRASS_SHADER_HANDLE};
 use metal_material::{part_visual, rocket_body_material, MetalMaterial, METAL_SHADER_HANDLE};
 use avian3d::prelude::Collider;
@@ -50,11 +52,18 @@ impl Plugin for RenderMainPassPlugin {
             "../../assets/metal_material.wgsl",
             Shader::from_wgsl
         );
+        load_internal_asset!(
+            app,
+            ASH_SHADER_HANDLE,
+            "../../assets/ash_material.wgsl",
+            Shader::from_wgsl
+        );
         app.add_plugins((
             MaterialPlugin::<GrassMaterial>::default(),
             MaterialPlugin::<MetalMaterial>::default(),
+            MaterialPlugin::<AshMaterial>::default(),
         ))
-            .add_systems(Startup, add_lighting)
+            .add_systems(Startup, (add_lighting, spawn_ash_field))
             .add_systems(
                 Update,
                 (
