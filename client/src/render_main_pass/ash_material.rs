@@ -90,6 +90,24 @@ impl Material for AshMaterial {
         AlphaMode::Blend
     }
 
+    // Keep the flakes out of the depth-prepass and shadow passes. Both use the
+    // engine's *default* prepass/shadow vertex shader, not ours — so they ignore
+    // the per-flake vertex animation (the flakes only live at their real world
+    // positions because THIS material's vertex shader scatters them around the
+    // camera) and, worse, our `specialize` below remaps UV to shader-location 2,
+    // which doesn't match the default prepass shader's vertex↔fragment interface.
+    // The result was an invalid `prepass_pipeline` that quit the whole app on GPUs
+    // that build one (validated on WebKit; would fail on the iPhone too). A
+    // transparent, unlit, camera-relative particle field has no business writing
+    // depth or casting shadows anyway, so simply opt out of both passes.
+    fn enable_prepass() -> bool {
+        false
+    }
+
+    fn enable_shadows() -> bool {
+        false
+    }
+
     // The mesh carries only a packed seed (in POSITION.x) and the corner UV;
     // pin those to the shader locations the WGSL reads (0 and 2).
     fn specialize(
