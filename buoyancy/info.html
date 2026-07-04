@@ -257,11 +257,19 @@
     The Waves menu sends a single sinusoidal wave train across the surface along
     \(+x\), so the water level becomes a function of position and time:
   </p>
-  $$ \eta(x, t) \;=\; A \sin(kx - \omega t), \qquad
-     \omega = \frac{2\pi}{T}, \qquad k = \frac{\omega}{c}, $$
+  $$ \eta(x, t) \;=\; A \sin\!\big(k(x - x_0) - \Phi\big), \qquad
+     \omega = \frac{2\pi}{T}, \qquad k = \frac{\omega^2}{g}, \qquad \Phi = \int \omega\,dt, $$
   <p>
-    with \(A\) the amplitude slider (0 = flat water, the default), \(T\) the period, and
-    \(c\) the speed — so the wavelength is \(\lambda = cT\). The model stays
+    with \(A\) the amplitude slider and \(T\) the period (the only two free controls;
+    \(A = 0\) is flat water, the default). The <strong>speed is not an independent
+    slider</strong> — real gravity waves obey the <em>deep-water dispersion relation</em>
+    \(c = g/\omega = gT/2\pi\), so once you pick the period the phase speed
+    \(c\) and wavelength \(\lambda = cT = 2\pi/k\) follow (both shown as read-outs).
+    Two further details keep the surface well-behaved as you drag the period: the phase
+    \(\Phi\) is <em>accumulated</em> (\(\int\omega\,dt\)) rather than recomputed as
+    \(\omega t\), and the \(x\)-origin \(x_0\) is pinned under the frustum's centre — so
+    changing \(T\) shifts only the wave going forward, never the water level directly
+    below the body at that instant. The model stays
     <em>hydrostatic under the instantaneous surface</em>: pressure is still
     \(\rho_w g \times\) depth, but depth is now measured to \(\eta\) straight above the
     point. (Real waves also carry orbital velocities and dynamic pressure that decay with
@@ -304,8 +312,8 @@
     <tr><td>fill</td><td>\(f\)</td><td>Fraction of the cavity filled with interior water; it weighs in at the solved water centroid and renders as the blue volume.</td></tr>
     <tr><td>slosh</td><td>—</td><td>Tilts the interior water's settling direction only (demonstration). ⟲ resets to vertical.</td></tr>
     <tr><td>amplitude</td><td>\(A\)</td><td>Wave height above/below the still level. 0 = flat water (the default; all wave code short-circuits).</td></tr>
-    <tr><td>period</td><td>\(T\)</td><td>Time between crests at a fixed point; \(\omega = 2\pi/T\).</td></tr>
-    <tr><td>speed</td><td>\(c\)</td><td>How fast crests travel (+x). Together with the period it sets the wavelength \(\lambda = cT\) — long swell vs. short chop.</td></tr>
+    <tr><td>period</td><td>\(T\)</td><td>Time between crests at a fixed point; \(\omega = 2\pi/T\). Sets everything else about the wave: longer period → faster, longer swell.</td></tr>
+    <tr><td>speed, wavelength</td><td>\(c,\ \lambda\)</td><td>Read-outs, not sliders: fixed by the period through the deep-water dispersion relation \(c = gT/2\pi\), \(\lambda = cT\). A gravity wave can't travel at an arbitrary speed for its period.</td></tr>
     <tr><td>grid density</td><td>\(n\)</td><td>Voxel method: cells per longest axis. Higher = smoother waterline response and less volume error, at more per-frame work.</td></tr>
     <tr><td>hull resolution</td><td>—</td><td>Mesh methods: radial tessellation segments. Higher = finer clipping at the waterline, better torque accuracy.</td></tr>
     <tr><td>viscous drag</td><td>\(C_d\)</td><td>Scales the method-appropriate drag model above. 0 = ideal fluid (the body bobs forever).</td></tr>

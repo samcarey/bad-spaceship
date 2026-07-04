@@ -102,14 +102,14 @@ const FILL_PCT_RANGE: std::ops::RangeInclusive<f32> = 0.0..=100.0;
 const SLOSH_RANGE: std::ops::RangeInclusive<f32> = -90.0..=90.0;
 
 // Wave sliders (Waves menu): a single sinusoidal wave train travelling along
-// +X. Wavelength is derived: λ = speed × period (8.75 m at the defaults —
-// close to the deep-water dispersion relation for that period, so the default
-// wave looks physically plausible). Amplitude defaults to 0 = flat water.
+// +X, with its x-origin pinned under the frustum's centre. Only amplitude and
+// period are free knobs; the phase speed and wavelength are NOT independent of
+// the period — they follow the deep-water gravity-wave dispersion relation
+// (c = gT/2π, λ = cT) and are shown as read-outs. Amplitude defaults to 0 =
+// flat water.
 const WAVE_AMP_RANGE: std::ops::RangeInclusive<f32> = 0.0..=1.2;
 const DEFAULT_WAVE_PERIOD: f32 = 2.5;
 const WAVE_PERIOD_RANGE: std::ops::RangeInclusive<f32> = 1.0..=10.0;
-const DEFAULT_WAVE_SPEED: f32 = 3.5;
-const WAVE_SPEED_RANGE: std::ops::RangeInclusive<f32> = 1.0..=10.0;
 
 /// Base opacity the water/body pair is tuned around.
 const BASE_ALPHA: f32 = 0.13125;
@@ -292,10 +292,9 @@ struct SimParams {
 
     /// Wave amplitude (m); 0 = flat water (the default).
     wave_amp: f32,
-    /// Wave period (s).
+    /// Wave period (s). The phase speed follows from it via the deep-water
+    /// dispersion relation (see `SimParams::wave_speed`) — not a free knob.
     wave_period: f32,
-    /// Wave phase speed (m/s); wavelength = speed × period.
-    wave_speed: f32,
 
     method: Method,
     /// Voxel method quality: cells along the body's longest local dimension.
@@ -325,15 +324,30 @@ impl SimParams {
         self.wall_cm * 0.01
     }
 
-    /// The wave surface at time `t` (seconds of whichever clock the caller's
-    /// schedule runs on — the fixed clock in physics, the render clock for
-    /// visuals; the two differ by less than one physics step).
-    fn wave(&self, t: f32) -> WaveField {
-        let omega = std::f32::consts::TAU / self.wave_period;
+    /// Angular frequency ω = 2π/T (rad/s).
+    fn omega(&self) -> f32 {
+        std::f32::consts::TAU / self.wave_period
+    }
+
+    /// Deep-water phase speed c = g/ω  (equivalently c = gT/2π). Not a slider:
+    /// gravity waves can't pick a speed independent of their period — this is
+    /// the dispersion relation, surfaced in the UI as a read-out only.
+    fn wave_speed(&self) -> f32 {
+        GRAVITY / self.omega()
+    }
+
+    /// A wave-surface snapshot from the shared [`WaveClock`]: `phase` is the
+    /// accumulated Φ = ∫ω dt (so changing the period never retro-jumps it) and
+    /// `origin_x` is the world x under the frustum's centre (so the surface
+    /// directly below the body is invariant to wavelength). Wavenumber follows
+    /// the deep-water dispersion relation k = ω²/g.
+    fn wave(&self, phase: f32, origin_x: f32) -> WaveField {
+        let omega = self.omega();
         WaveField {
             amp: self.wave_amp,
-            k: omega / self.wave_speed,
-            phase: omega * t,
+            k: omega * omega / GRAVITY,
+            phase,
+            origin_x,
         }
     }
 }
@@ -353,7 +367,6 @@ impl Default for SimParams {
             slosh_deg: 0.0,
             wave_amp: 0.0,
             wave_period: DEFAULT_WAVE_PERIOD,
-            wave_speed: DEFAULT_WAVE_SPEED,
             method: Method::VoxelGrid,
             voxel_res: 12,
             hull_res: 24,
@@ -367,7 +380,7 @@ impl Default for SimParams {
     }
 }
 
-/// The wave surface at one instant: `η(x) = WATER_LEVEL + A·sin(kx − ωt)`,
+/// The wave surface at one instant: `η(x) = WATER_LEVEL + A·sin(k(x − x₀) − Φ)`,
 /// a single sinusoidal wave train travelling along +X (z has no effect).
 /// Snapshot a `WaveField` once per step/frame via [`SimParams::wave`] and
 /// evaluate it wherever a local water level is needed.
@@ -393,10 +406,13 @@ impl Default for SimParams {
 #[derive(Clone, Copy)]
 struct WaveField {
     amp: f32,
-    /// Wavenumber k = ω / speed (rad/m).
+    /// Wavenumber k = ω²/g (rad/m) — the deep-water dispersion relation.
     k: f32,
-    /// Temporal phase ωt at the snapshot instant (rad).
+    /// Accumulated temporal phase Φ at the snapshot instant (rad).
     phase: f32,
+    /// Spatial phase origin (world x): the frustum's horizontal centre, so the
+    /// surface right under the body is invariant to wavelength.
+    origin_x: f32,
 }
 
 impl WaveField {
@@ -407,7 +423,7 @@ impl WaveField {
         if self.amp == 0.0 {
             return WATER_LEVEL;
         }
-        WATER_LEVEL + self.amp * (self.k * x - self.phase).sin()
+        WATER_LEVEL + self.amp * (self.k * (x - self.origin_x) - self.phase).sin()
     }
 
     /// Surface slope ∂η/∂x at world `x` — the water mesh's analytic normals.
@@ -415,7 +431,7 @@ impl WaveField {
         if self.amp == 0.0 {
             return 0.0;
         }
-        self.amp * self.k * (self.k * x - self.phase).cos()
+        self.amp * self.k * (self.k * (x - self.origin_x) - self.phase).cos()
     }
 
     /// Highest the surface gets anywhere — a conservative dry-rejection bound.
@@ -427,6 +443,19 @@ impl WaveField {
 /// Set by the UI's Reset button; consumed by `handle_reset`.
 #[derive(Resource, Default)]
 struct ResetRequested(bool);
+
+/// The wave clock: advanced every fixed step by `apply_hydro_forces`, read back
+/// by the visuals in `animate_waves`. Integrating the phase here — instead of
+/// recomputing ω·t_elapsed — is what keeps the surface continuous when the
+/// period slider moves ω: only the future rate changes, so the phase directly
+/// under the body is preserved at the instant of the change.
+#[derive(Resource, Default)]
+struct WaveClock {
+    /// Accumulated phase Φ = ∫ω dt (rad).
+    phase: f32,
+    /// Spatial phase origin: the frustum's horizontal centre (world x).
+    origin_x: f32,
+}
 
 /// The force-vector overlay: every hydro force applied in the latest recorded
 /// physics step, as
@@ -626,7 +655,8 @@ struct SubmergedTint {
     #[uniform(100)]
     water: Vec4,
     /// The wave field, so the tint boundary follows the moving surface:
-    /// x = amplitude, y = wavenumber k, z = temporal phase ωt, w = unused.
+    /// x = amplitude, y = wavenumber k, z = accumulated phase Φ, w = spatial
+    /// origin x₀ (world x under the frustum's centre).
     /// Kept current by `animate_waves` (static zeroes while amplitude is 0,
     /// where the waterline degenerates to `water.w`).
     #[uniform(101)]
@@ -676,6 +706,7 @@ fn main() {
         })
         .init_resource::<SimParams>()
         .init_resource::<ResetRequested>()
+        .init_resource::<WaveClock>()
         .init_resource::<ForceVectors>()
         .init_resource::<PhysicsTiming>()
         .init_resource::<VoxelCache>()
@@ -763,7 +794,7 @@ fn setup(
     // the water carries no collider.
     commands.spawn((
         WaterVolume,
-        Mesh3d(meshes.add(water_volume_mesh(&params.wave(0.0)))),
+        Mesh3d(meshes.add(water_volume_mesh(&params.wave(0.0, 0.0)))),
         MeshMaterial3d(materials.add(StandardMaterial {
             base_color: WATER_COLOR.with_alpha(WATER_ALPHA),
             alpha_mode: AlphaMode::Blend,
@@ -1345,13 +1376,22 @@ fn apply_hydro_forces(
     mut aligned: Local<Vec<[Vec3; 3]>>,
     mut timing: ResMut<PhysicsTiming>,
     mut vis: ResMut<ForceVectors>,
+    mut clock: ResMut<WaveClock>,
+    // Read-only view of the body's pose, just for the wave's spatial origin
+    // (the force-applying pass below borrows the same bodies mutably).
+    centre: Query<&Position, With<Buoy>>,
     mut bodies: Query<(&Position, &Rotation, &ComputedMass, Forces), With<Buoy>>,
 ) {
     let started = Instant::now();
     let dt = time.delta_secs().max(1e-4);
-    // Wave surface at this step's time (inside FixedUpdate, `Res<Time>` is the
-    // fixed clock, so catch-up steps each get their own phase).
-    let wave = params.wave(time.elapsed_secs());
+    // Advance the wave clock: pin its x-origin under the body's centre and
+    // integrate the phase (Φ += ω·dt) rather than recomputing ω·t_elapsed, so a
+    // period change never retro-jumps the surface below the frustum. Inside
+    // FixedUpdate `Res<Time>` is the fixed clock, so catch-up steps each
+    // integrate their own slice. Read back by `animate_waves` for the visuals.
+    clock.origin_x = centre.iter().next().map_or(clock.origin_x, |p| p.0.x);
+    clock.phase += params.omega() * dt;
+    let wave = params.wave(clock.phase, clock.origin_x);
     let max_level = wave.max_level();
     // Record the overlay only on the render frame's FINAL fixed step (once a
     // step is expended, remaining overstep < timestep ⇒ no further step runs
@@ -1666,30 +1706,30 @@ fn update_water_mesh(
 /// and then goes fully quiet — so still water costs nothing per frame and
 /// flat-water behaviour is unchanged.
 ///
-/// Render-clock time here vs the fixed clock in `apply_hydro_forces`: the two
-/// differ by less than one physics step (the overstep), far below what the
-/// translucent surface makes visible.
+/// Reads the shared [`WaveClock`] (advanced in `apply_hydro_forces`), so the
+/// rendered surface matches the physics exactly instead of drifting by the
+/// render-vs-fixed clock offset.
 fn animate_waves(
-    time: Res<Time>,
     params: Res<SimParams>,
-    mut last: Local<Option<(f32, f32, f32)>>,
+    clock: Res<WaveClock>,
+    mut last: Local<Option<(f32, f32)>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut shell_materials: ResMut<Assets<ShellMaterial>>,
     surface: Query<&Mesh3d, With<WaterVolume>>,
 ) {
-    let key = (params.wave_amp, params.wave_period, params.wave_speed);
+    let key = (params.wave_amp, params.wave_period);
     if params.wave_amp <= 0.0 && *last == Some(key) {
         return;
     }
     *last = Some(key);
-    let wave = params.wave(time.elapsed_secs());
+    let wave = params.wave(clock.phase, clock.origin_x);
     for mesh in &surface {
         // Replace the asset in place (same handle, renderer re-extracts) —
         // the same no-handle-churn pattern as `update_water_mesh`.
         let _ = meshes.insert(mesh.0.id(), water_volume_mesh(&wave));
     }
     for (_, material) in shell_materials.iter_mut() {
-        material.extension.wave = Vec4::new(wave.amp, wave.k, wave.phase, 0.0);
+        material.extension.wave = Vec4::new(wave.amp, wave.k, wave.phase, wave.origin_x);
     }
 }
 
@@ -2022,14 +2062,13 @@ fn ui(
                     "period",
                     egui::Slider::new(&mut params.wave_period, WAVE_PERIOD_RANGE).suffix(" s"),
                 );
-                labeled_slider(
-                    ui,
-                    "speed",
-                    egui::Slider::new(&mut params.wave_speed, WAVE_SPEED_RANGE).suffix(" m/s"),
-                );
+                // Speed and wavelength aren't free: deep-water gravity waves
+                // obey c = gT/2π and λ = cT, so both follow from the period.
+                // Shown as read-outs to keep the wave physically consistent.
                 ui.label(format!(
-                    "wavelength: {:.1} m (speed × period)",
-                    params.wave_speed * params.wave_period
+                    "speed {:.2} m/s · wavelength {:.1} m  (deep-water c = gT/2π)",
+                    params.wave_speed(),
+                    params.wave_speed() * params.wave_period,
                 ));
             });
 

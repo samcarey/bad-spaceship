@@ -19,17 +19,18 @@
 // WATER_COLOR / WATER_LEVEL in main.rs.
 @group(#{MATERIAL_BIND_GROUP}) @binding(100) var<uniform> water: vec4<f32>;
 // Wave field, so the tint boundary follows the moving surface: x = amplitude,
-// y = wavenumber k, z = temporal phase ωt, w = unused. Kept current by
-// `animate_waves` in main.rs; all-zero while the water is flat.
+// y = wavenumber k, z = accumulated phase Φ, w = spatial origin x₀ (world x
+// under the frustum's centre). Kept current by `animate_waves` in main.rs;
+// all-zero while the water is flat.
 @group(#{MATERIAL_BIND_GROUP}) @binding(101) var<uniform> wave: vec4<f32>;
 
 @fragment
 fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> FragmentOutput {
     var pbr_input = pbr_input_from_standard_material(in, is_front);
 
-    // Local waterline: still level + A*sin(k*x - omega*t), matching
-    // WaveField::height on the CPU side.
-    let level = water.w + wave.x * sin(wave.y * in.world_position.x - wave.z);
+    // Local waterline: still level + A*sin(k*(x - x0) - phase), matching
+    // WaveField::height on the CPU side (water.w = still level, wave.w = x0).
+    let level = water.w + wave.x * sin(wave.y * (in.world_position.x - wave.w) - wave.z);
     if in.world_position.y < level {
         pbr_input.material.base_color = vec4<f32>(
             mix(pbr_input.material.base_color.rgb, water.rgb, 0.5),
