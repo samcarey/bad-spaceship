@@ -266,6 +266,77 @@ pub fn reset_position_reload() {
     }
 }
 
+/// Copy the movement-tuning settings string to the clipboard on web. iOS/Safari only
+/// honours `navigator.clipboard.writeText` inside a genuine user-gesture context, which
+/// an egui button click (processed inside the wasm render loop, not a DOM event handler)
+/// doesn't reliably provide. So open a small non-blocking DOM overlay — a real
+/// `<textarea>` prefilled with the settings (long-press to select/copy on a phone) plus
+/// a "Copy" button whose *DOM* click handler runs in a true gesture context and calls
+/// the Clipboard API. Mirrors `begin_name_edit`'s overlay approach. Fire-and-forget: the
+/// listeners are `forget()`-leaked (a tuning tool is opened rarely, and Close removes the
+/// overlay node so they never fire again).
+pub fn copy_to_clipboard(text: &str) {
+    let document = get_document();
+    let make = |tag: &str, style: &str| -> Option<web_sys::Element> {
+        let el = document.create_element(tag).ok()?;
+        el.set_attribute("style", style).ok()?;
+        Some(el)
+    };
+    let (Some(root), Some(panel), Some(area), Some(row), Some(copy), Some(close)) = (
+        make(
+            "div",
+            "position:fixed;inset:0;z-index:2147483647;background:rgba(0,0,0,0.6);\
+             display:flex;align-items:center;justify-content:center;",
+        ),
+        make(
+            "div",
+            "display:flex;flex-direction:column;gap:14px;background:#222;color:#fff;\
+             padding:22px;border-radius:12px;min-width:min(340px,86vw);",
+        ),
+        make(
+            "textarea",
+            "font-size:16px;font-family:monospace;padding:10px;border-radius:6px;\
+             border:1px solid #888;min-height:150px;white-space:pre;",
+        ),
+        make("div", "display:flex;gap:12px;justify-content:flex-end;"),
+        make("button", "font-size:18px;padding:8px 18px;"),
+        make("button", "font-size:18px;padding:8px 18px;"),
+    ) else {
+        return;
+    };
+    area.set_text_content(Some(text));
+    let _ = area.set_attribute("readonly", "true");
+    copy.set_text_content(Some("Copy"));
+    close.set_text_content(Some("Close"));
+    let _ = row.append_child(&close);
+    let _ = row.append_child(&copy);
+    let _ = panel.append_child(&area);
+    let _ = panel.append_child(&row);
+    let _ = root.append_child(&panel);
+    let _ = get_body().append_child(&root);
+
+    // Copy: real DOM gesture context → the Clipboard API is honoured on iOS.
+    {
+        let text = text.to_string();
+        let copy_el = copy.clone();
+        EventListener::new(&copy, "click", move |_| {
+            if let Some(window) = web_sys::window() {
+                let _ = window.navigator().clipboard().write_text(&text);
+            }
+            copy_el.set_text_content(Some("Copied!"));
+        })
+        .forget();
+    }
+    // Close: tear the overlay down.
+    {
+        let root = root.clone();
+        EventListener::new(&close, "click", move |_| {
+            root.remove();
+        })
+        .forget();
+    }
+}
+
 #[derive(Clone, Default, Resource)]
 struct PointerLockTracker {
     lock: Arc<AtomicBool>,

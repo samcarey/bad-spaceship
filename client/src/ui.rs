@@ -8,6 +8,7 @@ use bevy_egui::{
     egui::{self, Align, Align2, Color32, Frame, Layout},
     EguiContexts, EguiPlugin, EguiPrimaryContextPass, EguiTextureHandle,
 };
+use bad_spaceship_shared::character::{MovementModel, MovementTuning};
 use bad_spaceship_shared::net::{
     sanitize_name, ControlChannel, NetName, NetPlayer, ResetPosition, SetAvatar, SetName,
     MAX_NAME_LEN, MONSTER_COUNT,
@@ -66,10 +67,97 @@ impl Plugin for UiPlugin {
                     show_name_labels,
                     show_instructions,
                     show_bottom_panel,
+                    // Live movement-feel tuner. Shown whenever we're past the initial
+                    // click-to-start screen (so it's usable both in-game and in the
+                    // desktop pause menu, where the cursor is free).
+                    show_movement_panel
+                        .run_if(|s: Res<State<AppState>>| *s.get() != AppState::Initial),
                 )
                     .in_set(EguiDrawSystems),
             );
     }
+}
+
+/// The in-game Movement panel: a live A/B tuner for how the character accelerates.
+/// Pick a model from the combo box and the sliders below reveal exactly that model's
+/// knobs (plus the shared max-speed and jump controls); everything applies immediately
+/// via the shared `MovementTuning` resource that the `FixedUpdate` movement systems
+/// read. "Copy settings" hands the current selection to the clipboard (a DOM overlay on
+/// web, stdout on native) so the feel that plays best can be reported back verbatim.
+fn show_movement_panel(
+    mut contexts: EguiContexts,
+    mut tuning: ResMut<MovementTuning>,
+) -> Result {
+    let ctx = contexts.ctx_mut()?;
+    egui::Window::new("Movement")
+        .default_pos(egui::pos2(12.0, 96.0))
+        .collapsible(true)
+        .resizable(false)
+        .show(ctx, |ui| {
+            egui::ComboBox::from_id_salt("movement_model")
+                .selected_text(tuning.model.label())
+                .show_ui(ui, |ui| {
+                    for model in MovementModel::ALL {
+                        ui.selectable_value(&mut tuning.model, model, model.label());
+                    }
+                });
+            ui.separator();
+
+            ui.add(egui::Slider::new(&mut tuning.max_speed, 1.0..=40.0).text("max speed"));
+            match tuning.model {
+                MovementModel::Smooth => {
+                    ui.add(
+                        egui::Slider::new(&mut tuning.smooth_rate, 1.0..=40.0)
+                            .text("snappiness (rate)"),
+                    );
+                    ui.add(egui::Slider::new(&mut tuning.air_control, 0.0..=1.0).text("air control"));
+                }
+                MovementModel::Instant => {
+                    ui.add(egui::Slider::new(&mut tuning.air_control, 0.0..=1.0).text("air control"));
+                }
+                MovementModel::Accel => {
+                    ui.add(egui::Slider::new(&mut tuning.accel, 10.0..=400.0).text("acceleration"));
+                    ui.add(egui::Slider::new(&mut tuning.decel, 10.0..=400.0).text("deceleration"));
+                    ui.add(egui::Slider::new(&mut tuning.air_control, 0.0..=1.0).text("air control"));
+                }
+                MovementModel::Source => {
+                    ui.add(egui::Slider::new(&mut tuning.friction, 0.0..=20.0).text("friction"));
+                    ui.add(
+                        egui::Slider::new(&mut tuning.ground_accel, 1.0..=30.0).text("ground accel"),
+                    );
+                    ui.add(egui::Slider::new(&mut tuning.air_accel, 0.0..=20.0).text("air accel"));
+                    ui.add(egui::Slider::new(&mut tuning.stop_speed, 0.0..=10.0).text("stop speed"));
+                }
+            }
+
+            ui.separator();
+            ui.add(egui::Slider::new(&mut tuning.jump_force, 1.0..=30.0).text("jump force"));
+            ui.add(
+                egui::Slider::new(&mut tuning.fall_multiplier, 0.0..=60.0).text("fall boost"),
+            );
+
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui.button("Copy settings").clicked() {
+                    crate::platform::copy_to_clipboard(&tuning.settings_string());
+                }
+                if ui.button("Reset").clicked() {
+                    // Full reset; `seed_movement_tuning` then re-applies the RON
+                    // max-speed / jump-force next frame.
+                    *tuning = MovementTuning::default();
+                }
+            });
+            // Manual-copy fallback: a selectable read-only view of the same string
+            // (edits to this scratch copy are discarded — it's regenerated each frame).
+            let mut settings = tuning.settings_string();
+            ui.add(
+                egui::TextEdit::multiline(&mut settings)
+                    .font(egui::TextStyle::Monospace)
+                    .desired_rows(3)
+                    .desired_width(f32::INFINITY),
+            );
+        });
+    Ok(())
 }
 
 /// Every system that draws egui (here and in `mobile.rs`) belongs to this set,
