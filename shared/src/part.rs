@@ -81,6 +81,13 @@ pub const MAX_PART_SIZE: f32 = 10.0;
 const MIN_PART_SIZE: f32 = 0.1;
 const MIN_PART_VOLUME: f32 = 1.0;
 const MAX_PART_VOLUME: f32 = 2.0;
+/// Uniform density of every dynamic part (cuboids *and* rockets); mass = density ×
+/// volume. `pub` so the rocket-thrust visualisation can weigh thrust against an
+/// average part.
+pub const PART_DENSITY: f32 = 2.0;
+/// Mass of a nominal "average" part — the mean of the accepted volume band times the
+/// shared density. Used to size rocket thrust ("lift N average parts").
+pub const NOMINAL_PART_MASS: f32 = PART_DENSITY * (MIN_PART_VOLUME + MAX_PART_VOLUME) / 2.0;
 // Held-part spring stiffnesses — also used by the multiplayer hold helpers in
 // `net.rs` (the server runs the same critically-damped springs), so they're
 // `pub` to keep a single definition rather than duplicated magic numbers.
@@ -103,6 +110,22 @@ pub const ROCKET_FLARE_HEIGHT: f32 = 0.7;
 /// Shared by the flare's collider (`spawn_rocket_engine`) and its child mesh (the
 /// client renderer) so the physics and visual flare stay aligned.
 pub const ROCKET_FLARE_Y_OFFSET: f32 = -(ROCKET_BODY_HEIGHT / 2.0 + ROCKET_FLARE_HEIGHT / 2.0);
+
+/// Nominal thrust of one rocket engine, expressed as how many *average* parts it can
+/// lift against gravity. Multiply by `NOMINAL_PART_MASS` and gravity's magnitude to
+/// get the force in newtons. The thrust is **not applied to the simulation yet** —
+/// it only drives the thrust-vector visualisation.
+pub const ROCKET_THRUST_PART_WEIGHTS: f32 = 3.0;
+
+/// Local-frame point where a rocket's thrust is applied: the centre of the flare's
+/// wide base (the nozzle-exit plane). The entity origin is the *body* centre and the
+/// flare hangs below it, so this sits `ROCKET_FLARE_HEIGHT/2` below the flare centre.
+pub const ROCKET_THRUST_ORIGIN_LOCAL: Vec3 =
+    Vec3::new(0.0, -(ROCKET_BODY_HEIGHT / 2.0 + ROCKET_FLARE_HEIGHT), 0.0);
+
+/// Local-frame thrust direction: straight down the cylinder axis toward the flared
+/// end (the direction the exhaust leaves the nozzle).
+pub const ROCKET_THRUST_DIR_LOCAL: Vec3 = Vec3::NEG_Y;
 
 /// Approximate volume of a rocket engine (cylinder body + cone flare), used as a
 /// mass proxy where parts are weighted by volume (density is uniform across all
@@ -305,7 +328,7 @@ fn insert_part_dynamics(entity: &mut EntityCommands) {
         // rapier's `ColliderMassProperties::Density` / `Friction::coefficient` /
         // `Restitution::coefficient` → Avian's `ColliderDensity` / `Friction::new`
         // / `Restitution::new`.
-        ColliderDensity(2.0),
+        ColliderDensity(PART_DENSITY),
         Friction::new(1.0),
         Restitution::new(0.1),
         // Parts spawn high and hit the thin trimesh ground fast; without CCD a fast
