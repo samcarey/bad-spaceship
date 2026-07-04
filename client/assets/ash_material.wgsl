@@ -94,16 +94,26 @@ fn vertex(v: Vertex) -> VertexOutput {
     let wrapped = rel - box * round(rel / box);
     let center = cam + wrapped;
 
-    // Fake spin: 0..1 flicker used for both brightness and a little size pulse.
-    let flick = 0.5 + 0.5 * sin(t * ash.spin_freq + r2.y * TAU);
+    // Real tumble: an in-plane spin plus an edge-on foreshorten, so each flake
+    // visibly turns over as it falls (not just a brightness flicker). `tumble`
+    // shrinks the flake's height toward a thin sliver when it's edge-on; a small
+    // floor keeps it from fully vanishing.
+    let roll = t * ash.spin_freq * 0.2 + phase;
+    let tumble = 0.12 + 0.88 * abs(cos(t * ash.spin_freq * 0.3 + r2.y * TAU));
 
     // Billboard the corner in the camera's right/up plane (columns of the
-    // camera-to-world matrix), so every flake faces the viewer.
+    // camera-to-world matrix), so every flake faces the viewer. Foreshorten the
+    // corner along the flake's own axis, then spin it in the billboard plane —
+    // the fragment draws its shape in the untransformed UV, so it inherits this
+    // spin + squish and reads as a tumbling chip.
     let right = view.world_from_view[0].xyz;
     let up = view.world_from_view[1].xyz;
-    let corner = v.uv * 2.0 - 1.0;
-    let radius = size * (0.7 + 0.6 * flick);
-    let world = center + (corner.x * right + corner.y * up) * radius;
+    var corner = v.uv * 2.0 - 1.0;
+    corner.y = corner.y * tumble;
+    let cr = cos(roll);
+    let sr = sin(roll);
+    corner = vec2<f32>(corner.x * cr - corner.y * sr, corner.x * sr + corner.y * cr);
+    let world = center + (corner.x * right + corner.y * up) * size;
 
     // Fades: pull flakes out of your face up close, and dissolve them toward the
     // box walls so nothing pops in/out at the wrap seams.
@@ -116,15 +126,18 @@ fn vertex(v: Vertex) -> VertexOutput {
     out.clip_position = view.clip_from_world * vec4<f32>(world, 1.0);
     out.uv = v.uv;
     out.tint = ash.color.rgb * mix(0.75, 1.2, r2.z); // per-flake grey jitter
-    out.alpha = ash.color.a * near * edge * (0.35 + 0.65 * flick);
+    out.alpha = ash.color.a * near * edge * (0.4 + 0.6 * tumble);
     return out;
 }
 
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
-    // Soft round flake from the corner UV.
-    let d = distance(in.uv, vec2<f32>(0.5)) * 2.0;
-    let disc = 1.0 - smoothstep(0.55, 1.0, d);
+    // Crisp-edged flake (a small chip) from the corner UV. The quad is spun and
+    // foreshortened in the vertex shader, so this axis-aligned diamond reads as a
+    // tumbling flake on screen (vs the old soft round dot).
+    let p = (in.uv - vec2<f32>(0.5)) * 2.0;
+    let d = abs(p.x) + abs(p.y);
+    let disc = 1.0 - smoothstep(0.82, 1.0, d);
     let a = in.alpha * disc;
     if a < 0.003 {
         discard;
