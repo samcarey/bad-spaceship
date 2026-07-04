@@ -18,11 +18,12 @@ use bad_spaceship_shared::character::{
 };
 use bad_spaceship_shared::net::{
     apply_hold_spring, apply_net_input, focused_part, ClientPanicReport, ControlChannel,
-    NetCenterOfMass, NetFacing, NetHold, NetInput, NetJoint, NetPart, take_rollback_diag,
+    NetCenterOfMass, NetFacing, NetHold, NetInput, NetJoint, NetPart, PartShape, take_rollback_diag,
     NetPlayer, ProtocolPlugin, RollbackReport, TelemetryChannel, GROUND_JOINT_ID, TICK,
 };
-use bad_spaceship_shared::part::{insert_part_physics, Holdable, SuppressLocalParts};
+use bad_spaceship_shared::part::{insert_part_physics, insert_rocket_physics, Holdable, SuppressLocalParts};
 use bad_spaceship_shared::player::make_local_player;
+use crate::render_main_pass::insert_rocket_visual;
 use crate::render_main_pass::metal_material::{metal_tint, part_visual, MetalMaterial};
 use crate::render_secondary_pass::gizmo_material::GizmoMaterial;
 use crate::render_secondary_pass::JointAppearance;
@@ -812,17 +813,26 @@ fn draw_replicated_parts(
     new_parts: Query<(Entity, &NetPart), (With<Predicted>, With<Position>, With<Rotation>, Without<Mesh3d>)>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<MetalMaterial>>,
+    mut standard_materials: ResMut<Assets<StandardMaterial>>,
 ) {
     for (entity, part) in &new_parts {
-        let half_extents = Vec3::from(part.half_extents);
         let mut e = commands.entity(entity);
-        insert_part_physics(&mut e, half_extents);
-        // Derived from the replicated seed via the same constructor as
-        // single-player, so every client renders this part identically.
-        let (mesh, material) = part_visual(half_extents, part.seed, &mut meshes, &mut materials);
+        // Rebuild the collider + render mesh from the replicated shape. Both the physics
+        // and the visual come from the same shared constructors single-player uses, so
+        // every client simulates and renders this part identically to the server.
+        match part.shape {
+            PartShape::Cuboid { half_extents } => {
+                let half_extents = Vec3::from(half_extents);
+                insert_part_physics(&mut e, half_extents);
+                let (mesh, material) = part_visual(half_extents, part.seed, &mut meshes, &mut materials);
+                e.insert((mesh, material));
+            }
+            PartShape::RocketEngine => {
+                insert_rocket_physics(&mut e);
+                insert_rocket_visual(&mut e, &mut meshes, &mut materials, &mut standard_materials);
+            }
+        }
         e.insert((
-            mesh,
-            material,
             Holdable,
             // Render-interpolate the predicted block between fixed ticks (same reason
             // as the character) so loose/held blocks move smoothly.

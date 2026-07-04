@@ -104,6 +104,19 @@ pub const ROCKET_FLARE_HEIGHT: f32 = 0.7;
 /// client renderer) so the physics and visual flare stay aligned.
 pub const ROCKET_FLARE_Y_OFFSET: f32 = -(ROCKET_BODY_HEIGHT / 2.0 + ROCKET_FLARE_HEIGHT / 2.0);
 
+/// Approximate volume of a rocket engine (cylinder body + cone flare), used as a
+/// mass proxy where parts are weighted by volume (density is uniform across all
+/// parts) — e.g. the server's largest-assembly center-of-mass. The cuboid path
+/// uses `8·hx·hy·hz`; this is the rocket's analogue so an assembly's COM stays
+/// mass-accurate when rockets are jointed in.
+pub const ROCKET_VOLUME: f32 = std::f32::consts::PI
+    * ROCKET_BODY_RADIUS
+    * ROCKET_BODY_RADIUS
+    * ROCKET_BODY_HEIGHT
+    + std::f32::consts::PI * ROCKET_FLARE_BOTTOM_RADIUS * ROCKET_FLARE_BOTTOM_RADIUS
+        * ROCKET_FLARE_HEIGHT
+        / 3.0;
+
 /// Below this Y a part/rocket has fallen off the platform and is recycled.
 const PART_FALL_Y: f32 = -10.0;
 
@@ -320,6 +333,26 @@ fn spawn_initial_parts(mut new_part_events: MessageWriter<NewPart>) {
 /// discriminant on `NetPart` (which today carries cuboid `half_extents` only) —
 /// deferred until rockets go multiplayer or a second rendered part type lands.
 pub fn spawn_rocket_engine(commands: &mut Commands, position: Vec3) -> Entity {
+    let mut entity = commands.spawn((
+        Interactable,
+        Holdable,
+        LinearVelocity::default(),
+        AngularVelocity::default(),
+        // Seed both `Transform` and Avian `Position` (see `spawn_random_part`).
+        Transform::from_translation(position),
+        Position(position),
+    ));
+    insert_rocket_physics(&mut entity);
+    entity.id()
+}
+
+/// Insert the rocket-engine shape's physics onto an existing entity: the `RocketEngine`
+/// marker, the compound (cylinder body + cone flare) collider, its bounding radius, and
+/// the shared dynamic-part props. Factored out of `spawn_rocket_engine` so the
+/// multiplayer client's replicated-part path (`draw_replicated_parts`) rebuilds an
+/// *identical* body from `NetPart` — the rocket analogue of `insert_part_physics` for
+/// cuboids, essential for client-side prediction to stay close to the server.
+pub fn insert_rocket_physics(entity: &mut EntityCommands) {
     // Flare cone: Avian's `Collider::cone` is centred on its own origin, base
     // (wide) at -Y and apex at +Y — so offset it below the body (`ROCKET_FLARE_Y_OFFSET`)
     // with the apex (narrow end) meeting the body's bottom face.
@@ -335,21 +368,17 @@ pub fn spawn_rocket_engine(commands: &mut Commands, position: Vec3) -> Entity {
     // the body centre is the flare's bottom rim.
     let flare_bottom_y = ROCKET_BODY_HEIGHT / 2.0 + ROCKET_FLARE_HEIGHT;
     let bounding_radius = (ROCKET_FLARE_BOTTOM_RADIUS.powi(2) + flare_bottom_y.powi(2)).sqrt();
-    let mut entity = commands.spawn((
-        RocketEngine,
-        Interactable,
-        Holdable,
-        collider,
-        BoundingRadius(bounding_radius),
-        LinearVelocity::default(),
-        AngularVelocity::default(),
-        // Seed both `Transform` and Avian `Position` (see `spawn_random_part`).
-        Transform::from_translation(position),
-        Position(position),
-    ));
+    entity.insert((RocketEngine, collider, BoundingRadius(bounding_radius)));
     // Density/friction/restitution/CCD/rigid-body — shared with the cuboid parts.
-    insert_part_dynamics(&mut entity);
-    entity.id()
+    insert_part_dynamics(entity);
+}
+
+/// Spawn one rocket engine at a random spawn-zone position — the multiplayer server's
+/// per-room rocket spawner (mirrors `spawn_random_part` for cuboids). Returns the entity
+/// so the caller can tag it for room-scoped replication.
+pub fn spawn_random_rocket(commands: &mut Commands) -> Entity {
+    let mut rng = rand::thread_rng();
+    spawn_rocket_engine(commands, random_rocket_spawn(&mut rng))
 }
 
 fn random_rocket_spawn(rng: &mut ThreadRng) -> Vec3 {
