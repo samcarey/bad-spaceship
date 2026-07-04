@@ -33,6 +33,11 @@ web-sys = { version = "0.3.40", optional = true, features = [
     "KeyboardEvent",
     # `Location::reload` for the "Reset Position" reload (`reset_position_reload`).
     "Location",
+    # `navigator.clipboard.writeText` for the movement panel's "Copy settings" button
+    # (`platform::web::copy_to_clipboard`). `Navigator` for `window.navigator()`,
+    # `Clipboard` for `.clipboard().write_text(..)`; neither is guaranteed transitively.
+    "Navigator",
+    "Clipboard",
 ] }
 # Read the `window.__BS_NET__` config (set by play.html) on the web build to
 # decide the multiplayer server URL. js-sys is already in the graph via web-sys;

@@ -27,6 +27,9 @@ impl Plugin for CharacterPlugin {
             Update,
             (
                 combine_directional_inputs,
+                // One-shot: copy the RON `max_speed`/`jump_force` into `MovementTuning`
+                // once the config asset loads, so the panel starts at the RON values.
+                seed_movement_tuning,
                 // Suppressed in multiplayer — the predicted networked avatar (client)
                 // / the per-client `ServerAvatar` (server) is the character instead.
                 spawn.run_if(not(resource_exists::<crate::SuppressLocalPlayer>)),
@@ -51,7 +54,170 @@ impl Plugin for CharacterPlugin {
             // player physics + movement match the multiplayer simulation tick
             // (Bevy's default `Time<Fixed>` is 64 Hz). Avian steps on this too.
             .insert_resource(Time::<Fixed>::from_duration(crate::net::TICK))
+            .init_resource::<MovementTuning>()
             .init_asset::<Config>();
+    }
+}
+
+/// Selectable horizontal-movement model, chosen live from the in-game Movement
+/// panel (`client::ui::show_movement_panel`). Each is a different way of steering the
+/// character's horizontal velocity toward the input direction; they exist so the
+/// "feel" can be A/B tested and fine-tuned at runtime. Read by `walk_based_on_input`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum MovementModel {
+    /// Frame-rate-independent exponential approach toward the target velocity (a
+    /// smoothed lerp) — closest to the game's original feel, snappier as
+    /// `smooth_rate` rises. Soft, symmetric momentum.
+    #[default]
+    Smooth,
+    /// Velocity snaps straight to the target on the ground (zero momentum, maximum
+    /// snap); in the air it steers by `air_control`. Arcade feel.
+    Instant,
+    /// Linear acceleration toward the target with a separate (usually higher)
+    /// deceleration back to rest — crisp, distinct start/stop (platformer feel).
+    Accel,
+    /// Quake/Source-style: ground friction, then accelerate toward the wish direction
+    /// up to the target speed. Momentum + air-strafing — the classic "snappy but
+    /// slidey" FPS feel.
+    Source,
+}
+
+impl MovementModel {
+    /// All models, in panel/combo-box order.
+    pub const ALL: [MovementModel; 4] = [
+        MovementModel::Smooth,
+        MovementModel::Instant,
+        MovementModel::Accel,
+        MovementModel::Source,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            MovementModel::Smooth => "Smooth (exponential)",
+            MovementModel::Instant => "Instant (arcade)",
+            MovementModel::Accel => "Accel (platformer)",
+            MovementModel::Source => "Source (FPS)",
+        }
+    }
+}
+
+/// Live, runtime-tunable movement parameters, edited from the in-game Movement panel
+/// and read by the `FixedUpdate` movement systems. One resource carries the superset
+/// of every model's knobs; each model uses only the subset relevant to it (the panel
+/// reveals just those). `max_speed`/`jump_force` are seeded once from the character
+/// `Config` asset (`seed_movement_tuning`) so they start at the RON values.
+#[derive(Resource, Clone, Debug)]
+pub struct MovementTuning {
+    pub model: MovementModel,
+    /// Set once `seed_movement_tuning` has copied the config defaults in.
+    seeded: bool,
+
+    // Shared
+    /// Target ground speed (m/s) at full input.
+    pub max_speed: f32,
+    /// Fraction (0..1) of ground responsiveness retained in the air.
+    pub air_control: f32,
+
+    // Smooth
+    /// Exponential approach rate (1/s). Higher = snappier.
+    pub smooth_rate: f32,
+
+    // Accel
+    /// Acceleration toward the target (m/s²).
+    pub accel: f32,
+    /// Deceleration back to rest when there is no input (m/s²).
+    pub decel: f32,
+
+    // Source
+    /// Ground friction (1/s).
+    pub friction: f32,
+    /// Ground acceleration coefficient.
+    pub ground_accel: f32,
+    /// Air acceleration coefficient.
+    pub air_accel: f32,
+    /// Speed floor for friction so slow motion still stops crisply (m/s).
+    pub stop_speed: f32,
+
+    // Jump (shared)
+    /// Upward launch speed on jump (m/s).
+    pub jump_force: f32,
+    /// Extra downward acceleration while descending (m/s²); 0 = off. A snappier, less
+    /// floaty fall without touching global gravity (so the parts are unaffected).
+    pub fall_multiplier: f32,
+}
+
+impl Default for MovementTuning {
+    fn default() -> Self {
+        Self {
+            model: MovementModel::Smooth,
+            seeded: false,
+            max_speed: 13.0,
+            air_control: 0.25,
+            smooth_rate: 14.0,
+            accel: 140.0,
+            decel: 170.0,
+            friction: 8.0,
+            ground_accel: 14.0,
+            air_accel: 2.0,
+            stop_speed: 1.5,
+            jump_force: 10.0,
+            fall_multiplier: 0.0,
+        }
+    }
+}
+
+impl MovementTuning {
+    /// A copy-pasteable summary of the current model + the knobs it actually uses
+    /// (plus the shared jump values), for the panel's "Copy settings" button.
+    pub fn settings_string(&self) -> String {
+        let mut s = format!(
+            "model: {}\nmax_speed: {:.2}\n",
+            self.model.label(),
+            self.max_speed
+        );
+        match self.model {
+            MovementModel::Smooth => {
+                s += &format!(
+                    "smooth_rate: {:.2}\nair_control: {:.2}\n",
+                    self.smooth_rate, self.air_control
+                );
+            }
+            MovementModel::Instant => {
+                s += &format!("air_control: {:.2}\n", self.air_control);
+            }
+            MovementModel::Accel => {
+                s += &format!(
+                    "accel: {:.1}\ndecel: {:.1}\nair_control: {:.2}\n",
+                    self.accel, self.decel, self.air_control
+                );
+            }
+            MovementModel::Source => {
+                s += &format!(
+                    "friction: {:.2}\nground_accel: {:.2}\nair_accel: {:.2}\nstop_speed: {:.2}\n",
+                    self.friction, self.ground_accel, self.air_accel, self.stop_speed
+                );
+            }
+        }
+        s += &format!(
+            "jump_force: {:.2}\nfall_multiplier: {:.1}\n",
+            self.jump_force, self.fall_multiplier
+        );
+        s
+    }
+}
+
+/// Copy the character `Config`'s `max_speed`/`jump_force` into `MovementTuning` once,
+/// the first frame the config asset is available — so the panel's initial values match
+/// the RON rather than the hard-coded `Default`. The `seeded` latch makes it a one-shot;
+/// afterward the user's live edits stand.
+fn seed_movement_tuning(mut tuning: ResMut<MovementTuning>, configs: Res<Assets<Config>>) {
+    if tuning.seeded {
+        return;
+    }
+    if let Some((_, config)) = configs.iter().next() {
+        tuning.max_speed = config.max_speed;
+        tuning.jump_force = config.jump_force;
+        tuning.seeded = true;
     }
 }
 
@@ -236,19 +402,16 @@ fn combine_directional_inputs(
     }
 }
 
-fn velocity_adjustment(
-    current_velocity: Vec3,
-    desired_velocity: Vec3,
-    current_relevant_velocity: Vec3,
-) -> Vec3 {
-    let current_speed_along_desired_direction =
-        current_velocity.dot(desired_velocity.normalize()).abs();
-    let current_velocity_along_propulsion_direction = if current_relevant_velocity != Vec3::ZERO {
-        current_speed_along_desired_direction * current_relevant_velocity.normalize()
+/// Step `from` toward `to` by at most `max_delta`, snapping to `to` once within reach
+/// (the `Accel` model's constant-acceleration integrator).
+fn move_toward(from: Vec3, to: Vec3, max_delta: f32) -> Vec3 {
+    let delta = to - from;
+    let dist = delta.length();
+    if dist <= max_delta || dist <= 1e-6 {
+        to
     } else {
-        Vec3::ZERO
-    };
-    desired_velocity - current_velocity_along_propulsion_direction
+        from + delta / dist * max_delta
+    }
 }
 
 #[derive(Default, Component)]
@@ -278,73 +441,110 @@ fn touching_ground(
 }
 
 fn walk_based_on_input(
-    mut query: Query<(&mut DirectionalInput, &Yaw, &mut LinearVelocity, &TouchingGround)>,
-    configs: Res<Assets<Config>>,
+    time: Res<Time>,
+    mut query: Query<(&DirectionalInput, &Yaw, &mut LinearVelocity, &TouchingGround)>,
+    tuning: Res<MovementTuning>,
 ) {
-    if let Some((_, config)) = configs.iter().next() {
-        for (directional_input, yaw, mut velocity, touching_ground) in query.iter_mut() {
-            // `LinearVelocity` is a `Vec3` newtype (rapier's `Velocity.linvel`).
-            let current_velocity: Vec3 = velocity.0;
-            // The character body is a ROTATION_LOCKED ball whose rotation Rapier
-            // owns, so movement is derived from the look `Yaw` directly instead of
-            // the body transform. This matches the old basis: `back()` = +Z and
-            // `left()` = -X, both yawed by `-yaw` (see `mouse_motion`).
-            let look = Quat::from_rotation_y(-yaw.0);
-            let forward = look * Vec3::Z * directional_input.0.z;
-            let right = look * Vec3::NEG_X * directional_input.0.x;
-            let desired_velocity = (forward + right) * config.max_speed;
-            let current_horizontal_velocity =
-                Vec3::new(current_velocity.x, 0.0, current_velocity.z);
-            let mut horizontal_velocity_change = if desired_velocity != Vec3::ZERO {
-                velocity_adjustment(
-                    current_velocity,
-                    desired_velocity,
-                    current_horizontal_velocity,
-                )
-            } else {
-                -current_horizontal_velocity
-            };
-            if !touching_ground.0 {
-                horizontal_velocity_change *= 0.13; // slowing down even more when in air
+    let dt = time.delta_secs();
+    if dt <= 0.0 {
+        return;
+    }
+    for (directional_input, yaw, mut velocity, touching_ground) in query.iter_mut() {
+        let grounded = touching_ground.0;
+        // The body is ROTATION_LOCKED (its rotation is owned by physics), so the move
+        // basis comes from the look `Yaw`, not the body transform: `back()` = +Z ("W"),
+        // `left()` = -X ("A"), both yawed by `-yaw` (see `mouse_motion`). `wish`'s
+        // magnitude (≤ 1 for analog sticks) doubles as the throttle.
+        let look = Quat::from_rotation_y(-yaw.0);
+        let wish =
+            look * Vec3::Z * directional_input.0.z + look * Vec3::NEG_X * directional_input.0.x;
+        let horizontal = Vec3::new(velocity.0.x, 0.0, velocity.0.z);
+
+        let new_horizontal = match tuning.model {
+            MovementModel::Smooth => {
+                // Exponential approach to the target (frame-rate independent). When the
+                // target is zero this decays to rest, so it also handles stopping.
+                let target = wish * tuning.max_speed;
+                let mut rate = tuning.smooth_rate;
+                if !grounded {
+                    rate *= tuning.air_control;
+                }
+                let alpha = 1.0 - (-rate * dt).exp();
+                horizontal.lerp(target, alpha)
             }
-            // Per-tick blend toward the desired velocity. Now that this runs in
-            // `FixedUpdate` at a fixed 60 Hz (was per-render-frame in `Update`),
-            // this is a deterministic per-tick factor; retune it (and `max_speed`)
-            // if the fixed-tick feel differs from the old variable-frame-rate feel.
-            velocity.0 += horizontal_velocity_change * 0.13;
-        }
+            MovementModel::Instant => {
+                // Snap to the target on the ground; lightly steer in the air.
+                let target = wish * tuning.max_speed;
+                if grounded {
+                    target
+                } else {
+                    horizontal.lerp(target, tuning.air_control)
+                }
+            }
+            MovementModel::Accel => {
+                // Constant acceleration toward the target; a separate (usually larger)
+                // deceleration when there's no input.
+                let target = wish * tuning.max_speed;
+                let has_input = wish.length_squared() > 1e-6;
+                let mut rate = if has_input { tuning.accel } else { tuning.decel };
+                if !grounded {
+                    rate *= tuning.air_control;
+                }
+                move_toward(horizontal, target, rate * dt)
+            }
+            MovementModel::Source => {
+                // Quake/Source: friction on the ground, then accelerate toward the wish
+                // direction up to the target speed (air acceleration enables strafing).
+                let mut h = horizontal;
+                if grounded {
+                    let speed = h.length();
+                    if speed > 0.0 {
+                        let control = speed.max(tuning.stop_speed);
+                        let drop = control * tuning.friction * dt;
+                        h *= (speed - drop).max(0.0) / speed;
+                    }
+                }
+                let wish_speed = wish.length() * tuning.max_speed;
+                if wish_speed > 0.0 {
+                    let wish_dir = wish.normalize();
+                    let add_speed = wish_speed - h.dot(wish_dir);
+                    if add_speed > 0.0 {
+                        let coef = if grounded {
+                            tuning.ground_accel
+                        } else {
+                            tuning.air_accel
+                        };
+                        let accel_speed = (coef * dt * wish_speed).min(add_speed);
+                        h += wish_dir * accel_speed;
+                    }
+                }
+                h
+            }
+        };
+
+        // Movement owns only the horizontal plane; gravity/jump own the vertical axis.
+        velocity.0.x = new_horizontal.x;
+        velocity.0.z = new_horizontal.z;
     }
 }
 
 fn jump_based_on_input(
-    mut query: Query<(
-        &mut DirectionalInput,
-        &Transform,
-        &mut LinearVelocity,
-        &TouchingGround,
-    )>,
-    configs: Res<Assets<Config>>,
+    time: Res<Time>,
+    mut query: Query<(&DirectionalInput, &mut LinearVelocity, &TouchingGround)>,
+    tuning: Res<MovementTuning>,
 ) {
-    if let Some((_, config)) = configs.iter().next() {
-        for (directional_input, transform, mut velocity, touching_ground) in query.iter_mut() {
-            if directional_input.0.y != 0. {
-                if touching_ground.0 {
-                    let current_velocity: Vec3 = velocity.0;
-                    let up = transform.up() * directional_input.0.y;
-                    let desired_velocity = Vec3::from(up) * config.jump_force;
-                    let current_vertical_velocity = Vec3::new(0.0, current_velocity.y, 0.0);
-                    let vertical_velocity = if desired_velocity != Vec3::ZERO {
-                        velocity_adjustment(
-                            current_velocity,
-                            desired_velocity,
-                            current_vertical_velocity,
-                        )
-                    } else {
-                        Vec3::ZERO
-                    };
-                    velocity.0 += vertical_velocity;
-                }
-            }
+    let dt = time.delta_secs();
+    for (directional_input, mut velocity, touching_ground) in query.iter_mut() {
+        // Jump: while grounded and the up-intent is held, set the upward speed directly
+        // (the body's up is always +Y — it's rotation-locked). Held-space re-jumps each
+        // tick it's grounded, matching the original behaviour.
+        if directional_input.0.y > 0.0 && touching_ground.0 {
+            velocity.0.y = tuning.jump_force;
+        }
+        // Snappier, less-floaty fall: extra downward acceleration while descending,
+        // applied only to the character so global gravity (and the parts) is untouched.
+        if !touching_ground.0 && velocity.0.y < 0.0 && tuning.fall_multiplier > 0.0 {
+            velocity.0.y -= tuning.fall_multiplier * dt;
         }
     }
 }

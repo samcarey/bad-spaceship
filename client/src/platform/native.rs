@@ -42,6 +42,14 @@ pub fn stored_avatar() -> Option<u8> {
     None
 }
 
+/// Copy the movement-tuning settings string somewhere the tester can grab it. Native
+/// has no clipboard dep (dropped with bevy_egui's clipboard feature), so print it to
+/// stdout — the desktop/build-box tester copies it from the terminal. Mirrors the web
+/// signature so `ui::show_movement_panel` can call it unconditionally.
+pub fn copy_to_clipboard(text: &str) {
+    println!("[movement settings]\n{text}");
+}
+
 // Bevy 0.15 moved the cursor fields off `Window` into a `cursor_options` struct;
 // Bevy 0.17 promoted that struct to its own `CursorOptions` component on the
 // window entity, so query it directly. (`Query::single_mut` is fallible since 0.16.)
