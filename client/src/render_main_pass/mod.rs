@@ -1,6 +1,9 @@
 use bad_spaceship_shared::{
     map::PLATFORM_WIDTH_M,
-    part::{Holdable, PartSeed, SuppressLocalParts},
+    part::{
+        Holdable, PartSeed, RocketEngine, SuppressLocalParts, ROCKET_BODY_HEIGHT,
+        ROCKET_BODY_RADIUS, ROCKET_FLARE_BOTTOM_RADIUS, ROCKET_FLARE_HEIGHT, ROCKET_FLARE_Y_OFFSET,
+    },
     Grass,
 };
 mod grass_material;
@@ -18,7 +21,7 @@ use bevy::{
     prelude::*,
 };
 use grass_material::{GrassExtension, GrassMaterial, GRASS_SHADER_HANDLE};
-use metal_material::{part_visual, MetalMaterial, METAL_SHADER_HANDLE};
+use metal_material::{part_visual, rocket_body_material, MetalMaterial, METAL_SHADER_HANDLE};
 use avian3d::prelude::Collider;
 
 /// The shared noise library both material shaders `#import` (see
@@ -59,6 +62,7 @@ impl Plugin for RenderMainPassPlugin {
                     // (and marked Holdable for joint display), so skip the local
                     // part renderer to avoid double meshes.
                     assign_parts.run_if(not(resource_exists::<SuppressLocalParts>)),
+                    assign_rocket_engines.run_if(not(resource_exists::<SuppressLocalParts>)),
                     assign_grass,
                 ),
             );
@@ -103,7 +107,9 @@ fn assign_parts(
     mut commands: Commands,
     unassigned: Query<
         (Entity, &Collider, &Transform, &GlobalTransform, &PartSeed),
-        (With<Holdable>, Without<AssignedMaterial>),
+        // Rocket engines are `Holdable` too but aren't cuboids (the mesh below
+        // reads `as_cuboid().unwrap()`); `assign_rocket_engines` draws them.
+        (With<Holdable>, Without<AssignedMaterial>, Without<RocketEngine>),
     >,
     mut materials: ResMut<Assets<MetalMaterial>>,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -125,6 +131,69 @@ fn assign_parts(
             .insert((transform.clone(), global_transform.clone(), mesh, material))
             .insert(AssignedMaterial);
     }
+}
+
+/// Draw the rocket-engine parts: a striped-orange cylinder **body** placed on the
+/// part entity itself (so `highlight.rs` recolours it on focus/attach like any
+/// part), plus a dark-grey conical-frustum **flare** as a child at the base. The
+/// mesh is built from the same geometry constants the compound collider uses in
+/// `spawn_rocket_engine`, so the visual matches the physics shape.
+fn assign_rocket_engines(
+    mut commands: Commands,
+    unassigned: Query<
+        (Entity, &Transform, &GlobalTransform),
+        (With<RocketEngine>, Without<AssignedMaterial>),
+    >,
+    mut metal_materials: ResMut<Assets<MetalMaterial>>,
+    mut standard_materials: ResMut<Assets<StandardMaterial>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+) {
+    for (entity, transform, global_transform) in unassigned.iter() {
+        let mut e = commands.entity(entity);
+        e.insert((transform.clone(), global_transform.clone(), AssignedMaterial));
+        insert_rocket_visual(&mut e, &mut meshes, &mut metal_materials, &mut standard_materials);
+    }
+}
+
+/// Build the rocket-engine visual on `entity`: a striped-orange cylinder **body** on the
+/// entity itself (so `highlight.rs` recolours it on focus/attach like any part) plus a
+/// dark-grey conical-frustum **flare** child at the base. Built from the same geometry
+/// constants the compound collider uses in `spawn_rocket_engine`, so the visual matches
+/// the physics shape. Shared by the single-player renderer (`assign_rocket_engines`) and
+/// the multiplayer replicated-part path (`draw_replicated_parts`) so a rocket looks
+/// identical in both modes.
+pub fn insert_rocket_visual(
+    entity: &mut EntityCommands,
+    meshes: &mut Assets<Mesh>,
+    metal_materials: &mut Assets<MetalMaterial>,
+    standard_materials: &mut Assets<StandardMaterial>,
+) {
+    let body_mesh = meshes.add(Cylinder::new(ROCKET_BODY_RADIUS, ROCKET_BODY_HEIGHT));
+    let flare_mesh = meshes.add(ConicalFrustum {
+        radius_top: ROCKET_BODY_RADIUS,
+        radius_bottom: ROCKET_FLARE_BOTTOM_RADIUS,
+        height: ROCKET_FLARE_HEIGHT,
+    });
+    let flare_material = standard_materials.add(StandardMaterial {
+        base_color: Color::srgb(0.18, 0.18, 0.2),
+        metallic: 0.6,
+        perceptual_roughness: 0.5,
+        ..Default::default()
+    });
+    entity
+        .insert((
+            Mesh3d(body_mesh),
+            MeshMaterial3d(metal_materials.add(rocket_body_material())),
+        ))
+        .with_children(|parent| {
+            parent.spawn((
+                Mesh3d(flare_mesh),
+                MeshMaterial3d(flare_material),
+                // The flare's narrow (top) end meets the body's bottom face
+                // (same offset the collider uses in `spawn_rocket_engine`).
+                Transform::from_xyz(0.0, ROCKET_FLARE_Y_OFFSET, 0.0),
+            ));
+        });
 }
 
 fn assign_grass(

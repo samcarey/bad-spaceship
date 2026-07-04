@@ -29,12 +29,13 @@ use bad_spaceship_shared::character::{spawn_position, CharacterMovement, Initial
 use bad_spaceship_shared::net::{
     apply_hold_spring, apply_net_input, focused_part, monster_index, sanitize_name,
     ClientPanicReport, InLargestAssembly, NetCenterOfMass, NetFacing, NetHold, NetInput, NetJoint,
-    NetName, NetPart, NetPlayer, ProtocolPlugin, ResetPosition, RollbackReport, SetAvatar, SetName,
-    GROUND_JOINT_ID, MONSTER_COUNT, TICK,
+    NetName, NetPart, NetPlayer, PartShape, ProtocolPlugin, ResetPosition, RollbackReport,
+    SetAvatar, SetName, GROUND_JOINT_ID, MONSTER_COUNT, TICK,
 };
 use bad_spaceship_shared::map::GROUND_LAYER;
 use bad_spaceship_shared::part::{
-    local_contact_anchor, spawn_random_part, SuppressLocalParts, DELETE_RADIUS, NUM_PARTS,
+    local_contact_anchor, spawn_random_part, spawn_random_rocket, SuppressLocalParts, DELETE_RADIUS,
+    NUM_PARTS, NUM_ROCKET_ENGINES, ROCKET_VOLUME,
 };
 use bad_spaceship_shared::{Grass, SuppressLocalPlayer, Yaw};
 use bevy::prelude::*;
@@ -668,7 +669,15 @@ fn record_resume_positions(
 fn spawn_room_world(commands: &mut Commands, room: Room) {
     for _ in 0..NUM_PARTS {
         let (entity, half_extents, seed) = spawn_random_part(commands);
-        tag_room_part(commands, entity, half_extents, seed, room);
+        tag_room_part(commands, entity, PartShape::Cuboid { half_extents: half_extents.to_array() }, seed, room);
+    }
+    // Rocket engines join the loose-parts pool (see `spawn_random_part` above): same
+    // room-scoped replication + prediction, distinguished only by `PartShape::RocketEngine`
+    // so each client rebuilds the cylinder+cone body instead of a cuboid. Rockets carry no
+    // appearance seed (their striped body material is fixed) — pass 0.
+    for _ in 0..NUM_ROCKET_ENGINES {
+        let entity = spawn_random_rocket(commands);
+        tag_room_part(commands, entity, PartShape::RocketEngine, 0, room);
     }
     // One center-of-mass orb per room: a server-owned, replicated marker whose
     // `NetCenterOfMass` the server rewrites as the room's largest assembly changes /
@@ -688,12 +697,12 @@ fn spawn_room_world(commands: &mut Commands, room: Room) {
 /// replicated + predicted, scoped to the room's `Rooms`, and isolated to the
 /// room's collision layer (it collides only with same-room parts and the ground —
 /// default bit 0).
-fn tag_room_part(commands: &mut Commands, entity: Entity, half_extents: Vec3, seed: u32, room: Room) {
+fn tag_room_part(commands: &mut Commands, entity: Entity, shape: PartShape, seed: u32, room: Room) {
     commands.entity(entity).insert((
         // `id` is the part's stable cross-network identity (this entity's bits), so
         // a replicated `NetJoint` can name its two endpoints and the client can find
         // the matching *predicted* parts to joint locally.
-        NetPart { half_extents: half_extents.to_array(), id: entity.to_bits(), seed },
+        NetPart { shape, id: entity.to_bits(), seed },
         Replicate::to_clients(NetworkTarget::All),
         // Predict the loose blocks on every client in the room: each client
         // simulates them locally (so shoving one is instant) and rollback reconciles
@@ -878,7 +887,13 @@ fn server_attach(
                             replaced.push(endpoint);
                             if let Some(room) = held_room {
                                 let (new_entity, half_extents, seed) = spawn_random_part(&mut commands);
-                                tag_room_part(&mut commands, new_entity, half_extents, seed, room);
+                                tag_room_part(
+                                    &mut commands,
+                                    new_entity,
+                                    PartShape::Cuboid { half_extents: half_extents.to_array() },
+                                    seed,
+                                    room,
+                                );
                             }
                         }
                     }
@@ -1011,19 +1026,29 @@ fn sync_net_hold(
 /// the same room and collision layer.
 fn replace_fallen_room_parts(
     mut commands: Commands,
-    parts: Query<(Entity, &Transform, &PartRoom), With<NetPart>>,
+    parts: Query<(Entity, &Transform, &PartRoom, &NetPart)>,
 ) {
-    for (entity, transform, part_room) in &parts {
+    for (entity, transform, part_room, part) in &parts {
         if transform.translation.y < -10.0 {
             commands.entity(entity).despawn();
-            let (new_entity, half_extents, seed) = spawn_random_part(&mut commands);
-            tag_room_part(
-                &mut commands,
-                new_entity,
-                half_extents,
-                seed,
-                Room { id: part_room.id, bit: part_room.bit },
-            );
+            let room = Room { id: part_room.id, bit: part_room.bit };
+            // Respawn the same kind that fell so the pool's composition is stable.
+            match part.shape {
+                PartShape::Cuboid { .. } => {
+                    let (new_entity, half_extents, seed) = spawn_random_part(&mut commands);
+                    tag_room_part(
+                        &mut commands,
+                        new_entity,
+                        PartShape::Cuboid { half_extents: half_extents.to_array() },
+                        seed,
+                        room,
+                    );
+                }
+                PartShape::RocketEngine => {
+                    let new_entity = spawn_random_rocket(&mut commands);
+                    tag_room_part(&mut commands, new_entity, PartShape::RocketEngine, 0, room);
+                }
+            }
         }
     }
 }
@@ -1137,8 +1162,15 @@ fn update_assembly_center_of_mass(
     let mut items: Vec<(Vec3, f32, RoomId)> = Vec::new();
     for (entity, position, part, room, _) in &parts {
         index.insert(entity, items.len());
-        let he = Vec3::from_array(part.half_extents);
-        let volume = 8.0 * he.x * he.y * he.z;
+        // Volume is the mass proxy (uniform density): full cuboid volume, or the
+        // rocket's precomputed cylinder+cone volume.
+        let volume = match part.shape {
+            PartShape::Cuboid { half_extents } => {
+                let he = Vec3::from_array(half_extents);
+                8.0 * he.x * he.y * he.z
+            }
+            PartShape::RocketEngine => ROCKET_VOLUME,
+        };
         items.push((position.0, volume, room.id));
     }
 

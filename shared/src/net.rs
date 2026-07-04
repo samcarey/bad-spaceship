@@ -222,19 +222,43 @@ impl MapEntities for NetInput {
     fn map_entities<M: EntityMapper>(&mut self, _entity_mapper: &mut M) {}
 }
 
-/// Replicated cuboid shape of a part (full extents = 2 × `half_extents`), plus a
-/// stable cross-network id. The shape lets a client rebuild the render mesh; the
-/// part's live pose rides on the predicted Avian `Position`/`Rotation`. `id` is
-/// the server part entity's bits — a *stable* identity (replicated onto both the
-/// client's `Confirmed` and `Predicted` copies) that lets the client match a
-/// replicated joint's endpoints (`NetJoint`) to the local *predicted* part
-/// entities, without depending on lightyear's confirmed→predicted entity mapping.
+/// The replicated shape of a part — enough for a client to rebuild the collider and
+/// render mesh. A cuboid carries its own half-extents; a rocket engine is fixed
+/// geometry (the `ROCKET_*` constants in `part.rs`), so it needs no parameters. This
+/// is the shape discriminant `NetPart` carries so rockets replicate like any part
+/// (before this, `NetPart` was cuboid-only and rockets were single-player).
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug)]
+pub enum PartShape {
+    /// A random box; `half_extents` are half the full extents (`Collider::cuboid`
+    /// takes full extents = 2 × these).
+    Cuboid { half_extents: [f32; 3] },
+    /// A rocket engine: cylinder body + cone flare, built from the shared `ROCKET_*`
+    /// geometry constants (no per-instance parameters).
+    RocketEngine,
+}
+
+impl Default for PartShape {
+    // A degenerate unit cuboid — only hit if a `NetPart` is ever default-constructed
+    // before replication fills it; real parts always carry a concrete shape.
+    fn default() -> Self {
+        PartShape::Cuboid { half_extents: [0.5, 0.5, 0.5] }
+    }
+}
+
+/// Replicated shape of a part (see [`PartShape`]) plus a stable cross-network id. The
+/// shape lets a client rebuild the collider + render mesh; the part's live pose rides
+/// on the predicted Avian `Position`/`Rotation`. `id` is the server part entity's bits
+/// — a *stable* identity (replicated onto both the client's `Confirmed` and `Predicted`
+/// copies) that lets the client match a replicated joint's endpoints (`NetJoint`) to the
+/// local *predicted* part entities, without depending on lightyear's confirmed→predicted
+/// entity mapping.
 #[derive(Component, Serialize, Deserialize, Clone, Copy, PartialEq, Debug, Default)]
 pub struct NetPart {
-    pub half_extents: [f32; 3],
+    pub shape: PartShape,
     pub id: u64,
     /// Appearance seed (see `PartSeed`): clients derive the part's metal look
-    /// from it, so every client renders the same part identically.
+    /// from it, so every client renders the same part identically. (Ignored for
+    /// rockets, whose striped body material is fixed.)
     pub seed: u32,
 }
 
