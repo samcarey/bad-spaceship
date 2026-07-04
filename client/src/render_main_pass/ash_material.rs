@@ -55,10 +55,10 @@ pub struct AshParams {
 impl Default for AshParams {
     fn default() -> Self {
         AshParams {
-            // White ash, mostly opaque. Note the per-flake grey jitter in the
-            // shader (`tint * mix(0.75, 1.2, r)`) keeps some flakes off pure
-            // white so the field still has depth.
-            color: Color::WHITE.with_alpha(0.85).to_linear(),
+            // Light grey ash, mostly opaque — reads against both the near-white
+            // sky (ClearColor) and the green ground (white vanished against the
+            // near-white sky).
+            color: Color::srgb(0.5, 0.49, 0.48).with_alpha(0.85).to_linear(),
             // A box ~2x the platform width, so flakes surround you out to ~one
             // map-radius (half the box) in every direction.
             box_size: Vec4::new(PLATFORM_WIDTH_M * 2.0, PLATFORM_WIDTH_M * 1.8, PLATFORM_WIDTH_M * 2.0, 0.0),
