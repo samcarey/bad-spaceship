@@ -1,5 +1,7 @@
 //! Mesh-based hydrostatic geometry: tessellation of the body into a closed
-//! triangle list, and clipping of that list against the water plane.
+//! triangle list, and clipping of that list against the water surface — a
+//! horizontal plane, or (via [`clip_triangle_signed`]'s per-vertex distances)
+//! an arbitrary height field such as the wave surface.
 //!
 //! These helpers are shape-agnostic past `frustum_triangles` — the buoyancy
 //! methods consume only a `&[[Vec3; 3]]` closed mesh (outward winding), so an
@@ -93,13 +95,23 @@ pub fn frustum_triangles(
 /// Clip a (world-space) triangle against the water plane, keeping the part with
 /// `y <= level`. Appends 0, 1, or 2 triangles to `out`, preserving winding.
 pub fn clip_triangle_below(tri: [Vec3; 3], level: f32, out: &mut Vec<[Vec3; 3]>) {
-    // Sutherland–Hodgman against a single plane: walk the edges, keep submerged
-    // vertices and edge/plane intersections. Yields a 0/3/4-gon.
+    clip_triangle_signed(tri, tri.map(|v| v.y - level), out);
+}
+
+/// Clip a triangle against an arbitrary surface given as per-vertex signed
+/// distances `d` (negative = submerged), keeping the part with `d <= 0` and
+/// placing crossing vertices where the edge-interpolated distance is zero.
+/// Exact for a plane; for a curved surface (waves) it linearises the surface
+/// over each edge — the same order of error as the tessellation itself.
+/// Appends 0, 1, or 2 triangles to `out`, preserving winding.
+pub fn clip_triangle_signed(tri: [Vec3; 3], d: [f32; 3], out: &mut Vec<[Vec3; 3]>) {
+    // Sutherland–Hodgman against a single boundary: walk the edges, keep
+    // submerged vertices and edge/surface intersections. Yields a 0/3/4-gon.
     let mut poly = [Vec3::ZERO; 4];
     let mut n = 0;
     for i in 0..3 {
         let (a, b) = (tri[i], tri[(i + 1) % 3]);
-        let (da, db) = (a.y - level, b.y - level);
+        let (da, db) = (d[i], d[(i + 1) % 3]);
         if da <= 0.0 {
             poly[n] = a;
             n += 1;

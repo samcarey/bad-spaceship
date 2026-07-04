@@ -27,6 +27,13 @@
 //! per-element where the method has elements), pressure drag and slamming
 //! (surface-pressure method only).
 //!
+//! The surface can carry **waves** (Waves menu): a single sinusoidal wave train
+//! travelling along +X, so the water level is a function of position and time,
+//! `η(x,t) = A·sin(kx − ωt)` above [`WATER_LEVEL`]. Every method measures
+//! submersion against the *local* surface height — how each one generalises is
+//! documented on [`WaveField`]. Amplitude defaults to zero, which reproduces
+//! flat-water behaviour exactly.
+//!
 //! The hollow shell can also carry **interior water** (fill slider): its
 //! distribution inside the cavity is solved from the cavity geometry and the
 //! body's orientation each step (free surface perpendicular to gravity), it
@@ -54,7 +61,8 @@ use bevy::shader::ShaderRef;
 use bevy_egui::{egui, input::EguiWantsInput, EguiContexts, EguiPlugin, EguiPrimaryContextPass};
 
 // ── Scene / physics constants ────────────────────────────────────────────────
-/// Water surface height (world Y). Buoyancy is computed against this plane.
+/// Still-water surface height (world Y). Buoyancy is computed against this
+/// level plus the wave field (see [`WaveField`]; flat at zero amplitude).
 const WATER_LEVEL: f32 = 0.0;
 /// Horizontal extent of the (square) water body and floor.
 const WATER_SIZE: f32 = 20.0;
@@ -92,6 +100,16 @@ const FILL_PCT_RANGE: std::ops::RangeInclusive<f32> = 0.0..=100.0;
 /// Slosh slider range: degrees the interior water's settling direction is
 /// tilted off vertical (about world Z, like the start-angle tilt).
 const SLOSH_RANGE: std::ops::RangeInclusive<f32> = -90.0..=90.0;
+
+// Wave sliders (Waves menu): a single sinusoidal wave train travelling along
+// +X, with its x-origin pinned under the frustum's centre. Only amplitude and
+// period are free knobs; the phase speed and wavelength are NOT independent of
+// the period — they follow the deep-water gravity-wave dispersion relation
+// (c = gT/2π, λ = cT) and are shown as read-outs. Amplitude defaults to 0 =
+// flat water.
+const WAVE_AMP_RANGE: std::ops::RangeInclusive<f32> = 0.0..=1.2;
+const DEFAULT_WAVE_PERIOD: f32 = 2.5;
+const WAVE_PERIOD_RANGE: std::ops::RangeInclusive<f32> = 1.0..=10.0;
 
 /// Base opacity the water/body pair is tuned around.
 const BASE_ALPHA: f32 = 0.13125;
@@ -272,6 +290,12 @@ struct SimParams {
     /// still pulls straight down (see `solve_interior_water`).
     slosh_deg: f32,
 
+    /// Wave amplitude (m); 0 = flat water (the default).
+    wave_amp: f32,
+    /// Wave period (s). The phase speed follows from it via the deep-water
+    /// dispersion relation (see `SimParams::wave_speed`) — not a free knob.
+    wave_period: f32,
+
     method: Method,
     /// Voxel method quality: cells along the body's longest local dimension.
     voxel_res: u32,
@@ -299,6 +323,33 @@ impl SimParams {
     fn wall(&self) -> f32 {
         self.wall_cm * 0.01
     }
+
+    /// Angular frequency ω = 2π/T (rad/s).
+    fn omega(&self) -> f32 {
+        std::f32::consts::TAU / self.wave_period
+    }
+
+    /// Deep-water phase speed c = g/ω  (equivalently c = gT/2π). Not a slider:
+    /// gravity waves can't pick a speed independent of their period — this is
+    /// the dispersion relation, surfaced in the UI as a read-out only.
+    fn wave_speed(&self) -> f32 {
+        GRAVITY / self.omega()
+    }
+
+    /// A wave-surface snapshot from the shared [`WaveClock`]: `phase` is the
+    /// accumulated Φ = ∫ω dt (so changing the period never retro-jumps it) and
+    /// `origin_x` is the world x under the frustum's centre (so the surface
+    /// directly below the body is invariant to wavelength). Wavenumber follows
+    /// the deep-water dispersion relation k = ω²/g.
+    fn wave(&self, phase: f32, origin_x: f32) -> WaveField {
+        let omega = self.omega();
+        WaveField {
+            amp: self.wave_amp,
+            k: omega * omega / GRAVITY,
+            phase,
+            origin_x,
+        }
+    }
 }
 
 impl Default for SimParams {
@@ -314,6 +365,8 @@ impl Default for SimParams {
             wall_cm: DEFAULT_WALL_CM,
             fill_pct: 0.0,
             slosh_deg: 0.0,
+            wave_amp: 0.0,
+            wave_period: DEFAULT_WAVE_PERIOD,
             method: Method::VoxelGrid,
             voxel_res: 12,
             hull_res: 24,
@@ -327,9 +380,82 @@ impl Default for SimParams {
     }
 }
 
+/// The wave surface at one instant: `η(x) = WATER_LEVEL + A·sin(k(x − x₀) − Φ)`,
+/// a single sinusoidal wave train travelling along +X (z has no effect).
+/// Snapshot a `WaveField` once per step/frame via [`SimParams::wave`] and
+/// evaluate it wherever a local water level is needed.
+///
+/// How each buoyancy method generalises from the flat plane:
+/// - **Voxel grid**: each cell's fractional submersion is measured against
+///   `height(cell.x)` instead of the constant level.
+/// - **Surface pressure**: triangles are clipped by per-vertex signed
+///   distances to the surface ([`hydro::clip_triangle_signed`]), and the
+///   pressure depth is taken to the surface above each sub-triangle centroid.
+/// - **Clipped volume**: vertices are sheared vertically by the local wave
+///   elevation (`y′ = y − η(x) + WATER_LEVEL`), which maps the wave surface
+///   back to the flat plane. The shear has unit Jacobian (volume-preserving),
+///   so the plane-clipped volume in sheared space IS the submerged volume;
+///   the centre of buoyancy is un-sheared at its own x afterwards.
+///
+/// In all methods only the *vertical* pressure component is applied, as on
+/// flat water. Under waves the horizontal components no longer cancel exactly
+/// (real waves impart drift), but the model here is hydrostatic pressure under
+/// the instantaneous surface — no orbital velocities or dynamic pressure — the
+/// standard game-water approximation, so the neglected horizontal residue is
+/// of the same order as what the pressure model already leaves out.
+#[derive(Clone, Copy)]
+struct WaveField {
+    amp: f32,
+    /// Wavenumber k = ω²/g (rad/m) — the deep-water dispersion relation.
+    k: f32,
+    /// Accumulated temporal phase Φ at the snapshot instant (rad).
+    phase: f32,
+    /// Spatial phase origin (world x): the frustum's horizontal centre, so the
+    /// surface right under the body is invariant to wavelength.
+    origin_x: f32,
+}
+
+impl WaveField {
+    /// Water-surface height (world y) above the point at world `x`.
+    /// Short-circuits at zero amplitude: flat water — the default state —
+    /// must not pay a `sin()` per voxel/vertex at 60 Hz in the physics path.
+    fn height(&self, x: f32) -> f32 {
+        if self.amp == 0.0 {
+            return WATER_LEVEL;
+        }
+        WATER_LEVEL + self.amp * (self.k * (x - self.origin_x) - self.phase).sin()
+    }
+
+    /// Surface slope ∂η/∂x at world `x` — the water mesh's analytic normals.
+    fn slope(&self, x: f32) -> f32 {
+        if self.amp == 0.0 {
+            return 0.0;
+        }
+        self.amp * self.k * (self.k * (x - self.origin_x) - self.phase).cos()
+    }
+
+    /// Highest the surface gets anywhere — a conservative dry-rejection bound.
+    fn max_level(&self) -> f32 {
+        WATER_LEVEL + self.amp
+    }
+}
+
 /// Set by the UI's Reset button; consumed by `handle_reset`.
 #[derive(Resource, Default)]
 struct ResetRequested(bool);
+
+/// The wave clock: advanced every fixed step by `apply_hydro_forces`, read back
+/// by the visuals in `animate_waves`. Integrating the phase here — instead of
+/// recomputing ω·t_elapsed — is what keeps the surface continuous when the
+/// period slider moves ω: only the future rate changes, so the phase directly
+/// under the body is preserved at the instant of the change.
+#[derive(Resource, Default)]
+struct WaveClock {
+    /// Accumulated phase Φ = ∫ω dt (rad).
+    phase: f32,
+    /// Spatial phase origin: the frustum's horizontal centre (world x).
+    origin_x: f32,
+}
 
 /// The force-vector overlay: every hydro force applied in the latest recorded
 /// physics step, as
@@ -457,6 +583,13 @@ struct ShellProps(MassProperties3d);
 #[derive(Component)]
 struct InteriorWaterMesh;
 
+/// Marker for the water body's render mesh (world-space geometry, identity
+/// transform). Its top surface follows the wave field — rebuilt every frame
+/// by `animate_waves` while waves are on, static (and rebuilt once) at
+/// amplitude 0.
+#[derive(Component)]
+struct WaterVolume;
+
 /// Cached hull tessellation in LOCAL space for the mesh-based methods, plus
 /// per-triangle data the slamming model needs. Same rebuild policy as `VoxelCache`.
 #[derive(Resource, Default)]
@@ -521,6 +654,13 @@ struct SubmergedTint {
     /// `WATER_COLOR`/`WATER_LEVEL` so retuning those can't desync the tint.
     #[uniform(100)]
     water: Vec4,
+    /// The wave field, so the tint boundary follows the moving surface:
+    /// x = amplitude, y = wavenumber k, z = accumulated phase Φ, w = spatial
+    /// origin x₀ (world x under the frustum's centre).
+    /// Kept current by `animate_waves` (static zeroes while amplitude is 0,
+    /// where the waterline degenerates to `water.w`).
+    #[uniform(101)]
+    wave: Vec4,
 }
 
 impl MaterialExtension for SubmergedTint {
@@ -566,6 +706,7 @@ fn main() {
         })
         .init_resource::<SimParams>()
         .init_resource::<ResetRequested>()
+        .init_resource::<WaveClock>()
         .init_resource::<ForceVectors>()
         .init_resource::<PhysicsTiming>()
         .init_resource::<VoxelCache>()
@@ -594,6 +735,8 @@ fn main() {
         .add_systems(Update, draw_force_vectors)
         // Likewise: rebuilds from the last fixed step's water solve.
         .add_systems(Update, update_water_mesh)
+        // Water-surface mesh + tint-shader wave uniform (render-rate visuals).
+        .add_systems(Update, animate_waves)
         // Hydro forces MUST run at the fixed physics rate, not render rate:
         // Avian clears `Forces` after every physics step (FixedPostUpdate), so
         // an Update-schedule writer only forces the first step of a render
@@ -644,18 +787,20 @@ fn setup(
         Transform::from_xyz(6.0, 12.0, 4.0).looking_at(Vec3::ZERO, Vec3::Y),
     ));
 
-    // Water — a translucent blue volume (surface at `WATER_LEVEL`, extending down).
-    // Visual only: the body passes through the surface and is acted on by the
-    // buoyancy force, so the water carries no collider.
+    // Water — a translucent blue volume (surface at `WATER_LEVEL` + the wave
+    // field, extending down). The mesh is built in world space with an identity
+    // transform; `animate_waves` rebuilds it while waves run. Visual only: the
+    // body passes through the surface and is acted on by the buoyancy force, so
+    // the water carries no collider.
     commands.spawn((
-        Mesh3d(meshes.add(Cuboid::new(WATER_SIZE, WATER_DEPTH, WATER_SIZE))),
+        WaterVolume,
+        Mesh3d(meshes.add(water_volume_mesh(&params.wave(0.0, 0.0)))),
         MeshMaterial3d(materials.add(StandardMaterial {
             base_color: WATER_COLOR.with_alpha(WATER_ALPHA),
             alpha_mode: AlphaMode::Blend,
             perceptual_roughness: 0.1,
             ..default()
         })),
-        Transform::from_xyz(0.0, WATER_LEVEL - WATER_DEPTH * 0.5, 0.0),
     ));
 
     // Floor at the bottom of the water so a dense (sinking) body comes to rest
@@ -685,6 +830,7 @@ fn setup(
             water_linear.blue,
             WATER_LEVEL,
         ),
+        wave: Vec4::ZERO,
     };
     let mut shell_material = |color| {
         shell_materials.add(ExtendedMaterial {
@@ -773,6 +919,97 @@ fn water_mesh(tris: &[[Vec3; 3]]) -> Mesh {
     .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.compute_flat_normals();
     mesh
+}
+
+/// Columns the water mesh samples the wave with along X. The wave is constant
+/// along Z, so the surface is a ruled strip: fine sampling costs almost
+/// nothing (~8 cm at 240 columns over the 20 m tank).
+const WATER_MESH_COLUMNS: usize = 240;
+
+/// World-space mesh of the whole water body under the given wave field: the
+/// undulating top strip, the four side walls (the ±Z walls' top edges follow
+/// the wave; the ±X walls are flat at the wave's edge height), and the flat
+/// bottom. Indexed, with analytic smooth normals on the top and flat normals
+/// on walls/bottom (each face owns its vertices). Outward winding throughout —
+/// the material keeps default back-face culling, like the cuboid it replaced.
+fn water_volume_mesh(wave: &WaveField) -> Mesh {
+    let n = WATER_MESH_COLUMNS;
+    let half = WATER_SIZE * 0.5;
+    let bottom = WATER_LEVEL - WATER_DEPTH;
+    // Exact counts: top strip + two ±Z walls at 2(n+1) vertices each, then
+    // 4 + 4 + 4 for the ±X walls and bottom; 6 indices per quad.
+    let mut positions: Vec<[f32; 3]> = Vec::with_capacity(6 * (n + 1) + 12);
+    let mut normals: Vec<[f32; 3]> = Vec::with_capacity(6 * (n + 1) + 12);
+    let mut indices: Vec<u32> = Vec::with_capacity(18 * n + 18);
+    let x_at = |i: usize| -half + WATER_SIZE * i as f32 / n as f32;
+    // Column surface heights, shared by the top strip and both ±Z walls.
+    let heights: Vec<f32> = (0..=n).map(|i| wave.height(x_at(i))).collect();
+    fn quad(indices: &mut Vec<u32>, a: u32, b: u32, c: u32, d: u32) {
+        indices.extend([a, b, c, b, d, c]);
+    }
+
+    // Top strip: two vertices per column (z = ∓half), smooth analytic normal.
+    for i in 0..=n {
+        let x = x_at(i);
+        let normal = Vec3::new(-wave.slope(x), 1.0, 0.0).normalize().to_array();
+        for z in [-half, half] {
+            positions.push([x, heights[i], z]);
+            normals.push(normal);
+        }
+    }
+    for i in 0..n as u32 {
+        // (a = near z, b = far z) at column i; (c, d) at column i+1.
+        let (a, b, c, d) = (2 * i, 2 * i + 1, 2 * i + 2, 2 * i + 3);
+        quad(&mut indices, d, c, b, a); // up-facing
+    }
+
+    // ±Z walls: per-column top vertex on the wave, bottom on the floor.
+    for (z, normal) in [(-half, [0.0, 0.0, -1.0]), (half, [0.0, 0.0, 1.0])] {
+        let base = positions.len() as u32;
+        for i in 0..=n {
+            positions.push([x_at(i), heights[i], z]);
+            positions.push([x_at(i), bottom, z]);
+            normals.extend([normal, normal]);
+        }
+        for i in 0..n as u32 {
+            let (t0, b0) = (base + 2 * i, base + 2 * i + 1);
+            let (t1, b1) = (t0 + 2, b0 + 2);
+            if z < 0.0 {
+                quad(&mut indices, t0, t1, b0, b1); // outward = -Z
+            } else {
+                quad(&mut indices, t0, b0, t1, b1); // outward = +Z
+            }
+        }
+    }
+
+    // ±X walls (flat: the wave is constant along z at a fixed x) + bottom.
+    for (x, normal) in [(-half, [-1.0, 0.0, 0.0]), (half, [1.0, 0.0, 0.0])] {
+        let base = positions.len() as u32;
+        let top = wave.height(x);
+        for (y, z) in [(top, -half), (top, half), (bottom, -half), (bottom, half)] {
+            positions.push([x, y, z]);
+            normals.push(normal);
+        }
+        if x < 0.0 {
+            quad(&mut indices, base, base + 2, base + 1, base + 3);
+        } else {
+            quad(&mut indices, base, base + 1, base + 2, base + 3);
+        }
+    }
+    let base = positions.len() as u32;
+    for (x, z) in [(-half, -half), (half, -half), (-half, half), (half, half)] {
+        positions.push([x, bottom, z]);
+        normals.push([0.0, -1.0, 0.0]);
+    }
+    quad(&mut indices, base, base + 1, base + 2, base + 3);
+
+    Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    )
+    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+    .with_inserted_indices(Indices::U32(indices))
 }
 
 /// End-disc mesh for one cap: side 1 (+Y) or side 2 (-Y).
@@ -1139,10 +1376,23 @@ fn apply_hydro_forces(
     mut aligned: Local<Vec<[Vec3; 3]>>,
     mut timing: ResMut<PhysicsTiming>,
     mut vis: ResMut<ForceVectors>,
+    mut clock: ResMut<WaveClock>,
+    // Read-only view of the body's pose, just for the wave's spatial origin
+    // (the force-applying pass below borrows the same bodies mutably).
+    centre: Query<&Position, With<Buoy>>,
     mut bodies: Query<(&Position, &Rotation, &ComputedMass, Forces), With<Buoy>>,
 ) {
     let started = Instant::now();
     let dt = time.delta_secs().max(1e-4);
+    // Advance the wave clock: pin its x-origin under the body's centre and
+    // integrate the phase (Φ += ω·dt) rather than recomputing ω·t_elapsed, so a
+    // period change never retro-jumps the surface below the frustum. Inside
+    // FixedUpdate `Res<Time>` is the fixed clock, so catch-up steps each
+    // integrate their own slice. Read back by `animate_waves` for the visuals.
+    clock.origin_x = centre.iter().next().map_or(clock.origin_x, |p| p.0.x);
+    clock.phase += params.omega() * dt;
+    let wave = params.wave(clock.phase, clock.origin_x);
+    let max_level = wave.max_level();
     // Record the overlay only on the render frame's FINAL fixed step (once a
     // step is expended, remaining overstep < timestep ⇒ no further step runs
     // this frame): earlier catch-up steps' recordings would be overwritten
@@ -1183,15 +1433,22 @@ fn apply_hydro_forces(
             Method::VoxelGrid => {
                 refresh_voxel_cache(&params, &mut voxels);
                 for local in &voxels.centers {
-                    // Fractional submersion of the cell (treated as `cell_size`
-                    // tall — exact for full/empty cells, softened at the
-                    // waterline band, which is the standard anti-jitter fix).
-                    let frac =
-                        ((WATER_LEVEL - world_y(*local)) / voxels.cell_size + 0.5).clamp(0.0, 1.0);
-                    if frac <= 0.0 {
+                    // Conservative dry rejection on the cheap one-component
+                    // transform: the local surface is at most `max_level`.
+                    let wy = world_y(*local);
+                    if wy - 0.5 * voxels.cell_size >= max_level {
                         continue;
                     }
                     let world = pos.0 + rot_m * *local;
+                    // Fractional submersion of the cell against the local wave
+                    // surface (treated as `cell_size` tall — exact for
+                    // full/empty cells, softened at the waterline band, which
+                    // is the standard anti-jitter fix).
+                    let frac =
+                        ((wave.height(world.x) - wy) / voxels.cell_size + 0.5).clamp(0.0, 1.0);
+                    if frac <= 0.0 {
+                        continue;
+                    }
                     let v_cell = voxels.cell_volume * frac;
                     let mut f = Vec3::Y * (WATER_DENSITY * GRAVITY * v_cell);
                     if params.drag_on {
@@ -1221,14 +1478,19 @@ fn apply_hydro_forces(
                 let c_f = 0.075 / (reynolds.log10() - 2.0).powi(2);
 
                 for (j, tri) in hull.tris.iter().enumerate() {
-                    // Dry triangle: no forces; just clear its slamming history.
-                    if tri.iter().all(|v| world_y(*v) > WATER_LEVEL) {
+                    // Dry triangle (conservatively vs the wave crest): no
+                    // forces; just clear its slamming history.
+                    if tri.iter().all(|v| world_y(*v) > max_level) {
                         hull.prev_dv[j] = 0.0;
                         continue;
                     }
                     let world = hydro::tri_to_world(tri, pos.0, &rot_m);
                     clipped.clear();
-                    hydro::clip_triangle_below(world, WATER_LEVEL, &mut clipped);
+                    hydro::clip_triangle_signed(
+                        world,
+                        world.map(|v| v.y - wave.height(v.x)),
+                        &mut clipped,
+                    );
 
                     let mut sub_area = 0.0;
                     for sub in clipped.iter() {
@@ -1236,7 +1498,10 @@ fn apply_hydro_forces(
                             continue;
                         };
                         sub_area += g.area;
-                        let depth = WATER_LEVEL - g.centroid.y;
+                        // Depth to the surface straight above the centroid;
+                        // clamped because a clipped triangle's centroid can
+                        // poke marginally above a *curved* surface.
+                        let depth = (wave.height(g.centroid.x) - g.centroid.y).max(0.0);
                         // Hydrostatic pressure force. Only the vertical component
                         // is kept: the horizontal parts cancel exactly over a
                         // closed surface, and dropping them kills numerical
@@ -1308,18 +1573,25 @@ fn apply_hydro_forces(
                 refresh_hull_cache(&params, &mut hull);
                 clipped.clear();
                 for tri in &hull.tris {
-                    if tri.iter().all(|v| world_y(*v) > WATER_LEVEL) {
+                    if tri.iter().all(|v| world_y(*v) > max_level) {
                         continue;
                     }
-                    hydro::clip_triangle_below(
-                        hydro::tri_to_world(tri, pos.0, &rot_m),
-                        WATER_LEVEL,
-                        &mut clipped,
-                    );
+                    // Shear each vertex down by the local wave elevation:
+                    // the wave surface maps to the flat `WATER_LEVEL` plane,
+                    // and the shear's unit Jacobian means the plane-clipped
+                    // volume below IS the true submerged volume (see the
+                    // `WaveField` docs). At amplitude 0 this is the identity.
+                    let sheared = hydro::tri_to_world(tri, pos.0, &rot_m)
+                        .map(|v| Vec3::new(v.x, v.y - wave.height(v.x) + WATER_LEVEL, v.z));
+                    hydro::clip_triangle_below(sheared, WATER_LEVEL, &mut clipped);
                 }
-                if let Some((v_sub, center_of_buoyancy)) =
+                if let Some((v_sub, mut center_of_buoyancy)) =
                     hydro::submerged_volume_centroid(&clipped, WATER_LEVEL)
                 {
+                    // Un-shear the centroid: x/z are untouched by the shear,
+                    // and its y moves back up by the local wave elevation
+                    // (exact to first order in the surface's curvature).
+                    center_of_buoyancy.y += wave.height(center_of_buoyancy.x) - WATER_LEVEL;
                     let f_buoy = Vec3::Y * (WATER_DENSITY * GRAVITY * v_sub);
                     forces.apply_force_at_point(f_buoy, center_of_buoyancy);
                     if record {
@@ -1425,6 +1697,39 @@ fn update_water_mesh(
         // makes the renderer re-extract — no per-solve handle churn. (The
         // returned value is the displaced old mesh, dropped here.)
         let _ = meshes.insert(mesh.0.id(), water_mesh(&water.render_tris));
+    }
+}
+
+/// Animate the water: rebuild the water volume's mesh under the current wave
+/// field and refresh the shell tint's wave uniform. Runs every frame while
+/// waves are on; at amplitude 0 it runs once per slider change (flat rebuild)
+/// and then goes fully quiet — so still water costs nothing per frame and
+/// flat-water behaviour is unchanged.
+///
+/// Reads the shared [`WaveClock`] (advanced in `apply_hydro_forces`), so the
+/// rendered surface matches the physics exactly instead of drifting by the
+/// render-vs-fixed clock offset.
+fn animate_waves(
+    params: Res<SimParams>,
+    clock: Res<WaveClock>,
+    mut last: Local<Option<(f32, f32)>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut shell_materials: ResMut<Assets<ShellMaterial>>,
+    surface: Query<&Mesh3d, With<WaterVolume>>,
+) {
+    let key = (params.wave_amp, params.wave_period);
+    if params.wave_amp <= 0.0 && *last == Some(key) {
+        return;
+    }
+    *last = Some(key);
+    let wave = params.wave(clock.phase, clock.origin_x);
+    for mesh in &surface {
+        // Replace the asset in place (same handle, renderer re-extracts) —
+        // the same no-handle-churn pattern as `update_water_mesh`.
+        let _ = meshes.insert(mesh.0.id(), water_volume_mesh(&wave));
+    }
+    for (_, material) in shell_materials.iter_mut() {
+        material.extension.wave = Vec4::new(wave.amp, wave.k, wave.phase, wave.origin_x);
     }
 }
 
@@ -1617,8 +1922,9 @@ fn floating_area(
         });
 }
 
-/// Bottom control panel: shape + density sliders, method radio + quality,
-/// add-on checkboxes, reset.
+/// Bottom control panel: shape + density sliders, the collapsed-by-default
+/// Waves and Method sections (wave sliders; method radio + quality + add-on
+/// checkboxes), reset.
 fn ui(
     mut contexts: EguiContexts,
     mut params: ResMut<SimParams>,
@@ -1742,6 +2048,29 @@ fn ui(
                         }
                     });
                 });
+
+            // Collapsed by default: flat water is the baseline; open to send a
+            // wave train across the surface.
+            egui::CollapsingHeader::new("Waves").show(ui, |ui| {
+                labeled_slider(
+                    ui,
+                    "amplitude",
+                    egui::Slider::new(&mut params.wave_amp, WAVE_AMP_RANGE).suffix(" m"),
+                );
+                labeled_slider(
+                    ui,
+                    "period",
+                    egui::Slider::new(&mut params.wave_period, WAVE_PERIOD_RANGE).suffix(" s"),
+                );
+                // Speed and wavelength aren't free: deep-water gravity waves
+                // obey c = gT/2π and λ = cT, so both follow from the period.
+                // Shown as read-outs to keep the wave physically consistent.
+                ui.label(format!(
+                    "speed {:.2} m/s · wavelength {:.1} m  (deep-water c = gT/2π)",
+                    params.wave_speed(),
+                    params.wave_speed() * params.wave_period,
+                ));
+            });
 
             ui.separator();
             // Collapsed by default: the method selector + its quality slider +

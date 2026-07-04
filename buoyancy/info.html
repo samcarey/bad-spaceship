@@ -251,6 +251,55 @@
     where \(V_{\text{sub}}^{2/3}\) stands in for the projected area of the wetted region.
   </p>
 
+  <h2>Waves</h2>
+
+  <p>
+    The Waves menu sends a single sinusoidal wave train across the surface along
+    \(+x\), so the water level becomes a function of position and time:
+  </p>
+  $$ \eta(x, t) \;=\; A \sin\!\big(k(x - x_0) - \Phi\big), \qquad
+     \omega = \frac{2\pi}{T}, \qquad k = \frac{\omega^2}{g}, \qquad \Phi = \int \omega\,dt, $$
+  <p>
+    with \(A\) the amplitude slider and \(T\) the period (the only two free controls;
+    \(A = 0\) is flat water, the default). The <strong>speed is not an independent
+    slider</strong> — real gravity waves obey the <em>deep-water dispersion relation</em>
+    \(c = g/\omega = gT/2\pi\), so once you pick the period the phase speed
+    \(c\) and wavelength \(\lambda = cT = 2\pi/k\) follow (both shown as read-outs).
+    Two further details keep the surface well-behaved as you drag the period: the phase
+    \(\Phi\) is <em>accumulated</em> (\(\int\omega\,dt\)) rather than recomputed as
+    \(\omega t\), and the \(x\)-origin \(x_0\) is pinned under the frustum's centre — so
+    changing \(T\) shifts only the wave going forward, never the water level directly
+    below the body at that instant. The model stays
+    <em>hydrostatic under the instantaneous surface</em>: pressure is still
+    \(\rho_w g \times\) depth, but depth is now measured to \(\eta\) straight above the
+    point. (Real waves also carry orbital velocities and dynamic pressure that decay with
+    depth; like most game water, those are neglected.) Each method adapts differently:
+  </p>
+  <ul>
+    <li><strong>Voxel grid</strong> — each cell's fractional submersion compares the cell
+      centre against the local surface height \(\eta(x_i, t)\) instead of a constant
+      level.</li>
+    <li><strong>Surface pressure</strong> — triangles are clipped by <em>per-vertex signed
+      distances</em> \(d_i = y_i - \eta(x_i, t)\) (the surface is linearised over each
+      edge, the same order of error as the tessellation), and each sub-triangle's pressure
+      depth is taken to the surface above its centroid.</li>
+    <li><strong>Clipped volume</strong> — each vertex is sheared vertically by the local
+      wave elevation, \(y' = y - \eta(x, t)\), which maps the wave surface back to a flat
+      plane so the exact plane-clip machinery applies unchanged. The shear has unit
+      Jacobian (it only slides vertical columns), so the volume computed in sheared space
+      <em>is</em> the submerged volume; the centre of buoyancy is un-sheared at its own
+      \(x\) afterwards.</li>
+  </ul>
+  <p>
+    As on flat water, only the vertical pressure component is applied. Under waves the
+    horizontal components no longer cancel exactly (real waves impart drift forces), but
+    that residue is of the same order as the dynamic-pressure terms the hydrostatic model
+    already leaves out — dropping it keeps the three methods comparable and drift-free.
+    A body floating in waves still pitches and heaves realistically, because the
+    <em>distribution</em> of vertical force along the hull follows the passing crests
+    and troughs.
+  </p>
+
   <h2>What each parameter does</h2>
 
   <table>
@@ -262,6 +311,9 @@
     <tr><td>wall thickness</td><td>—</td><td>Shell wall of the hollow sealed body. Thicker = heavier (mass, inertia, and centre of mass come from the shell = outer minus cavity); displacement stays the full outer volume.</td></tr>
     <tr><td>fill</td><td>\(f\)</td><td>Fraction of the cavity filled with interior water; it weighs in at the solved water centroid and renders as the blue volume.</td></tr>
     <tr><td>slosh</td><td>—</td><td>Tilts the interior water's settling direction only (demonstration). ⟲ resets to vertical.</td></tr>
+    <tr><td>amplitude</td><td>\(A\)</td><td>Wave height above/below the still level. 0 = flat water (the default; all wave code short-circuits).</td></tr>
+    <tr><td>period</td><td>\(T\)</td><td>Time between crests at a fixed point; \(\omega = 2\pi/T\). Sets everything else about the wave: longer period → faster, longer swell.</td></tr>
+    <tr><td>speed, wavelength</td><td>\(c,\ \lambda\)</td><td>Read-outs, not sliders: fixed by the period through the deep-water dispersion relation \(c = gT/2\pi\), \(\lambda = cT\). A gravity wave can't travel at an arbitrary speed for its period.</td></tr>
     <tr><td>grid density</td><td>\(n\)</td><td>Voxel method: cells per longest axis. Higher = smoother waterline response and less volume error, at more per-frame work.</td></tr>
     <tr><td>hull resolution</td><td>—</td><td>Mesh methods: radial tessellation segments. Higher = finer clipping at the waterline, better torque accuracy.</td></tr>
     <tr><td>viscous drag</td><td>\(C_d\)</td><td>Scales the method-appropriate drag model above. 0 = ideal fluid (the body bobs forever).</td></tr>
