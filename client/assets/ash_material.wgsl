@@ -127,7 +127,7 @@ fn vertex(v: Vertex) -> VertexOutput {
     out.uv = v.uv;
     // Two-tone: half the flakes a darker grey, half a lighter grey (a per-flake
     // coin flip, scaled off the base colour so the AshParams knob still tunes it).
-    out.tint = ash.color.rgb * select(1.35, 0.6, r2.z < 0.5);
+    out.tint = ash.color.rgb * select(1.8, 0.6, r2.z < 0.5);
     out.alpha = ash.color.a * near * edge * (0.4 + 0.6 * tumble);
     return out;
 }
