@@ -17,9 +17,9 @@ use bad_spaceship_shared::character::{
     insert_character_body, CharacterMovement, Config as CharacterConfig,
 };
 use bad_spaceship_shared::net::{
-    apply_hold_spring, apply_net_input, focused_part, ClientPanicReport, ControlChannel, NetFacing,
-    NetHold, NetInput, NetJoint, NetPart, take_rollback_diag, NetPlayer, ProtocolPlugin,
-    RollbackReport, TelemetryChannel, TICK,
+    apply_hold_spring, apply_net_input, focused_part, ClientPanicReport, ControlChannel,
+    NetCenterOfMass, NetFacing, NetHold, NetInput, NetJoint, NetPart, take_rollback_diag,
+    NetPlayer, ProtocolPlugin, RollbackReport, TelemetryChannel, GROUND_JOINT_ID, TICK,
 };
 use bad_spaceship_shared::part::{insert_part_physics, Holdable, SuppressLocalParts};
 use bad_spaceship_shared::player::make_local_player;
@@ -27,9 +27,9 @@ use crate::render_main_pass::metal_material::{metal_tint, part_visual, MetalMate
 use crate::render_secondary_pass::gizmo_material::GizmoMaterial;
 use crate::render_secondary_pass::JointAppearance;
 use bad_spaceship_shared::{
-    CameraOrbitCenter, Character, DirectionalInput, FocusedInteractable, HoldPoint, Holding,
-    InputEvents, LookPitch, Modifying, PartRotation, Player, PlayerClick, PredeleteJoints,
-    SuppressLocalPlayer, UpdateJointsLabel, Yaw,
+    CameraOrbitCenter, Character, DirectionalInput, FocusedInteractable, Grass, HoldPoint,
+    Holding, InputEvents, LookPitch, Modifying, PartRotation, Player, PlayerClick,
+    PredeleteJoints, SuppressLocalPlayer, UpdateJointsLabel, Yaw,
 };
 use bevy::prelude::*;
 use lightyear::prelude::client::input::InputSystems as ClientInputSystems;
@@ -263,6 +263,7 @@ impl Plugin for NetClientPlugin {
                 redress_replicated_players,
                 face_replicated_players,
                 draw_replicated_parts,
+                draw_center_of_mass_orb,
                 (bind_replicated_joints, position_replicated_joints).chain(),
                 // Recolor each joint's own persistent gizmo sphere red while it's in the
                 // delete zone. Runs after the shared detector fills `PredeleteJoints`.
@@ -831,6 +832,91 @@ fn draw_replicated_parts(
     }
 }
 
+/// Draw the floating white orb at each room's largest-assembly center of mass.
+///
+/// The server owns the calculation (which parts form the largest assembly and where
+/// its COM is) and replicates the result on a per-room [`NetCenterOfMass`] entity;
+/// this system just renders it. On first sighting of that entity it attaches the orb
+/// mesh + material (built once the character config's size is known); every frame it
+/// tracks the entity's `Transform` to the replicated position and shows the orb only
+/// while an assembly exists (`count >= 2`).
+///
+/// The orb is a plain unlit white sphere half a character wide: the character body is
+/// `(2/3) * size` across, so half that width is a `size / 3` diameter — a `size / 6`
+/// radius.
+fn draw_center_of_mass_orb(
+    mut commands: Commands,
+    time: Res<Time>,
+    // The orb's shared mesh + material, built lazily once the config size is loaded
+    // (an asset, so not available at plugin build). One orb per room reuses them.
+    mut appearance: Local<Option<(Handle<Mesh>, Handle<StandardMaterial>)>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    configs: Res<Assets<CharacterConfig>>,
+    new: Query<(Entity, &NetCenterOfMass), Without<Mesh3d>>,
+    mut existing: Query<(&NetCenterOfMass, &mut Transform, &mut Visibility), With<Mesh3d>>,
+) {
+    // The COM replicates at the network rate, so snapping the orb straight to it steps
+    // visibly. Ease toward the target with a frame-rate-independent exponential smooth
+    // (~`1/ORB_SMOOTH_RATE`s time constant) so the marker glides. Snap (no ease) when
+    // it's hidden or reappearing so it never slides in from a stale pose, and snap the
+    // final sub-`ORB_SNAP_EPS` gap so a settled assembly stops dirtying `Transform`.
+    const ORB_SMOOTH_RATE: f32 = 12.0;
+    const ORB_SNAP_EPS: f32 = 1e-4;
+    let alpha = 1.0 - (-ORB_SMOOTH_RATE * time.delta_secs()).exp();
+    for (com, mut transform, mut visibility) in &mut existing {
+        let target = Vec3::from_array(com.position);
+        let want_visible = com.count >= 2;
+        // Smooth only while it's staying visible; otherwise jump straight to the target.
+        let next = if want_visible && *visibility == Visibility::Visible {
+            let eased = transform.translation.lerp(target, alpha);
+            if eased.distance_squared(target) < ORB_SNAP_EPS * ORB_SNAP_EPS {
+                target
+            } else {
+                eased
+            }
+        } else {
+            target
+        };
+        if transform.translation != next {
+            transform.translation = next;
+        }
+        let want = if want_visible { Visibility::Visible } else { Visibility::Hidden };
+        if *visibility != want {
+            *visibility = want;
+        }
+    }
+
+    if new.is_empty() {
+        return;
+    }
+    // Build the orb appearance the first time one is needed (needs the config size).
+    if appearance.is_none() {
+        let Some((_, config)) = configs.iter().next() else {
+            return; // config not loaded yet — retry next frame
+        };
+        let radius = config.size() / 6.0;
+        let mesh = meshes.add(Sphere::new(radius).mesh().ico(5).unwrap());
+        let material = materials.add(StandardMaterial {
+            base_color: Color::WHITE,
+            // Emissive so it reads as a glowing indicator rather than a shaded ball.
+            emissive: LinearRgba::WHITE,
+            unlit: true,
+            ..default()
+        });
+        *appearance = Some((mesh, material));
+    }
+    let (mesh, material) = appearance.as_ref().unwrap();
+    for (entity, com) in &new {
+        commands.entity(entity).insert((
+            Mesh3d(mesh.clone()),
+            MeshMaterial3d(material.clone()),
+            Transform::from_translation(Vec3::from_array(com.position)),
+            if com.count >= 2 { Visibility::Visible } else { Visibility::Hidden },
+        ));
+    }
+}
+
 /// The *predicted* part entity a replicated joint anchors its gizmo to (its
 /// `body1`), recorded so `position_replicated_joints` can track the gizmo to the
 /// moving assembly without re-resolving the id each frame. Its presence also marks
@@ -856,6 +942,9 @@ fn bind_replicated_joints(
     mut commands: Commands,
     new_joints: Query<(Entity, &NetJoint), Without<JointAnchorBody>>,
     parts: Query<(Entity, &NetPart), (With<Predicted>, With<RigidBody>)>,
+    // The local ground body: ground joints name it via the `GROUND_JOINT_ID`
+    // sentinel (the ground is spawned locally by `MapPlugin`, not replicated).
+    grounds: Query<Entity, (With<Grass>, With<RigidBody>)>,
     appearance: Res<JointAppearance>,
 ) {
     let (Some(mesh), Some(material)) = (&appearance.mesh, &appearance.invalid_material) else {
@@ -863,6 +952,9 @@ fn bind_replicated_joints(
     };
     for (joint_entity, joint) in &new_joints {
         let find = |id: u64| {
+            if id == GROUND_JOINT_ID {
+                return grounds.iter().next();
+            }
             parts
                 .iter()
                 .find(|(_, part)| part.id == id)
