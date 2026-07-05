@@ -80,16 +80,33 @@ pub fn balanced_assembly_thrust(
         .collect()
 }
 
-/// Per-rocket throttle factors `aᵢ ∈ [0, 1]` that cancel an assembly's net thrust torque
-/// with the minimum departure from full throttle.
+/// The launch will not trade away more than `1 - LIFT_FLOOR` of its average thrust for
+/// spin balance. Throttling rockets can only ever *reduce* total thrust, so a stack that
+/// can't be balanced (e.g. a lone off-centre rocket, whose torque nothing opposes) would
+/// otherwise throttle to nothing and never leave the ground. Lift wins over spin: below
+/// this average throttle we boost the rockets back toward full. `0.85` = at most a 15%
+/// average-thrust sacrifice for balance before lift takes priority.
+const LIFT_FLOOR: f32 = 0.85;
+
+/// Per-rocket throttle factors `aᵢ ∈ [0, 1]` that reduce an assembly's net thrust torque
+/// (to stop it spinning) without sacrificing so much thrust that it won't lift.
 ///
-/// We want `Σ aᵢ τᵢ = 0`. Writing `aᵢ = 1 + cᵢ`, that is `Σ cᵢ τᵢ = −Στᵢ`; the
-/// minimum-norm `c` solving it is `cᵢ = −τᵢ · x` with `x = (Σ τᵢτᵢᵀ + λI)⁻¹ Στᵢ` (a
-/// single 3×3 solve — `Σ τᵢτᵢᵀ` is the `TTᵀ` normal matrix, `λI` regularises the
-/// degenerate cases where the torques don't span 3-D, e.g. collinear rockets). Clamping
-/// `1 + cᵢ` to `[0, 1]` keeps every throttle physical; where the clamp bites the torque
-/// isn't perfectly cancelled — the "as good as possible" the balance can do.
+/// First, the torque-cancelling step: we want `Σ aᵢ τᵢ = 0`. Writing `aᵢ = 1 + cᵢ`, that
+/// is `Σ cᵢ τᵢ = −Στᵢ`; the minimum-norm `c` solving it is `cᵢ = −τᵢ · x` with
+/// `x = (Σ τᵢτᵢᵀ + λI)⁻¹ Στᵢ` (a single 3×3 solve — `Σ τᵢτᵢᵀ` is the `TTᵀ` normal matrix,
+/// `λI` regularises the degenerate cases where the torques don't span 3-D, e.g. collinear
+/// rockets). Clamping `1 + cᵢ` to `[0, 1]` keeps every throttle physical.
+///
+/// That step minimises spin, but because throttling only ever *reduces* thrust it can
+/// drive an unbalanceable stack's thrust to zero. So second, the lift guard
+/// ([`LIFT_FLOOR`]): if the average throttle dropped below the floor, boost every rocket
+/// back toward full — preserving their *relative* trim — until the average reaches the
+/// floor. A balanceable stack rises without spinning; an unbalanceable one still rises
+/// (and tumbles, unavoidably) instead of sitting dead on the pad.
 pub fn balanced_thrust_scales(torques: &[Vec3]) -> Vec<f32> {
+    if torques.is_empty() {
+        return Vec::new();
+    }
     let torque_sum: Vec3 = torques.iter().copied().sum();
     // Normal matrix Σ τᵢτᵢᵀ (each term is the outer product, whose columns are τ·τ.{x,y,z}).
     let mut normal = Mat3::ZERO;
@@ -102,7 +119,23 @@ pub fn balanced_thrust_scales(torques: &[Vec3]) -> Vec<f32> {
     let lambda = (trace * 1e-4).max(1e-9);
     normal += Mat3::from_diagonal(Vec3::splat(lambda));
     let x = normal.inverse() * torque_sum;
-    torques.iter().map(|t| (1.0 - t.dot(x)).clamp(0.0, 1.0)).collect()
+    let mut scales: Vec<f32> =
+        torques.iter().map(|t| (1.0 - t.dot(x)).clamp(0.0, 1.0)).collect();
+
+    // Lift guard: boost back toward full if balancing sacrificed too much average thrust.
+    let mean = scales.iter().sum::<f32>() / scales.len() as f32;
+    if mean < LIFT_FLOOR {
+        let headroom = 1.0 - mean; // = mean(1 − aᵢ)
+        let t = if headroom > 1e-6 {
+            (LIFT_FLOOR - mean) / headroom
+        } else {
+            0.0
+        };
+        for a in &mut scales {
+            *a += (1.0 - *a) * t;
+        }
+    }
+    scales
 }
 
 #[cfg(test)]
@@ -117,12 +150,29 @@ mod tests {
         assert!(scales.iter().all(|&a| a > 0.99), "scales = {scales:?}");
     }
 
-    /// A lone off-centre rocket spins the assembly; it can't be balanced (nothing to
-    /// oppose it), so it throttles down toward zero.
+    /// A lone off-centre rocket spins the assembly and can't be balanced (nothing opposes
+    /// it) — but lift must win over spin, so the lift guard keeps it firing at least
+    /// `LIFT_FLOOR` rather than throttling it dead. (It will tumble; that's unavoidable
+    /// with one off-centre rocket.)
     #[test]
-    fn lone_offset_rocket_throttles_down() {
+    fn lone_offset_rocket_still_lifts() {
         let scales = balanced_thrust_scales(&[Vec3::new(0.0, 0.0, 1.0)]);
-        assert!(scales[0] < 0.5, "scales = {scales:?}");
+        assert!(scales[0] >= LIFT_FLOOR - 1e-6, "scales = {scales:?}");
+    }
+
+    /// The lift guard never drops the average throttle below `LIFT_FLOOR`, whatever the
+    /// torques — an assembly always gets enough thrust to have a chance at lifting.
+    #[test]
+    fn average_thrust_never_below_floor() {
+        for torques in [
+            vec![Vec3::new(1.0, 0.0, 0.0)],
+            vec![Vec3::new(2.0, 0.0, 0.0), Vec3::new(2.0, 1.0, 0.0)],
+            vec![Vec3::new(0.0, 3.0, 0.0), Vec3::new(0.0, 3.0, 0.0), Vec3::new(0.0, -1.0, 0.0)],
+        ] {
+            let scales = balanced_thrust_scales(&torques);
+            let mean = scales.iter().sum::<f32>() / scales.len() as f32;
+            assert!(mean >= LIFT_FLOOR - 1e-6, "mean {mean} for {torques:?} -> {scales:?}");
+        }
     }
 
     /// Rockets whose thrust passes through the COM make no torque, so full throttle.
