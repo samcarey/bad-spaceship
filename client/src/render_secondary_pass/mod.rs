@@ -655,7 +655,10 @@ fn update_center_of_mass_orb(
     configs: Res<Assets<character::Config>>,
     mut orb: Query<(&mut Transform, &mut Visibility), With<CenterOfMassOrb>>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    // The orb draws with `GizmoMaterial` (like the thrust arrow), so it renders on the
+    // always-on-top gizmo layer — never occluded by normal parts, but depth-composited
+    // with the arrow (which can occlude it).
+    mut materials: ResMut<Assets<GizmoMaterial>>,
     mut spawned: Local<bool>,
     // Multiplayer has the server-authoritative orb (replicated `NetCenterOfMass`);
     // don't compute or draw a second one here.
@@ -688,13 +691,7 @@ fn update_center_of_mass_orb(
         let radius = config.size() / 6.0;
         commands.spawn((
             Mesh3d(meshes.add(Sphere::new(radius).mesh().ico(5).unwrap())),
-            MeshMaterial3d(materials.add(StandardMaterial {
-                base_color: Color::WHITE,
-                // Emissive + unlit so it reads as a glowing indicator, not a shaded ball.
-                emissive: LinearRgba::WHITE,
-                unlit: true,
-                ..default()
-            })),
+            MeshMaterial3d(materials.add(GizmoMaterial::from(Color::WHITE))),
             Transform::default(),
             Visibility::Hidden,
             NotShadowCaster,
