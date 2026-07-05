@@ -1,11 +1,18 @@
+use avian3d::prelude::{ComputedMass, Gravity, SphericalJoint};
 use bad_spaceship_shared::{
-    part::{Holdable, SuppressLocalParts, TargetOrientation, TargetPosition, DELETE_RADIUS},
+    character,
+    part::{
+        Holdable, RocketEngine, SuppressLocalParts, TargetOrientation, TargetPosition,
+        DELETE_RADIUS, NOMINAL_PART_MASS, ROCKET_THRUST_DIR_LOCAL, ROCKET_THRUST_ORIGIN_LOCAL,
+        ROCKET_THRUST_PART_WEIGHTS,
+    },
     DisplayableJoint, ExistingJoints, HoldPoint, Holding, Modifying, Player, PlayerHoldPoint,
     PotentialJoints, PredeleteJoint, PredeleteJoints, UpdateJointsLabel,
 };
 // Bevy 0.17 moved `NotShadowCaster` from `bevy_pbr` to `bevy_light` (`bevy::light`).
 use bevy::{asset::load_internal_asset, light::NotShadowCaster, prelude::*};
 use normalization::*;
+use std::collections::{HashMap, HashSet};
 
 use self::gizmo_material::GizmoMaterial;
 
@@ -28,12 +35,17 @@ impl Plugin for RenderSecondaryPassPlugin {
         );
 
         app.add_plugins((Ui3dNormalization, MaterialPlugin::<GizmoMaterial>::default()))
-            .add_systems(Startup, (build_gizmo, initialize_joint_appearance))
+            .add_systems(
+                Startup,
+                (build_gizmo, initialize_joint_appearance, build_thrust_arrow),
+            )
             .init_resource::<JointAppearance>()
             .add_systems(
                 Update,
                 (
                     position_gizmo,
+                    update_thrust_arrow,
+                    update_center_of_mass_orb,
                     // The hold-point delete-zone sphere shows in multiplayer too:
                     // the predicted avatar carries the same `HoldPoint` child +
                     // `Holding`/`Modifying`, and joint deletion is now server-
@@ -413,5 +425,280 @@ fn delete_zone_visibility(
         if let Ok(mut visible) = hold_points.get_mut(hold_point.0) {
             set_visible(&mut visible, modifying.0 && !holding.0);
         }
+    }
+}
+
+// ---- Combined rocket-thrust vector ------------------------------------------
+//
+// Each rocket engine has a nominal thrust (enough to lift `ROCKET_THRUST_PART_WEIGHTS`
+// average parts against gravity) directed down its cylinder axis toward the flared
+// end, applied at the flare's base. For the rockets that belong to the *main
+// assembly* (the largest joint-connected group of parts), we sum the thrust vectors,
+// average their application points, and draw a single yellow arrow from that point.
+// The arrow's world length encodes the combined force: one rocket's worth of thrust
+// is about one character-height long. Nothing is applied to the sim — this is purely
+// a visualisation.
+
+#[derive(Component)]
+struct ThrustArrowShaft;
+
+#[derive(Component)]
+struct ThrustArrowHead;
+
+// Fixed cross-section (world units, *not* screen-normalised — the length carries the
+// force magnitude, so it must scale with the world).
+const THRUST_ARROW_RADIUS: f32 = 0.1;
+const THRUST_ARROW_HEAD_HEIGHT: f32 = 0.5;
+const THRUST_ARROW_HEAD_RADIUS: f32 = 0.25;
+
+/// Spawn the (initially hidden) shaft + head of the thrust arrow. The unit-height
+/// cylinder is scaled/placed each frame by `update_thrust_arrow`; the cone head is a
+/// fixed-size tip. Both use the always-on-top `GizmoMaterial` like the other gizmos.
+fn build_thrust_arrow(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<GizmoMaterial>>,
+) {
+    let material = materials.add(GizmoMaterial::from(Color::srgb(1.0, 0.85, 0.1)));
+    // Unit-height cylinder centred at the origin (y ∈ [-0.5, 0.5]); scaled along Y and
+    // translated so its base sits at the application point.
+    let shaft = meshes.add(Cylinder::new(THRUST_ARROW_RADIUS, 1.0));
+    let head = meshes.add(Mesh::from(cone::Cone {
+        height: THRUST_ARROW_HEAD_HEIGHT,
+        radius: THRUST_ARROW_HEAD_RADIUS,
+        ..Default::default()
+    }));
+    commands.spawn((
+        Mesh3d(shaft),
+        MeshMaterial3d(material.clone()),
+        Transform::default(),
+        Visibility::Hidden,
+        NotShadowCaster,
+        ThrustArrowShaft,
+    ));
+    commands.spawn((
+        Mesh3d(head),
+        MeshMaterial3d(material),
+        Transform::default(),
+        Visibility::Hidden,
+        NotShadowCaster,
+        ThrustArrowHead,
+    ));
+}
+
+fn update_thrust_arrow(
+    rockets: Query<(Entity, &GlobalTransform), With<RocketEngine>>,
+    joints: Query<&SphericalJoint>,
+    // Which entities are parts (rockets or cuboids). Joints to non-parts (the ground)
+    // are excluded so an assembly is only parts joined *directly* to each other.
+    parts: Query<(), With<Holdable>>,
+    configs: Res<Assets<character::Config>>,
+    gravity: Res<Gravity>,
+    mut shaft: Query<
+        (&mut Transform, &mut Visibility),
+        (With<ThrustArrowShaft>, Without<ThrustArrowHead>),
+    >,
+    mut head: Query<
+        (&mut Transform, &mut Visibility),
+        (With<ThrustArrowHead>, Without<ThrustArrowShaft>),
+    >,
+    // Rockets are never created in multiplayer (server-owned world, no local
+    // `RocketEngine`/`SphericalJoint`), so this would no-op there anyway — the gate
+    // just makes that explicit and skips the work.
+    multiplayer: Option<Res<SuppressLocalParts>>,
+) {
+    let (Ok((mut shaft_transform, mut shaft_vis)), Ok((mut head_transform, mut head_vis))) =
+        (shaft.single_mut(), head.single_mut())
+    else {
+        return;
+    };
+
+    let arrow = multiplayer
+        .is_none()
+        .then(|| thrust_arrow(&rockets, &joints, &parts, &configs, gravity.0))
+        .flatten();
+
+    let Some((origin, dir, length)) = arrow else {
+        *shaft_vis = Visibility::Hidden;
+        *head_vis = Visibility::Hidden;
+        return;
+    };
+
+    let rotation = Quat::from_rotation_arc(Vec3::Y, dir);
+    // Reserve the tip for the cone head so shaft + head together span `length`.
+    let shaft_len = (length - THRUST_ARROW_HEAD_HEIGHT).max(0.0);
+    *shaft_transform = Transform {
+        translation: origin + dir * (shaft_len / 2.0),
+        rotation,
+        scale: Vec3::new(1.0, shaft_len, 1.0),
+    };
+    *head_transform = Transform {
+        translation: origin + dir * shaft_len,
+        rotation,
+        scale: Vec3::ONE,
+    };
+    *shaft_vis = Visibility::Visible;
+    *head_vis = Visibility::Visible;
+}
+
+/// Combined thrust arrow for the rockets in the main assembly: `(average application
+/// point, unit direction, world length)`. `None` when no rocket belongs to the main
+/// assembly or the summed force cancels out.
+fn thrust_arrow(
+    rockets: &Query<(Entity, &GlobalTransform), With<RocketEngine>>,
+    joints: &Query<&SphericalJoint>,
+    parts: &Query<(), With<Holdable>>,
+    configs: &Assets<character::Config>,
+    gravity: Vec3,
+) -> Option<(Vec3, Vec3, f32)> {
+    let main_assembly = largest_assembly(joints, |e| parts.get(e).is_ok())?;
+
+    // One rocket's thrust: enough to lift N average parts against gravity.
+    let thrust = ROCKET_THRUST_PART_WEIGHTS * NOMINAL_PART_MASS * gravity.length();
+    let mut sum_force = Vec3::ZERO;
+    let mut sum_point = Vec3::ZERO;
+    let mut count = 0u32;
+    for (entity, transform) in rockets.iter() {
+        if !main_assembly.contains(&entity) {
+            continue;
+        }
+        let (_, rotation, translation) = transform.to_scale_rotation_translation();
+        sum_point += translation + rotation * ROCKET_THRUST_ORIGIN_LOCAL;
+        sum_force += (rotation * ROCKET_THRUST_DIR_LOCAL) * thrust;
+        count += 1;
+    }
+    if count == 0 {
+        return None;
+    }
+
+    let origin = sum_point / count as f32;
+    let dir = sum_force.normalize_or_zero();
+    if dir == Vec3::ZERO {
+        return None;
+    }
+    // One rocket's force → one character height of arrow: length = |ΣF| · (h / F₁).
+    let character_height = configs.iter().next().map_or(1.5, |(_, c)| c.size());
+    let length = sum_force.length() * character_height / thrust;
+    Some((origin, dir, length))
+}
+
+/// Union-find over the **part-to-part** joint graph → the entities in the largest
+/// connected component of ≥ 2 parts (the "main assembly"). Joints to non-parts (the
+/// ground) are ignored, so parts pinned to the ground — but not to each other — are
+/// *not* an assembly. `None` when no two parts are jointed directly together.
+fn largest_assembly(
+    joints: &Query<&SphericalJoint>,
+    is_part: impl Fn(Entity) -> bool,
+) -> Option<HashSet<Entity>> {
+    // Root-walk (no path compression): the graph is rebuilt from a handful of joints
+    // every frame, so the trees are tiny and short-lived.
+    fn find(parent: &HashMap<Entity, Entity>, e: Entity) -> Entity {
+        let mut root = e;
+        while parent[&root] != root {
+            root = parent[&root];
+        }
+        root
+    }
+
+    let mut parent: HashMap<Entity, Entity> = HashMap::new();
+    for joint in joints.iter() {
+        let (a, b) = (joint.body1, joint.body2);
+        // Skip joints that aren't part-to-part (e.g. a part pinned to the ground).
+        if !is_part(a) || !is_part(b) {
+            continue;
+        }
+        parent.entry(a).or_insert(a);
+        parent.entry(b).or_insert(b);
+        let (ra, rb) = (find(&parent, a), find(&parent, b));
+        if ra != rb {
+            parent.insert(ra, rb);
+        }
+    }
+
+    let mut groups: HashMap<Entity, HashSet<Entity>> = HashMap::new();
+    for &e in parent.keys() {
+        groups.entry(find(&parent, e)).or_default().insert(e);
+    }
+    groups
+        .into_values()
+        .filter(|g| g.len() >= 2)
+        .max_by_key(|g| g.len())
+}
+
+// ---- Single-player assembly centre-of-mass orb -------------------------------
+//
+// A floating unlit-white orb marks the mass-weighted centre of mass of the main
+// assembly (the largest group of parts jointed directly together). In multiplayer
+// this is server-authoritative (`server::update_assembly_center_of_mass` +
+// `net::draw_center_of_mass_orb`); single-player has no server, so it's computed
+// locally here. The orb is half a character wide — the body is `(2/3)·size` across, so
+// half that is a `size/3` diameter (`size/6` radius) — and hidden when no assembly
+// exists.
+
+#[derive(Component)]
+struct CenterOfMassOrb;
+
+fn update_center_of_mass_orb(
+    mut commands: Commands,
+    joints: Query<&SphericalJoint>,
+    parts: Query<(Entity, &GlobalTransform, &ComputedMass), With<Holdable>>,
+    configs: Res<Assets<character::Config>>,
+    mut orb: Query<(&mut Transform, &mut Visibility), With<CenterOfMassOrb>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    // The orb draws with `GizmoMaterial` (like the thrust arrow), so it renders on the
+    // always-on-top gizmo layer — never occluded by normal parts, but depth-composited
+    // with the arrow (which can occlude it).
+    mut materials: ResMut<Assets<GizmoMaterial>>,
+    mut spawned: Local<bool>,
+    // Multiplayer has the server-authoritative orb (replicated `NetCenterOfMass`);
+    // don't compute or draw a second one here.
+    multiplayer: Option<Res<SuppressLocalParts>>,
+) {
+    if multiplayer.is_some() {
+        return;
+    }
+
+    // Mass-weighted centre of mass of the largest assembly (≥ 2 parts, jointed
+    // directly — not through the ground).
+    let com = largest_assembly(&joints, |e| parts.get(e).is_ok()).and_then(|members| {
+        let mut weight = 0.0;
+        let mut weighted_pos = Vec3::ZERO;
+        for (entity, transform, mass) in &parts {
+            if members.contains(&entity) {
+                let m = mass.value();
+                weighted_pos += transform.translation() * m;
+                weight += m;
+            }
+        }
+        (weight > 0.0).then(|| weighted_pos / weight)
+    });
+
+    // Lazily spawn the orb once the character config (its size) is loaded.
+    if !*spawned {
+        let Some((_, config)) = configs.iter().next() else {
+            return; // config not loaded yet — retry next frame
+        };
+        let radius = config.size() / 6.0;
+        commands.spawn((
+            Mesh3d(meshes.add(Sphere::new(radius).mesh().ico(5).unwrap())),
+            MeshMaterial3d(materials.add(GizmoMaterial::from(Color::WHITE))),
+            Transform::default(),
+            Visibility::Hidden,
+            NotShadowCaster,
+            CenterOfMassOrb,
+        ));
+        *spawned = true;
+        return; // the orb exists from next frame
+    }
+
+    let Ok((mut transform, mut visibility)) = orb.single_mut() else {
+        return;
+    };
+    match com {
+        Some(pos) => {
+            transform.translation = pos;
+            *visibility = Visibility::Visible;
+        }
+        None => *visibility = Visibility::Hidden,
     }
 }
