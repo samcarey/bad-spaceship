@@ -1,4 +1,5 @@
 use avian3d::prelude::{ComputedMass, Gravity, SphericalJoint};
+use bad_spaceship_shared::assembly::largest_assembly_per_room;
 use bad_spaceship_shared::{
     character,
     part::{
@@ -489,9 +490,9 @@ fn build_thrust_arrow(
 fn update_thrust_arrow(
     rockets: Query<(Entity, &GlobalTransform), With<RocketEngine>>,
     joints: Query<&SphericalJoint>,
-    // Which entities are parts (rockets or cuboids). Joints to non-parts (the ground)
-    // are excluded so an assembly is only parts joined *directly* to each other.
-    parts: Query<(), With<Holdable>>,
+    // All parts, for the assembly union-find (`main_assembly` builds its items from
+    // these). The mass isn't used here but keeps one query shape shared with the orb.
+    parts: Query<(Entity, &GlobalTransform, &ComputedMass), With<Holdable>>,
     configs: Res<Assets<character::Config>>,
     gravity: Res<Gravity>,
     mut shaft: Query<
@@ -513,10 +514,12 @@ fn update_thrust_arrow(
         return;
     };
 
-    let arrow = multiplayer
-        .is_none()
-        .then(|| thrust_arrow(&rockets, &joints, &parts, &configs, gravity.0))
-        .flatten();
+    let arrow = if multiplayer.is_some() {
+        None
+    } else {
+        main_assembly(&parts, &joints)
+            .and_then(|(members, _com)| thrust_arrow(&rockets, &members, &configs, gravity.0))
+    };
 
     let Some((origin, dir, length)) = arrow else {
         *shaft_vis = Visibility::Hidden;
@@ -541,25 +544,22 @@ fn update_thrust_arrow(
     *head_vis = Visibility::Visible;
 }
 
-/// Combined thrust arrow for the rockets in the main assembly: `(average application
-/// point, unit direction, world length)`. `None` when no rocket belongs to the main
-/// assembly or the summed force cancels out.
+/// Combined thrust arrow for the rockets in the given assembly `members`: `(average
+/// application point, unit direction, world length)`. `None` when no rocket belongs to
+/// the assembly or the summed force cancels out.
 fn thrust_arrow(
     rockets: &Query<(Entity, &GlobalTransform), With<RocketEngine>>,
-    joints: &Query<&SphericalJoint>,
-    parts: &Query<(), With<Holdable>>,
+    members: &HashSet<Entity>,
     configs: &Assets<character::Config>,
     gravity: Vec3,
 ) -> Option<(Vec3, Vec3, f32)> {
-    let main_assembly = largest_assembly(joints, |e| parts.get(e).is_ok())?;
-
     // One rocket's thrust: enough to lift N average parts against gravity.
     let thrust = ROCKET_THRUST_PART_WEIGHTS * NOMINAL_PART_MASS * gravity.length();
     let mut sum_force = Vec3::ZERO;
     let mut sum_point = Vec3::ZERO;
     let mut count = 0u32;
     for (entity, transform) in rockets.iter() {
-        if !main_assembly.contains(&entity) {
+        if !members.contains(&entity) {
             continue;
         }
         let (_, rotation, translation) = transform.to_scale_rotation_translation();
@@ -582,47 +582,38 @@ fn thrust_arrow(
     Some((origin, dir, length))
 }
 
-/// Union-find over the **part-to-part** joint graph → the entities in the largest
-/// connected component of ≥ 2 parts (the "main assembly"). Joints to non-parts (the
-/// ground) are ignored, so parts pinned to the ground — but not to each other — are
-/// *not* an assembly. `None` when no two parts are jointed directly together.
-fn largest_assembly(
+/// The single-player **main assembly** — the largest group of parts jointed *directly*
+/// together (≥ 2 parts) — as its member entities plus mass-weighted centre of mass.
+/// Joints to the ground (or any non-part body) contribute no edge, so a part pinned to
+/// the ground isn't an assembly. Shares the tested `bad_spaceship_shared::assembly`
+/// core with the multiplayer server, so both agree on what counts as an assembly.
+/// `None` when no two parts are jointed directly together.
+fn main_assembly(
+    parts: &Query<(Entity, &GlobalTransform, &ComputedMass), With<Holdable>>,
     joints: &Query<&SphericalJoint>,
-    is_part: impl Fn(Entity) -> bool,
-) -> Option<HashSet<Entity>> {
-    // Root-walk (no path compression): the graph is rebuilt from a handful of joints
-    // every frame, so the trees are tiny and short-lived.
-    fn find(parent: &HashMap<Entity, Entity>, e: Entity) -> Entity {
-        let mut root = e;
-        while parent[&root] != root {
-            root = parent[&root];
-        }
-        root
+) -> Option<(HashSet<Entity>, Vec3)> {
+    // Index every part; items carry its world position, mass weight, and the single
+    // (unit) room. `entities` maps an index back to its entity for the result.
+    let mut index: HashMap<Entity, usize> = HashMap::new();
+    let mut entities: Vec<Entity> = Vec::new();
+    let mut items: Vec<(Vec3, f32, ())> = Vec::new();
+    for (entity, transform, mass) in parts {
+        index.insert(entity, items.len());
+        entities.push(entity);
+        items.push((transform.translation(), mass.value(), ()));
     }
-
-    let mut parent: HashMap<Entity, Entity> = HashMap::new();
-    for joint in joints.iter() {
-        let (a, b) = (joint.body1, joint.body2);
-        // Skip joints that aren't part-to-part (e.g. a part pinned to the ground).
-        if !is_part(a) || !is_part(b) {
-            continue;
-        }
-        parent.entry(a).or_insert(a);
-        parent.entry(b).or_insert(b);
-        let (ra, rb) = (find(&parent, a), find(&parent, b));
-        if ra != rb {
-            parent.insert(ra, rb);
+    // Joint edges as index pairs. A joint to a non-part (the ground) or a despawned
+    // body isn't in `index`, so it contributes no edge — ground-anchored parts alone
+    // don't form an assembly.
+    let mut edges: Vec<(usize, usize)> = Vec::new();
+    for joint in joints {
+        if let (Some(&a), Some(&b)) = (index.get(&joint.body1), index.get(&joint.body2)) {
+            edges.push((a, b));
         }
     }
-
-    let mut groups: HashMap<Entity, HashSet<Entity>> = HashMap::new();
-    for &e in parent.keys() {
-        groups.entry(find(&parent, e)).or_default().insert(e);
-    }
-    groups
-        .into_values()
-        .filter(|g| g.len() >= 2)
-        .max_by_key(|g| g.len())
+    let assembly = largest_assembly_per_room(&items, &edges).remove(&())?;
+    let members = assembly.members.iter().map(|&i| entities[i]).collect();
+    Some((members, assembly.com))
 }
 
 // ---- Single-player assembly centre-of-mass orb -------------------------------
@@ -658,20 +649,8 @@ fn update_center_of_mass_orb(
         return;
     }
 
-    // Mass-weighted centre of mass of the largest assembly (≥ 2 parts, jointed
-    // directly — not through the ground).
-    let com = largest_assembly(&joints, |e| parts.get(e).is_ok()).and_then(|members| {
-        let mut weight = 0.0;
-        let mut weighted_pos = Vec3::ZERO;
-        for (entity, transform, mass) in &parts {
-            if members.contains(&entity) {
-                let m = mass.value();
-                weighted_pos += transform.translation() * m;
-                weight += m;
-            }
-        }
-        (weight > 0.0).then(|| weighted_pos / weight)
-    });
+    // Mass-weighted centre of mass of the main assembly (≥ 2 parts, jointed directly).
+    let com = main_assembly(&parts, &joints).map(|(_members, com)| com);
 
     // Lazily spawn the orb once the character config (its size) is loaded.
     if !*spawned {

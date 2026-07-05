@@ -10,6 +10,7 @@ use map::MapPlugin;
 use part::PartPlugin;
 use player::PlayerPlugin;
 
+pub mod assembly;
 pub mod character;
 pub mod config;
 pub mod map;

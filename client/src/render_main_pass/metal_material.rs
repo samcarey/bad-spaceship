@@ -140,11 +140,8 @@ fn next_unit(state: &mut u64) -> f32 {
     (bad_spaceship_shared::net::splitmix64(state) >> 40) as f32 / (1u64 << 24) as f32
 }
 
-/// The part's finish and metal tint, derived from its seed alone — their own
-/// stream, so the focus-highlight reset (`highlight_grabbable`, `highlight.rs`)
-/// can recover a part's colour via [`metal_tint`] without rebuilding the whole
-/// material. The finish is drawn *first* because it constrains the tint:
-/// galvanized parts are always zinc-gray.
+/// The part's finish and metal tint, derived from its seed alone. The finish is drawn
+/// *first* because it constrains the tint: galvanized parts are always zinc-gray.
 fn finish_and_tint(seed: u32) -> (Finish, Color) {
     // (weight, sRGB albedo) — real-metal base colours (standard PBR reference
     // values), weighted toward the common structural metals so most parts read
@@ -189,11 +186,6 @@ fn finish_and_tint(seed: u32) -> (Finish, Color) {
         *c = (*c * l).min(1.0);
     }
     (finish, Color::srgb(rgb[0], rgb[1], rgb[2]))
-}
-
-/// The part's colour alone (for the focus-highlight reset).
-pub fn metal_tint(seed: u32) -> Color {
-    finish_and_tint(seed).1
 }
 
 /// Derive a part's whole material from its spawn seed. Deterministic: same
