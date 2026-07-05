@@ -551,7 +551,7 @@ fn thrust_arrow(
     configs: &Assets<character::Config>,
     gravity: Vec3,
 ) -> Option<(Vec3, Vec3, f32)> {
-    let main_assembly = largest_assembly(joints, parts)?;
+    let main_assembly = largest_assembly(joints, |e| parts.get(e).is_ok())?;
 
     // One rocket's thrust: enough to lift N average parts against gravity.
     let thrust = ROCKET_THRUST_PART_WEIGHTS * NOMINAL_PART_MASS * gravity.length();
@@ -588,19 +588,14 @@ fn thrust_arrow(
 /// *not* an assembly. `None` when no two parts are jointed directly together.
 fn largest_assembly(
     joints: &Query<&SphericalJoint>,
-    parts: &Query<(), With<Holdable>>,
+    is_part: impl Fn(Entity) -> bool,
 ) -> Option<HashSet<Entity>> {
-    fn find(parent: &mut HashMap<Entity, Entity>, e: Entity) -> Entity {
+    // Root-walk (no path compression): the graph is rebuilt from a handful of joints
+    // every frame, so the trees are tiny and short-lived.
+    fn find(parent: &HashMap<Entity, Entity>, e: Entity) -> Entity {
         let mut root = e;
         while parent[&root] != root {
             root = parent[&root];
-        }
-        // Path compression.
-        let mut cur = e;
-        while cur != root {
-            let next = parent[&cur];
-            parent.insert(cur, root);
-            cur = next;
         }
         root
     }
@@ -609,24 +604,20 @@ fn largest_assembly(
     for joint in joints.iter() {
         let (a, b) = (joint.body1, joint.body2);
         // Skip joints that aren't part-to-part (e.g. a part pinned to the ground).
-        if parts.get(a).is_err() || parts.get(b).is_err() {
+        if !is_part(a) || !is_part(b) {
             continue;
         }
         parent.entry(a).or_insert(a);
         parent.entry(b).or_insert(b);
-        let (ra, rb) = (find(&mut parent, a), find(&mut parent, b));
+        let (ra, rb) = (find(&parent, a), find(&parent, b));
         if ra != rb {
             parent.insert(ra, rb);
         }
     }
-    if parent.is_empty() {
-        return None;
-    }
 
     let mut groups: HashMap<Entity, HashSet<Entity>> = HashMap::new();
-    for e in parent.keys().copied().collect::<Vec<_>>() {
-        let root = find(&mut parent, e);
-        groups.entry(root).or_default().insert(e);
+    for &e in parent.keys() {
+        groups.entry(find(&parent, e)).or_default().insert(e);
     }
     groups
         .into_values()
@@ -650,7 +641,6 @@ struct CenterOfMassOrb;
 fn update_center_of_mass_orb(
     mut commands: Commands,
     joints: Query<&SphericalJoint>,
-    part_markers: Query<(), With<Holdable>>,
     parts: Query<(Entity, &GlobalTransform, &ComputedMass), With<Holdable>>,
     configs: Res<Assets<character::Config>>,
     mut orb: Query<(&mut Transform, &mut Visibility), With<CenterOfMassOrb>>,
@@ -670,7 +660,7 @@ fn update_center_of_mass_orb(
 
     // Mass-weighted centre of mass of the largest assembly (≥ 2 parts, jointed
     // directly — not through the ground).
-    let com = largest_assembly(&joints, &part_markers).and_then(|members| {
+    let com = largest_assembly(&joints, |e| parts.get(e).is_ok()).and_then(|members| {
         let mut weight = 0.0;
         let mut weighted_pos = Vec3::ZERO;
         for (entity, transform, mass) in &parts {
