@@ -62,6 +62,19 @@ pub struct SaveFile {
     pub world: SaveWorld,
 }
 
+impl SaveFile {
+    /// A current-version save of `world`, stamped now. The single assembly point
+    /// for both the autosave and manual-save writers, so the meta conventions
+    /// can't drift between them.
+    pub fn new(name: String, room_code: String, kind: &str, world: SaveWorld) -> Self {
+        Self {
+            version: SAVE_VERSION,
+            meta: SaveMeta { name, room_code, kind: kind.to_string(), saved_unix: now_unix() },
+            world,
+        }
+    }
+}
+
 /// The stable listing envelope — what the lobby's saved-games tab shows. Fields
 /// here must keep their meaning across versions (see the module doc).
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -285,7 +298,10 @@ pub fn open_recording(code: &str) -> Result<std::fs::File, String> {
         "version": SAVE_VERSION,
         "room_code": code,
         "started_unix": now_unix(),
-        "tick_hz": 60,
+        // The exact simulated-tick timebase (from the shared TICK the server loop
+        // runs on) — analysis tooling times frames off this, so it must never be
+        // a hand-written approximation.
+        "tick_secs": bad_spaceship_shared::net::TICK.as_secs_f64(),
     });
     writeln!(file, "{header}").map_err(|e| format!("writing header to {path:?}: {e}"))?;
     println!("[save] recording room {code} -> {path:?}");

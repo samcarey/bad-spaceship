@@ -109,7 +109,7 @@ struct SaveEnvelope {
     meta: SaveMeta,
 }
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 struct SaveMeta {
     name: String,
     room_code: String,
@@ -117,16 +117,15 @@ struct SaveMeta {
     saved_unix: u64,
 }
 
-/// What the lobby's saved-games tab sees. `file` is the opaque handle passed back
-/// to `POST /api/saves/load`.
+/// What the lobby's saved-games tab sees: the envelope plus the `file` handle
+/// passed back to `POST /api/saves/load` (`meta` is flattened, so the JSON is
+/// one level — a new envelope field flows through without touching this).
 #[derive(Serialize)]
 struct SaveView {
     file: String,
-    name: String,
-    room_code: String,
-    kind: String,
-    saved_unix: u64,
     version: u32,
+    #[serde(flatten)]
+    meta: SaveMeta,
 }
 
 #[derive(Deserialize)]
@@ -207,14 +206,20 @@ fn load_rooms(path: &str) -> HashMap<String, Room> {
         .unwrap_or_default()
 }
 
-/// Atomic persist (temp + rename on the same dir) so a crash never leaves a
-/// half-written rooms file.
+/// Atomic write (temp + rename in the same dir, so the rename can't cross
+/// filesystems) — a crash never leaves a half-written file and readers never see
+/// a partial one. Shared by the rooms persistence and save staging.
+fn atomic_write(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(&tmp, path)
+}
+
+/// Persist the rooms map (see `atomic_write` — a crash never leaves a
+/// half-written rooms file).
 fn save_rooms(path: &str, rooms: &HashMap<String, Room>) {
     if let Ok(json) = serde_json::to_string_pretty(rooms) {
-        let tmp = format!("{path}.tmp");
-        if std::fs::write(&tmp, json).is_ok() {
-            let _ = std::fs::rename(&tmp, path);
-        }
+        let _ = atomic_write(std::path::Path::new(path), json.as_bytes());
     }
 }
 
@@ -260,9 +265,13 @@ async fn list_matches(State(state): State<AppState>) -> Json<Vec<LobbyView>> {
     Json(out)
 }
 
+/// New rooms default to this capacity (`create_match` accepts an override).
+const DEFAULT_MAX_PLAYERS: u32 = 8;
+
 /// Insert a fresh room under a newly-generated unique code, returning the code.
-/// `name: None` ⇒ the "Match <code>" auto-name. Shared by match creation and
-/// save loading; the caller persists (`save_rooms`) after any other mutations.
+/// Owns the room-naming policy: trims + caps the requested name; empty/absent ⇒
+/// the "Match <code>" auto-name. Shared by match creation and save loading; the
+/// caller persists (`save_rooms`) after any other mutations.
 fn alloc_room(
     rooms: &mut HashMap<String, Room>,
     name: Option<String>,
@@ -275,8 +284,12 @@ fn alloc_room(
             break candidate;
         }
     };
+    let name = name
+        .map(|n| n.trim().chars().take(40).collect::<String>())
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| format!("Match {id}"));
     let room = Room {
-        name: name.unwrap_or_else(|| format!("Match {id}")),
+        name,
         players: 1,
         max_players,
         created_unix: now_unix(),
@@ -307,12 +320,8 @@ async fn create_match(
     };
 
     let mut rooms = state.rooms.lock().unwrap();
-    let name = req
-        .name
-        .map(|n| n.trim().chars().take(40).collect::<String>())
-        .filter(|n| !n.is_empty());
-    let max_players = req.max_players.unwrap_or(8).clamp(2, 32);
-    let id = alloc_room(&mut rooms, name, max_players, sha.clone());
+    let max_players = req.max_players.unwrap_or(DEFAULT_MAX_PLAYERS).clamp(2, 32);
+    let id = alloc_room(&mut rooms, req.name, max_players, sha.clone());
     save_rooms(&state.rooms_path, &rooms);
 
     (
@@ -400,17 +409,10 @@ async fn list_saves(State(state): State<AppState>) -> Json<Vec<SaveView>> {
             else {
                 continue;
             };
-            out.push(SaveView {
-                file,
-                name: envelope.meta.name,
-                room_code: envelope.meta.room_code,
-                kind: envelope.meta.kind,
-                saved_unix: envelope.meta.saved_unix,
-                version: envelope.version,
-            });
+            out.push(SaveView { file, version: envelope.version, meta: envelope.meta });
         }
     }
-    out.sort_by(|a, b| b.saved_unix.cmp(&a.saved_unix));
+    out.sort_by(|a, b| b.meta.saved_unix.cmp(&a.meta.saved_unix));
     Json(out)
 }
 
@@ -441,15 +443,13 @@ async fn load_save(State(state): State<AppState>, Json(req): Json<LoadReq>) -> i
     };
 
     let mut rooms = state.rooms.lock().unwrap();
-    let name: String = format!("{} (loaded)", envelope.meta.name).chars().take(40).collect();
-    let id = alloc_room(&mut rooms, Some(name), 8, sha.clone());
+    let name = format!("{} (loaded)", envelope.meta.name);
+    let id = alloc_room(&mut rooms, Some(name), DEFAULT_MAX_PLAYERS, sha.clone());
 
-    // Stage the pending copy atomically (temp + rename), keyed by the new room's
-    // code. If staging fails the room would come up as a random world — undo it
-    // and report instead.
+    // Stage the pending copy atomically, keyed by the new room's code. If staging
+    // fails the room would come up as a random world — undo it and report instead.
     let pending = std::path::Path::new(&state.saves_dir).join(format!("pending-{id}.json"));
-    let tmp = std::path::Path::new(&state.saves_dir).join(format!("pending-{id}.json.tmp"));
-    if std::fs::write(&tmp, &bytes).and_then(|_| std::fs::rename(&tmp, &pending)).is_err() {
+    if atomic_write(&pending, &bytes).is_err() {
         rooms.remove(&id);
         return (StatusCode::INTERNAL_SERVER_ERROR, "failed to stage save").into_response();
     }

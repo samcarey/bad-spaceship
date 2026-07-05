@@ -527,6 +527,37 @@ fn glyph_button(ui: &mut egui::Ui, size: f32, glyph: &str) -> egui::Response {
     response
 }
 
+/// One centred native text-prompt modal — the shared body of the "Change name"
+/// and "Save game" forms: a single-line field (capped at [`MAX_NAME_LEN`]) where
+/// Enter submits, plus Save/Cancel buttons. Returns `(submitted, closed)`;
+/// `closed` is true on either outcome so the caller clears its open flag.
+fn text_prompt_modal(
+    ctx: &egui::Context,
+    title: &str,
+    label: &str,
+    editing: &mut String,
+) -> (bool, bool) {
+    let mut save = false;
+    let mut close = false;
+    egui::Window::new(title)
+        .collapsible(false)
+        .resizable(false)
+        .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
+            ui.label(label);
+            let field = ui.add(egui::TextEdit::singleline(editing).char_limit(MAX_NAME_LEN));
+            // Enter in the field submits, like clicking Save.
+            if field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                save = true;
+            }
+            ui.horizontal(|ui| {
+                save |= ui.button("Save").clicked();
+                close |= ui.button("Cancel").clicked();
+            });
+        });
+    (save, save || close)
+}
+
 /// The one representative entity per player carrying its name: the owner's own
 /// avatar is `Predicted`, every remote avatar is `Interpolated`. This excludes the
 /// invisible `Confirmed` copies so each player appears exactly once (in the roster
@@ -693,62 +724,25 @@ fn show_name_hud(
         }
     }
 
-    // The native rename modal (never opened on web — the prompt above handles it).
+    // The native rename + save-name modals (never opened on web — the DOM overlay
+    // handles both there). One shared modal body (`text_prompt_modal`); save names
+    // share the rename's length cap and sanitize rules, so the forms can't drift.
     if hud.show_change_modal {
-        let mut save = false;
-        let mut close = false;
-        egui::Window::new("Change name")
-            .collapsible(false)
-            .resizable(false)
-            .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
-            .show(ctx, |ui| {
-                ui.label("Enter a new name:");
-                let field =
-                    ui.add(egui::TextEdit::singleline(&mut hud.editing).char_limit(MAX_NAME_LEN));
-                // Enter in the field submits, like clicking Save.
-                if field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                    save = true;
-                }
-                ui.horizontal(|ui| {
-                    save |= ui.button("Save").clicked();
-                    close |= ui.button("Cancel").clicked();
-                });
-            });
-        if save {
+        let (submit, close) = text_prompt_modal(ctx, "Change name", "Enter a new name:", &mut hud.editing);
+        if submit {
             rename_to = Some(hud.editing.clone());
         }
-        if save || close {
+        if close {
             hud.show_change_modal = false;
         }
     }
-
-    // The native save-name modal (never opened on web — the DOM overlay handles it).
-    // Mirrors the rename modal exactly; save names share the rename's length cap and
-    // sanitize rules, so the two forms behave identically.
     if hud.show_save_modal {
-        let mut save = false;
-        let mut close = false;
-        egui::Window::new("Save game")
-            .collapsible(false)
-            .resizable(false)
-            .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
-            .show(ctx, |ui| {
-                ui.label("Name this save:");
-                let field = ui
-                    .add(egui::TextEdit::singleline(&mut hud.save_editing).char_limit(MAX_NAME_LEN));
-                // Enter in the field submits, like clicking Save.
-                if field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                    save = true;
-                }
-                ui.horizontal(|ui| {
-                    save |= ui.button("Save").clicked();
-                    close |= ui.button("Cancel").clicked();
-                });
-            });
-        if save {
+        let (submit, close) =
+            text_prompt_modal(ctx, "Save game", "Name this save:", &mut hud.save_editing);
+        if submit {
             save_as = Some(hud.save_editing.clone());
         }
-        if save || close {
+        if close {
             hud.show_save_modal = false;
         }
     }
