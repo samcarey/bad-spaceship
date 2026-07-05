@@ -274,6 +274,9 @@ fn show_launch_ui(
         egui::Area::new(egui::Id::new("bs_launch_banner"))
             .anchor(Align2::CENTER_TOP, egui::vec2(0.0, 84.0))
             .show(ctx, |ui| {
+                // Let the big word size to its natural width instead of wrapping "Blastoff!"
+                // onto several lines inside the anchored (width-less) area.
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
                 ui.label(
                     egui::RichText::new(text)
                         .size(64.0)
