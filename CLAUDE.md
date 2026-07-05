@@ -1120,6 +1120,41 @@ largest-component / weighted-COM math is factored into the pure `largest_assembl
 helper with unit tests (`cargo test -p bad-spaceship-server`), since a live two-client
 joint-building session is the only other way to exercise it.
 
+**Rocket launch (slide-to-launch, countdown, balanced thrust; SP + MP).** A player
+touching its room's largest assembly gets a top-centre "slide to launch" control; a full
+swipe runs a `3 → 2 → 1 → Blastoff!` countdown, then cuts the assembly's ground joints and
+fires its rockets. The interesting physics is **anti-spin balancing**: each rocket at full
+throttle exerts a torque `τᵢ = (flare base − assembly COM) × Fᵢ` about the COM, so each is
+scaled by `aᵢ ∈ [0,1]` chosen to cancel the *net* torque with the least departure from full
+throttle — a single closed-form 3×3 least-squares solve (`shared/src/launch.rs`
+`balanced_thrust_scales`, unit-tested; regularised so collinear/degenerate rocket layouts
+don't blow up, clamped to `[0,1]` so it degrades to "as good as possible" when perfect
+cancellation is impossible). Thrust is applied at each rocket's flare base via Avian's
+`Forces::apply_force_at_point` in **FixedUpdate** (an Update-rate force would make lift
+fps-dependent). Key facts that shaped the design:
+- **Rockets exist in *both* modes** — the server spawns `NUM_ROCKET_ENGINES` per room
+  (`spawn_room_world` → `spawn_random_rocket`), replicated as `PartShape::RocketEngine`; so
+  the feature can't be single-player-only. Applying thrust *only* on the server would
+  rollback-jitter the whole flight (parts are `PredictionTarget::All` — predicted on every
+  client), so the client applies the **identical** balanced thrust to its *predicted*
+  rockets and prediction converges. The single replicated launch state is a per-room
+  `NetLaunch { remaining, launched }` on the existing orb entity — everyone in the room sees
+  the same countdown, no per-rocket/per-tick replication.
+- **Ground joints exist in MP too** (contrary to a stale comment in
+  `update_assembly_center_of_mass`): `server_attach` *can* joint a part to the ground
+  (`Grass`), named by the `GROUND_JOINT_ID` sentinel. "Cut ground joints at blastoff" =
+  despawn every room joint with an endpoint that isn't a `NetPart` (SP: not `Holdable`);
+  part-to-part joints stay so the stack holds together.
+- **Split of authority:** SP is client-authoritative (client owns countdown + cut + thrust,
+  membership via the client's `main_assembly`); MP is server-authoritative (reliable
+  `RequestLaunch` on `ControlChannel` → server `LaunchRegistry` per-room countdown →
+  `NetLaunch`; membership via the replicated `InLargestAssembly`). The per-rocket thrust
+  point/force + full-thrust magnitude are a shared helper (`rocket_world_thrust` /
+  `full_rocket_thrust`) reused by the thrust-arrow viz so the arrow and the real force can't
+  drift. On the client, read the rocket pose from Avian `Position`/`Rotation`, **not**
+  `GlobalTransform` (in MP `lightyear_avian` owns the Position→Transform sync and it lags
+  the fixed schedule).
+
 **lightyear API gotchas worth remembering** (the published book lags the crate; the
 ground truth is the crate source in `~/.cargo/registry/src/.../lightyear*-0.28.0`).
 These all held unchanged across the 0.27 → 0.28 bump:
