@@ -1,11 +1,11 @@
 use avian3d::prelude::{ComputedMass, Gravity, SphericalJoint};
 use bad_spaceship_shared::assembly::largest_assembly_per_room;
+use bad_spaceship_shared::launch::{full_rocket_thrust, rocket_world_thrust};
 use bad_spaceship_shared::{
     character,
     part::{
         Holdable, RocketEngine, SuppressLocalParts, TargetOrientation, TargetPosition,
-        DELETE_RADIUS, NOMINAL_PART_MASS, ROCKET_THRUST_DIR_LOCAL, ROCKET_THRUST_ORIGIN_LOCAL,
-        ROCKET_THRUST_PART_WEIGHTS,
+        DELETE_RADIUS,
     },
     DisplayableJoint, ExistingJoints, HoldPoint, Holding, Modifying, Player, PlayerHoldPoint,
     PotentialJoints, PredeleteJoint, PredeleteJoints, UpdateJointsLabel,
@@ -553,8 +553,10 @@ fn thrust_arrow(
     configs: &Assets<character::Config>,
     gravity: Vec3,
 ) -> Option<(Vec3, Vec3, f32)> {
-    // One rocket's thrust: enough to lift N average parts against gravity.
-    let thrust = ROCKET_THRUST_PART_WEIGHTS * NOMINAL_PART_MASS * gravity.length();
+    // One rocket's thrust: enough to lift N average parts against gravity. The per-rocket
+    // application point + force come from the same shared helper the launch physics uses,
+    // so the arrow and the real thrust can't drift apart.
+    let thrust = full_rocket_thrust(gravity);
     let mut sum_force = Vec3::ZERO;
     let mut sum_point = Vec3::ZERO;
     let mut count = 0u32;
@@ -563,8 +565,9 @@ fn thrust_arrow(
             continue;
         }
         let (_, rotation, translation) = transform.to_scale_rotation_translation();
-        sum_point += translation + rotation * ROCKET_THRUST_ORIGIN_LOCAL;
-        sum_force += (rotation * ROCKET_THRUST_DIR_LOCAL) * thrust;
+        let (point, force) = rocket_world_thrust(translation, rotation, thrust);
+        sum_point += point;
+        sum_force += force;
         count += 1;
     }
     if count == 0 {
@@ -588,7 +591,7 @@ fn thrust_arrow(
 /// the ground isn't an assembly. Shares the tested `bad_spaceship_shared::assembly`
 /// core with the multiplayer server, so both agree on what counts as an assembly.
 /// `None` when no two parts are jointed directly together.
-fn main_assembly(
+pub(crate) fn main_assembly(
     parts: &Query<(Entity, &GlobalTransform, &ComputedMass), With<Holdable>>,
     joints: &Query<&SphericalJoint>,
 ) -> Option<(HashSet<Entity>, Vec3)> {

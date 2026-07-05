@@ -23,20 +23,21 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use avian3d::prelude::{
     AngularVelocity, CollisionLayers, Collisions, ComputedCenterOfMass, Forces, Gravity,
-    LinearVelocity, Position, Rotation, SphericalJoint,
+    LinearVelocity, Position, Rotation, SphericalJoint, WriteRigidBodyForces,
 };
 use bad_spaceship_shared::assembly::largest_assembly_per_room;
+use bad_spaceship_shared::launch::{balanced_assembly_thrust, LAUNCH_COUNTDOWN_SECS};
 use bad_spaceship_shared::character::{spawn_position, CharacterMovement, InitialPose, ServerAvatar};
 use bad_spaceship_shared::net::{
     apply_hold_spring, apply_net_input, focused_part, monster_index, sanitize_name,
     ClientPanicReport, InLargestAssembly, NetCenterOfMass, NetFacing, NetHold, NetInput, NetJoint,
-    NetName, NetPart, NetPlayer, PartShape, ProtocolPlugin, ResetPosition, RollbackReport,
-    SetAvatar, SetName, GROUND_JOINT_ID, MONSTER_COUNT, TICK,
+    NetLaunch, NetName, NetPart, NetPlayer, PartShape, ProtocolPlugin, RequestLaunch, ResetPosition,
+    RollbackReport, SetAvatar, SetName, GROUND_JOINT_ID, MONSTER_COUNT, TICK,
 };
 use bad_spaceship_shared::map::GROUND_LAYER;
 use bad_spaceship_shared::part::{
-    local_contact_anchor, spawn_random_part, spawn_random_rocket, SuppressLocalParts, DELETE_RADIUS,
-    NUM_PARTS, NUM_ROCKET_ENGINES, ROCKET_VOLUME,
+    local_contact_anchor, spawn_random_part, spawn_random_rocket, RocketEngine, SuppressLocalParts,
+    DELETE_RADIUS, NUM_PARTS, NUM_ROCKET_ENGINES, ROCKET_VOLUME,
 };
 use bad_spaceship_shared::{Grass, SuppressLocalPlayer, Yaw};
 use bevy::prelude::*;
@@ -310,6 +311,8 @@ impl Plugin for NetServerPlugin {
         // entities sharing one of its rooms.
         app.add_plugins(RoomPlugin);
         app.init_resource::<RoomRegistry>();
+        // Per-room rocket-launch countdown state (see `LaunchRegistry`).
+        app.init_resource::<LaunchRegistry>();
         // Server-authoritative session resume: remember each player's last position
         // (keyed by its persistent `resume_id`) so a reconnect after an iOS reload
         // lands back in place rather than at the origin.
@@ -353,6 +356,13 @@ impl Plugin for NetServerPlugin {
             Update,
             (assign_rooms, apply_name_changes, apply_avatar_changes, apply_position_resets),
         );
+        // Rocket launch: accept a client's launch request for its room, run that room's
+        // countdown, and at blastoff cut the assembly's ground joints. Publishing the
+        // countdown into each room's orb `NetLaunch` lets every client draw the banner.
+        app.add_systems(
+            Update,
+            (handle_launch_requests, tick_room_launches, publish_room_launch).chain(),
+        );
         // Session resume: continuously remember live avatars' positions (the reconnect
         // restore itself happens at connect, in `spawn_player_for_client`).
         app.add_systems(Update, record_resume_positions);
@@ -373,6 +383,9 @@ impl Plugin for NetServerPlugin {
             (
                 apply_net_input.before(CharacterMovement),
                 (server_grab, server_hold, server_attach, server_delete).chain(),
+                // Balanced rocket thrust for launched rooms — a continuous force, so it
+                // runs per physics tick like the hold spring.
+                apply_room_rocket_thrust,
             ),
         );
     }
@@ -687,6 +700,10 @@ fn spawn_room_world(commands: &mut Commands, room: Room) {
     // only that room's clients receive it.
     commands.spawn((
         NetCenterOfMass::default(),
+        // The same room-scoped entity carries the room's launch/countdown state, so a
+        // single replicated entity per room tells clients both where the COM is and
+        // where the launch sequence is.
+        NetLaunch::default(),
         Replicate::to_clients(NetworkTarget::All),
         Rooms::single(room.id),
         OrbRoom(room.id),
@@ -1083,16 +1100,7 @@ fn update_assembly_center_of_mass(
     let mut items: Vec<(Vec3, f32, RoomId)> = Vec::new();
     for (entity, position, part, room, _) in &parts {
         index.insert(entity, items.len());
-        // Volume is the mass proxy (uniform density): full cuboid volume, or the
-        // rocket's precomputed cylinder+cone volume.
-        let volume = match part.shape {
-            PartShape::Cuboid { half_extents } => {
-                let he = Vec3::from_array(half_extents);
-                8.0 * he.x * he.y * he.z
-            }
-            PartShape::RocketEngine => ROCKET_VOLUME,
-        };
-        items.push((position.0, volume, room.id));
+        items.push((position.0, part_volume(part.shape), room.id));
     }
 
     // Joint edges as index pairs. A joint referencing a despawned part (a dangling
@@ -1131,6 +1139,172 @@ fn update_assembly_center_of_mass(
             None => NetCenterOfMass { position: com.position, count: 0 },
         };
         com.set_if_neq(next);
+    }
+}
+
+/// A part's volume — the mass proxy under uniform density (full cuboid volume, or the
+/// rocket's precomputed cylinder+cone volume). Shared by the assembly COM and the launch
+/// COM so both weigh parts identically.
+fn part_volume(shape: PartShape) -> f32 {
+    match shape {
+        PartShape::Cuboid { half_extents } => {
+            let he = Vec3::from_array(half_extents);
+            8.0 * he.x * he.y * he.z
+        }
+        PartShape::RocketEngine => ROCKET_VOLUME,
+    }
+}
+
+// ---- Rocket launch (server-authoritative) -----------------------------------
+//
+// A player touching its room's largest assembly can swipe to launch (`RequestLaunch`).
+// The server runs that room's countdown, and at blastoff cuts the assembly's ground
+// joints and fires its rockets with balanced thrust. The countdown + launched flag ride
+// on the room's orb entity (`NetLaunch`), so every client draws the same banner and
+// applies the same thrust to its predicted rockets (smooth liftoff, minimal rollback).
+
+/// Per-room launch state, keyed by `RoomId`. A room is absent until launch is requested;
+/// `Counting` runs the pre-blastoff countdown, then `Launched` fires the rockets for the
+/// rest of the session.
+#[derive(Clone, Copy)]
+enum RoomLaunch {
+    Counting { remaining: f32 },
+    Launched,
+}
+
+#[derive(Resource, Default)]
+struct LaunchRegistry {
+    by_room: HashMap<RoomId, RoomLaunch>,
+}
+
+/// Start a room's countdown when one of its members swipes to launch. Maps the requesting
+/// client link → its avatar (`ControlledBy`) → its `RoomMember`, and arms the countdown if
+/// the room isn't already counting down or launched (re-requests are ignored — launch is a
+/// one-way room event).
+fn handle_launch_requests(
+    mut links: Query<
+        (Entity, &mut MessageReceiver<RequestLaunch>),
+        (With<ClientOf>, With<Connected>),
+    >,
+    avatars: Query<(&ControlledBy, &RoomMember)>,
+    mut registry: ResMut<LaunchRegistry>,
+) {
+    for (link, mut receiver) in &mut links {
+        if receiver.receive().count() == 0 {
+            continue;
+        }
+        for (controlled, member) in &avatars {
+            if controlled.owner == link {
+                registry
+                    .by_room
+                    .entry(member.0)
+                    .or_insert(RoomLaunch::Counting { remaining: LAUNCH_COUNTDOWN_SECS });
+            }
+        }
+    }
+}
+
+/// Advance each room's countdown; at blastoff flip it to `Launched` and cut every joint
+/// pinning that room's assembly to the ground (a part↔ground joint has one endpoint that
+/// isn't a `NetPart`). Part-to-part joints stay intact so the assembly holds together.
+fn tick_room_launches(
+    time: Res<Time>,
+    mut commands: Commands,
+    mut registry: ResMut<LaunchRegistry>,
+    joints: Query<(Entity, &SphericalJoint, &RoomMember)>,
+    net_parts: Query<(), With<NetPart>>,
+) {
+    let dt = time.delta_secs();
+    for (&room, launch) in registry.by_room.iter_mut() {
+        let RoomLaunch::Counting { remaining } = launch else {
+            continue;
+        };
+        *remaining -= dt;
+        if *remaining > 0.0 {
+            continue;
+        }
+        *launch = RoomLaunch::Launched;
+        for (entity, joint, member) in &joints {
+            if member.0 == room
+                && (net_parts.get(joint.body1).is_err() || net_parts.get(joint.body2).is_err())
+            {
+                commands.entity(entity).despawn();
+            }
+        }
+    }
+}
+
+/// Mirror each room's launch state onto its orb `NetLaunch` so it replicates to every
+/// client in the room (countdown banner + predicted thrust). Rooms with no launch entry
+/// report the idle default. `set_if_neq` keeps a settled/idle room quiet.
+fn publish_room_launch(registry: Res<LaunchRegistry>, mut orbs: Query<(&OrbRoom, &mut NetLaunch)>) {
+    for (orb_room, mut launch) in &mut orbs {
+        let next = match registry.by_room.get(&orb_room.0) {
+            Some(RoomLaunch::Counting { remaining }) => {
+                NetLaunch { remaining: remaining.max(0.0), launched: false }
+            }
+            Some(RoomLaunch::Launched) => NetLaunch { remaining: 0.0, launched: true },
+            None => NetLaunch::default(),
+        };
+        launch.set_if_neq(next);
+    }
+}
+
+/// Apply balanced rocket thrust to every launched room's assembly rockets each physics
+/// tick. Reuses the replicated `InLargestAssembly` membership + `PartRoom` grouping the COM
+/// system maintains: computes each launched room's mass-weighted COM from its members and
+/// the balanced per-rocket forces via the shared `balanced_assembly_thrust`.
+fn apply_room_rocket_thrust(
+    registry: Res<LaunchRegistry>,
+    gravity: Res<Gravity>,
+    members: Query<(&Position, &NetPart, &PartRoom), With<InLargestAssembly>>,
+    rocket_geometry: Query<
+        (Entity, &Position, &Rotation, &PartRoom),
+        (With<InLargestAssembly>, With<RocketEngine>),
+    >,
+    mut rocket_forces: Query<(Entity, Forces), With<RocketEngine>>,
+) {
+    let is_launched =
+        |room: RoomId| matches!(registry.by_room.get(&room), Some(RoomLaunch::Launched));
+
+    // Mass-weighted COM accumulator per launched room (over all its assembly members).
+    let mut com_accum: HashMap<RoomId, (Vec3, f32)> = HashMap::new();
+    for (position, part, room) in &members {
+        if !is_launched(room.id) {
+            continue;
+        }
+        let volume = part_volume(part.shape);
+        let entry = com_accum.entry(room.id).or_insert((Vec3::ZERO, 0.0));
+        entry.0 += position.0 * volume;
+        entry.1 += volume;
+    }
+    if com_accum.is_empty() {
+        return;
+    }
+
+    // Group launched rooms' member rockets by room.
+    let mut per_room: HashMap<RoomId, Vec<(Entity, Vec3, Quat)>> = HashMap::new();
+    for (entity, position, rotation, room) in &rocket_geometry {
+        if com_accum.contains_key(&room.id) {
+            per_room.entry(room.id).or_default().push((entity, position.0, rotation.0));
+        }
+    }
+
+    // Balanced thrust per room → (force, point) per rocket entity.
+    let mut to_apply: HashMap<Entity, (Vec3, Vec3)> = HashMap::new();
+    for (room, rockets) in &per_room {
+        let (weighted, mass) = com_accum[room];
+        if mass <= 0.0 {
+            continue;
+        }
+        for thrust in balanced_assembly_thrust(weighted / mass, gravity.0, rockets) {
+            to_apply.insert(thrust.entity, (thrust.force, thrust.point));
+        }
+    }
+    for (entity, mut forces) in &mut rocket_forces {
+        if let Some((force, point)) = to_apply.get(&entity) {
+            forces.apply_force_at_point(*force, *point);
+        }
     }
 }
 

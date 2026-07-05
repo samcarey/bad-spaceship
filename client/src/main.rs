@@ -13,6 +13,7 @@ use bevy::prelude::*;
 use gamepad::GamepadPlugin;
 use highlight::HighlightPlugin;
 use input::InputPlugin;
+use launch::LaunchPlugin;
 use mobile::MobilePlugin;
 use platform::PlatformPlugin;
 use render_main_pass::RenderMainPassPlugin;
@@ -21,6 +22,7 @@ use ui::UiPlugin;
 
 mod gamepad;
 mod input;
+mod launch;
 mod mobile;
 mod monster;
 mod net;
@@ -81,6 +83,7 @@ fn main() {
             GamepadPlugin,
             PlatformPlugin,
             HighlightPlugin,
+            LaunchPlugin,
             RenderMainPassPlugin,
             monster::MonsterPlugin,
             RenderSecondaryPassPlugin,

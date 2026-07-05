@@ -314,6 +314,23 @@ pub struct NetCenterOfMass {
 #[derive(Component, Serialize, Deserialize, Clone, Copy, PartialEq, Debug, Default)]
 pub struct InLargestAssembly;
 
+/// Replicated launch state for a room, authored by the server onto that room's
+/// center-of-mass orb entity (the same room-scoped entity that carries
+/// [`NetCenterOfMass`]) so every client in the room sees the same countdown. A player
+/// touching the room's largest assembly can start a launch ([`RequestLaunch`]); the
+/// server runs the countdown here and, at blastoff, cuts the assembly's ground joints
+/// and fires its rockets. Clients read this to draw the `3 → 2 → 1 → Blastoff!` banner
+/// and — once `launched` — to apply the same balanced thrust to their *predicted*
+/// rockets (so the liftoff is smooth, not rollback-jittered).
+#[derive(Component, Serialize, Deserialize, Clone, Copy, PartialEq, Debug, Default)]
+pub struct NetLaunch {
+    /// Seconds left in the countdown while counting down (`> 0`); `0` when idle or
+    /// already launched.
+    pub remaining: f32,
+    /// Whether blastoff has happened and the rockets are firing.
+    pub launched: bool,
+}
+
 /// Replicated hold state for a part a player is currently holding: who holds it
 /// (their [`NetPlayer::client_id`]) and the hold point + target orientation the server
 /// is springing it toward (the holder's forwarded `hold_target`/`hold_rotation`). All
@@ -372,9 +389,19 @@ pub struct SetAvatar(pub u8);
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 pub struct ResetPosition;
 
+/// Client → server request to start a rocket launch for the sender's room. The server
+/// resolves the sender's room (via `ControlledBy` → the avatar's `RoomMember`) and, if
+/// that room isn't already counting down or launched, starts its countdown (whose state
+/// then replicates to every client in the room via [`NetLaunch`]). A unit message on the
+/// reliable [`ControlChannel`] so the one-shot swipe isn't dropped. Gated client-side on
+/// the player actually touching the room's largest assembly; the server trusts that gate
+/// (any room member may launch — the launch is a room-wide event, not a per-player one).
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct RequestLaunch;
+
 /// Reliable client → server control channel for one-shot user actions ([`SetName`],
-/// [`ResetPosition`]). Separate from the unreliable [`TelemetryChannel`] because these
-/// are deliberate actions that must not be silently lost.
+/// [`ResetPosition`], [`RequestLaunch`]). Separate from the unreliable [`TelemetryChannel`]
+/// because these are deliberate actions that must not be silently lost.
 pub struct ControlChannel;
 
 /// Cap on a display name's length (characters). The server truncates to this and the
@@ -629,6 +656,10 @@ impl Plugin for ProtocolPlugin {
         // marker), and the marker is discrete.
         app.component::<NetCenterOfMass>().replicate();
         app.component::<InLargestAssembly>().replicate();
+        // Per-room launch/countdown state (see `NetLaunch`), authored on the room's orb
+        // entity so every client in the room sees the same countdown and the same
+        // blastoff. Discrete, server-authored each frame — just replicate.
+        app.component::<NetLaunch>().replicate();
         // Held-part hold state (see `NetHold`): replicated so every client can spring a
         // held part toward the holder's hold point instead of predicting it in free-fall.
         app.component::<NetHold>().replicate();
@@ -681,6 +712,8 @@ impl Plugin for ProtocolPlugin {
         app.register_message::<SetAvatar>()
             .add_direction(NetworkDirection::ClientToServer);
         app.register_message::<ResetPosition>()
+            .add_direction(NetworkDirection::ClientToServer);
+        app.register_message::<RequestLaunch>()
             .add_direction(NetworkDirection::ClientToServer);
         // TEMPORARY client-crash report on the reliable control channel.
         app.register_message::<ClientPanicReport>()
