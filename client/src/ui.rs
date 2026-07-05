@@ -10,8 +10,8 @@ use bevy_egui::{
 };
 use bad_spaceship_shared::character::{MovementModel, MovementTuning};
 use bad_spaceship_shared::net::{
-    sanitize_name, ControlChannel, NetName, NetPlayer, ResetPosition, SetAvatar, SetName,
-    MAX_NAME_LEN, MONSTER_COUNT,
+    sanitize_name, ControlChannel, NetName, NetPlayer, ResetPosition, SaveGame, SetAvatar,
+    SetName, MAX_NAME_LEN, MONSTER_COUNT,
 };
 use chrono::{DateTime, FixedOffset, Utc};
 use lightyear::prelude::client::Connected;
@@ -455,12 +455,18 @@ struct HudState {
     show_menu: bool,
     /// The rename modal is open.
     show_change_modal: bool,
+    /// The name-this-save modal is open (native; web uses the DOM overlay).
+    show_save_modal: bool,
     /// The avatar-picker modal is open.
     show_avatar_modal: bool,
     /// The instructions overlay is revealed (toggled by the "?" button).
     show_help: bool,
     /// Live contents of the rename text field.
     editing: String,
+    /// Live contents of the save-name text field.
+    save_editing: String,
+    /// Seconds left on the "Game saved" confirmation toast.
+    save_flash: f32,
 }
 
 /// How high above an avatar's origin its name billboard floats (metres). The avatar
@@ -541,10 +547,12 @@ type RenderedAvatar = Or<(With<Predicted>, With<Interpolated>)>;
 fn show_name_hud(
     mut contexts: EguiContexts,
     mut hud: ResMut<HudState>,
+    time: Res<Time>,
     local: Query<&LocalId, With<Connected>>,
     players: Query<(&NetPlayer, &NetName), RenderedAvatar>,
     mut name_sender: Query<&mut MessageSender<SetName>, With<Connected>>,
     mut reset_sender: Query<&mut MessageSender<ResetPosition>, With<Connected>>,
+    mut save_sender: Query<&mut MessageSender<SaveGame>, With<Connected>>,
 ) -> Result {
     let ctx = contexts.ctx_mut()?;
     let my_id = crate::net::my_netcode_id(&local);
@@ -559,16 +567,24 @@ fn show_name_hud(
 
     // Menu actions, applied after the egui closures (see the doc comment).
     let mut rename_to: Option<String> = None;
+    let mut save_as: Option<String> = None;
     // On web, a submitted name arrives (a later frame) from the non-blocking DOM
-    // rename overlay opened below; collect it here to send like any other rename.
+    // text overlay opened below; collect it here to send like any other rename/save.
     #[cfg(target_arch = "wasm32")]
-    if let Some(name) = crate::platform::take_name_edit() {
-        rename_to = Some(name);
+    {
+        use crate::platform::TextPrompt;
+        if let Some(name) = crate::platform::take_text_edit(TextPrompt::Name) {
+            rename_to = Some(name);
+        }
+        if let Some(name) = crate::platform::take_text_edit(TextPrompt::SaveGame) {
+            save_as = Some(name);
+        }
     }
     let mut toggle_menu = false;
     let mut close_menu = false;
     let mut toggle_help = false;
     let mut open_rename = false;
+    let mut open_save = false;
     let mut open_avatar = false;
     let mut do_reset = false;
 
@@ -595,6 +611,9 @@ fn show_name_hud(
                         }
                         if ui.button("Change Avatar").clicked() {
                             open_avatar = true;
+                        }
+                        if ui.button("Save Game").clicked() {
+                            open_save = true;
                         }
                         if ui.button("Reset Position").clicked() {
                             do_reset = true;
@@ -626,12 +645,26 @@ fn show_name_hud(
         // open the egui modal (desktop text entry works fine).
         #[cfg(target_arch = "wasm32")]
         {
-            crate::platform::begin_name_edit(&current);
+            crate::platform::begin_text_edit(crate::platform::TextPrompt::Name, "Enter your name", &current);
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
             hud.editing = current;
             hud.show_change_modal = true;
+        }
+    }
+    if open_save {
+        hud.show_menu = false;
+        // Text entry: same web/native split as rename (the DOM overlay raises the
+        // mobile keyboard without freezing the loop).
+        #[cfg(target_arch = "wasm32")]
+        {
+            crate::platform::begin_text_edit(crate::platform::TextPrompt::SaveGame, "Name this save", "");
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            hud.save_editing.clear();
+            hud.show_save_modal = true;
         }
     }
     if open_avatar {
@@ -687,6 +720,65 @@ fn show_name_hud(
         if save || close {
             hud.show_change_modal = false;
         }
+    }
+
+    // The native save-name modal (never opened on web — the DOM overlay handles it).
+    // Mirrors the rename modal exactly; save names share the rename's length cap and
+    // sanitize rules, so the two forms behave identically.
+    if hud.show_save_modal {
+        let mut save = false;
+        let mut close = false;
+        egui::Window::new("Save game")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label("Name this save:");
+                let field = ui
+                    .add(egui::TextEdit::singleline(&mut hud.save_editing).char_limit(MAX_NAME_LEN));
+                // Enter in the field submits, like clicking Save.
+                if field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    save = true;
+                }
+                ui.horizontal(|ui| {
+                    save |= ui.button("Save").clicked();
+                    close |= ui.button("Cancel").clicked();
+                });
+            });
+        if save {
+            save_as = Some(hud.save_editing.clone());
+        }
+        if save || close {
+            hud.show_save_modal = false;
+        }
+    }
+
+    // Send the committed manual save once (same sanitize rules as the server; a
+    // blank name is a no-op), and flash a brief confirmation toast.
+    if let Some(name) = save_as {
+        let cleaned = sanitize_name(&name);
+        if !cleaned.is_empty() {
+            if let Ok(mut sender) = save_sender.single_mut() {
+                sender.send::<ControlChannel>(SaveGame(cleaned));
+                hud.save_flash = 2.0;
+            }
+        }
+    }
+
+    // The "Game saved" confirmation toast (top-centre, fades out by timer).
+    if hud.save_flash > 0.0 {
+        hud.save_flash -= time.delta_secs();
+        egui::Area::new(egui::Id::new("bs_save_toast"))
+            .anchor(Align2::CENTER_TOP, egui::vec2(0.0, 48.0))
+            .show(ctx, |ui| {
+                Frame::default()
+                    .fill(Color32::from_black_alpha(160))
+                    .inner_margin(egui::Margin::same(8))
+                    .show(ui, |ui| {
+                        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+                        ui.label(egui::RichText::new("Game saved").size(18.0));
+                    });
+            });
     }
 
     // Send the committed rename once. `sanitize_name` + the empty check mirror the

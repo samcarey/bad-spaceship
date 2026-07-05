@@ -27,6 +27,12 @@ lightyear_avian3d = { workspace = true }
 # server only — never compiled to wasm. `bundled` builds SQLite from source so
 # the host needs no system libsqlite3 (it has a C compiler).
 rusqlite = { version = "0.32", features = ["bundled"] }
+# Save-game files (`src/save.rs`): versioned JSON world snapshots on local disk.
+# JSON (not a binary format) so saves stay inspectable and the version-migration
+# chain can rewrite old files as `serde_json::Value` regardless of the schema
+# that wrote them.
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1"
 
 [features]
 default = [

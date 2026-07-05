@@ -32,15 +32,21 @@ use bad_spaceship_shared::net::{
     apply_hold_spring, apply_net_input, focused_part, monster_index, sanitize_name,
     ClientPanicReport, InLargestAssembly, NetCenterOfMass, NetFacing, NetHold, NetInput, NetJoint,
     NetLaunch, NetName, NetPart, NetPlayer, PartShape, ProtocolPlugin, RequestLaunch, ResetPosition,
-    RollbackReport, SetAvatar, SetName, GROUND_JOINT_ID, MONSTER_COUNT, TICK,
+    RollbackReport, SaveGame, SetAvatar, SetName, GROUND_JOINT_ID, MONSTER_COUNT, TICK,
 };
 use bad_spaceship_shared::map::GROUND_LAYER;
 use bad_spaceship_shared::part::{
-    local_contact_anchor, spawn_random_part, spawn_random_rocket, RocketEngine, SuppressLocalParts,
-    DELETE_RADIUS, NUM_PARTS, NUM_ROCKET_ENGINES, ROCKET_VOLUME,
+    local_contact_anchor, spawn_random_part, spawn_random_rocket, spawn_rocket_engine,
+    spawn_saved_cuboid, RocketEngine, SuppressLocalParts, DELETE_RADIUS, NUM_PARTS,
+    NUM_ROCKET_ENGINES, ROCKET_VOLUME,
 };
 use bad_spaceship_shared::{Grass, SuppressLocalPlayer, Yaw};
 use bevy::prelude::*;
+
+use crate::save::{
+    self, SaveAvatar, SaveBody, SaveFile, SaveJoint, SaveMeta, SavePart, SaveShape, SaveWorld,
+    AUTOSAVE_SECS, SAVE_VERSION,
+};
 use lightyear::prelude::input::native::ActionState;
 use lightyear::prelude::input::InputBuffer;
 use lightyear::prelude::server::*;
@@ -366,6 +372,19 @@ impl Plugin for NetServerPlugin {
         // Session resume: continuously remember live avatars' positions (the reconnect
         // restore itself happens at connect, in `spawn_player_for_client`).
         app.add_systems(Update, record_resume_positions);
+        // Save games: a rolling per-room autosave every `AUTOSAVE_SECS`, plus the
+        // player-named manual save (`SaveGame` over the control channel). Loading
+        // happens at room creation (`assign_rooms` consumes the matchmaker-staged
+        // pending file).
+        app.add_systems(Update, (autosave_rooms, apply_manual_saves));
+        // Opt-in flight recorder (`BS_RECORD`): one world snapshot + all inputs per
+        // simulated tick per occupied room, as JSONL, for frame-by-frame analysis
+        // of a reproduced bug. `FixedLast` = after the physics step, so each line
+        // is the tick's *outcome* alongside the inputs that produced it.
+        if std::env::var("BS_RECORD").is_ok() {
+            app.init_resource::<RecordingRegistry>();
+            app.add_systems(FixedLast, record_room_frames);
+        }
         // Bridge each client's per-tick input intent into its avatar's movement
         // inputs (`DirectionalInput`/`Yaw`), before the shared movement systems
         // read them on the same sim tick — so the server simulates the character
@@ -500,6 +519,10 @@ fn assign_rooms(
     mut commands: Commands,
     mut registry: ResMut<RoomRegistry>,
     mut allocator: ResMut<RoomAllocator>,
+    // For a room created from a saved game: the ground entity (saved ground joints
+    // re-anchor to it) and the launch registry (a launched save resumes thrusting).
+    grounds: Query<Entity, With<Grass>>,
+    mut launches: ResMut<LaunchRegistry>,
     players: Query<(Entity, &ActionState<NetInput>, &ControlledBy, &NetName), Without<RoomMember>>,
     // Already-assigned avatars' names, so a fresh join picks a default that's unique
     // within its room.
@@ -527,7 +550,19 @@ fn assign_rooms(
         }
         let (room, is_new) = registry.get_or_create(state.0.room, &mut allocator);
         if is_new {
-            spawn_room_world(&mut commands, room);
+            // A room created by the matchmaker's "load saved game" flow has a pending
+            // save staged under its code — rebuild that world; otherwise spawn the
+            // normal random one.
+            match save::take_pending(&save::code_string(state.0.room)) {
+                Some(world) => spawn_room_world_from_save(
+                    &mut commands,
+                    room,
+                    &world,
+                    grounds.iter().next(),
+                    &mut launches,
+                ),
+                None => spawn_room_world(&mut commands, room),
+            }
         }
         // Scope this avatar and this client to the room (`Rooms` is immutable, so
         // `insert` replaces any prior membership). The avatar is a real dynamic body
@@ -693,21 +728,107 @@ fn spawn_room_world(commands: &mut Commands, room: Room) {
         let entity = spawn_random_rocket(commands);
         tag_room_part(commands, entity, PartShape::RocketEngine, 0, room);
     }
-    // One center-of-mass orb per room: a server-owned, replicated marker whose
-    // `NetCenterOfMass` the server rewrites as the room's largest assembly changes /
-    // moves (`update_assembly_center_of_mass`). It carries no physics body — it's a
-    // pure data holder the client renders a floating orb from. Scoped to the room so
-    // only that room's clients receive it.
+    spawn_room_orb(commands, room);
+}
+
+/// One center-of-mass orb per room: a server-owned, replicated marker whose
+/// `NetCenterOfMass` the server rewrites as the room's largest assembly changes /
+/// moves (`update_assembly_center_of_mass`). It carries no physics body — it's a
+/// pure data holder the client renders a floating orb from. Scoped to the room so
+/// only that room's clients receive it. The same entity carries the room's
+/// launch/countdown state (`NetLaunch`), so a single replicated entity per room
+/// tells clients both where the COM is and where the launch sequence is.
+fn spawn_room_orb(commands: &mut Commands, room: Room) {
     commands.spawn((
         NetCenterOfMass::default(),
-        // The same room-scoped entity carries the room's launch/countdown state, so a
-        // single replicated entity per room tells clients both where the COM is and
-        // where the launch sequence is.
         NetLaunch::default(),
         Replicate::to_clients(NetworkTarget::All),
         Rooms::single(room.id),
         OrbRoom(room.id),
     ));
+}
+
+/// Spawn a fresh room's world from a saved snapshot instead of the random pool
+/// (the load half of the save-game feature — see `crate::save`): respawn every
+/// saved part at its saved pose/velocity, rebuild the joints (remapping saved
+/// part indices to the new entities; ground endpoints to the shared `Grass`
+/// entity), restore the launched flag, and spawn the room orb.
+fn spawn_room_world_from_save(
+    commands: &mut Commands,
+    room: Room,
+    world: &SaveWorld,
+    ground: Option<Entity>,
+    launches: &mut LaunchRegistry,
+) {
+    let entities: Vec<Entity> = world
+        .parts
+        .iter()
+        .map(|p| {
+            let pos = Vec3::from_array(p.position);
+            let rot = Quat::from_array(p.rotation);
+            let (entity, shape) = match p.shape {
+                SaveShape::Cuboid { half_extents } => (
+                    spawn_saved_cuboid(commands, Vec3::from_array(half_extents), p.seed),
+                    PartShape::Cuboid { half_extents },
+                ),
+                SaveShape::RocketEngine => {
+                    (spawn_rocket_engine(commands, pos), PartShape::RocketEngine)
+                }
+            };
+            // The saved pose/velocity. Both `Transform` AND the Avian components
+            // must be seeded — `lightyear_avian` owns the sync in multiplayer, so a
+            // `Transform` alone would leave the body simulating from the origin
+            // (see `spawn_random_part`).
+            commands.entity(entity).insert((
+                Transform::from_translation(pos).with_rotation(rot),
+                Position(pos),
+                Rotation(rot),
+                LinearVelocity(Vec3::from_array(p.linear_velocity)),
+                AngularVelocity(Vec3::from_array(p.angular_velocity)),
+            ));
+            tag_room_part(commands, entity, shape, p.seed, room);
+            entity
+        })
+        .collect();
+
+    for joint in &world.joints {
+        let resolve = |body: SaveBody| match body {
+            SaveBody::Part(i) => entities.get(i as usize).copied(),
+            SaveBody::Ground => ground,
+        };
+        let (Some(b1), Some(b2)) = (resolve(joint.body1), resolve(joint.body2)) else {
+            // A part index past the parts list (a corrupt/hand-edited file) or a
+            // ground joint with no ground entity — drop the joint, keep the world.
+            println!("[save] skipping joint with unresolvable endpoint ({joint:?})");
+            continue;
+        };
+        let net_id = |body: SaveBody, e: Entity| match body {
+            SaveBody::Ground => GROUND_JOINT_ID,
+            SaveBody::Part(_) => e.to_bits(),
+        };
+        // The same authoritative-joint + replicated-`NetJoint` pair `server_attach`
+        // spawns, minus the contact discovery — the anchors come from the save.
+        commands.spawn((
+            SphericalJoint::new(b1, b2)
+                .with_local_anchor1(Vec3::from_array(joint.anchor1))
+                .with_local_anchor2(Vec3::from_array(joint.anchor2)),
+            NetJoint {
+                body1: net_id(joint.body1, b1),
+                body2: net_id(joint.body2, b2),
+                anchor1: joint.anchor1,
+                anchor2: joint.anchor2,
+            },
+            Replicate::to_clients(NetworkTarget::All),
+            Rooms::single(room.id),
+            RoomMember(room.id),
+        ));
+    }
+
+    // A world saved after blastoff resumes with its rockets firing.
+    if world.launched {
+        launches.by_room.insert(room.id, RoomLaunch::Launched);
+    }
+    spawn_room_orb(commands, room);
 }
 
 /// Tag a freshly-spawned part for room-scoped replication: its shape + stable id
@@ -1304,6 +1425,311 @@ fn apply_room_rocket_thrust(
     for (entity, mut forces) in &mut rocket_forces {
         if let Some((force, point)) = to_apply.get(&entity) {
             forces.apply_force_at_point(*force, *point);
+        }
+    }
+}
+
+// ---- Save games ---------------------------------------------------------------
+//
+// The snapshot half of the save-game feature (format + disk I/O in `crate::save`;
+// the load half is `spawn_room_world_from_save`). Two writers: a rolling per-room
+// autosave every `AUTOSAVE_SECS`, and the player's named manual save (`SaveGame`
+// over the control channel), which the autosave never touches.
+
+/// The pose + identity data a room snapshot reads off every part.
+type SnapshotParts<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static NetPart,
+        &'static PartRoom,
+        &'static Position,
+        &'static Rotation,
+        &'static LinearVelocity,
+        &'static AngularVelocity,
+    ),
+>;
+
+/// Every joint's replicated data + room tag (`RoomMember` also rides on avatars,
+/// but only joints carry `NetJoint`).
+type SnapshotJoints<'w, 's> = Query<'w, 's, (&'static NetJoint, &'static RoomMember)>;
+
+/// Every room-assigned player's snapshot state (un-assigned avatars have no
+/// `RoomMember` yet and are naturally excluded).
+type SnapshotAvatars<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static NetPlayer,
+        &'static NetName,
+        &'static RoomMember,
+        &'static Position,
+        &'static Yaw,
+        &'static LinearVelocity,
+        &'static HeldPart,
+    ),
+    With<ServerAvatar>,
+>;
+
+/// Snapshot one room's world into the save schema. Parts are ordered by their
+/// stable `NetPart::id`, so an unchanged world snapshots identically (the
+/// autosave's skip-if-unchanged hash relies on it). Joints and held-part
+/// references name parts by index into that order; a dangling reference (an
+/// endpoint despawned this frame) is dropped.
+fn snapshot_room(
+    room: RoomId,
+    launched: bool,
+    avatars: &SnapshotAvatars,
+    parts: &SnapshotParts,
+    joints: &SnapshotJoints,
+) -> SaveWorld {
+    let mut room_parts: Vec<_> =
+        parts.iter().filter(|(_, part_room, ..)| part_room.id == room).collect();
+    room_parts.sort_by_key(|(part, ..)| part.id);
+    let index: HashMap<u64, u32> = room_parts
+        .iter()
+        .enumerate()
+        .map(|(i, (part, ..))| (part.id, i as u32))
+        .collect();
+
+    let save_parts = room_parts
+        .iter()
+        .map(|(part, _, position, rotation, linear, angular)| SavePart {
+            shape: match part.shape {
+                PartShape::Cuboid { half_extents } => SaveShape::Cuboid { half_extents },
+                PartShape::RocketEngine => SaveShape::RocketEngine,
+            },
+            seed: part.seed,
+            position: position.0.to_array(),
+            rotation: rotation.0.to_array(),
+            linear_velocity: linear.0.to_array(),
+            angular_velocity: angular.0.to_array(),
+        })
+        .collect();
+
+    let body = |id: u64| {
+        if id == GROUND_JOINT_ID {
+            Some(SaveBody::Ground)
+        } else {
+            index.get(&id).copied().map(SaveBody::Part)
+        }
+    };
+    let save_joints = joints
+        .iter()
+        .filter(|(_, member)| member.0 == room)
+        .filter_map(|(joint, _)| {
+            Some(SaveJoint {
+                body1: body(joint.body1)?,
+                body2: body(joint.body2)?,
+                anchor1: joint.anchor1,
+                anchor2: joint.anchor2,
+            })
+        })
+        .collect();
+
+    // The players, as analysis context (ignored on load — see `SaveAvatar`).
+    let save_avatars = avatars
+        .iter()
+        .filter(|(_, _, member, ..)| member.0 == room)
+        .map(|(player, name, _, position, yaw, linear, held)| SaveAvatar {
+            client_id: player.client_id,
+            name: name.0.clone(),
+            position: position.0.to_array(),
+            yaw: yaw.0,
+            linear_velocity: linear.0.to_array(),
+            held_part: held.0.and_then(|e| index.get(&e.to_bits()).copied()),
+        })
+        .collect();
+
+    SaveWorld { parts: save_parts, joints: save_joints, avatars: save_avatars, launched }
+}
+
+/// A snapshot's identity for the autosave's skip-if-unchanged check. Settled
+/// bodies stop moving exactly (Avian sleeps them), so an untouched room hashes
+/// stably and generates no disk traffic.
+fn world_hash(world: &SaveWorld) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    serde_json::to_string(world).unwrap_or_default().hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Every `AUTOSAVE_SECS`, atomically replace each **occupied** room's rolling
+/// autosave (`auto-<CODE>.json`). Unoccupied rooms freeze — their last autosave
+/// (at most one interval stale) stands until someone rejoins. A room whose world
+/// hasn't changed since the last write is skipped entirely.
+fn autosave_rooms(
+    time: Res<Time>,
+    mut timer: Local<f32>,
+    mut last_hash: Local<HashMap<RoomId, u64>>,
+    registry: Res<RoomRegistry>,
+    launches: Res<LaunchRegistry>,
+    avatars: SnapshotAvatars,
+    parts: SnapshotParts,
+    joints: SnapshotJoints,
+) {
+    *timer += time.delta_secs();
+    if *timer < AUTOSAVE_SECS {
+        return;
+    }
+    *timer = 0.0;
+    let occupied: HashSet<RoomId> = avatars.iter().map(|(_, _, member, ..)| member.0).collect();
+    for (&code, room) in &registry.by_code {
+        if !occupied.contains(&room.id) {
+            continue;
+        }
+        let launched = matches!(launches.by_room.get(&room.id), Some(RoomLaunch::Launched));
+        let world = snapshot_room(room.id, launched, &avatars, &parts, &joints);
+        let hash = world_hash(&world);
+        if last_hash.get(&room.id) == Some(&hash) {
+            continue;
+        }
+        let code = save::code_string(code);
+        let file = SaveFile {
+            version: SAVE_VERSION,
+            meta: SaveMeta {
+                name: code.clone(),
+                room_code: code.clone(),
+                kind: "auto".into(),
+                saved_unix: save::now_unix(),
+            },
+            world,
+        };
+        match save::write_save(&save::auto_file_name(&code), &file) {
+            Ok(()) => {
+                last_hash.insert(room.id, hash);
+            }
+            Err(e) => println!("[save] autosave {code} failed: {e}"),
+        }
+    }
+}
+
+/// Write a player-named manual save of the sender's room (`manual-<CODE>-<slug>.json`
+/// — a separate file per name, never touched by the autosave). Maps the client link
+/// to its avatar's room like every other control-channel handler; the name gets the
+/// same `sanitize_name` rules as a rename (blank ⇒ ignored).
+fn apply_manual_saves(
+    mut links: Query<(Entity, &mut MessageReceiver<SaveGame>), (With<ClientOf>, With<Connected>)>,
+    avatars: Query<(&ControlledBy, &RoomMember)>,
+    registry: Res<RoomRegistry>,
+    launches: Res<LaunchRegistry>,
+    snapshot_avatars: SnapshotAvatars,
+    parts: SnapshotParts,
+    joints: SnapshotJoints,
+) {
+    for (link, mut receiver) in &mut links {
+        // Sequenced-reliable: only the newest request this window matters.
+        let Some(msg) = receiver.receive().last() else {
+            continue;
+        };
+        let name = sanitize_name(&msg.0);
+        if name.is_empty() {
+            continue;
+        }
+        let Some(room_id) = avatars
+            .iter()
+            .find(|(controlled, _)| controlled.owner == link)
+            .map(|(_, member)| member.0)
+        else {
+            continue;
+        };
+        // Reverse-map the room id to its lobby code (the registry is keyed by code;
+        // rooms are few, so a scan is fine).
+        let Some(&code) = registry.by_code.iter().find(|(_, r)| r.id == room_id).map(|(c, _)| c)
+        else {
+            continue;
+        };
+        let launched = matches!(launches.by_room.get(&room_id), Some(RoomLaunch::Launched));
+        let world = snapshot_room(room_id, launched, &snapshot_avatars, &parts, &joints);
+        let code = save::code_string(code);
+        let file = SaveFile {
+            version: SAVE_VERSION,
+            meta: SaveMeta {
+                name: name.clone(),
+                room_code: code.clone(),
+                kind: "manual".into(),
+                saved_unix: save::now_unix(),
+            },
+            world,
+        };
+        match save::write_save(&save::manual_file_name(&code, &name), &file) {
+            Ok(()) => println!("[save] manual save '{name}' written for room {code}"),
+            Err(e) => println!("[save] manual save '{name}' for room {code} failed: {e}"),
+        }
+    }
+}
+
+/// Live flight-recording files, one per recorded room (see `record_room_frames`).
+/// Only inserted when `BS_RECORD` is set.
+#[derive(Resource, Default)]
+struct RecordingRegistry {
+    by_room: HashMap<RoomId, std::fs::File>,
+}
+
+/// Flight recorder (opt-in via `BS_RECORD`): every simulated tick, append one
+/// JSON line per **occupied** room to its recording file —
+///
+/// ```json
+/// {"tick":N,"unix_ms":T,"inputs":[{"client_id":..,"input":{..}}],"world":{..}}
+/// ```
+///
+/// where `world` is the same versioned [`SaveWorld`] snapshot a save uses (taken
+/// **after** the physics step — the tick's outcome) and `inputs` is each player's
+/// raw `NetInput` for the tick. This is the machine-analysis complement to saves:
+/// reproduce a bug while recording, then step/bisect/diff the JSONL tick-by-tick
+/// to see exactly which frame — and which input — went wrong. A room's file opens
+/// on its first recorded tick and is never rotated (recordings are debug
+/// artifacts, enabled deliberately, not a production default).
+fn record_room_frames(
+    mut tick: Local<u64>,
+    mut recordings: ResMut<RecordingRegistry>,
+    registry: Res<RoomRegistry>,
+    launches: Res<LaunchRegistry>,
+    avatars: SnapshotAvatars,
+    inputs: Query<(&NetPlayer, &RoomMember, &ActionState<NetInput>)>,
+    parts: SnapshotParts,
+    joints: SnapshotJoints,
+) {
+    use std::io::Write;
+    *tick += 1;
+    let occupied: HashSet<RoomId> = avatars.iter().map(|(_, _, member, ..)| member.0).collect();
+    for (&code, room) in &registry.by_code {
+        if !occupied.contains(&room.id) {
+            continue;
+        }
+        let launched = matches!(launches.by_room.get(&room.id), Some(RoomLaunch::Launched));
+        let world = snapshot_room(room.id, launched, &avatars, &parts, &joints);
+        let room_inputs: Vec<serde_json::Value> = inputs
+            .iter()
+            .filter(|(_, member, _)| member.0 == room.id)
+            .map(|(player, _, state)| {
+                serde_json::json!({ "client_id": player.client_id, "input": state.0 })
+            })
+            .collect();
+        let line = serde_json::json!({
+            "tick": *tick,
+            "unix_ms": save::now_unix_ms(),
+            "inputs": room_inputs,
+            "world": world,
+        });
+
+        if let std::collections::hash_map::Entry::Vacant(entry) =
+            recordings.by_room.entry(room.id)
+        {
+            match save::open_recording(&save::code_string(code)) {
+                Ok(file) => {
+                    entry.insert(file);
+                }
+                Err(e) => {
+                    println!("[save] recording for room {:?} failed to open: {e}", room.id);
+                    continue;
+                }
+            }
+        }
+        let file = recordings.by_room.get_mut(&room.id).unwrap();
+        if let Err(e) = writeln!(file, "{line}") {
+            println!("[save] recording write for room {:?} failed: {e}", room.id);
+            recordings.by_room.remove(&room.id);
         }
     }
 }

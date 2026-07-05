@@ -296,6 +296,18 @@ pub fn spawn_random_part(commands: &mut Commands) -> (Entity, Vec3, u32) {
     (e.id(), half_extents, seed)
 }
 
+/// Spawn one cuboid part with **explicit** half-extents and appearance seed — the
+/// deterministic counterpart of `spawn_random_part`, used to rebuild parts from a
+/// saved world. Deliberately sets no pose: the caller inserts the saved
+/// `Transform`/`Position`/`Rotation`/velocities (both `Transform` *and* the Avian
+/// components must be seeded in multiplayer — see `spawn_random_part`).
+pub fn spawn_saved_cuboid(commands: &mut Commands, half_extents: Vec3, seed: u32) -> Entity {
+    let mut e = commands.spawn_empty();
+    insert_part_physics(&mut e, half_extents);
+    e.insert((PartSeed(seed), PartBundle::default()));
+    e.id()
+}
+
 /// Insert the shared dynamic-part physics (collider + mass/friction/restitution +
 /// CCD) onto an entity from its cuboid half-extents. Used by `spawn_random_part`
 /// (single-player + the server's authoritative parts) AND the multiplayer client's

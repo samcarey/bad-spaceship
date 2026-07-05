@@ -52,7 +52,20 @@ impl Plugin for PlatformPlugin {
 /// An in-progress name-edit overlay (a real DOM `<input>`), plus the DOM listeners
 /// (kept alive here) that record the outcome. Single-threaded wasm, so a
 /// `thread_local` is fine.
-struct NameEdit {
+/// What an open text-edit overlay is collecting. Only one overlay is ever open at
+/// a time; the purpose tags which flow opened it, so the rename poller can never
+/// consume a save-game name (and vice versa).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum TextPrompt {
+    /// The "Change Name" rename flow.
+    Name,
+    /// The "Save Game" name-this-save flow.
+    SaveGame,
+}
+
+struct TextEdit {
+    /// Which flow opened the overlay (matched by `take_text_edit`).
+    purpose: TextPrompt,
     /// The full-screen overlay root, removed when the edit finishes.
     root: web_sys::Element,
     /// The text field, read for its value on submit.
@@ -63,19 +76,20 @@ struct NameEdit {
 }
 
 thread_local! {
-    static NAME_EDIT: RefCell<Option<NameEdit>> = const { RefCell::new(None) };
+    static TEXT_EDIT: RefCell<Option<TextEdit>> = const { RefCell::new(None) };
 }
 
-/// Open a **non-blocking** name-edit overlay: a full-screen backdrop (captures all
+/// Open a **non-blocking** text-edit overlay: a full-screen backdrop (captures all
 /// pointer input, so the character can't move behind it) with a text field the user
 /// taps to raise the mobile keyboard, plus Save/Cancel. Unlike `window.prompt`, this
 /// does NOT block the wasm event loop — the game keeps running and the connection
 /// stays alive. (A blocking `prompt` froze the loop for the whole time the dialog was
 /// open, which timed out the netcode session so the avatar vanished for others, and
-/// iOS then wouldn't resume the loop — the reported freeze/crash.) Poll `take_name_edit`
-/// each frame for the result. No-op if an edit is already open.
-pub fn begin_name_edit(initial: &str) {
-    if NAME_EDIT.with(|c| c.borrow().is_some()) {
+/// iOS then wouldn't resume the loop — the reported freeze/crash.) Poll
+/// `take_text_edit` (with the same purpose) each frame for the result. No-op if an
+/// edit is already open.
+pub fn begin_text_edit(purpose: TextPrompt, prompt: &str, initial: &str) {
+    if TEXT_EDIT.with(|c| c.borrow().is_some()) {
         return;
     }
     let document = get_document();
@@ -109,7 +123,7 @@ pub fn begin_name_edit(initial: &str) {
     let Ok(input) = input_el.dyn_into::<web_sys::HtmlInputElement>() else {
         return;
     };
-    label.set_text_content(Some("Enter your name"));
+    label.set_text_content(Some(prompt));
     save.set_text_content(Some("Save"));
     cancel.set_text_content(Some("Cancel"));
     input.set_value(initial);
@@ -152,8 +166,9 @@ pub fn begin_name_edit(initial: &str) {
         }));
     }
 
-    NAME_EDIT.with(|c| {
-        *c.borrow_mut() = Some(NameEdit {
+    TEXT_EDIT.with(|c| {
+        *c.borrow_mut() = Some(TextEdit {
+            purpose,
             root,
             input,
             outcome,
@@ -162,11 +177,15 @@ pub fn begin_name_edit(initial: &str) {
     });
 }
 
-/// Poll the name-edit overlay opened by `begin_name_edit`. Returns `Some(name)` once,
-/// on submit (and tears the overlay down); `None` while it's still open, or on cancel
-/// (also torn down). Call each frame.
-pub fn take_name_edit() -> Option<String> {
-    NAME_EDIT.with(|cell| {
+/// Poll the text-edit overlay opened by `begin_text_edit` **for this purpose**.
+/// Returns `Some(text)` once, on submit (and tears the overlay down); `None` while
+/// it's still open, opened for a different purpose, or on cancel (also torn down).
+/// Call each frame.
+pub fn take_text_edit(purpose: TextPrompt) -> Option<String> {
+    TEXT_EDIT.with(|cell| {
+        if cell.borrow().as_ref().map(|e| e.purpose) != Some(purpose) {
+            return None;
+        }
         let outcome = cell.borrow().as_ref().and_then(|e| *e.outcome.borrow());
         let submitted = outcome?;
         // Finished (submit or cancel): tear the overlay down and report.
@@ -272,7 +291,7 @@ pub fn reset_position_reload() {
 /// doesn't reliably provide. So open a small non-blocking DOM overlay — a real
 /// `<textarea>` prefilled with the settings (long-press to select/copy on a phone) plus
 /// a "Copy" button whose *DOM* click handler runs in a true gesture context and calls
-/// the Clipboard API. Mirrors `begin_name_edit`'s overlay approach. Fire-and-forget: the
+/// the Clipboard API. Mirrors `begin_text_edit`'s overlay approach. Fire-and-forget: the
 /// listeners are `forget()`-leaked (a tuning tool is opened rarely, and Close removes the
 /// overlay node so they never fire again).
 pub fn copy_to_clipboard(text: &str) {

@@ -127,6 +127,40 @@
 
     .empty { color: var(--muted); text-align: center; padding: 2rem 0; font-size: 0.9rem; }
 
+    /* Matches / Saved Games tab bar. */
+    .tabs {
+      display: flex;
+      gap: 0.5rem;
+      margin-bottom: 1.2rem;
+      border-bottom: 1px solid var(--border);
+    }
+    .tab {
+      appearance: none;
+      cursor: pointer;
+      font: inherit;
+      color: var(--muted);
+      background: none;
+      border: none;
+      border-bottom: 2px solid transparent;
+      padding: 0.6rem 0.9rem;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+    }
+    .tab:hover { color: var(--text); }
+    .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+    /* Save-kind badge (auto vs manual) in the saved-games rows. */
+    .badge {
+      font-size: 0.68rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 0.1rem 0.4rem;
+      color: var(--muted);
+    }
+    .badge.manual { color: var(--ok); border-color: var(--ok); }
+
     /* Shareable-link panel shown after creating a match. */
     #share {
       display: none;
@@ -165,6 +199,11 @@
 
   <div id="status" class="status">Connecting to matchmaker…</div>
 
+  <div class="tabs">
+    <button class="tab active" id="tab-matches" type="button">Matches</button>
+    <button class="tab" id="tab-saves" type="button">Saved Games</button>
+  </div>
+
   <div id="share">
     <div class="label">Match created — share this link to invite players:</div>
     <div class="linkrow">
@@ -176,11 +215,16 @@
     <button class="btn primary" id="share-enter">Enter</button>
   </div>
 
-  <div class="actions">
-    <button class="btn primary" id="create">Create Match</button>
+  <div id="pane-matches">
+    <div class="actions">
+      <button class="btn primary" id="create">Create Match</button>
+    </div>
+    <div id="list"></div>
   </div>
 
-  <div id="list"></div>
+  <div id="pane-saves" style="display: none">
+    <div id="saves-list"></div>
+  </div>
 
   <script>
     // The matchmaker base URL. Resolution order:
@@ -265,7 +309,98 @@
       }
     }
 
+    // ---- Saved games tab -------------------------------------------------
+
+    let activeTab = 'matches';
+
+    function setTab(tab) {
+      activeTab = tab;
+      document.getElementById('tab-matches').classList.toggle('active', tab === 'matches');
+      document.getElementById('tab-saves').classList.toggle('active', tab === 'saves');
+      document.getElementById('pane-matches').style.display = tab === 'matches' ? '' : 'none';
+      document.getElementById('pane-saves').style.display = tab === 'saves' ? '' : 'none';
+      refresh();
+    }
+
+    function renderSaves(saves) {
+      const savesEl = document.getElementById('saves-list');
+      savesEl.innerHTML = '';
+      if (!saves.length) {
+        const d = document.createElement('div');
+        d.className = 'empty';
+        d.textContent = 'No saved games yet — worlds autosave while you play.';
+        savesEl.appendChild(d);
+        return;
+      }
+      for (const s of saves) {
+        const row = document.createElement('div');
+        row.className = 'row';
+
+        const name = document.createElement('div');
+        name.className = 'name';
+        const b = document.createElement('b');
+        b.textContent = s.kind === 'auto' ? 'Autosave ' + s.room_code : s.name;
+        const small = document.createElement('small');
+        small.textContent = 'from ' + s.room_code + ' · ' + ago(s.saved_unix);
+        name.appendChild(b);
+        name.appendChild(small);
+
+        const badge = document.createElement('span');
+        badge.className = 'badge' + (s.kind === 'manual' ? ' manual' : '');
+        badge.textContent = s.kind;
+
+        const btn = document.createElement('button');
+        btn.className = 'btn primary';
+        btn.textContent = 'Load';
+        btn.addEventListener('click', () => loadSave(s.file, btn));
+
+        row.appendChild(name);
+        row.appendChild(badge);
+        row.appendChild(btn);
+        savesEl.appendChild(row);
+      }
+    }
+
+    // Load = the matchmaker creates a fresh match seeded from the save and
+    // returns its play URL; entering it spawns the saved world.
+    async function loadSave(file, btn) {
+      btn.disabled = true;
+      try {
+        const r = await api('/api/saves/load', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ file }),
+        });
+        if (r.status === 503) {
+          setStatus('Servers are updating to a new version — try again in a moment.', 'err');
+          return;
+        }
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const { web_url } = await r.json();
+        enterGame(web_url);
+      } catch (e) {
+        setStatus('Failed to load save: ' + e.message, 'err');
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
     async function refresh() {
+      if (activeTab === 'saves') {
+        try {
+          const r = await api('/api/saves');
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          const saves = await r.json();
+          renderSaves(saves);
+          setStatus(saves.length + ' saved game' + (saves.length === 1 ? '' : 's'), 'ok');
+        } catch (e) {
+          setStatus(
+            "Can't reach matchmaker at " + MATCHMAKER + ' — is it running? (' + e.message + ')',
+            'err'
+          );
+        }
+        return;
+      }
       try {
         const r = await api('/api/matches');
         if (!r.ok) throw new Error('HTTP ' + r.status);
@@ -349,6 +484,8 @@
     const CHECK_SVG = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
 
     document.getElementById('create').addEventListener('click', createMatch);
+    document.getElementById('tab-matches').addEventListener('click', () => setTab('matches'));
+    document.getElementById('tab-saves').addEventListener('click', () => setTab('saves'));
     document.getElementById('share-copy').addEventListener('click', async () => {
       const btn = document.getElementById('share-copy');
       if (await copyToClipboard(shareLink)) {
