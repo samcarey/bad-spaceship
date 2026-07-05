@@ -24,7 +24,7 @@ use bad_spaceship_shared::net::{
 use bad_spaceship_shared::part::{insert_part_physics, insert_rocket_physics, Holdable, SuppressLocalParts};
 use bad_spaceship_shared::player::make_local_player;
 use crate::render_main_pass::insert_rocket_visual;
-use crate::render_main_pass::metal_material::{metal_tint, part_visual, MetalMaterial};
+use crate::render_main_pass::metal_material::{part_visual, MetalMaterial};
 use crate::render_secondary_pass::gizmo_material::GizmoMaterial;
 use crate::render_secondary_pass::JointAppearance;
 use bad_spaceship_shared::{
@@ -478,7 +478,7 @@ fn write_input(
 /// you look at next once you've grabbed.
 fn highlight_grabbable(
     player: Query<&FocusedInteractable, With<Player>>,
-    parts: Query<(&MeshMaterial3d<MetalMaterial>, &NetPart)>,
+    parts: Query<&MeshMaterial3d<MetalMaterial>, With<NetPart>>,
     mut materials: ResMut<Assets<MetalMaterial>>,
     // The previously-highlighted part, so we only re-colour on change. Mutating a
     // material flags it for GPU re-upload, so recolouring every part every frame
@@ -489,16 +489,14 @@ fn highlight_grabbable(
     if *lit == highlighted {
         return;
     }
+    // Glow via the metal shader's `highlight` uniform — the same single mechanism the
+    // single-player focus highlight uses (`highlight.rs`), so it lights the whole part
+    // (striped rockets included) and needs nothing saved/restored: reset is `ZERO`.
     let recolour = |entity, materials: &mut Assets<MetalMaterial>, lit: bool| {
-        if let Ok((material, part)) = parts.get(entity) {
+        if let Ok(material) = parts.get(entity) {
             if let Some(mut mat) = materials.get_mut(&material.0) {
-                (mat.base.base_color, mat.base.emissive) = if lit {
-                    (Color::srgb(1.0, 1.0, 0.0), LinearRgba::rgb(0.6, 0.6, 0.0))
-                } else {
-                    // The part's own colour re-derives from its seed (the
-                    // metal look is deterministic), so nothing is stored.
-                    (metal_tint(part.seed), LinearRgba::BLACK)
-                };
+                mat.extension
+                    .set_highlight(if lit { Vec4::new(1.0, 1.0, 0.0, 1.0) } else { Vec4::ZERO });
             }
         }
     };
