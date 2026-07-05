@@ -74,12 +74,28 @@ pub struct MetalParams {
     /// `Finish` discriminant.
     finish: u32,
     _pad: u32,
+    /// Focus/attach highlight: `rgb` = glow colour (linear), `a` = strength. The
+    /// fragment shader mixes the *whole* albedo toward this — bands included — so a
+    /// striped part glows uniformly instead of only its coloured bands (the "blue
+    /// stripes" bug). Strength 0 (the default) leaves the part un-highlighted. Driven
+    /// by `highlight.rs` for rockets, whose striped material can't be uniformly tinted
+    /// via `base_color` alone.
+    highlight: Vec4,
 }
 
 #[derive(Asset, AsBindGroup, Debug, Clone, Default, TypePath)]
 pub struct MetalExtension {
     #[uniform(100)]
     params: MetalParams,
+}
+
+impl MetalExtension {
+    /// Set the focus/attach highlight glow: `rgb` = colour (linear), `a` = strength
+    /// (0 = off). Used by `highlight.rs` to light a rocket body up uniformly, past the
+    /// striped finish. `Vec4::ZERO` clears it.
+    pub fn set_highlight(&mut self, tint: Vec4) {
+        self.params.highlight = tint;
+    }
 }
 
 impl MaterialExtension for MetalExtension {
@@ -229,6 +245,8 @@ pub fn metal_material(seed: u32) -> MetalMaterial {
                 center_y: range(0.25, 0.75),
                 finish: finish as u32,
                 _pad: 0,
+                // Un-highlighted until `highlight.rs` lights it up (rockets only).
+                highlight: Vec4::ZERO,
             },
         },
     }

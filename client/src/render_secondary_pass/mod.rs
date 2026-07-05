@@ -488,6 +488,9 @@ fn build_thrust_arrow(
 fn update_thrust_arrow(
     rockets: Query<(Entity, &GlobalTransform), With<RocketEngine>>,
     joints: Query<&SphericalJoint>,
+    // Which entities are parts (rockets or cuboids). Joints to non-parts (the ground)
+    // are excluded so an assembly is only parts joined *directly* to each other.
+    parts: Query<(), With<Holdable>>,
     configs: Res<Assets<character::Config>>,
     gravity: Res<Gravity>,
     mut shaft: Query<
@@ -511,7 +514,7 @@ fn update_thrust_arrow(
 
     let arrow = multiplayer
         .is_none()
-        .then(|| thrust_arrow(&rockets, &joints, &configs, gravity.0))
+        .then(|| thrust_arrow(&rockets, &joints, &parts, &configs, gravity.0))
         .flatten();
 
     let Some((origin, dir, length)) = arrow else {
@@ -543,10 +546,11 @@ fn update_thrust_arrow(
 fn thrust_arrow(
     rockets: &Query<(Entity, &GlobalTransform), With<RocketEngine>>,
     joints: &Query<&SphericalJoint>,
+    parts: &Query<(), With<Holdable>>,
     configs: &Assets<character::Config>,
     gravity: Vec3,
 ) -> Option<(Vec3, Vec3, f32)> {
-    let main_assembly = largest_assembly(joints)?;
+    let main_assembly = largest_assembly(joints, parts)?;
 
     // One rocket's thrust: enough to lift N average parts against gravity.
     let thrust = ROCKET_THRUST_PART_WEIGHTS * NOMINAL_PART_MASS * gravity.length();
@@ -577,9 +581,14 @@ fn thrust_arrow(
     Some((origin, dir, length))
 }
 
-/// Union-find over the joint graph → the entities in the largest connected component
-/// of ≥ 2 parts (the "main assembly"). `None` when there are no joints.
-fn largest_assembly(joints: &Query<&SphericalJoint>) -> Option<HashSet<Entity>> {
+/// Union-find over the **part-to-part** joint graph → the entities in the largest
+/// connected component of ≥ 2 parts (the "main assembly"). Joints to non-parts (the
+/// ground) are ignored, so parts pinned to the ground — but not to each other — are
+/// *not* an assembly. `None` when no two parts are jointed directly together.
+fn largest_assembly(
+    joints: &Query<&SphericalJoint>,
+    parts: &Query<(), With<Holdable>>,
+) -> Option<HashSet<Entity>> {
     fn find(parent: &mut HashMap<Entity, Entity>, e: Entity) -> Entity {
         let mut root = e;
         while parent[&root] != root {
@@ -598,6 +607,10 @@ fn largest_assembly(joints: &Query<&SphericalJoint>) -> Option<HashSet<Entity>> 
     let mut parent: HashMap<Entity, Entity> = HashMap::new();
     for joint in joints.iter() {
         let (a, b) = (joint.body1, joint.body2);
+        // Skip joints that aren't part-to-part (e.g. a part pinned to the ground).
+        if parts.get(a).is_err() || parts.get(b).is_err() {
+            continue;
+        }
         parent.entry(a).or_insert(a);
         parent.entry(b).or_insert(b);
         let (ra, rb) = (find(&mut parent, a), find(&mut parent, b));

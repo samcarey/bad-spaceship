@@ -117,15 +117,15 @@ pub const ROCKET_FLARE_Y_OFFSET: f32 = -(ROCKET_BODY_HEIGHT / 2.0 + ROCKET_FLARE
 /// it only drives the thrust-vector visualisation.
 pub const ROCKET_THRUST_PART_WEIGHTS: f32 = 3.0;
 
-/// Local-frame point where a rocket's thrust is applied: the centre of the flare's
-/// wide base (the nozzle-exit plane). The entity origin is the *body* centre and the
-/// flare hangs below it, so this sits `ROCKET_FLARE_HEIGHT/2` below the flare centre.
-pub const ROCKET_THRUST_ORIGIN_LOCAL: Vec3 =
-    Vec3::new(0.0, -(ROCKET_BODY_HEIGHT / 2.0 + ROCKET_FLARE_HEIGHT), 0.0);
+/// Local-frame point where a rocket's thrust is applied: inside the rocket at the
+/// base of the body, where the flare begins (the flare's narrow top meets the body's
+/// bottom face). The entity origin is the *body* centre, so this is `ROCKET_BODY_HEIGHT/2`
+/// below it.
+pub const ROCKET_THRUST_ORIGIN_LOCAL: Vec3 = Vec3::new(0.0, -(ROCKET_BODY_HEIGHT / 2.0), 0.0);
 
-/// Local-frame thrust direction: straight down the cylinder axis toward the flared
-/// end (the direction the exhaust leaves the nozzle).
-pub const ROCKET_THRUST_DIR_LOCAL: Vec3 = Vec3::NEG_Y;
+/// Local-frame thrust direction: up the cylinder axis, *away* from the flared end —
+/// the reaction/lift direction the exhaust pushes the rocket.
+pub const ROCKET_THRUST_DIR_LOCAL: Vec3 = Vec3::Y;
 
 /// Approximate volume of a rocket engine (cylinder body + cone flare), used as a
 /// mass proxy where parts are weighted by volume (density is uniform across all

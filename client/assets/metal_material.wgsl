@@ -48,6 +48,7 @@ struct MetalParams {
     center_y: f32,
     finish: u32,
     _pad: u32,
+    highlight: vec4<f32>,
 }
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(100)
@@ -165,6 +166,10 @@ fn fragment(
         color = mix(color, vec3(0.75), scratch);
         roughness += scratch * 0.4;
     }
+
+    // Focus/attach highlight: tint the whole albedo (bands included) toward the glow
+    // colour, so a striped part glows uniformly. No-op at the default strength 0.
+    color = mix(color, metal.highlight.rgb, metal.highlight.a);
 
     pbr_input.material.base_color = vec4(color, pbr_input.material.base_color.a);
     pbr_input.material.perceptual_roughness = clamp(roughness, 0.04, 1.0);
