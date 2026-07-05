@@ -1,4 +1,4 @@
-use avian3d::prelude::{Gravity, SphericalJoint};
+use avian3d::prelude::{ComputedMass, Gravity, SphericalJoint};
 use bad_spaceship_shared::{
     character,
     part::{
@@ -45,6 +45,7 @@ impl Plugin for RenderSecondaryPassPlugin {
                 (
                     position_gizmo,
                     update_thrust_arrow,
+                    update_center_of_mass_orb,
                     // The hold-point delete-zone sphere shows in multiplayer too:
                     // the predicted avatar carries the same `HoldPoint` child +
                     // `Holding`/`Modifying`, and joint deletion is now server-
@@ -631,4 +632,86 @@ fn largest_assembly(
         .into_values()
         .filter(|g| g.len() >= 2)
         .max_by_key(|g| g.len())
+}
+
+// ---- Single-player assembly centre-of-mass orb -------------------------------
+//
+// A floating unlit-white orb marks the mass-weighted centre of mass of the main
+// assembly (the largest group of parts jointed directly together). In multiplayer
+// this is server-authoritative (`server::update_assembly_center_of_mass` +
+// `net::draw_center_of_mass_orb`); single-player has no server, so it's computed
+// locally here. The orb is half a character wide — the body is `(2/3)·size` across, so
+// half that is a `size/3` diameter (`size/6` radius) — and hidden when no assembly
+// exists.
+
+#[derive(Component)]
+struct CenterOfMassOrb;
+
+fn update_center_of_mass_orb(
+    mut commands: Commands,
+    joints: Query<&SphericalJoint>,
+    part_markers: Query<(), With<Holdable>>,
+    parts: Query<(Entity, &GlobalTransform, &ComputedMass), With<Holdable>>,
+    configs: Res<Assets<character::Config>>,
+    mut orb: Query<(&mut Transform, &mut Visibility), With<CenterOfMassOrb>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut spawned: Local<bool>,
+    // Multiplayer has the server-authoritative orb (replicated `NetCenterOfMass`);
+    // don't compute or draw a second one here.
+    multiplayer: Option<Res<SuppressLocalParts>>,
+) {
+    if multiplayer.is_some() {
+        return;
+    }
+
+    // Mass-weighted centre of mass of the largest assembly (≥ 2 parts, jointed
+    // directly — not through the ground).
+    let com = largest_assembly(&joints, &part_markers).and_then(|members| {
+        let mut weight = 0.0;
+        let mut weighted_pos = Vec3::ZERO;
+        for (entity, transform, mass) in &parts {
+            if members.contains(&entity) {
+                let m = mass.value();
+                weighted_pos += transform.translation() * m;
+                weight += m;
+            }
+        }
+        (weight > 0.0).then(|| weighted_pos / weight)
+    });
+
+    // Lazily spawn the orb once the character config (its size) is loaded.
+    if !*spawned {
+        let Some((_, config)) = configs.iter().next() else {
+            return; // config not loaded yet — retry next frame
+        };
+        let radius = config.size() / 6.0;
+        commands.spawn((
+            Mesh3d(meshes.add(Sphere::new(radius).mesh().ico(5).unwrap())),
+            MeshMaterial3d(materials.add(StandardMaterial {
+                base_color: Color::WHITE,
+                // Emissive + unlit so it reads as a glowing indicator, not a shaded ball.
+                emissive: LinearRgba::WHITE,
+                unlit: true,
+                ..default()
+            })),
+            Transform::default(),
+            Visibility::Hidden,
+            NotShadowCaster,
+            CenterOfMassOrb,
+        ));
+        *spawned = true;
+        return; // the orb exists from next frame
+    }
+
+    let Ok((mut transform, mut visibility)) = orb.single_mut() else {
+        return;
+    };
+    match com {
+        Some(pos) => {
+            transform.translation = pos;
+            *visibility = Visibility::Visible;
+        }
+        None => *visibility = Visibility::Hidden,
+    }
 }
