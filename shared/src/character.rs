@@ -614,13 +614,42 @@ fn jump_based_on_input(
         // (jump vertically, sprint horizontally) ⇒ a contact-solver kick — a
         // deep landing or an edge contact on a fast platform, kicking upward or
         // diagonally — not real motion. Clamp each axis group to its earnable
-        // limit; a real jump (support + jump_force) and a full-speed run off
-        // the edge (≤ max_speed) pass untouched. The margins cover the support
-        // accelerating during the couple of ticks the memory can be stale.
+        // limit. The vertical margin is deliberately TINY: the support's
+        // recorded velocity jitters ±2 m/s tick-to-tick under thrust, and a
+        // 2 m/s margin let ~+11 m/s bounces sail under a jitter-high ceiling
+        // (every wide-deck landing bucked the rider). A spuriously-triggered
+        // clamp is harmless — it sets exactly a legitimate jump velocity — so
+        // err toward clamping.
+        // Diagnostics (BS_DEBUG_CLAMP): print clamp decisions for fast-relative
+        // states near the ground — how the kick-vs-clamp forensics in this file
+        // were gathered. Checked once (hot path).
+        static DEBUG_CLAMP: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let debug_clamp = *DEBUG_CLAMP.get_or_init(|| std::env::var("BS_DEBUG_CLAMP").is_ok());
+        if debug_clamp && last_support.ticks_since_grounded <= 4 {
+            let rel = velocity.0 - last_support.velocity;
+            if rel.length() > 5.0 {
+                println!(
+                    "[clamp?] touching={} since={} rel=({:.1},{:.1},{:.1}) support_vy={:.1}",
+                    touching_ground.0,
+                    last_support.ticks_since_grounded,
+                    rel.x, rel.y, rel.z,
+                    last_support.velocity.y
+                );
+            }
+        }
         if !touching_ground.0 && last_support.ticks_since_grounded <= 2 {
             let rel = velocity.0 - last_support.velocity;
-            if rel.y > tuning.jump_force + 2.0 {
-                velocity.0.y = last_support.velocity.y + tuning.jump_force;
+            if rel.y > tuning.jump_force + 0.25 {
+                // Grant a snap-down (+1 relative — re-lands within a couple of
+                // ticks), NOT a jump: kicks scale with platform speed (+49 m/s
+                // measured at 46 m/s ascent), and converting each one into an
+                // involuntary full hop stacked ~0.9 s of extra airborne drift
+                // onto the rider — which is how they still ended up off the
+                // deck edge. A real jump (rel exactly jump_force) passes.
+                if debug_clamp {
+                    println!("[clamp!] vy {:.1} -> {:.1}", velocity.0.y, last_support.velocity.y + 1.0);
+                }
+                velocity.0.y = last_support.velocity.y + 1.0;
             }
             let horizontal = Vec3::new(rel.x, 0.0, rel.z);
             let cap = tuning.max_speed + 3.0;
