@@ -1040,8 +1040,7 @@ fn build_netcode_client(server_addr: SocketAddr) -> Option<NetcodeClient> {
     // the *resume* identity is the `user_data` id, persisted in localStorage. Version
     // gate (`BS_PROTOCOL_ID`): a client only connects to a server built from the same
     // commit — the matchmaker routes to the matching version; this is the backstop.
-    let mut user_data = [0u8; 256];
-    user_data[..8].copy_from_slice(&resume_id().to_le_bytes());
+    let user_data = bad_spaceship_shared::net::resume_user_data(resume_id());
     let token = ConnectToken::build(
         server_addr,
         bad_spaceship_shared::net::BS_PROTOCOL_ID,

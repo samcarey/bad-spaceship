@@ -18,11 +18,22 @@
 //! - `BS_BOT_RIDE`  autopilot: walk the avatar onto the rocket platform (via the
 //!                  step block) and only then allow the launch — a real
 //!                  character riding the ascent, verified from the recorder.
+//! - `BS_BOT_WANDER`  with `BS_BOT_RIDE`: after liftoff, walk around on the
+//!                  platform (deterministic golden-angle waypoints around the
+//!                  platform's replicated position) instead of standing still —
+//!                  reproduces a human rider shifting their weight mid-flight.
+//! - `BS_BOT_JUMPY`  with `BS_BOT_WANDER`: also hop every few seconds while
+//!                  riding — a human rider WILL press jump on an ascending
+//!                  rocket, which is exactly how absolute-velocity jumps fling
+//!                  them off.
+//! - `BS_BOT_RESUME_ID`  persistent resume id (u64), sent in the connect
+//!                  token's user_data + every input like the real client — for
+//!                  testing the server's session-resume behaviour across rooms.
 
 use avian3d::prelude::Position;
 use bad_spaceship_shared::net::{
-    room_code_bytes, ControlChannel, NetInput, NetPlayer, ProtocolPlugin, RequestLaunch,
-    BS_PROTOCOL_ID, TICK,
+    resume_user_data, room_code_bytes, ControlChannel, NetInput, NetPart, NetPlayer, PartShape,
+    ProtocolPlugin, RequestLaunch, BS_PROTOCOL_ID, TICK,
 };
 use bevy::{app::ScheduleRunnerPlugin, prelude::*};
 use lightyear::netcode::ConnectToken;
@@ -43,6 +54,9 @@ struct BotConfig {
     launch_after: Option<f32>,
     run_secs: Option<f32>,
     ride: bool,
+    wander: bool,
+    jumpy: bool,
+    resume_id: u64,
 }
 
 /// Ride-autopilot progress: how long the avatar has been standing on the
@@ -65,6 +79,12 @@ impl BotConfig {
             launch_after: secs_var("BS_BOT_LAUNCH_SECS").filter(|s| *s >= 0.0),
             run_secs: secs_var("BS_BOT_SECS").filter(|s| *s > 0.0),
             ride: std::env::var("BS_BOT_RIDE").is_ok(),
+            wander: std::env::var("BS_BOT_WANDER").is_ok(),
+            jumpy: std::env::var("BS_BOT_JUMPY").is_ok(),
+            resume_id: std::env::var("BS_BOT_RESUME_ID")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0),
         }
     }
 }
@@ -98,9 +118,13 @@ fn main() {
 fn connect(mut commands: Commands, config: Res<BotConfig>) {
     let server_addr: SocketAddr =
         config.server.parse().unwrap_or_else(|e| panic!("BS_CONNECT '{}': {e}", config.server));
+    // The resume id rides in the token's user_data, exactly like the real client
+    // (the server reads it at connect to restore a remembered position).
+    let user_data = resume_user_data(config.resume_id);
     let token = ConnectToken::build(server_addr, BS_PROTOCOL_ID, rand::random::<u64>(), [0u8; 32])
         .timeout_seconds(3)
         .expire_seconds(30)
+        .user_data(user_data)
         .generate()
         .expect("connect token");
     let netcode = NetcodeClient::new(Authentication::Token(token), NetcodeConfig::default())
@@ -147,17 +171,44 @@ fn adopt_avatar(
 fn write_input(
     config: Res<BotConfig>,
     mut boarded: ResMut<Boarded>,
+    mut wander_tick: Local<u32>,
+    parts: Query<(&NetPart, &Position), (With<Predicted>, Without<InputMarker<NetInput>>)>,
     mut controlled: Query<
         (&mut ActionState<NetInput>, Option<&Position>),
         With<InputMarker<NetInput>>,
     >,
 ) {
     for (mut state, position) in &mut controlled {
-        let mut input = NetInput { room: config.room, ..default() };
-        // Once launch has been earned (see `send_launch`), just stand and ride —
-        // the platform drifts in world space, so pre-boarding geometry is
-        // meaningless after liftoff.
-        if config.ride && boarded.0 < BOARD_SETTLE_TICKS {
+        let mut input =
+            NetInput { room: config.room, resume_id: config.resume_id, ..default() };
+        // Once launch has been earned (see `send_launch`), stand and ride — or,
+        // in wander mode, stroll around the platform like a fidgety human rider
+        // (the platform's world position moves, so waypoints are computed off
+        // its replicated `Position` each tick). Deterministic golden-angle
+        // waypoints, changed every 1.5 s, radius alternating mid/edge.
+        if config.ride && config.wander && boarded.0 >= BOARD_SETTLE_TICKS {
+            if let (Some(position), Some(plat)) = (position, platform_xz(&parts)) {
+                *wander_tick += 1;
+                let phase = *wander_tick / 90;
+                let angle = phase as f32 * 2.399963; // golden angle
+                let radius = if phase % 2 == 0 { 0.4 } else { 0.9 };
+                let target = plat + radius * Vec2::new(angle.cos(), angle.sin());
+                let delta = target - Vec2::new(position.0.x, position.0.z);
+                if delta.length() > 0.2 {
+                    let dir = delta.normalize_or_zero();
+                    input.yaw = f32::atan2(-dir.x, dir.y);
+                    input.move_xz = [0.0, (delta.length() * 1.5).clamp(0.2, 0.6)];
+                }
+                // A real rider WILL hit jump mid-ascent: hop for a few ticks
+                // every ~4.5 s — but only near the deck centre. Jumping while
+                // walking toward the edge drifts you overboard mid-air (~4.5 m
+                // of relative drift per hop vs a 1.6 m half-width deck), which
+                // is correct physics, not the regression under test.
+                let near_center =
+                    (Vec2::new(position.0.x, position.0.z) - plat).length() < 0.7;
+                input.jump = config.jumpy && near_center && *wander_tick % 270 < 8;
+            }
+        } else if config.ride && boarded.0 < BOARD_SETTLE_TICKS {
             if let Some(position) = position {
                 // `Position` is the capsule CENTRE (contact + 0.75): bowl floor
                 // ≈ -0.7, step top ≈ 0.1, platform top ≈ 2.1.
@@ -196,6 +247,23 @@ fn write_input(
         }
         state.0 = input;
     }
+}
+
+/// The platform's replicated world XZ: the largest-footprint cuboid in view (the
+/// platform dwarfs the step block and any loose cubes).
+fn platform_xz(
+    parts: &Query<(&NetPart, &Position), (With<Predicted>, Without<InputMarker<NetInput>>)>,
+) -> Option<Vec2> {
+    parts
+        .iter()
+        .filter_map(|(part, position)| match part.shape {
+            PartShape::Cuboid { half_extents } => {
+                Some((half_extents[0] * half_extents[2], position.0))
+            }
+            PartShape::RocketEngine => None,
+        })
+        .max_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, p)| Vec2::new(p.x, p.z))
 }
 
 /// One-shot `RequestLaunch` once the scripted delay elapses — the headless twin

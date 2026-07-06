@@ -466,8 +466,18 @@ const RESUME_GRACE_SECS: u64 = 1800;
 /// re-sends its persisted id, and the server places it back where it was.
 #[derive(Resource, Default)]
 struct ResumeRegistry {
-    by_id: HashMap<u64, (Vec3, SystemTime)>,
+    /// resume id → (last position, room code it was recorded in, when).
+    by_id: HashMap<u64, (Vec3, [u8; 6], SystemTime)>,
 }
+
+/// The room code a resumed position came from, riding on the avatar until its
+/// first input reveals which room it is actually joining (`assign_rooms`). A
+/// remembered position is only valid in *its own* room: restoring it into a
+/// different room teleported players to their old spot — e.g. loading a fresh
+/// save after falling off a rocket respawned them mid-air at altitude instead
+/// of at the new room's spawn.
+#[derive(Component, Clone, Copy)]
+struct ResumeRoom([u8; 6]);
 
 /// The room a player avatar belongs to (server-side), so its grab is scoped to
 /// that room's parts.
@@ -524,10 +534,21 @@ fn assign_rooms(
     // re-anchor to it) and the launch registry (a launched save resumes thrusting).
     grounds: Query<Entity, With<Grass>>,
     mut launches: ResMut<LaunchRegistry>,
-    players: Query<(Entity, &ActionState<NetInput>, &ControlledBy, &NetName), Without<RoomMember>>,
+    players: Query<
+        (Entity, &ActionState<NetInput>, &ControlledBy, &NetName, Option<&ResumeRoom>),
+        Without<RoomMember>,
+    >,
     // Already-assigned avatars' names, so a fresh join picks a default that's unique
     // within its room.
     named: Query<(&NetName, &RoomMember)>,
+    // For revoking a cross-room resume position (see `ResumeRoom`): teleport the
+    // already-built body back to a fresh spawn. Scoped to avatars so this system
+    // doesn't declare conflicting access to every rigid body's pose (which would
+    // serialize it against the physics-adjacent systems every tick).
+    mut bodies: Query<
+        (&mut Position, &mut LinearVelocity, &mut AngularVelocity),
+        With<ServerAvatar>,
+    >,
 ) {
     // The `players` query is `Without<RoomMember>`, so on the vast majority of ticks
     // nobody is joining — skip the whole name-bookkeeping scan then.
@@ -543,11 +564,29 @@ fn assign_rooms(
             used.entry(member.0).or_default().insert(n);
         }
     }
-    for (entity, state, controlled, name) in &players {
+    for (entity, state, controlled, name, resume_room) in &players {
         // Wait for the first real input — the all-zero seed carries no room (a
         // real input always has a unit-quaternion rotation, never `[0,0,0,0]`).
         if state.0 == NetInput::default() {
             continue;
+        }
+        // A resumed position is only meaningful in the room it was recorded in.
+        // If this client's first input reveals a *different* room (e.g. it loaded
+        // a fresh save), revoke the optimistic connect-time restore: drop the
+        // pending `InitialPose` (body not built yet) and/or teleport the built
+        // body to a fresh spawn — otherwise the player starts mid-air wherever
+        // they last were in the old room.
+        if let Some(ResumeRoom(recorded)) = resume_room {
+            if *recorded != state.0.room {
+                commands.entity(entity).remove::<InitialPose>();
+                if let Ok((mut position, mut linear, mut angular)) = bodies.get_mut(entity) {
+                    position.0 = spawn_position();
+                    linear.0 = Vec3::ZERO;
+                    angular.0 = Vec3::ZERO;
+                }
+                println!("[resume] revoked cross-room resume (recorded room != joined room)");
+            }
+            commands.entity(entity).remove::<ResumeRoom>();
         }
         let (room, is_new) = registry.get_or_create(state.0.room, &mut allocator);
         if is_new {
@@ -703,11 +742,11 @@ fn record_resume_positions(
     let now = SystemTime::now();
     for (state, position) in &avatars {
         if state.0.resume_id != 0 {
-            resume.by_id.insert(state.0.resume_id, (position.0, now));
+            resume.by_id.insert(state.0.resume_id, (position.0, state.0.room, now));
         }
     }
     // Drop records for players who didn't return within the grace window.
-    resume.by_id.retain(|_, (_, at)| {
+    resume.by_id.retain(|_, (_, _, at)| {
         at.elapsed().map(|e| e.as_secs() < RESUME_GRACE_SECS).unwrap_or(false)
     });
 }
@@ -1833,15 +1872,15 @@ fn spawn_player_for_client(
     let rid = tokens
         .get(client)
         .ok()
-        .map(|t| u64::from_le_bytes(t.0[..8].try_into().unwrap()))
+        .map(|t| bad_spaceship_shared::net::resume_id_from_user_data(&t.0))
         .unwrap_or(0);
     let resume_pos = (rid != 0)
         .then(|| {
-            resume.by_id.remove(&rid).and_then(|(pos, at)| {
+            resume.by_id.remove(&rid).and_then(|(pos, room, at)| {
                 at.elapsed()
                     .map(|e| e.as_secs() < RESUME_GRACE_SECS)
                     .unwrap_or(false)
-                    .then_some(pos)
+                    .then_some((pos, room))
             })
         })
         .flatten();
@@ -1879,8 +1918,12 @@ fn spawn_player_for_client(
         // unique per-room default), so the client never queries a nameless avatar.
         NetName::default(),
     ));
-    if let Some(pos) = resume_pos {
-        avatar.insert(InitialPose(pos));
+    if let Some((pos, room)) = resume_pos {
+        // Optimistically build at the remembered spot (the common case — an iOS
+        // reload rejoining the same room — must not slide in from the origin).
+        // `assign_rooms` revokes it if the first input reveals a DIFFERENT room:
+        // a remembered position means nothing in another room's world.
+        avatar.insert((InitialPose(pos), ResumeRoom(room)));
         println!("[resume] client_id={client_id} reconnect -> spawn at {pos:?}");
     } else {
         println!("[resume] client_id={client_id} fresh connect (no remembered position)");
