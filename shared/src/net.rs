@@ -81,6 +81,20 @@ pub fn monster_index(id: u64) -> u8 {
     (splitmix64(&mut state) % MONSTER_COUNT as u64) as u8
 }
 
+/// Pack a lobby code into the fixed 6-byte field the server keys rooms by
+/// ([`NetInput::room`]): the matchmaker hands out 6 uppercase chars, so
+/// uppercase, take up to 6 bytes, zero-pad. An empty code maps to all-zero —
+/// the shared default room. Lives beside the wire format it defines so every
+/// client of the protocol (the game client, the headless bot) packs rooms
+/// identically.
+pub fn room_code_bytes(code: &str) -> [u8; 6] {
+    let mut out = [0u8; 6];
+    for (slot, byte) in out.iter_mut().zip(code.to_ascii_uppercase().bytes()) {
+        *slot = byte;
+    }
+    out
+}
+
 /// Per-tick client → server **input intent** (not pose). The server runs the
 /// authoritative character simulation from this intent (move direction, jump,
 /// look angle), so the world is server-authoritative and — once client-side

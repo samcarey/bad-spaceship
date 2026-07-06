@@ -19,9 +19,12 @@
 //!   force, so prediction converges).
 
 use avian3d::prelude::{
-    ComputedMass, Forces, Gravity, Position, Rotation, SphericalJoint, WriteRigidBodyForces,
+    AngularVelocity, ComputedMass, Forces, Gravity, Position, Rotation, SphericalJoint,
+    WriteRigidBodyForces,
 };
-use bad_spaceship_shared::launch::{balanced_assembly_thrust, LAUNCH_COUNTDOWN_SECS};
+use bad_spaceship_shared::launch::{
+    balanced_assembly_thrust, measure_assembly_spin, AssemblySpin, LAUNCH_COUNTDOWN_SECS,
+};
 use bad_spaceship_shared::net::{ControlChannel, InLargestAssembly, NetLaunch, NetPart, RequestLaunch};
 use bad_spaceship_shared::part::{Holdable, RocketEngine, SuppressLocalParts};
 use bad_spaceship_shared::Character;
@@ -153,13 +156,34 @@ fn apply_sp_thrust(
     parts: Query<(Entity, &GlobalTransform, &ComputedMass), With<Holdable>>,
     joints: Query<&SphericalJoint>,
     rockets: Query<(Entity, &GlobalTransform), With<RocketEngine>>,
-    mut rocket_forces: Query<(Entity, Forces), With<RocketEngine>>,
+    // `Forces` takes `AngularVelocity` mutably inside, so the spin read and the
+    // force write cannot coexist as sibling queries (B0001) — sequence them.
+    mut set: ParamSet<(
+        Query<&AngularVelocity>,
+        Query<(Entity, Forces), With<RocketEngine>>,
+    )>,
     gravity: Res<Gravity>,
 ) {
     if local.sp != SpPhase::Launched {
         return;
     }
-    let Some((members, com)) = main_assembly(&parts, &joints) else {
+    let Some((members, _)) = main_assembly(&parts, &joints) else {
+        return;
+    };
+    // The assembly's COM + rotational state, via the shared measurement (see
+    // `measure_assembly_spin`) so the trim matches the server/MP paths exactly.
+    let Some((com, spin)) = ({
+        let velocities = set.p0();
+        let samples = || {
+            parts.iter().filter(|(entity, ..)| members.contains(entity)).map(
+                |(entity, transform, part_mass)| {
+                    let angular = velocities.get(entity).map(|w| w.0).unwrap_or_default();
+                    (transform.translation(), angular, part_mass.value())
+                },
+            )
+        };
+        measure_assembly_spin(samples)
+    }) else {
         return;
     };
     let geometry: Vec<(Entity, Vec3, Quat)> = rockets
@@ -170,7 +194,7 @@ fn apply_sp_thrust(
             (entity, translation, rotation)
         })
         .collect();
-    apply_thrust(com, gravity.0, &geometry, &mut rocket_forces);
+    apply_thrust(com, gravity.0, &geometry, &spin, &mut set.p1());
 }
 
 /// Apply balanced thrust to the multiplayer assembly's **predicted** rockets each physics
@@ -179,31 +203,43 @@ fn apply_sp_thrust(
 /// `GlobalTransform`, which `lightyear_avian` drives out of the fixed schedule).
 fn apply_mp_thrust(
     orb: Query<&NetLaunch>,
-    members: Query<
-        (Entity, &Position, &Rotation, &ComputedMass, Has<RocketEngine>),
-        (With<NetPart>, With<Predicted>, With<InLargestAssembly>),
-    >,
-    mut rocket_forces: Query<(Entity, Forces), (With<RocketEngine>, With<Predicted>)>,
+    // `Forces` takes `AngularVelocity` mutably inside, so the member read and the
+    // force write cannot coexist as sibling queries (B0001) — sequence them.
+    mut set: ParamSet<(
+        Query<
+            (Entity, &Position, &Rotation, &AngularVelocity, &ComputedMass, Has<RocketEngine>),
+            (With<NetPart>, With<Predicted>, With<InLargestAssembly>),
+        >,
+        Query<(Entity, Forces), (With<RocketEngine>, With<Predicted>)>,
+    )>,
     gravity: Res<Gravity>,
 ) {
     if !orb.iter().next().is_some_and(|l| l.launched) {
         return;
     }
-    // Mass-weighted COM over all assembly members; collect the member rockets' poses.
-    let mut weighted = Vec3::ZERO;
-    let mut mass = 0.0;
-    let mut geometry: Vec<(Entity, Vec3, Quat)> = Vec::new();
-    for (entity, position, rotation, part_mass, is_rocket) in &members {
-        weighted += position.0 * part_mass.value();
-        mass += part_mass.value();
-        if is_rocket {
-            geometry.push((entity, position.0, rotation.0));
-        }
-    }
-    if mass <= 0.0 {
+    // The assembly's COM + rotational state, via the shared measurement (see
+    // `measure_assembly_spin`) so the trim matches the server exactly; collect
+    // the member rockets' poses alongside.
+    let (measured, geometry) = {
+        let members = set.p0();
+        let samples = || {
+            members
+                .iter()
+                .map(|(_, position, _, angular, part_mass, _)| {
+                    (position.0, angular.0, part_mass.value())
+                })
+        };
+        let geometry: Vec<(Entity, Vec3, Quat)> = members
+            .iter()
+            .filter(|(.., is_rocket)| *is_rocket)
+            .map(|(entity, position, rotation, ..)| (entity, position.0, rotation.0))
+            .collect();
+        (measure_assembly_spin(samples), geometry)
+    };
+    let Some((com, spin)) = measured else {
         return;
-    }
-    apply_thrust(weighted / mass, gravity.0, &geometry, &mut rocket_forces);
+    };
+    apply_thrust(com, gravity.0, &geometry, &spin, &mut set.p1());
 }
 
 /// Compute the balanced per-rocket forces for an assembly and apply each at its flare
@@ -213,15 +249,17 @@ fn apply_thrust(
     com: Vec3,
     gravity: Vec3,
     geometry: &[(Entity, Vec3, Quat)],
+    spin: &AssemblySpin,
     rocket_forces: &mut Query<(Entity, Forces), impl bevy::ecs::query::QueryFilter>,
 ) {
     if geometry.is_empty() {
         return;
     }
-    let to_apply: HashMap<Entity, (Vec3, Vec3)> = balanced_assembly_thrust(com, gravity, geometry)
-        .into_iter()
-        .map(|thrust| (thrust.entity, (thrust.force, thrust.point)))
-        .collect();
+    let to_apply: HashMap<Entity, (Vec3, Vec3)> =
+        balanced_assembly_thrust(com, gravity, geometry, spin)
+            .into_iter()
+            .map(|thrust| (thrust.entity, (thrust.force, thrust.point)))
+            .collect();
     for (entity, mut forces) in rocket_forces.iter_mut() {
         if let Some((force, point)) = to_apply.get(&entity) {
             forces.apply_force_at_point(*force, *point);

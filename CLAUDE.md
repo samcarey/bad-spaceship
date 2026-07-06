@@ -1154,6 +1154,38 @@ fps-dependent). Key facts that shaped the design:
   drift. On the client, read the rocket pose from Avian `Position`/`Rotation`, **not**
   `GlobalTransform` (in MP `lightyear_avian` owns the Position→Transform sync and it lags
   the fixed schedule).
+- **Stability assist (PD attitude hold).** The trim solver steers the net thrust torque to
+  `I·(KP·(t̂×ŷ) − KD·ω)` — not zero — via `balanced_thrust_scales_toward` (min-norm 3×3
+  solve + one refinement pass over unsaturated rockets, because throttles only go *down*
+  from full and the upper clamp otherwise discards half the correction). Zero-target trim
+  is blind to **external** torque: a 1 kg rider standing 0.4 m off-centre flipped the stack
+  in seconds, and f32 constraint noise at altitude slowly spun even clean flights (both
+  verified frame-by-frame from the flight recorder). All three thrust sites (server rooms,
+  SP, predicted MP) feed the shared `measure_assembly_spin` (mass-weighted member ω +
+  point-mass inertia — two passes, NOT the parallel-axis identity, which is catastrophic
+  f32 cancellation at altitude) so trims can't drift. Avian gotcha: `Forces` takes
+  `AngularVelocity` mutably inside, so each site reads spin and writes forces through a
+  `ParamSet` (B0001 startup panic otherwise). Measured (4-rocket "Rocket Ride" save,
+  debug build): unmanned ascent to ~524 km @ 3.4 km/s; with a rider aboard ~33 km @
+  0.8 km/s, dead straight (|ω| < 0.01 rad/s) — the ceiling in each case is f32 ULP
+  starving the joint/contact solve, which brings down the next point.
+- **Divergence guard (NaN kills the whole app).** A blown constraint solve drives a part's
+  state to NaN, and Avian's next broadphase *asserts* (`b.min.cmple(b.max)`) — panicking
+  the entire server (every room) or the SP client. All part recyclers (`replace_fallen_*`
+  SP + server) now run in `FixedUpdate` (before the physics step *every* tick — an
+  `Update` guard can be skipped between back-to-back fixed steps) and also recycle on the
+  shared `part_state_diverged` predicate (`shared/src/part.rs`: non-finite, |pos| > 1000 km,
+  |v| > 100 km/s, |ω| > 1000 rad/s).
+- **Headless bot (`bot/` crate).** A real lightyear client on `MinimalPlugins` — no window,
+  assets, or physics — for unattended server+client sessions: joins a room by code (which
+  creates it server-side, consuming a staged `pending-<CODE>.json` and arming the
+  `BS_RECORD` recorder via occupancy), optionally auto-launches (`BS_BOT_LAUNCH_SECS`),
+  exits after `BS_BOT_SECS`. `BS_BOT_RIDE` runs a tiny autopilot that walks its avatar onto
+  the "Rocket Ride" save's platform (via the step block) and gates the launch on being
+  aboard — a real character contact riding the ascent, verified from the recorder, no
+  screen anywhere. Gotcha: room codes are exactly ≤ 6 bytes (`room_code_bytes`, now in
+  `shared/src/net.rs`) — a 7-char `BS_ROOM` silently truncates and joins/creates the wrong
+  room (and misses its pending save).
 
 **Save games (versioned world snapshots; autosave + manual + lobby load) and the
 flight recorder.** A room's world (parts, joints, players-as-context, launched flag)

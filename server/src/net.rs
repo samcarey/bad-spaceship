@@ -22,11 +22,13 @@ use std::sync::Mutex;
 use std::time::SystemTime;
 
 use avian3d::prelude::{
-    AngularVelocity, CollisionLayers, Collisions, ComputedCenterOfMass, Forces, Gravity,
-    LinearVelocity, Position, Rotation, SphericalJoint, WriteRigidBodyForces,
+    AngularVelocity, CollisionLayers, Collisions, ComputedCenterOfMass, ComputedMass, Forces,
+    Gravity, LinearVelocity, Position, Rotation, SphericalJoint, WriteRigidBodyForces,
 };
 use bad_spaceship_shared::assembly::largest_assembly_per_room;
-use bad_spaceship_shared::launch::{balanced_assembly_thrust, LAUNCH_COUNTDOWN_SECS};
+use bad_spaceship_shared::launch::{
+    balanced_assembly_thrust, measure_assembly_spin, LAUNCH_COUNTDOWN_SECS,
+};
 use bad_spaceship_shared::character::{spawn_position, CharacterMovement, InitialPose, ServerAvatar};
 use bad_spaceship_shared::net::{
     apply_hold_spring, apply_net_input, focused_part, monster_index, sanitize_name,
@@ -36,9 +38,9 @@ use bad_spaceship_shared::net::{
 };
 use bad_spaceship_shared::map::GROUND_LAYER;
 use bad_spaceship_shared::part::{
-    local_contact_anchor, spawn_random_part, spawn_random_rocket, spawn_rocket_engine,
-    spawn_saved_cuboid, RocketEngine, SuppressLocalParts, DELETE_RADIUS, NUM_PARTS,
-    NUM_ROCKET_ENGINES, ROCKET_VOLUME,
+    local_contact_anchor, part_state_diverged, spawn_random_part, spawn_random_rocket,
+    spawn_rocket_engine, spawn_saved_cuboid, RocketEngine, SuppressLocalParts, DELETE_RADIUS,
+    NUM_PARTS, NUM_ROCKET_ENGINES, PART_FALL_Y, ROCKET_VOLUME,
 };
 use bad_spaceship_shared::{Grass, SuppressLocalPlayer, Yaw};
 use bevy::prelude::*;
@@ -344,13 +346,16 @@ impl Plugin for NetServerPlugin {
         // to stream per-frame.
         app.add_systems(
             Update,
-            (
-                replace_fallen_room_parts,
-                sync_avatar_facing,
-                sync_net_hold,
-                update_assembly_center_of_mass,
-            ),
+            (sync_avatar_facing, sync_net_hold, update_assembly_center_of_mass),
         );
+        // Part recycling runs in `FixedUpdate`, NOT `Update`: it also catches parts
+        // whose state went non-finite / absurd (a diverging constraint solve), and
+        // those MUST be despawned before the *next* Avian step — its broadphase
+        // asserts on a NaN AABB and panics the whole server. `FixedUpdate` precedes
+        // the physics step (`FixedPostUpdate`) on every tick, while an `Update`
+        // system can be skipped between two back-to-back fixed steps in a lagging
+        // frame — exactly when an explosion is underway.
+        app.add_systems(FixedUpdate, replace_fallen_room_parts);
         // Assign each client (and its avatar) to its reported room on the first
         // input, lazily creating the room's world, and apply client rename +
         // avatar-pick + reset-position requests.
@@ -1167,12 +1172,26 @@ fn sync_net_hold(
 /// stocked (the server's per-room equivalent of single-player's
 /// `replace_fallen_parts`, which is suppressed here). The replacement re-joins
 /// the same room and collision layer.
+///
+/// Also recycles parts whose simulation state has *diverged* (see the shared
+/// `part_state_diverged` — non-finite or absurd state from an exploding
+/// constraint solve, e.g. a jointed rocket assembly at extreme altitude). A NaN
+/// position panics Avian's next broadphase and kills the server for every room,
+/// so divergence is caught here, one tick ahead, and the part is recycled like a
+/// fallen one.
 fn replace_fallen_room_parts(
     mut commands: Commands,
-    parts: Query<(Entity, &Transform, &PartRoom, &NetPart)>,
+    parts: Query<(Entity, &Position, &LinearVelocity, &AngularVelocity, &PartRoom, &NetPart)>,
 ) {
-    for (entity, transform, part_room, part) in &parts {
-        if transform.translation.y < -10.0 {
+    for (entity, position, linear, angular, part_room, part) in &parts {
+        let diverged = part_state_diverged(position.0, linear.0, angular.0);
+        if diverged {
+            println!(
+                "[part] recycling diverged part (pos {:?}, v {:?}, w {:?})",
+                position.0, linear.0, angular.0
+            );
+        }
+        if position.0.y < PART_FALL_Y || diverged {
             commands.entity(entity).despawn();
             let room = Room { id: part_room.id, bit: part_room.bit };
             // Respawn the same kind that fell so the pool's composition is stable.
@@ -1385,55 +1404,56 @@ fn publish_room_launch(registry: Res<LaunchRegistry>, mut orbs: Query<(&OrbRoom,
 
 /// Apply balanced rocket thrust to every launched room's assembly rockets each physics
 /// tick. Reuses the replicated `InLargestAssembly` membership + `PartRoom` grouping the COM
-/// system maintains: computes each launched room's mass-weighted COM from its members and
-/// the balanced per-rocket forces via the shared `balanced_assembly_thrust`.
+/// system maintains: computes each launched room's mass-weighted COM + rotational state
+/// from its members and the balanced per-rocket forces via the shared
+/// `balanced_assembly_thrust` (whose PD stability assist needs the spin measurement).
 fn apply_room_rocket_thrust(
     registry: Res<LaunchRegistry>,
     gravity: Res<Gravity>,
-    members: Query<(&Position, &NetPart, &PartRoom), With<InLargestAssembly>>,
     rocket_geometry: Query<
         (Entity, &Position, &Rotation, &PartRoom),
         (With<InLargestAssembly>, With<RocketEngine>),
     >,
-    mut rocket_forces: Query<(Entity, Forces), With<RocketEngine>>,
+    // `Forces` takes `AngularVelocity` mutably inside, so the member read and the
+    // force write cannot coexist as sibling queries (B0001) — sequence them.
+    mut set: ParamSet<(
+        Query<(&Position, &AngularVelocity, &ComputedMass, &PartRoom), With<InLargestAssembly>>,
+        Query<(Entity, Forces), With<RocketEngine>>,
+    )>,
 ) {
-    let is_launched = |room: RoomId| registry.is_launched(room);
-
-    // Mass-weighted COM accumulator per launched room (over all its assembly members).
-    let mut com_accum: HashMap<RoomId, (Vec3, f32)> = HashMap::new();
-    for (position, part, room) in &members {
-        if !is_launched(room.id) {
-            continue;
-        }
-        let volume = part_volume(part.shape);
-        let entry = com_accum.entry(room.id).or_insert((Vec3::ZERO, 0.0));
-        entry.0 += position.0 * volume;
-        entry.1 += volume;
-    }
-    if com_accum.is_empty() {
-        return;
-    }
-
     // Group launched rooms' member rockets by room.
     let mut per_room: HashMap<RoomId, Vec<(Entity, Vec3, Quat)>> = HashMap::new();
     for (entity, position, rotation, room) in &rocket_geometry {
-        if com_accum.contains_key(&room.id) {
+        if registry.is_launched(room.id) {
             per_room.entry(room.id).or_default().push((entity, position.0, rotation.0));
         }
     }
+    if per_room.is_empty() {
+        return;
+    }
 
-    // Balanced thrust per room → (force, point) per rocket entity.
+    // Balanced thrust per room → (force, point) per rocket entity. The COM +
+    // rotational state come from the shared `measure_assembly_spin` (the same
+    // measurement the client's predicted twin makes, from the same `ComputedMass`).
     let mut to_apply: HashMap<Entity, (Vec3, Vec3)> = HashMap::new();
-    for (room, rockets) in &per_room {
-        let (weighted, mass) = com_accum[room];
-        if mass <= 0.0 {
-            continue;
-        }
-        for thrust in balanced_assembly_thrust(weighted / mass, gravity.0, rockets) {
-            to_apply.insert(thrust.entity, (thrust.force, thrust.point));
+    {
+        let members = set.p0();
+        for (room, rockets) in &per_room {
+            let samples = || {
+                members
+                    .iter()
+                    .filter(|(.., r)| r.id == *room)
+                    .map(|(position, angular, mass, _)| (position.0, angular.0, mass.value()))
+            };
+            let Some((com, spin)) = measure_assembly_spin(samples) else {
+                continue;
+            };
+            for thrust in balanced_assembly_thrust(com, gravity.0, rockets, &spin) {
+                to_apply.insert(thrust.entity, (thrust.force, thrust.point));
+            }
         }
     }
-    for (entity, mut forces) in &mut rocket_forces {
+    for (entity, mut forces) in &mut set.p1() {
         if let Some((force, point)) = to_apply.get(&entity) {
             forces.apply_force_at_point(*force, *point);
         }
