@@ -253,6 +253,7 @@ struct CharacterBundle {
     // `AngularVelocity`; the character only reads/writes linear velocity.
     linear_velocity: LinearVelocity,
     touching_ground: TouchingGround,
+    ground_velocity: GroundVelocity,
 }
 
 /// Insert the core character physics body onto an entity. Shared by the
@@ -424,15 +425,25 @@ fn move_toward(from: Vec3, to: Vec3, max_delta: f32) -> Vec3 {
 #[derive(Default, Component)]
 struct TouchingGround(bool);
 
+/// The velocity of whatever the character is standing on (zero when airborne or
+/// on static ground). Movement and jumping compose with it so the character
+/// works on *moving* supports: standing on an ascending rocket platform
+/// (~120 m/s up), a world-frame jump (`vy = jump_force`) instantly flung the
+/// rider off — the platform out-accelerated them within a tick.
+#[derive(Default, Component)]
+struct GroundVelocity(Vec3);
+
 fn touching_ground(
-    mut query: Query<(Entity, &mut TouchingGround)>,
+    mut query: Query<(Entity, &mut TouchingGround, &mut GroundVelocity)>,
     // Avian's `Collisions` system param yields only the touching contact pairs
     // (a convenience view over the `ContactGraph`); `collisions_with` is the
     // rapier `contact_pairs_with` equivalent.
     collisions: Collisions,
+    velocities: Query<&LinearVelocity>,
 ) {
-    for (entity, mut touching_ground) in query.iter_mut() {
+    for (entity, mut touching_ground, mut ground_velocity) in query.iter_mut() {
         touching_ground.0 = false;
+        ground_velocity.0 = Vec3::ZERO;
         for pair in collisions.collisions_with(entity) {
             if let Some(contact) = pair.find_deepest_contact() {
                 // Avian's `penetration` is positive when the bodies overlap — the
@@ -440,6 +451,14 @@ fn touching_ground(
                 // "in contact" test becomes `penetration > -0.002`.
                 if contact.penetration > -0.002 {
                     touching_ground.0 = true;
+                    // The support's velocity (static ground has none → zero).
+                    let other = if pair.collider1 == entity {
+                        pair.collider2
+                    } else {
+                        pair.collider1
+                    };
+                    ground_velocity.0 =
+                        velocities.get(other).map(|v| v.0).unwrap_or(Vec3::ZERO);
                     break;
                 }
             }
@@ -449,14 +468,16 @@ fn touching_ground(
 
 fn walk_based_on_input(
     time: Res<Time>,
-    mut query: Query<(&DirectionalInput, &Yaw, &mut LinearVelocity, &TouchingGround)>,
+    mut query: Query<(&DirectionalInput, &Yaw, &mut LinearVelocity, &TouchingGround, &GroundVelocity)>,
     tuning: Res<MovementTuning>,
 ) {
     let dt = time.delta_secs();
     if dt <= 0.0 {
         return;
     }
-    for (directional_input, yaw, mut velocity, touching_ground) in query.iter_mut() {
+    for (directional_input, yaw, mut velocity, touching_ground, ground_velocity) in
+        query.iter_mut()
+    {
         let grounded = touching_ground.0;
         // The body is ROTATION_LOCKED (its rotation is owned by physics), so the move
         // basis comes from the look `Yaw`, not the body transform: `back()` = +Z ("W"),
@@ -465,7 +486,16 @@ fn walk_based_on_input(
         let look = Quat::from_rotation_y(-yaw.0);
         let wish =
             look * Vec3::Z * directional_input.0.z + look * Vec3::NEG_X * directional_input.0.x;
-        let horizontal = Vec3::new(velocity.0.x, 0.0, velocity.0.z);
+        // Walk *relative to the support*: on a moving platform the target speed is
+        // measured against the platform, not the world, so standing still on a
+        // drifting rocket doesn't read as "moving" (and get braked against it).
+        // Zero when airborne or on static ground — identical to the old behaviour.
+        let support = if grounded {
+            Vec3::new(ground_velocity.0.x, 0.0, ground_velocity.0.z)
+        } else {
+            Vec3::ZERO
+        };
+        let horizontal = Vec3::new(velocity.0.x, 0.0, velocity.0.z) - support;
 
         let new_horizontal = match tuning.model {
             MovementModel::Smooth => {
@@ -530,23 +560,25 @@ fn walk_based_on_input(
         };
 
         // Movement owns only the horizontal plane; gravity/jump own the vertical axis.
-        velocity.0.x = new_horizontal.x;
-        velocity.0.z = new_horizontal.z;
+        velocity.0.x = support.x + new_horizontal.x;
+        velocity.0.z = support.z + new_horizontal.z;
     }
 }
 
 fn jump_based_on_input(
     time: Res<Time>,
-    mut query: Query<(&DirectionalInput, &mut LinearVelocity, &TouchingGround)>,
+    mut query: Query<(&DirectionalInput, &mut LinearVelocity, &TouchingGround, &GroundVelocity)>,
     tuning: Res<MovementTuning>,
 ) {
     let dt = time.delta_secs();
-    for (directional_input, mut velocity, touching_ground) in query.iter_mut() {
+    for (directional_input, mut velocity, touching_ground, ground_velocity) in query.iter_mut() {
         // Jump: while grounded and the up-intent is held, set the upward speed directly
         // (the body's up is always +Y — it's rotation-locked). Held-space re-jumps each
-        // tick it's grounded, matching the original behaviour.
+        // tick it's grounded, matching the original behaviour. The jump is *relative to
+        // the support*: a world-frame `vy = jump_force` on a platform ascending at
+        // 120 m/s instantly clamped the rider ~112 m/s slower than their ride.
         if directional_input.0.y > 0.0 && touching_ground.0 {
-            velocity.0.y = tuning.jump_force;
+            velocity.0.y = ground_velocity.0.y + tuning.jump_force;
         }
         // Snappier, less-floaty fall: extra downward acceleration while descending,
         // applied only to the character so global gravity (and the parts) is untouched.
