@@ -254,6 +254,7 @@ struct CharacterBundle {
     linear_velocity: LinearVelocity,
     touching_ground: TouchingGround,
     ground_velocity: GroundVelocity,
+    last_support: LastSupport,
 }
 
 /// Insert the core character physics body onto an entity. Shared by the
@@ -442,15 +443,29 @@ struct TouchingGround(bool);
 #[derive(Default, Component)]
 struct GroundVelocity(Vec3);
 
+/// The support's velocity at the character's last grounded tick, plus how many
+/// ticks ago that was. Fed by `touching_ground`, consumed by the separation
+/// clamp in `jump_based_on_input`: a body that *just* left the ground can't
+/// legitimately move faster relative to its support than a jump (vertically)
+/// or a sprint (horizontally) — anything above that is a contact-solver kick
+/// (a deep landing or an edge contact on a fast platform occasionally ejects
+/// at +15…+200 m/s relative, vertically or diagonally) and gets clamped,
+/// turning a violent buck into motion the deck can catch.
+#[derive(Default, Component)]
+struct LastSupport {
+    velocity: Vec3,
+    ticks_since_grounded: u32,
+}
+
 fn touching_ground(
-    mut query: Query<(Entity, &mut TouchingGround, &mut GroundVelocity)>,
+    mut query: Query<(Entity, &mut TouchingGround, &mut GroundVelocity, &mut LastSupport)>,
     // Avian's `Collisions` system param yields only the touching contact pairs
     // (a convenience view over the `ContactGraph`); `collisions_with` is the
     // rapier `contact_pairs_with` equivalent.
     collisions: Collisions,
     velocities: Query<&LinearVelocity>,
 ) {
-    for (entity, mut touching_ground, mut ground_velocity) in query.iter_mut() {
+    for (entity, mut touching_ground, mut ground_velocity, mut last_support) in query.iter_mut() {
         touching_ground.0 = false;
         ground_velocity.0 = Vec3::ZERO;
         for pair in collisions.collisions_with(entity) {
@@ -471,6 +486,14 @@ fn touching_ground(
                     break;
                 }
             }
+        }
+        // Remember the support's velocity across the moment of separation
+        // (see `LastSupport`); while airborne, only the age advances.
+        if touching_ground.0 {
+            last_support.velocity = ground_velocity.0;
+            last_support.ticks_since_grounded = 0;
+        } else {
+            last_support.ticks_since_grounded = last_support.ticks_since_grounded.saturating_add(1);
         }
     }
 }
@@ -573,11 +596,40 @@ fn walk_based_on_input(
 
 fn jump_based_on_input(
     time: Res<Time>,
-    mut query: Query<(&DirectionalInput, &mut LinearVelocity, &TouchingGround, &GroundVelocity)>,
+    mut query: Query<(
+        &DirectionalInput,
+        &mut LinearVelocity,
+        &TouchingGround,
+        &GroundVelocity,
+        &LastSupport,
+    )>,
     tuning: Res<MovementTuning>,
 ) {
     let dt = time.delta_secs();
-    for (directional_input, mut velocity, touching_ground, ground_velocity) in query.iter_mut() {
+    for (directional_input, mut velocity, touching_ground, ground_velocity, last_support) in
+        query.iter_mut()
+    {
+        // Separation clamp (see `LastSupport`): freshly airborne and moving
+        // faster *relative to the support* than the player could have earned
+        // (jump vertically, sprint horizontally) ⇒ a contact-solver kick — a
+        // deep landing or an edge contact on a fast platform, kicking upward or
+        // diagonally — not real motion. Clamp each axis group to its earnable
+        // limit; a real jump (support + jump_force) and a full-speed run off
+        // the edge (≤ max_speed) pass untouched. The margins cover the support
+        // accelerating during the couple of ticks the memory can be stale.
+        if !touching_ground.0 && last_support.ticks_since_grounded <= 2 {
+            let rel = velocity.0 - last_support.velocity;
+            if rel.y > tuning.jump_force + 2.0 {
+                velocity.0.y = last_support.velocity.y + tuning.jump_force;
+            }
+            let horizontal = Vec3::new(rel.x, 0.0, rel.z);
+            let cap = tuning.max_speed + 3.0;
+            if horizontal.length() > cap {
+                let scaled = horizontal * (cap / horizontal.length());
+                velocity.0.x = last_support.velocity.x + scaled.x;
+                velocity.0.z = last_support.velocity.z + scaled.z;
+            }
+        }
         // Jump: while grounded and the up-intent is held, set the upward speed directly
         // (the body's up is always +Y — it's rotation-locked). Held-space re-jumps each
         // tick it's grounded, matching the original behaviour. The jump is *relative to
