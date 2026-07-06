@@ -9,6 +9,9 @@ edition = "2021"
 # verification against the flight recorder, load scripts). See src/main.rs.
 
 [dependencies]
+# For the Avian `Position` component the ride autopilot reads off its own
+# replicated avatar (no physics plugins run here).
+avian3d = { workspace = true, features = ["3d", "f32"] }
 bad-spaceship-shared = { path = "../shared" }
 bevy = { workspace = true, features = ["bevy_state"] }
 # The client-role lightyear feature set (mirrors client/Cargo.toml minus

@@ -15,7 +15,11 @@
 //! - `BS_BOT_LAUNCH_SECS`  seconds after start to send one `RequestLaunch`
 //!                         (unset / negative ⇒ never launch)
 //! - `BS_BOT_SECS`  seconds to run before exiting (unset / 0 ⇒ run forever)
+//! - `BS_BOT_RIDE`  autopilot: walk the avatar onto the rocket platform (via the
+//!                  step block) and only then allow the launch — a real
+//!                  character riding the ascent, verified from the recorder.
 
+use avian3d::prelude::Position;
 use bad_spaceship_shared::net::{
     ControlChannel, NetInput, NetPlayer, ProtocolPlugin, RequestLaunch, BS_PROTOCOL_ID, TICK,
 };
@@ -37,7 +41,13 @@ struct BotConfig {
     room: [u8; 6],
     launch_after: Option<f32>,
     run_secs: f32,
+    ride: bool,
 }
+
+/// Ride-autopilot progress: how long the avatar has been standing on the
+/// platform (ticks). The launch is gated on this in ride mode.
+#[derive(Resource, Default)]
+struct Boarded(u32);
 
 impl BotConfig {
     fn from_env() -> Self {
@@ -57,6 +67,7 @@ impl BotConfig {
             room,
             launch_after: secs_var("BS_BOT_LAUNCH_SECS").filter(|s| *s >= 0.0),
             run_secs: secs_var("BS_BOT_SECS").unwrap_or(0.0),
+            ride: std::env::var("BS_BOT_RIDE").is_ok(),
         }
     }
 }
@@ -74,6 +85,7 @@ fn main() {
     app.add_plugins(ClientPlugins { tick_duration: TICK });
     app.add_plugins(ProtocolPlugin);
     app.insert_resource(BotConfig::from_env());
+    app.init_resource::<Boarded>();
     app.add_systems(Startup, connect);
     app.add_systems(Update, (adopt_avatar, send_launch, exit_when_done));
     app.add_systems(
@@ -125,35 +137,79 @@ fn adopt_avatar(
     }
 }
 
-/// Forward an idle input every tick. The room code is the whole payload: the
-/// server keys room creation (and any staged pending-save load) on it.
+/// Forward an input every tick. The room code is the whole payload for an idle
+/// bot: the server keys room creation (and any staged pending-save load) on it.
+///
+/// In ride mode (`BS_BOT_RIDE`) this is a tiny autopilot over the "Rocket Ride"
+/// save's known geometry, driving the avatar from its own replicated `Position`:
+/// walk to the step block at (3.4, 0), hop on, jump across onto the platform
+/// (top ≈ 1.37 — only reachable off the step), then stand at the centre. The
+/// launch is gated on `Boarded` so the rocket lifts off with the rider aboard.
+/// Movement basis matches `walk_based_on_input`: with `yaw = atan2(-dx, dz)`
+/// the target is dead ahead and `move_xz = [0, throttle]` walks toward it.
 fn write_input(
     config: Res<BotConfig>,
-    mut controlled: Query<&mut ActionState<NetInput>, With<InputMarker<NetInput>>>,
+    mut boarded: ResMut<Boarded>,
+    mut controlled: Query<
+        (&mut ActionState<NetInput>, Option<&Position>),
+        With<InputMarker<NetInput>>,
+    >,
 ) {
-    for mut state in &mut controlled {
-        state.0 = NetInput { room: config.room, ..default() };
+    for (mut state, position) in &mut controlled {
+        let mut input = NetInput { room: config.room, ..default() };
+        // Once launch has been earned (see `send_launch`), just stand and ride —
+        // the platform drifts in world space, so pre-boarding geometry is
+        // meaningless after liftoff.
+        if config.ride && boarded.0 < 60 {
+            if let Some(position) = position {
+                // `Position` is the capsule CENTRE (contact + 0.75): bowl floor
+                // ≈ -0.7, step top ≈ 0.1, platform top ≈ 2.1.
+                let pos = position.0;
+                let on_platform = pos.y > 1.9;
+                let target = if on_platform || pos.y > -0.3 {
+                    Vec3::new(0.0, 0.0, 0.0) // platform centre (from the step: jump across)
+                } else {
+                    Vec3::new(3.4, 0.0, 0.0) // the step block first
+                };
+                let delta = target - pos;
+                let dist = Vec2::new(delta.x, delta.z).length();
+                if on_platform && dist < 0.45 {
+                    boarded.0 += 1; // stand at the centre; launch unlocks at 60 ticks
+                } else {
+                    input.yaw = f32::atan2(-delta.x, delta.z);
+                    input.move_xz = [0.0, (dist / 2.0).clamp(0.2, 1.0)];
+                    // Hop whenever climbing is called for: onto the step from the
+                    // bowl, and from the step across+up onto the platform.
+                    input.jump =
+                        (pos.y <= -0.3 && dist < 2.2) || (-0.3..1.9).contains(&pos.y);
+                }
+            }
+        }
+        state.0 = input;
     }
 }
 
 /// One-shot `RequestLaunch` once the scripted delay elapses — the headless twin
 /// of the slide-to-launch gesture (the server accepts it from any room member).
+/// In ride mode it additionally waits until the avatar has stood on the platform
+/// for a second, so the rocket lifts off with the rider aboard.
 fn send_launch(
     time: Res<Time>,
     config: Res<BotConfig>,
+    boarded: Res<Boarded>,
     mut sent: Local<bool>,
     mut senders: Query<&mut MessageSender<RequestLaunch>, With<Connected>>,
 ) {
     let Some(after) = config.launch_after else {
         return;
     };
-    if *sent || time.elapsed_secs() < after {
+    if *sent || time.elapsed_secs() < after || (config.ride && boarded.0 < 60) {
         return;
     }
     for mut sender in &mut senders {
         sender.send::<ControlChannel>(RequestLaunch);
         *sent = true;
-        println!("[bot] sent RequestLaunch at t={:.1}s", time.elapsed_secs());
+        println!("[bot] sent RequestLaunch at t={:.1}s (boarded {} ticks)", time.elapsed_secs(), boarded.0);
     }
 }
 

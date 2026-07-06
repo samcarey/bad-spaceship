@@ -26,7 +26,7 @@ use avian3d::prelude::{
     LinearVelocity, Position, Rotation, SphericalJoint, WriteRigidBodyForces,
 };
 use bad_spaceship_shared::assembly::largest_assembly_per_room;
-use bad_spaceship_shared::launch::{balanced_assembly_thrust, LAUNCH_COUNTDOWN_SECS};
+use bad_spaceship_shared::launch::{balanced_assembly_thrust, AssemblySpin, LAUNCH_COUNTDOWN_SECS};
 use bad_spaceship_shared::character::{spawn_position, CharacterMovement, InitialPose, ServerAvatar};
 use bad_spaceship_shared::net::{
     apply_hold_spring, apply_net_input, focused_part, monster_index, sanitize_name,
@@ -38,7 +38,7 @@ use bad_spaceship_shared::map::GROUND_LAYER;
 use bad_spaceship_shared::part::{
     local_contact_anchor, spawn_random_part, spawn_random_rocket, spawn_rocket_engine,
     spawn_saved_cuboid, RocketEngine, SuppressLocalParts, DELETE_RADIUS, NUM_PARTS,
-    NUM_ROCKET_ENGINES, ROCKET_VOLUME,
+    NUM_ROCKET_ENGINES, PART_DENSITY, ROCKET_VOLUME,
 };
 use bad_spaceship_shared::{Grass, SuppressLocalPlayer, Yaw};
 use bevy::prelude::*;
@@ -1410,39 +1410,45 @@ fn publish_room_launch(registry: Res<LaunchRegistry>, mut orbs: Query<(&OrbRoom,
 
 /// Apply balanced rocket thrust to every launched room's assembly rockets each physics
 /// tick. Reuses the replicated `InLargestAssembly` membership + `PartRoom` grouping the COM
-/// system maintains: computes each launched room's mass-weighted COM from its members and
-/// the balanced per-rocket forces via the shared `balanced_assembly_thrust`.
+/// system maintains: computes each launched room's mass-weighted COM + rotational state
+/// from its members and the balanced per-rocket forces via the shared
+/// `balanced_assembly_thrust` (whose PD stability assist needs the spin measurement).
 fn apply_room_rocket_thrust(
     registry: Res<LaunchRegistry>,
     gravity: Res<Gravity>,
-    members: Query<(&Position, &NetPart, &PartRoom), With<InLargestAssembly>>,
     rocket_geometry: Query<
         (Entity, &Position, &Rotation, &PartRoom),
         (With<InLargestAssembly>, With<RocketEngine>),
     >,
-    mut rocket_forces: Query<(Entity, Forces), With<RocketEngine>>,
+    // `Forces` takes `AngularVelocity` mutably inside, so the member read and the
+    // force write cannot coexist as sibling queries (B0001) — sequence them.
+    mut set: ParamSet<(
+        Query<(&Position, &AngularVelocity, &NetPart, &PartRoom), With<InLargestAssembly>>,
+        Query<(Entity, Forces), With<RocketEngine>>,
+    )>,
 ) {
     let is_launched = |room: RoomId| registry.is_launched(room);
 
-    // Mass-weighted COM accumulator per launched room (over all its assembly members).
-    let mut com_accum: HashMap<RoomId, (Vec3, f32)> = HashMap::new();
-    for (position, part, room) in &members {
-        if !is_launched(room.id) {
-            continue;
+    // Snapshot the launched rooms' members (position, spin, mass) — volume is the
+    // mass proxy (uniform `PART_DENSITY`).
+    let mut sampled: HashMap<RoomId, Vec<(Vec3, Vec3, f32)>> = HashMap::new();
+    for (position, angular, part, room) in &set.p0() {
+        if is_launched(room.id) {
+            sampled.entry(room.id).or_default().push((
+                position.0,
+                angular.0,
+                PART_DENSITY * part_volume(part.shape),
+            ));
         }
-        let volume = part_volume(part.shape);
-        let entry = com_accum.entry(room.id).or_insert((Vec3::ZERO, 0.0));
-        entry.0 += position.0 * volume;
-        entry.1 += volume;
     }
-    if com_accum.is_empty() {
+    if sampled.is_empty() {
         return;
     }
 
     // Group launched rooms' member rockets by room.
     let mut per_room: HashMap<RoomId, Vec<(Entity, Vec3, Quat)>> = HashMap::new();
     for (entity, position, rotation, room) in &rocket_geometry {
-        if com_accum.contains_key(&room.id) {
+        if sampled.contains_key(&room.id) {
             per_room.entry(room.id).or_default().push((entity, position.0, rotation.0));
         }
     }
@@ -1450,15 +1456,22 @@ fn apply_room_rocket_thrust(
     // Balanced thrust per room → (force, point) per rocket entity.
     let mut to_apply: HashMap<Entity, (Vec3, Vec3)> = HashMap::new();
     for (room, rockets) in &per_room {
-        let (weighted, mass) = com_accum[room];
+        let members = &sampled[room];
+        let mass: f32 = members.iter().map(|(_, _, m)| m).sum();
         if mass <= 0.0 {
             continue;
         }
-        for thrust in balanced_assembly_thrust(weighted / mass, gravity.0, rockets) {
+        let com = members.iter().map(|(p, _, m)| *p * *m).sum::<Vec3>() / mass;
+        let spin = AssemblySpin {
+            angular_velocity: members.iter().map(|(_, w, m)| *w * *m).sum::<Vec3>() / mass,
+            // Point-mass inertia proxy about the COM.
+            inertia: members.iter().map(|(p, _, m)| m * p.distance_squared(com)).sum(),
+        };
+        for thrust in balanced_assembly_thrust(com, gravity.0, rockets, &spin) {
             to_apply.insert(thrust.entity, (thrust.force, thrust.point));
         }
     }
-    for (entity, mut forces) in &mut rocket_forces {
+    for (entity, mut forces) in &mut set.p1() {
         if let Some((force, point)) = to_apply.get(&entity) {
             forces.apply_force_at_point(*force, *point);
         }
