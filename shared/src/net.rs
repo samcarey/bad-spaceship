@@ -399,9 +399,18 @@ pub struct ResetPosition;
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 pub struct RequestLaunch;
 
+/// Client → server request to save the sender's room world under a player-chosen name
+/// (the in-game "Save Game" form — the manual counterpart of the server's rolling
+/// autosave, written to a separate file the autosave never overwrites). The server
+/// resolves the sender's room (via `ControlledBy` → the avatar's `RoomMember`),
+/// [`sanitize_name`]s the string (same rules as a rename), and snapshots the room to
+/// disk. On the reliable [`ControlChannel`] so a one-shot save isn't dropped.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct SaveGame(pub String);
+
 /// Reliable client → server control channel for one-shot user actions ([`SetName`],
-/// [`ResetPosition`], [`RequestLaunch`]). Separate from the unreliable [`TelemetryChannel`]
-/// because these are deliberate actions that must not be silently lost.
+/// [`ResetPosition`], [`RequestLaunch`], [`SaveGame`]). Separate from the unreliable
+/// [`TelemetryChannel`] because these are deliberate actions that must not be silently lost.
 pub struct ControlChannel;
 
 /// Cap on a display name's length (characters). The server truncates to this and the
@@ -714,6 +723,8 @@ impl Plugin for ProtocolPlugin {
         app.register_message::<ResetPosition>()
             .add_direction(NetworkDirection::ClientToServer);
         app.register_message::<RequestLaunch>()
+            .add_direction(NetworkDirection::ClientToServer);
+        app.register_message::<SaveGame>()
             .add_direction(NetworkDirection::ClientToServer);
         // TEMPORARY client-crash report on the reliable control channel.
         app.register_message::<ClientPanicReport>()

@@ -4,6 +4,7 @@ use bad_spaceship_shared::{character, player, CommonPlugins};
 use bevy::{app::ScheduleRunnerPlugin, asset::AssetPlugin, prelude::*};
 
 mod net;
+mod save;
 
 fn main() {
     // Bevy resolves its asset root from `BEVY_ASSET_ROOT`, else `CARGO_MANIFEST_DIR`

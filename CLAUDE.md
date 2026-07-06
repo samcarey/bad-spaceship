@@ -1155,6 +1155,55 @@ fps-dependent). Key facts that shaped the design:
   `GlobalTransform` (in MP `lightyear_avian` owns the Position→Transform sync and it lags
   the fixed schedule).
 
+**Save games (versioned world snapshots; autosave + manual + lobby load) and the
+flight recorder.** A room's world (parts, joints, players-as-context, launched flag)
+saves to versioned JSON on the Mac and loads back from the lobby, across game
+versions. The moving parts:
+- **Format + migrations (`server/src/save.rs`).** One JSON file per save:
+  `{version, meta, world}`. `version`+`meta` are a **stable envelope** (the matchmaker
+  lists saves of any version by reading only that); `world` is the versioned payload
+  with its **own** schema structs — deliberately *not* the wire types
+  (`NetPart`/`NetJoint`), which are free to change per-commit while saves must load
+  forever. On a schema change: bump `SAVE_VERSION` and append a `Value → Value` step to
+  `MIGRATIONS` (the array length is tied to `SAVE_VERSION` in the type, so forgetting
+  the step is a **compile error**); `parse_save` upgrades any old file step-by-step.
+  The frozen `V1_FIXTURE` test pins the promise — **never** edit the fixture to track
+  schema changes; that's exactly the regression it exists to catch. Parts are saved in
+  stable `NetPart::id` order; joints/held-part references are **part indices** (entity
+  ids are meaningless across runs), ground endpoints an explicit `Ground` variant.
+- **Autosave**: `autosave_rooms` (server) atomically (tmp+rename) replaces
+  `auto-<CODE>.json` every 10 s per **occupied** room, skipping unchanged worlds
+  (hash of the serialized snapshot; settled bodies sleep, so idle rooms go quiet).
+  Manual saves (`SaveGame(name)` on `ControlChannel` from the hamburger menu's "Save
+  Game" form — rename-style: native egui modal, web DOM overlay via the generalized
+  purpose-tagged `begin_text_edit`/`take_text_edit`) write `manual-<CODE>-<slug>.json`,
+  which autosave never touches. Save names share `sanitize_name`/`MAX_NAME_LEN`.
+- **Load** goes through the matchmaker (it shares the Mac's filesystem):
+  `GET /api/saves` lists envelopes; `POST /api/saves/load {file}` creates a fresh
+  match on the **latest** version and stages a copy as `pending-<NEWCODE>.json`;
+  `assign_rooms` consumes that file when the first input creates the room and calls
+  `spawn_room_world_from_save` (respawn each part exactly — `spawn_saved_cuboid` /
+  `spawn_rocket_engine` + saved pose/velocity on both `Transform` AND Avian
+  `Position`/`Rotation` — then rebuild joints remapping indices → new entities, restore
+  `Launched`). Loading an old save on a newer server version is the *normal* path —
+  migration happens server-side on load. The lobby's "Saved Games" tab drives it.
+  Saved `avatars` are analysis context only — **ignored on load** (players are live
+  connections).
+- **The directory contract**: game server(s) and matchmaker must agree on
+  `BS_SAVES_DIR` (server default: `saves/` under cwd; matchmaker default:
+  `~/bs-mac/versions/saves`) — deploys must set it to one shared absolute path on
+  every versioned game server. All-zero room code (native, no `BS_ROOM`) saves as
+  `DEFAULT` (7 chars — can't collide with real 6-char codes).
+- **Flight recorder (`BS_RECORD`, machine analysis).** The same snapshot machinery,
+  per tick: with the env var set, `record_room_frames` (FixedLast — *after* the physics
+  step) appends one JSONL line per occupied room per simulated tick to
+  `<saves>/recordings/<CODE>-<unix>.jsonl`: `{tick, unix_ms, inputs: [per-player raw
+  NetInput], world: <SaveWorld>}` after a versioned header line. This is the
+  frame-by-frame debugging path: reproduce a bug while recording, then bisect/diff the
+  file tick-by-tick (every line is a full snapshot — no replay/determinism needed) to
+  find the exact frame and input where behavior went wrong. Saves answer "put my world
+  back"; recordings answer "what exactly happened". ~1-2 KB/tick/room, opt-in only.
+
 **lightyear API gotchas worth remembering** (the published book lags the crate; the
 ground truth is the crate source in `~/.cargo/registry/src/.../lightyear*-0.28.0`).
 These all held unchanged across the 0.27 → 0.28 bump:

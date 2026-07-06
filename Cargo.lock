@@ -682,6 +682,8 @@ dependencies = [
  "lightyear",
  "lightyear_avian3d",
  "rusqlite",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
