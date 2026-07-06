@@ -21,7 +21,8 @@
 
 use avian3d::prelude::Position;
 use bad_spaceship_shared::net::{
-    ControlChannel, NetInput, NetPlayer, ProtocolPlugin, RequestLaunch, BS_PROTOCOL_ID, TICK,
+    room_code_bytes, ControlChannel, NetInput, NetPlayer, ProtocolPlugin, RequestLaunch,
+    BS_PROTOCOL_ID, TICK,
 };
 use bevy::{app::ScheduleRunnerPlugin, prelude::*};
 use lightyear::netcode::ConnectToken;
@@ -40,7 +41,7 @@ struct BotConfig {
     server: String,
     room: [u8; 6],
     launch_after: Option<f32>,
-    run_secs: f32,
+    run_secs: Option<f32>,
     ride: bool,
 }
 
@@ -49,24 +50,20 @@ struct BotConfig {
 #[derive(Resource, Default)]
 struct Boarded(u32);
 
+/// Ticks the autopilot must stand centred on the platform before the launch is
+/// considered boarded (and the autopilot freezes into "just ride").
+const BOARD_SETTLE_TICKS: u32 = 60;
+
 impl BotConfig {
     fn from_env() -> Self {
-        // Pack the room code the way the client does: uppercase, ≤6 bytes, zero-pad
-        // (all-zero = the shared default room).
-        let mut room = [0u8; 6];
-        if let Ok(code) = std::env::var("BS_ROOM") {
-            for (slot, byte) in room.iter_mut().zip(code.to_ascii_uppercase().bytes()) {
-                *slot = byte;
-            }
-        }
         let secs_var = |name: &str| {
             std::env::var(name).ok().and_then(|v| v.parse::<f32>().ok())
         };
         Self {
             server: std::env::var("BS_CONNECT").unwrap_or_else(|_| "127.0.0.1:5001".into()),
-            room,
+            room: room_code_bytes(std::env::var("BS_ROOM").ok().as_deref().unwrap_or("")),
             launch_after: secs_var("BS_BOT_LAUNCH_SECS").filter(|s| *s >= 0.0),
-            run_secs: secs_var("BS_BOT_SECS").unwrap_or(0.0),
+            run_secs: secs_var("BS_BOT_SECS").filter(|s| *s > 0.0),
             ride: std::env::var("BS_BOT_RIDE").is_ok(),
         }
     }
@@ -160,7 +157,7 @@ fn write_input(
         // Once launch has been earned (see `send_launch`), just stand and ride —
         // the platform drifts in world space, so pre-boarding geometry is
         // meaningless after liftoff.
-        if config.ride && boarded.0 < 60 {
+        if config.ride && boarded.0 < BOARD_SETTLE_TICKS {
             if let Some(position) = position {
                 // `Position` is the capsule CENTRE (contact + 0.75): bowl floor
                 // ≈ -0.7, step top ≈ 0.1, platform top ≈ 2.1.
@@ -174,9 +171,21 @@ fn write_input(
                 let delta = target - pos;
                 let dist = Vec2::new(delta.x, delta.z).length();
                 if on_platform && dist < 0.45 {
-                    boarded.0 += 1; // stand at the centre; launch unlocks at 60 ticks
+                    boarded.0 += 1; // stand at the centre; launch unlocks at BOARD_SETTLE_TICKS
                 } else {
-                    input.yaw = f32::atan2(-delta.x, delta.z);
+                    let mut dir = Vec2::new(delta.x, delta.z).normalize_or_zero();
+                    // Ground approach must go AROUND the pad, never through it: a
+                    // character shoving a rocket at walk speed topples the whole
+                    // assembly (seen on the recorder: the stack ended upside down
+                    // 4 m away, then "launched" itself into the ground). Blend in
+                    // a radial repulsion from the pad while crossing its vicinity.
+                    if pos.y <= -0.3 && dist > 1.5 {
+                        let radial = Vec2::new(pos.x, pos.z);
+                        if radial.length() < 3.6 {
+                            dir = (dir + radial.normalize_or_zero() * 1.4).normalize_or_zero();
+                        }
+                    }
+                    input.yaw = f32::atan2(-dir.x, dir.y);
                     input.move_xz = [0.0, (dist / 2.0).clamp(0.2, 1.0)];
                     // Hop whenever climbing is called for: onto the step from the
                     // bowl, and from the step across+up onto the platform.
@@ -203,7 +212,7 @@ fn send_launch(
     let Some(after) = config.launch_after else {
         return;
     };
-    if *sent || time.elapsed_secs() < after || (config.ride && boarded.0 < 60) {
+    if *sent || time.elapsed_secs() < after || (config.ride && boarded.0 < BOARD_SETTLE_TICKS) {
         return;
     }
     for mut sender in &mut senders {
@@ -215,8 +224,11 @@ fn send_launch(
 
 /// Exit cleanly after the scripted run time (0 = run until killed).
 fn exit_when_done(time: Res<Time>, config: Res<BotConfig>, mut exit: MessageWriter<AppExit>) {
-    if config.run_secs > 0.0 && time.elapsed_secs() >= config.run_secs {
-        println!("[bot] run time reached ({:.0}s), exiting", config.run_secs);
+    let Some(run_secs) = config.run_secs else {
+        return;
+    };
+    if time.elapsed_secs() >= run_secs {
+        println!("[bot] run time reached ({run_secs:.0}s), exiting");
         exit.write(AppExit::Success);
     }
 }

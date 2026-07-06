@@ -17,7 +17,8 @@ use bad_spaceship_shared::character::{
     insert_character_body, CharacterMovement, Config as CharacterConfig,
 };
 use bad_spaceship_shared::net::{
-    apply_hold_spring, apply_net_input, focused_part, ClientPanicReport, ControlChannel,
+    apply_hold_spring, apply_net_input, focused_part, room_code_bytes, ClientPanicReport,
+    ControlChannel,
     NetCenterOfMass, NetFacing, NetHold, NetInput, NetJoint, NetPart, PartShape, take_rollback_diag,
     NetPlayer, ProtocolPlugin, RollbackReport, TelemetryChannel, GROUND_JOINT_ID, TICK,
 };
@@ -48,18 +49,6 @@ use std::net::SocketAddr;
 /// replicated world to it). Constant for the session.
 #[derive(Resource)]
 struct MyRoom([u8; 6]);
-
-/// Pack a lobby code into the fixed 6-byte field the server keys rooms by: the
-/// matchmaker hands out 6 uppercase chars, so uppercase, take up to 6 bytes,
-/// zero-pad. An empty code (no room / native loopback) maps to all-zero — the
-/// shared default room, so a roomless connect still works.
-fn room_code_bytes(code: &str) -> [u8; 6] {
-    let mut out = [0u8; 6];
-    for (slot, byte) in out.iter_mut().zip(code.to_ascii_uppercase().bytes()) {
-        *slot = byte;
-    }
-    out
-}
 
 /// The room code to report. Native reads `BS_ROOM`; wasm reads
 /// `window.__BS_NET__.room` (set by `play.html` from the `?room=` query param).

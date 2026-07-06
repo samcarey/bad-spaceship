@@ -58,6 +58,36 @@ pub struct AssemblySpin {
     pub inertia: f32,
 }
 
+/// Measure an assembly's mass-weighted COM + rotational state from `(position,
+/// angular_velocity, mass)` member samples — the **single** implementation every
+/// thrust site (server rooms, client single-player, client predicted multiplayer)
+/// feeds its ECS gathering into, so the trims they command can never drift apart.
+/// `None` when the samples carry no mass.
+///
+/// Takes a re-callable sample source and iterates it twice (COM first, then the
+/// inertia about it) instead of the one-pass parallel-axis form
+/// `Σm·|p|² − M·|com|²` — at high altitude that difference is catastrophic f32
+/// cancellation (|p| ~ 5e5 m while the true inertia arm is ~1 m), and rockets
+/// live at high altitude.
+pub fn measure_assembly_spin<I: Iterator<Item = (Vec3, Vec3, f32)>>(
+    samples: impl Fn() -> I,
+) -> Option<(Vec3, AssemblySpin)> {
+    let mut mass = 0.0;
+    let mut weighted_pos = Vec3::ZERO;
+    let mut weighted_ang = Vec3::ZERO;
+    for (position, angular, m) in samples() {
+        mass += m;
+        weighted_pos += position * m;
+        weighted_ang += angular * m;
+    }
+    if mass <= 0.0 {
+        return None;
+    }
+    let com = weighted_pos / mass;
+    let inertia = samples().map(|(position, _, m)| m * position.distance_squared(com)).sum();
+    Some((com, AssemblySpin { angular_velocity: weighted_ang / mass, inertia }))
+}
+
 /// Attitude-hold stiffness: restoring angular acceleration (rad/s²) per radian of
 /// net-thrust tilt away from world-up. With [`STABILITY_KD`] = 2·√KP the loop is
 /// critically damped — a disturbed assembly rights itself without overshoot.
@@ -125,11 +155,6 @@ pub fn balanced_assembly_thrust(
 /// this average throttle we boost the rockets back toward full. `0.85` = at most a 15%
 /// average-thrust sacrifice for balance before lift takes priority.
 const LIFT_FLOOR: f32 = 0.85;
-
-/// [`balanced_thrust_scales_toward`] a zero target: cancel the net thrust torque.
-pub fn balanced_thrust_scales(torques: &[Vec3]) -> Vec<f32> {
-    balanced_thrust_scales_toward(torques, Vec3::ZERO)
-}
 
 /// Per-rocket throttle factors `aᵢ ∈ [0, 1]` that steer an assembly's net thrust torque
 /// toward `target` (zero = just stop it spinning) without sacrificing so much thrust
@@ -214,7 +239,7 @@ mod tests {
     /// their torques cancel, so both fire at full.
     #[test]
     fn symmetric_pair_fires_full() {
-        let scales = balanced_thrust_scales(&[Vec3::new(0.0, 0.0, 1.0), Vec3::new(0.0, 0.0, -1.0)]);
+        let scales = balanced_thrust_scales_toward(&[Vec3::new(0.0, 0.0, 1.0), Vec3::new(0.0, 0.0, -1.0)], Vec3::ZERO);
         assert!(scales.iter().all(|&a| a > 0.99), "scales = {scales:?}");
     }
 
@@ -224,7 +249,7 @@ mod tests {
     /// with one off-centre rocket.)
     #[test]
     fn lone_offset_rocket_still_lifts() {
-        let scales = balanced_thrust_scales(&[Vec3::new(0.0, 0.0, 1.0)]);
+        let scales = balanced_thrust_scales_toward(&[Vec3::new(0.0, 0.0, 1.0)], Vec3::ZERO);
         assert!(scales[0] >= LIFT_FLOOR - 1e-6, "scales = {scales:?}");
     }
 
@@ -237,7 +262,7 @@ mod tests {
             vec![Vec3::new(2.0, 0.0, 0.0), Vec3::new(2.0, 1.0, 0.0)],
             vec![Vec3::new(0.0, 3.0, 0.0), Vec3::new(0.0, 3.0, 0.0), Vec3::new(0.0, -1.0, 0.0)],
         ] {
-            let scales = balanced_thrust_scales(&torques);
+            let scales = balanced_thrust_scales_toward(&torques, Vec3::ZERO);
             let mean = scales.iter().sum::<f32>() / scales.len() as f32;
             assert!(mean >= LIFT_FLOOR - 1e-6, "mean {mean} for {torques:?} -> {scales:?}");
         }
@@ -246,7 +271,7 @@ mod tests {
     /// Rockets whose thrust passes through the COM make no torque, so full throttle.
     #[test]
     fn zero_torque_fires_full() {
-        let scales = balanced_thrust_scales(&[Vec3::ZERO, Vec3::ZERO, Vec3::ZERO]);
+        let scales = balanced_thrust_scales_toward(&[Vec3::ZERO, Vec3::ZERO, Vec3::ZERO], Vec3::ZERO);
         assert!(scales.iter().all(|&a| (a - 1.0).abs() < 1e-6), "scales = {scales:?}");
     }
 

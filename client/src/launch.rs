@@ -22,7 +22,9 @@ use avian3d::prelude::{
     AngularVelocity, ComputedMass, Forces, Gravity, Position, Rotation, SphericalJoint,
     WriteRigidBodyForces,
 };
-use bad_spaceship_shared::launch::{balanced_assembly_thrust, AssemblySpin, LAUNCH_COUNTDOWN_SECS};
+use bad_spaceship_shared::launch::{
+    balanced_assembly_thrust, measure_assembly_spin, AssemblySpin, LAUNCH_COUNTDOWN_SECS,
+};
 use bad_spaceship_shared::net::{ControlChannel, InLargestAssembly, NetLaunch, NetPart, RequestLaunch};
 use bad_spaceship_shared::part::{Holdable, RocketEngine, SuppressLocalParts};
 use bad_spaceship_shared::Character;
@@ -165,30 +167,25 @@ fn apply_sp_thrust(
     if local.sp != SpPhase::Launched {
         return;
     }
-    let Some((members, com)) = main_assembly(&parts, &joints) else {
+    let Some((members, _)) = main_assembly(&parts, &joints) else {
         return;
     };
-    // The assembly's rotational state for the stability assist (see `AssemblySpin`).
-    let mut weighted_angular = Vec3::ZERO;
-    let mut mass = 0.0;
-    let mut inertia = 0.0;
-    {
+    // The assembly's COM + rotational state, via the shared measurement (see
+    // `measure_assembly_spin`) so the trim matches the server/MP paths exactly.
+    let Some((com, spin)) = ({
         let velocities = set.p0();
-        for (entity, transform, part_mass) in &parts {
-            if !members.contains(&entity) {
-                continue;
-            }
-            let m = part_mass.value();
-            let angular = velocities.get(entity).map(|w| w.0).unwrap_or_default();
-            weighted_angular += angular * m;
-            mass += m;
-            inertia += m * transform.translation().distance_squared(com);
-        }
-    }
-    if mass <= 0.0 {
+        let samples = || {
+            parts.iter().filter(|(entity, ..)| members.contains(entity)).map(
+                |(entity, transform, part_mass)| {
+                    let angular = velocities.get(entity).map(|w| w.0).unwrap_or_default();
+                    (transform.translation(), angular, part_mass.value())
+                },
+            )
+        };
+        measure_assembly_spin(samples)
+    }) else {
         return;
-    }
-    let spin = AssemblySpin { angular_velocity: weighted_angular / mass, inertia };
+    };
     let geometry: Vec<(Entity, Vec3, Quat)> = rockets
         .iter()
         .filter(|(entity, _)| members.contains(entity))
@@ -220,24 +217,27 @@ fn apply_mp_thrust(
     if !orb.iter().next().is_some_and(|l| l.launched) {
         return;
     }
-    // Snapshot the members (pose, spin, mass, rocket poses) in one pass.
-    let mut sampled: Vec<(Vec3, Vec3, f32)> = Vec::new();
-    let mut geometry: Vec<(Entity, Vec3, Quat)> = Vec::new();
-    for (entity, position, rotation, angular, part_mass, is_rocket) in &set.p0() {
-        sampled.push((position.0, angular.0, part_mass.value()));
-        if is_rocket {
-            geometry.push((entity, position.0, rotation.0));
-        }
-    }
-    let mass: f32 = sampled.iter().map(|(_, _, m)| m).sum();
-    if mass <= 0.0 {
+    // The assembly's COM + rotational state, via the shared measurement (see
+    // `measure_assembly_spin`) so the trim matches the server exactly; collect
+    // the member rockets' poses alongside.
+    let (measured, geometry) = {
+        let members = set.p0();
+        let samples = || {
+            members
+                .iter()
+                .map(|(_, position, _, angular, part_mass, _)| {
+                    (position.0, angular.0, part_mass.value())
+                })
+        };
+        let geometry: Vec<(Entity, Vec3, Quat)> = members
+            .iter()
+            .filter(|(.., is_rocket)| *is_rocket)
+            .map(|(entity, position, rotation, ..)| (entity, position.0, rotation.0))
+            .collect();
+        (measure_assembly_spin(samples), geometry)
+    };
+    let Some((com, spin)) = measured else {
         return;
-    }
-    let com = sampled.iter().map(|(p, _, m)| *p * *m).sum::<Vec3>() / mass;
-    let spin = AssemblySpin {
-        angular_velocity: sampled.iter().map(|(_, w, m)| *w * *m).sum::<Vec3>() / mass,
-        // Point-mass inertia proxy for the stability assist (see `AssemblySpin`).
-        inertia: sampled.iter().map(|(p, _, m)| m * p.distance_squared(com)).sum(),
     };
     apply_thrust(com, gravity.0, &geometry, &spin, &mut set.p1());
 }

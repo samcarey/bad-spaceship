@@ -31,12 +31,19 @@ impl Plugin for PartPlugin {
             (spawn_initial_parts, spawn_initial_rocket_engines)
                 .run_if(not(resource_exists::<SuppressLocalParts>)),
         )
+            // Recycling runs in `FixedUpdate`, not `Update`: it also catches parts
+            // whose state diverged (see `part_state_diverged`), which must be
+            // despawned before the *next* physics step — Avian's broadphase asserts
+            // on a NaN AABB. `FixedUpdate` precedes the step every tick, while an
+            // `Update` system can be skipped between two back-to-back fixed steps.
+            .add_systems(
+                FixedUpdate,
+                (replace_fallen_parts, replace_fallen_rocket_engines)
+                    .run_if(not(resource_exists::<SuppressLocalParts>)),
+            )
             .add_systems(
                 Update,
                 (
-                    replace_fallen_parts.run_if(not(resource_exists::<SuppressLocalParts>)),
-                    replace_fallen_rocket_engines
-                        .run_if(not(resource_exists::<SuppressLocalParts>)),
                     // Single-player focus. MUST be off in multiplayer: with zero
                     // `Interactable` entities there (replicated parts are `Holdable`
                     // only) it unconditionally clears `FocusedInteractable` every
@@ -141,7 +148,26 @@ pub const ROCKET_VOLUME: f32 = std::f32::consts::PI
         / 3.0;
 
 /// Below this Y a part/rocket has fallen off the platform and is recycled.
-const PART_FALL_Y: f32 = -10.0;
+/// `pub` so the multiplayer server's per-room recycler uses the same threshold.
+pub const PART_FALL_Y: f32 = -10.0;
+
+/// Whether a part's simulation state has *diverged* — non-finite or absurd
+/// position/velocity from an exploding constraint solve (observed with a jointed
+/// rocket assembly at extreme altitude, where f32 resolution starves the solver).
+/// A NaN position panics Avian's next broadphase (`assertion failed:
+/// b.min.cmple(b.max)`) and takes the whole app down, so recyclers check this
+/// every tick *before* the physics step. The bounds are far beyond anything
+/// legitimate play produces (the fastest verified healthy state is a rocket
+/// ascent at ~3 km/s; nothing recoverable spins at 1000 rad/s or sits 1000 km
+/// from a 50 m map).
+pub fn part_state_diverged(position: Vec3, linear: Vec3, angular: Vec3) -> bool {
+    !position.is_finite()
+        || !linear.is_finite()
+        || !angular.is_finite()
+        || position.length_squared() > 1.0e12 // |pos| > 1000 km
+        || linear.length_squared() > 1.0e10 // |v| > 100 km/s
+        || angular.length_squared() > 1.0e6 // |w| > 1000 rad/s
+}
 
 #[derive(Default, Component)]
 struct Interactable;
@@ -431,16 +457,24 @@ fn spawn_initial_rocket_engines(mut commands: Commands) {
     }
 }
 
-/// A rocket engine that falls off the platform is despawned and a fresh one
-/// dropped back in — the rocket-engine counterpart to `replace_fallen_parts`
-/// (rockets carry no `GetsReplaced`, since that path respawns a *cuboid*).
+/// Whether this part should be recycled: fallen off the platform, or its state
+/// diverged (see `part_state_diverged` — recycling before the next physics step
+/// is what keeps a solver explosion from panicking Avian's broadphase).
+fn needs_recycle(position: &Position, linear: &LinearVelocity, angular: &AngularVelocity) -> bool {
+    position.0.y < PART_FALL_Y || part_state_diverged(position.0, linear.0, angular.0)
+}
+
+/// A rocket engine that falls off the platform (or diverges) is despawned and a
+/// fresh one dropped back in — the rocket-engine counterpart to
+/// `replace_fallen_parts` (rockets carry no `GetsReplaced`, since that path
+/// respawns a *cuboid*).
 fn replace_fallen_rocket_engines(
     mut commands: Commands,
-    rockets: Query<(&Transform, Entity), With<RocketEngine>>,
+    rockets: Query<(&Position, &LinearVelocity, &AngularVelocity, Entity), With<RocketEngine>>,
 ) {
     let mut rng = rand::thread_rng();
-    for (transform, entity) in rockets.iter() {
-        if transform.translation.y < PART_FALL_Y {
+    for (position, linear, angular, entity) in rockets.iter() {
+        if needs_recycle(position, linear, angular) {
             commands.entity(entity).despawn();
             spawn_rocket_engine(&mut commands, random_rocket_spawn(&mut rng));
         }
@@ -449,11 +483,11 @@ fn replace_fallen_rocket_engines(
 
 fn replace_fallen_parts(
     mut commands: Commands,
-    parts: Query<(&Transform, Entity), With<GetsReplaced>>,
+    parts: Query<(&Position, &LinearVelocity, &AngularVelocity, Entity), With<GetsReplaced>>,
     mut new_part_events: MessageWriter<NewPart>,
 ) {
-    for (transform, entity) in parts.iter() {
-        if transform.translation.y < PART_FALL_Y {
+    for (position, linear, angular, entity) in parts.iter() {
+        if needs_recycle(position, linear, angular) {
             commands.entity(entity).despawn();
             new_part_events.write(NewPart);
         }
