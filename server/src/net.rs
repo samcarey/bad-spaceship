@@ -344,13 +344,16 @@ impl Plugin for NetServerPlugin {
         // to stream per-frame.
         app.add_systems(
             Update,
-            (
-                replace_fallen_room_parts,
-                sync_avatar_facing,
-                sync_net_hold,
-                update_assembly_center_of_mass,
-            ),
+            (sync_avatar_facing, sync_net_hold, update_assembly_center_of_mass),
         );
+        // Part recycling runs in `FixedUpdate`, NOT `Update`: it also catches parts
+        // whose state went non-finite / absurd (a diverging constraint solve), and
+        // those MUST be despawned before the *next* Avian step — its broadphase
+        // asserts on a NaN AABB and panics the whole server. `FixedUpdate` precedes
+        // the physics step (`FixedPostUpdate`) on every tick, while an `Update`
+        // system can be skipped between two back-to-back fixed steps in a lagging
+        // frame — exactly when an explosion is underway.
+        app.add_systems(FixedUpdate, replace_fallen_room_parts);
         // Assign each client (and its avatar) to its reported room on the first
         // input, lazily creating the room's world, and apply client rename +
         // avatar-pick + reset-position requests.
@@ -1167,12 +1170,34 @@ fn sync_net_hold(
 /// stocked (the server's per-room equivalent of single-player's
 /// `replace_fallen_parts`, which is suppressed here). The replacement re-joins
 /// the same room and collision layer.
+///
+/// Also recycles parts whose simulation state has *diverged* — non-finite or
+/// absurd position/velocity from an exploding constraint solve (observed with a
+/// jointed rocket assembly past ~14 km, where f32 resolution starves the solver).
+/// A NaN position panics Avian's next broadphase (`assertion failed:
+/// b.min.cmple(b.max)`) and kills the server for every room, so divergence is
+/// caught here, one tick ahead, and the part is recycled like a fallen one. The
+/// bounds are far beyond anything legitimate play produces (the fastest verified
+/// healthy state is a rocket ascent at ~600 m/s; nothing recoverable spins at
+/// 1000 rad/s or sits 1000 km from a 50 m map).
 fn replace_fallen_room_parts(
     mut commands: Commands,
-    parts: Query<(Entity, &Transform, &PartRoom, &NetPart)>,
+    parts: Query<(Entity, &Position, &LinearVelocity, &AngularVelocity, &PartRoom, &NetPart)>,
 ) {
-    for (entity, transform, part_room, part) in &parts {
-        if transform.translation.y < -10.0 {
+    for (entity, position, linear, angular, part_room, part) in &parts {
+        let diverged = !position.0.is_finite()
+            || !linear.0.is_finite()
+            || !angular.0.is_finite()
+            || position.0.length_squared() > 1.0e12 // |pos| > 1000 km
+            || linear.0.length_squared() > 1.0e10 // |v| > 100 km/s
+            || angular.0.length_squared() > 1.0e6; // |w| > 1000 rad/s
+        if diverged {
+            println!(
+                "[part] recycling diverged part (pos {:?}, v {:?}, w {:?})",
+                position.0, linear.0, angular.0
+            );
+        }
+        if position.0.y < -10.0 || diverged {
             commands.entity(entity).despawn();
             let room = Room { id: part_room.id, bit: part_room.bit };
             // Respawn the same kind that fell so the pool's composition is stable.

@@ -1,0 +1,26 @@
+[package]
+name = "bad-spaceship-bot"
+version = "0.1.0"
+edition = "2021"
+
+# Headless test client ("bot"): connects to the multiplayer server like a real
+# player — same protocol, same input channel — but with no rendering, window, or
+# assets, so a full server+client session can run unattended (CI, physics
+# verification against the flight recorder, load scripts). See src/main.rs.
+
+[dependencies]
+bad-spaceship-shared = { path = "../shared" }
+bevy = { workspace = true, features = ["bevy_state"] }
+# The client-role lightyear feature set (mirrors client/Cargo.toml minus
+# `frame_interpolation`, which only smooths rendering).
+lightyear = { workspace = true, features = [
+    "client",
+    "replication",
+    "prediction",
+    "interpolation",
+    "websocket",
+    "netcode",
+    "std",
+    "input_native",
+] }
+rand = "0.8"

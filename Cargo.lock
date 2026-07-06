@@ -621,6 +621,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "be5eb007b7cacc6c660343e96f650fedf4b5a77512399eb952ca6642cf8d13f7"
 
 [[package]]
+name = "bad-spaceship-bot"
+version = "0.1.0"
+dependencies = [
+ "bad-spaceship-shared",
+ "bevy",
+ "lightyear",
+ "rand 0.8.6",
+]
+
+[[package]]
 name = "bad-spaceship-buoyancy"
 version = "0.1.0"
 dependencies = [
