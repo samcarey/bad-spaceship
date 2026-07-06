@@ -1176,6 +1176,14 @@ fps-dependent). Key facts that shaped the design:
   `Update` guard can be skipped between back-to-back fixed steps) and also recycle on the
   shared `part_state_diverged` predicate (`shared/src/part.rs`: non-finite, |pos| > 1000 km,
   |v| > 100 km/s, |ω| > 1000 rad/s).
+- **Riders on moving platforms (support velocity).** The character tracks what it stands on
+  (`GroundVelocity`, captured from the ground contact in `touching_ground`): jump is
+  `support_vy + jump_force` and the walk models measure their horizontal target *relative
+  to the support*. A world-frame `vy = jump_force` on a platform ascending at 120 m/s
+  clamped the rider ~112 m/s slower than their ride — one hop and the rocket blasted past
+  them (the first real-human ride found this; bot riders never jumped). Airborne/static
+  ground behave exactly as before (support = zero). Jumping toward the deck edge still
+  carries you overboard — correct physics, ~4.5 m of relative drift per hop.
 - **Headless bot (`bot/` crate).** A real lightyear client on `MinimalPlugins` — no window,
   assets, or physics — for unattended server+client sessions: joins a room by code (which
   creates it server-side, consuming a staged `pending-<CODE>.json` and arming the
@@ -1183,7 +1191,10 @@ fps-dependent). Key facts that shaped the design:
   exits after `BS_BOT_SECS`. `BS_BOT_RIDE` runs a tiny autopilot that walks its avatar onto
   the "Rocket Ride" save's platform (via the step block) and gates the launch on being
   aboard — a real character contact riding the ascent, verified from the recorder, no
-  screen anywhere. Gotcha: room codes are exactly ≤ 6 bytes (`room_code_bytes`, now in
+  screen anywhere. `BS_BOT_WANDER` strolls around the deck mid-flight; `BS_BOT_JUMPY` hops
+  near the deck centre (a human rider's weight-shifting + jumping); `BS_BOT_RESUME_ID`
+  exercises the session-resume path (token `user_data` + `NetInput`, like the real client).
+  Gotcha: room codes are exactly ≤ 6 bytes (`room_code_bytes`, now in
   `shared/src/net.rs`) — a 7-char `BS_ROOM` silently truncates and joins/creates the wrong
   room (and misses its pending save).
 
@@ -1329,7 +1340,13 @@ background.)
   is the saved one, with **no origin→saved ease** (resolving at first-input instead caused a
   visible slide from the map center, since the origin pose replicated ~1 RTT before the
   resume). The recorder also keys off a copy of `resume_id` that rides each `NetInput` (it
-  needs the id on the avatar, not the connection entity).
+  needs the id on the avatar, not the connection entity). **Resume is room-scoped**: the
+  record carries the room code it was written in, and `assign_rooms` *revokes* the
+  optimistic connect-time restore when the first input reveals a different room (drops the
+  pending `InitialPose`, teleports an already-built body to a fresh spawn). Without this,
+  loading a fresh save — which always creates a NEW room — teleported the player to
+  wherever they last were in the old room (e.g. falling mid-air at 12 km after a rocket
+  ride). Same-room reload keeps the no-slide connect-time restore.
 - **Camera look** (yaw + pitch) is client-owned, so it's saved to `sessionStorage` each frame
   (`write_look_beacon`, `web.rs`) and restored on boot (`read_resume_look` → applied once in
   `setup_predicted_avatar`). `sessionStorage` survives `location.reload()`.

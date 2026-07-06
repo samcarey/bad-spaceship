@@ -32,8 +32,8 @@
 
 use avian3d::prelude::Position;
 use bad_spaceship_shared::net::{
-    room_code_bytes, ControlChannel, NetInput, NetPart, NetPlayer, PartShape, ProtocolPlugin,
-    RequestLaunch, BS_PROTOCOL_ID, TICK,
+    resume_user_data, room_code_bytes, ControlChannel, NetInput, NetPart, NetPlayer, PartShape,
+    ProtocolPlugin, RequestLaunch, BS_PROTOCOL_ID, TICK,
 };
 use bevy::{app::ScheduleRunnerPlugin, prelude::*};
 use lightyear::netcode::ConnectToken;
@@ -120,8 +120,7 @@ fn connect(mut commands: Commands, config: Res<BotConfig>) {
         config.server.parse().unwrap_or_else(|e| panic!("BS_CONNECT '{}': {e}", config.server));
     // The resume id rides in the token's user_data, exactly like the real client
     // (the server reads it at connect to restore a remembered position).
-    let mut user_data = [0u8; 256];
-    user_data[..8].copy_from_slice(&config.resume_id.to_le_bytes());
+    let user_data = resume_user_data(config.resume_id);
     let token = ConnectToken::build(server_addr, BS_PROTOCOL_ID, rand::random::<u64>(), [0u8; 32])
         .timeout_seconds(3)
         .expire_seconds(30)
@@ -187,32 +186,29 @@ fn write_input(
         // (the platform's world position moves, so waypoints are computed off
         // its replicated `Position` each tick). Deterministic golden-angle
         // waypoints, changed every 1.5 s, radius alternating mid/edge.
-        if config.ride && boarded.0 >= BOARD_SETTLE_TICKS {
-            if config.wander {
-                if let (Some(position), Some(plat)) = (position, platform_xz(&parts)) {
-                    *wander_tick += 1;
-                    let phase = *wander_tick / 90;
-                    let angle = phase as f32 * 2.399963; // golden angle
-                    let radius = if phase % 2 == 0 { 0.4 } else { 0.9 };
-                    let target = plat + radius * Vec2::new(angle.cos(), angle.sin());
-                    let delta = target - Vec2::new(position.0.x, position.0.z);
-                    if delta.length() > 0.2 {
-                        let dir = delta.normalize_or_zero();
-                        input.yaw = f32::atan2(-dir.x, dir.y);
-                        input.move_xz = [0.0, (delta.length() * 1.5).clamp(0.2, 0.6)];
-                    }
-                    // A real rider WILL hit jump mid-ascent: hop for a few ticks
-                    // every ~4.5 s — but only near the deck centre. Jumping while
-                    // walking toward the edge drifts you overboard mid-air (~4.5 m
-                    // of relative drift per hop vs a 1.6 m half-width deck), which
-                    // is correct physics, not the regression under test.
-                    let near_center = (Vec2::new(position.0.x, position.0.z) - plat)
-                        .length()
-                        < 0.7;
-                    input.jump = config.jumpy && near_center && *wander_tick % 270 < 8;
+        if config.ride && config.wander && boarded.0 >= BOARD_SETTLE_TICKS {
+            if let (Some(position), Some(plat)) = (position, platform_xz(&parts)) {
+                *wander_tick += 1;
+                let phase = *wander_tick / 90;
+                let angle = phase as f32 * 2.399963; // golden angle
+                let radius = if phase % 2 == 0 { 0.4 } else { 0.9 };
+                let target = plat + radius * Vec2::new(angle.cos(), angle.sin());
+                let delta = target - Vec2::new(position.0.x, position.0.z);
+                if delta.length() > 0.2 {
+                    let dir = delta.normalize_or_zero();
+                    input.yaw = f32::atan2(-dir.x, dir.y);
+                    input.move_xz = [0.0, (delta.length() * 1.5).clamp(0.2, 0.6)];
                 }
+                // A real rider WILL hit jump mid-ascent: hop for a few ticks
+                // every ~4.5 s — but only near the deck centre. Jumping while
+                // walking toward the edge drifts you overboard mid-air (~4.5 m
+                // of relative drift per hop vs a 1.6 m half-width deck), which
+                // is correct physics, not the regression under test.
+                let near_center =
+                    (Vec2::new(position.0.x, position.0.z) - plat).length() < 0.7;
+                input.jump = config.jumpy && near_center && *wander_tick % 270 < 8;
             }
-        } else if config.ride {
+        } else if config.ride && boarded.0 < BOARD_SETTLE_TICKS {
             if let Some(position) = position {
                 // `Position` is the capsule CENTRE (contact + 0.75): bowl floor
                 // ≈ -0.7, step top ≈ 0.1, platform top ≈ 2.1.

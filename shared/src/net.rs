@@ -95,6 +95,21 @@ pub fn room_code_bytes(code: &str) -> [u8; 6] {
     out
 }
 
+/// Pack a persistent resume id into a netcode connect-token `user_data` block
+/// (little-endian u64 at offset 0), and read it back out. The one definition of
+/// the wire layout shared by every writer (game client, headless bot) and the
+/// server's connect-time reader — change it here or nowhere.
+pub fn resume_user_data(resume_id: u64) -> [u8; 256] {
+    let mut out = [0u8; 256];
+    out[..8].copy_from_slice(&resume_id.to_le_bytes());
+    out
+}
+
+/// See [`resume_user_data`].
+pub fn resume_id_from_user_data(user_data: &[u8; 256]) -> u64 {
+    u64::from_le_bytes(user_data[..8].try_into().unwrap())
+}
+
 /// Per-tick client → server **input intent** (not pose). The server runs the
 /// authoritative character simulation from this intent (move direction, jump,
 /// look angle), so the world is server-authoritative and — once client-side

@@ -276,6 +276,15 @@ pub fn insert_character_body(entity: &mut EntityCommands, size: f32) {
         // (Avian's `capsule` takes the radius and the cylindrical mid-section
         // length, not the total height.)
         Collider::capsule(size / 3.0, size / 3.0),
+        // NO `SweptCcd` here, deliberately (the parts carry it; the character must
+        // not): sweeping a body in *persistent contact* with a fast co-moving
+        // platform (riding a rocket at 100+ m/s) occasionally clamps it to a stale
+        // TOI while the platform advances a full ~2 m tick-step, manufacturing a
+        // huge synthetic overlap — measured as a +234 m/s ejection one tick after
+        // a perfectly soft landing. Without CCD, jump landings can penetrate a few
+        // cm and very rarely buck the rider (~+20 m/s once per many hops); with
+        // it, even standing riders get launched. The lesser evil, verified both
+        // ways with the recorder.
         // Pin mass to 1.0; movement sets velocity directly so this only scales how
         // the character shoves parts on contact.
         Mass(1.0),
@@ -489,12 +498,9 @@ fn walk_based_on_input(
         // Walk *relative to the support*: on a moving platform the target speed is
         // measured against the platform, not the world, so standing still on a
         // drifting rocket doesn't read as "moving" (and get braked against it).
-        // Zero when airborne or on static ground — identical to the old behaviour.
-        let support = if grounded {
-            Vec3::new(ground_velocity.0.x, 0.0, ground_velocity.0.z)
-        } else {
-            Vec3::ZERO
-        };
+        // `GroundVelocity` is zero whenever airborne or on static ground
+        // (`touching_ground` clears it), so those behave exactly as before.
+        let support = Vec3::new(ground_velocity.0.x, 0.0, ground_velocity.0.z);
         let horizontal = Vec3::new(velocity.0.x, 0.0, velocity.0.z) - support;
 
         let new_horizontal = match tuning.model {

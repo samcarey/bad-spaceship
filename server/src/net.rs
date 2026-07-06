@@ -542,8 +542,13 @@ fn assign_rooms(
     // within its room.
     named: Query<(&NetName, &RoomMember)>,
     // For revoking a cross-room resume position (see `ResumeRoom`): teleport the
-    // already-built body back to a fresh spawn.
-    mut bodies: Query<(&mut Position, &mut LinearVelocity, &mut AngularVelocity)>,
+    // already-built body back to a fresh spawn. Scoped to avatars so this system
+    // doesn't declare conflicting access to every rigid body's pose (which would
+    // serialize it against the physics-adjacent systems every tick).
+    mut bodies: Query<
+        (&mut Position, &mut LinearVelocity, &mut AngularVelocity),
+        With<ServerAvatar>,
+    >,
 ) {
     // The `players` query is `Without<RoomMember>`, so on the vast majority of ticks
     // nobody is joining — skip the whole name-bookkeeping scan then.
@@ -1867,7 +1872,7 @@ fn spawn_player_for_client(
     let rid = tokens
         .get(client)
         .ok()
-        .map(|t| u64::from_le_bytes(t.0[..8].try_into().unwrap()))
+        .map(|t| bad_spaceship_shared::net::resume_id_from_user_data(&t.0))
         .unwrap_or(0);
     let resume_pos = (rid != 0)
         .then(|| {
