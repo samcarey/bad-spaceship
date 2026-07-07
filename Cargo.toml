@@ -79,3 +79,15 @@ opt-level = "z"
 lto = "fat"
 strip = true
 panic = "abort"
+
+# avian3d 0.7.0 + the tolerant-island patch (samcarey/avian fork of Jondolf/avian
+# at the v0.7.0 tag). Avian's island manager panicked on a dangling contact link
+# — `remove_contact` unwrapping a neighbor edge that was already removed from the
+# contact graph (armed when `JointCollisionDisabled` lands on a pair that already
+# has a live contact, which the multiplayer client can't avoid: replication
+# delivers parts before their joints). On Wasm (panic=abort) that froze the whole
+# game seconds after standing on a clamped rocket pad — 100% reproducible on
+# WebKit via headless Playwright. Drop this patch when upstream fixes it
+# (Jondolf/avian#950 family).
+[patch.crates-io]
+avian3d = { git = "https://github.com/samcarey/avian", rev = "e87387c9540ad4fb8567ccf5d2ad144c204c419e" }
