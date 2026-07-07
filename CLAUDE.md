@@ -1169,6 +1169,25 @@ fps-dependent). Key facts that shaped the design:
   debug build): unmanned ascent to ~524 km @ 3.4 km/s; with a rider aboard ~33 km @
   0.8 km/s, dead straight (|ω| < 0.01 rad/s) — the ceiling in each case is f32 ULP
   starving the joint/contact solve, which brings down the next point.
+- **Thrust vectoring (gimballed nozzles).** Each rocket carries a `Gimbal` component
+  (`shared/src/part.rs`, inserted by `insert_rocket_physics` so SP, server, and
+  client-predicted rockets all have it): a local-frame nozzle tilt vector, ≤ 15°
+  (`GIMBAL_MAX_RAD`), slewing at 120°/s (`GIMBAL_RATE_RAD`) via the shared
+  `gimbal_step`. `balanced_assembly_thrust` now returns per-rocket `throttle` +
+  `desired_gimbal`; each thrust site slews the component toward the command and
+  applies the deflected force (`gimbaled_rocket_thrust`). The command is
+  **incremental** (current deflection + correction for the torque missing from the
+  *actually applied* thrust) — the nozzle is the loop's integrator, so a steady
+  external torque (a rider standing off-centre) is absorbed by a held deflection with
+  zero steady tilt. A *positional* command (recomputed from nominal thrust) needs a
+  standing attitude error `e = τ/(KP·I)` — on a one-rocket stack (I ≈ 2 kg·m²) that
+  was ~30° of heel and it fell over. TVC cannot make roll (torque ∥ the lever arm):
+  a lone rocket slowly rolls up (~1 rad/s) from solver noise, harmlessly — attitude
+  holds within ~2°. This is what lets 1–2-rocket assemblies (zero/one-axis throttle
+  authority) climb straight: recorder-verified 234 km (single, unmanned), and
+  standing riders get level rides to the ~10–20 km rider-contact f32 wall. Gimbal
+  state is deliberately NOT replicated or saved — each side integrates the same law
+  from the same measured state (like the throttle trim), and it starts at zero.
 - **Divergence guard (NaN kills the whole app).** A blown constraint solve drives a part's
   state to NaN, and Avian's next broadphase *asserts* (`b.min.cmple(b.max)`) — panicking
   the entire server (every room) or the SP client. All part recyclers (`replace_fallen_*`

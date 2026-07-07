@@ -187,11 +187,17 @@ fn write_input(
         // its replicated `Position` each tick). Deterministic golden-angle
         // waypoints, changed every 1.5 s, radius alternating mid/edge.
         if config.ride && config.wander && boarded.0 >= BOARD_SETTLE_TICKS {
-            if let (Some(position), Some(plat)) = (position, platform_xz(&parts)) {
+            if let (Some(position), Some((plat, half))) = (position, platform_xz(&parts)) {
                 *wander_tick += 1;
                 let phase = *wander_tick / 90;
                 let angle = phase as f32 * 2.399963; // golden angle
-                let radius = if phase % 2 == 0 { 0.4 } else { 0.9 };
+                // Scale the stroll to the deck: the edge waypoint keeps ~0.45 m
+                // (the capsule + a step) inside the deck's short half-width,
+                // capped at the 0.9 m the big 4-rocket deck was tuned with —
+                // on a small 1-2-rocket deck the old fixed 0.9 walked the
+                // rider clean off the edge at blastoff.
+                let edge = (half.min_element() - 0.45).clamp(0.15, 0.9);
+                let radius = if phase % 2 == 0 { (edge * 0.5).min(0.4) } else { edge };
                 let target = plat + radius * Vec2::new(angle.cos(), angle.sin());
                 let delta = target - Vec2::new(position.0.x, position.0.z);
                 if delta.length() > 0.2 {
@@ -204,8 +210,8 @@ fn write_input(
                 // walking toward the edge drifts you overboard mid-air (~4.5 m
                 // of relative drift per hop vs a 1.6 m half-width deck), which
                 // is correct physics, not the regression under test.
-                let near_center =
-                    (Vec2::new(position.0.x, position.0.z) - plat).length() < 0.7;
+                let near_center = (Vec2::new(position.0.x, position.0.z) - plat).length()
+                    < (edge * 0.8).min(0.7);
                 input.jump = config.jumpy && near_center && *wander_tick % 270 < 8;
             }
         } else if config.ride && boarded.0 < BOARD_SETTLE_TICKS {
@@ -249,21 +255,23 @@ fn write_input(
     }
 }
 
-/// The platform's replicated world XZ: the largest-footprint cuboid in view (the
-/// platform dwarfs the step block and any loose cubes).
+/// The platform's replicated world XZ + its XZ half-extents: the largest-footprint
+/// cuboid in view (the platform dwarfs the step block and any loose cubes).
 fn platform_xz(
     parts: &Query<(&NetPart, &Position), (With<Predicted>, Without<InputMarker<NetInput>>)>,
-) -> Option<Vec2> {
+) -> Option<(Vec2, Vec2)> {
     parts
         .iter()
         .filter_map(|(part, position)| match part.shape {
-            PartShape::Cuboid { half_extents } => {
-                Some((half_extents[0] * half_extents[2], position.0))
-            }
+            PartShape::Cuboid { half_extents } => Some((
+                half_extents[0] * half_extents[2],
+                position.0,
+                Vec2::new(half_extents[0], half_extents[2]),
+            )),
             PartShape::RocketEngine => None,
         })
         .max_by(|a, b| a.0.total_cmp(&b.0))
-        .map(|(_, p)| Vec2::new(p.x, p.z))
+        .map(|(_, p, half)| (Vec2::new(p.x, p.z), half))
 }
 
 /// One-shot `RequestLaunch` once the scripted delay elapses — the headless twin

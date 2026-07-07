@@ -26,9 +26,7 @@ use avian3d::prelude::{
     Gravity, LinearVelocity, Position, Rotation, SphericalJoint, WriteRigidBodyForces,
 };
 use bad_spaceship_shared::assembly::largest_assembly_per_room;
-use bad_spaceship_shared::launch::{
-    balanced_assembly_thrust, measure_assembly_spin, LAUNCH_COUNTDOWN_SECS,
-};
+use bad_spaceship_shared::launch::{assembly_burn, measure_assembly_spin, LAUNCH_COUNTDOWN_SECS};
 use bad_spaceship_shared::character::{spawn_position, CharacterMovement, InitialPose, ServerAvatar};
 use bad_spaceship_shared::net::{
     apply_hold_spring, apply_net_input, focused_part, monster_index, sanitize_name,
@@ -39,7 +37,7 @@ use bad_spaceship_shared::net::{
 use bad_spaceship_shared::map::GROUND_LAYER;
 use bad_spaceship_shared::part::{
     local_contact_anchor, part_state_diverged, spawn_random_part, spawn_random_rocket,
-    spawn_rocket_engine, spawn_saved_cuboid, RocketEngine, SuppressLocalParts, DELETE_RADIUS,
+    spawn_rocket_engine, spawn_saved_cuboid, Gimbal, RocketEngine, SuppressLocalParts, DELETE_RADIUS,
     NUM_PARTS, NUM_ROCKET_ENGINES, PART_FALL_Y, ROCKET_VOLUME,
 };
 use bad_spaceship_shared::{Grass, SuppressLocalPlayer, Yaw};
@@ -1447,36 +1445,42 @@ fn publish_room_launch(registry: Res<LaunchRegistry>, mut orbs: Query<(&OrbRoom,
 /// from its members and the balanced per-rocket forces via the shared
 /// `balanced_assembly_thrust` (whose PD stability assist needs the spin measurement).
 fn apply_room_rocket_thrust(
+    time: Res<Time>,
     registry: Res<LaunchRegistry>,
     gravity: Res<Gravity>,
-    rocket_geometry: Query<
-        (Entity, &Position, &Rotation, &PartRoom),
-        (With<InLargestAssembly>, With<RocketEngine>),
-    >,
-    // `Forces` takes `AngularVelocity` mutably inside, so the member read and the
-    // force write cannot coexist as sibling queries (B0001) — sequence them.
+    // `Forces` takes `AngularVelocity` mutably inside (and writes each rocket's
+    // `Gimbal` the geometry pass reads), so the member/geometry reads and the force
+    // write cannot coexist as sibling queries (B0001) — sequence them.
     mut set: ParamSet<(
+        Query<
+            (Entity, &Position, &Rotation, &PartRoom, &Gimbal),
+            (With<InLargestAssembly>, With<RocketEngine>),
+        >,
         Query<(&Position, &AngularVelocity, &ComputedMass, &PartRoom), With<InLargestAssembly>>,
-        Query<(Entity, Forces), With<RocketEngine>>,
+        Query<(Entity, Forces, &mut Gimbal), With<RocketEngine>>,
     )>,
 ) {
     // Group launched rooms' member rockets by room.
-    let mut per_room: HashMap<RoomId, Vec<(Entity, Vec3, Quat)>> = HashMap::new();
-    for (entity, position, rotation, room) in &rocket_geometry {
+    let mut per_room: HashMap<RoomId, Vec<(Entity, Vec3, Quat, Vec2)>> = HashMap::new();
+    for (entity, position, rotation, room, gimbal) in &set.p0() {
         if registry.is_launched(room.id) {
-            per_room.entry(room.id).or_default().push((entity, position.0, rotation.0));
+            per_room
+                .entry(room.id)
+                .or_default()
+                .push((entity, position.0, rotation.0, gimbal.0));
         }
     }
     if per_room.is_empty() {
         return;
     }
 
-    // Balanced thrust per room → (force, point) per rocket entity. The COM +
-    // rotational state come from the shared `measure_assembly_spin` (the same
-    // measurement the client's predicted twin makes, from the same `ComputedMass`).
-    let mut to_apply: HashMap<Entity, (Vec3, Vec3)> = HashMap::new();
+    // Resolve each room's burn (shared `assembly_burn`, so the client's predicted twin
+    // computes the identical trims + gimbal slews). The COM + rotational state come
+    // from the shared `measure_assembly_spin`, over the same `ComputedMass`.
+    let dt = time.delta_secs();
+    let mut burns = Vec::new();
     {
-        let members = set.p0();
+        let members = set.p1();
         for (room, rockets) in &per_room {
             let samples = || {
                 members
@@ -1487,14 +1491,14 @@ fn apply_room_rocket_thrust(
             let Some((com, spin)) = measure_assembly_spin(samples) else {
                 continue;
             };
-            for thrust in balanced_assembly_thrust(com, gravity.0, rockets, &spin) {
-                to_apply.insert(thrust.entity, (thrust.force, thrust.point));
-            }
+            burns.extend(assembly_burn(com, gravity.0, dt, rockets, &spin));
         }
     }
-    for (entity, mut forces) in &mut set.p1() {
-        if let Some((force, point)) = to_apply.get(&entity) {
-            forces.apply_force_at_point(*force, *point);
+    let mut rockets = set.p2();
+    for burn in burns {
+        if let Ok((_, mut forces, mut gimbal)) = rockets.get_mut(burn.entity) {
+            gimbal.0 = burn.gimbal;
+            forces.apply_force_at_point(burn.force, burn.point);
         }
     }
 }
