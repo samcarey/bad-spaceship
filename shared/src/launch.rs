@@ -209,9 +209,11 @@ const STABILITY_KD: f32 = 4.0;
 /// attitude loop (decay rate ≈ g·KV ≈ 0.4/s vs the PD's ~2 rad/s bandwidth).
 const STABILITY_KV: f32 = 0.04;
 /// Velocity hold: the maximum lean the velocity term may command (as the length of
-/// the horizontal direction component, ≈ sin of the lean angle — ~8.5°). Bounds how
-/// hard the stack chases drift so it can never trade meaningful lift for it.
-const STABILITY_MAX_LEAN: f32 = 0.15;
+/// the horizontal direction component, ≈ sin of the lean angle — ~14.5°, a 3.4% lift
+/// sacrifice when saturated). Bounds how hard the stack chases drift. 0.15 (8.5°)
+/// saturated against a rider's standing trim force on a *single*-rocket stack — the
+/// weakest vehicle drifted 5 km sideways over a 13.5 km climb, level the whole way.
+const STABILITY_MAX_LEAN: f32 = 0.25;
 /// Attitude integral (the I in PID): restoring angular acceleration (rad/s²) per
 /// rad·s of accumulated attitude error. Without it the loop is P-only against
 /// *external* torque, so holding a rider's off-centre weight required a standing
@@ -221,10 +223,15 @@ const STABILITY_MAX_LEAN: f32 = 0.15;
 /// pinned at 4.8 m/s — the forces exactly cancelled). The integral winds until the
 /// external torque is held with zero standing error.
 const STABILITY_KI: f32 = 0.5;
-/// Anti-windup bound on the accumulated attitude error (rad·s) — ~4× what a rider
-/// standing at a small deck's edge needs, so recovery transients can't wind the
-/// integral into a slow deep overshoot.
-const ATTITUDE_INTEGRAL_MAX: f32 = 2.0;
+/// Anti-windup bound on the accumulated attitude error (rad·s). Holding an external
+/// torque τ takes `∫e = τ/(KI·I)`, so SMALL-inertia assemblies need the most integral
+/// headroom: a rider's standing trim on a one-rocket stack (I ≈ 3 kg·m²) needs
+/// ~2.7 rad·s — a 2.0 clamp saturated exactly there and the un-held remainder drifted
+/// the stack ~2 km sideways (level the whole way). But the clamp also bounds how much
+/// integral energy can couple into a riderless single rocket's free roll (TVC can't
+/// damp roll): at 8.0 the unmanned single wobbled (|ω| ~2, altitude oscillating)
+/// where 2.0 flew clean. 4.0 = rider trim + 50% margin, roll coupling still bounded.
+const ATTITUDE_INTEGRAL_MAX: f32 = 4.0;
 
 /// Balanced launch thrust for the rockets of one assembly. Each rocket at full throttle
 /// would exert a torque `τᵢ = (application point − COM) × Fᵢ` about the assembly's centre

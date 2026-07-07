@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use bad_spaceship_shared::{character, player, CommonPlugins};
+use bad_spaceship_shared::{character, player, time_scale, CommonPlugins};
 use bevy::{app::ScheduleRunnerPlugin, asset::AssetPlugin, prelude::*};
 
 mod net;
@@ -88,9 +88,4 @@ fn load_configs(
     // TODO: Fix this
     // Theoretically this should work instead of the above, but it doesn't...
     // *handles = Some(asset_server.load_folder("config").unwrap());
-}
-
-/// Wall-clock acceleration factor for tests (`BS_TIME_SCALE`, default 1).
-fn time_scale() -> f64 {
-    std::env::var("BS_TIME_SCALE").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0)
 }

@@ -31,6 +31,7 @@
 //!                  testing the server's session-resume behaviour across rooms.
 
 use avian3d::prelude::Position;
+use bad_spaceship_shared::time_scale;
 use bad_spaceship_shared::net::{
     resume_user_data, room_code_bytes, ControlChannel, NetInput, NetPart, NetPlayer, PartShape,
     ProtocolPlugin, RequestLaunch, BS_PROTOCOL_ID, TICK,
@@ -326,12 +327,6 @@ fn exit_when_done(time: Res<Time>, config: Res<BotConfig>, mut exit: MessageWrit
         println!("[bot] run time reached ({run_secs:.0}s), exiting");
         exit.write(AppExit::Success);
     }
-}
-
-/// Wall-clock acceleration factor for tests (`BS_TIME_SCALE`, default 1) — must
-/// match the server's or lightyear's tick sync fights the skew.
-fn time_scale() -> f64 {
-    std::env::var("BS_TIME_SCALE").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0)
 }
 
 /// Compose `BS_TIME_SCALE` onto whatever clock speed lightyear's sync set last
