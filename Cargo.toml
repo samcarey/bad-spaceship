@@ -90,4 +90,4 @@ panic = "abort"
 # WebKit via headless Playwright. Drop this patch when upstream fixes it
 # (Jondolf/avian#950 family).
 [patch.crates-io]
-avian3d = { git = "https://github.com/samcarey/avian", rev = "e87387c9540ad4fb8567ccf5d2ad144c204c419e" }
+avian3d = { git = "https://github.com/samcarey/avian", rev = "e184f19c31db87c8ed313f8b8b988d6453d2a2ba" }
