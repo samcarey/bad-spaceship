@@ -25,7 +25,10 @@ fn main() {
         // Bevy 0.11 merged ScheduleRunnerSettings into ScheduleRunnerPlugin;
         // override the one MinimalPlugins adds to keep the fixed 60 Hz loop.
         .add_plugins(MinimalPlugins.set(ScheduleRunnerPlugin::run_loop(
-            Duration::from_secs_f64(1.0 / 60.),
+            // BS_TIME_SCALE=N runs the whole sim N x faster than wall clock (the
+            // fixed 1/60 s tick is unchanged; ticks just FIRE N x as often via
+            // `Time<Virtual>` relative speed below) — accelerated full-stack tests.
+            Duration::from_secs_f64(1.0 / (60. * time_scale())),
         )))
         // AssetServerSettings was folded into AssetPlugin in Bevy 0.9; 0.12
         // renamed `asset_folder` to `file_path` and swapped the `ChangeWatcher`
@@ -37,7 +40,14 @@ fn main() {
         })
         .add_plugins(CommonPlugins)
 
-        .add_systems(Startup, load_configs);
+        .add_systems(Startup, load_configs)
+        .add_systems(Startup, |mut time: ResMut<Time<Virtual>>| {
+            let scale = time_scale();
+            if scale != 1.0 {
+                time.set_relative_speed(scale as f32);
+                println!("[time] BS_TIME_SCALE: running {scale}x wall clock");
+            }
+        });
 
     // Opt-in multiplayer host: set BS_MULTIPLAYER to run as the authoritative
     // netcode server. Unset → the headless single-player sim, unchanged.
@@ -78,4 +88,9 @@ fn load_configs(
     // TODO: Fix this
     // Theoretically this should work instead of the above, but it doesn't...
     // *handles = Some(asset_server.load_folder("config").unwrap());
+}
+
+/// Wall-clock acceleration factor for tests (`BS_TIME_SCALE`, default 1).
+fn time_scale() -> f64 {
+    std::env::var("BS_TIME_SCALE").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0)
 }
