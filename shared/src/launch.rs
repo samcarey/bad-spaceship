@@ -122,9 +122,10 @@ pub fn assembly_burn(
     dt: f32,
     geometry: &[(Entity, Vec3, Quat, Vec2)],
     spin: &AssemblySpin,
+    integral: &mut Vec3,
 ) -> Vec<RocketBurn> {
     let full = full_rocket_thrust(gravity);
-    balanced_assembly_thrust(com, gravity, geometry, spin)
+    balanced_assembly_thrust(com, gravity, dt, geometry, spin, integral)
         .into_iter()
         .zip(geometry)
         .map(|(thrust, &(entity, translation, rotation, current))| {
@@ -142,6 +143,10 @@ pub fn assembly_burn(
 /// assembly's **members** (not just its rockets), by every thrust site the same way,
 /// so the server and the client's predicted twin command identical trims.
 pub struct AssemblySpin {
+    /// Mass-weighted mean linear velocity of the members (m/s) — the velocity-hold
+    /// term leans the attitude target against its horizontal part so the stack
+    /// brakes lateral drift instead of carrying it forever.
+    pub linear_velocity: Vec3,
     /// Mass-weighted mean angular velocity of the members (rad/s).
     pub angular_velocity: Vec3,
     /// Point-mass moment-of-inertia proxy about the COM: `Σ mᵢ·|rᵢ − com|²` (kg·m²).
@@ -150,42 +155,83 @@ pub struct AssemblySpin {
     pub inertia: f32,
 }
 
-/// Measure an assembly's mass-weighted COM + rotational state from `(position,
-/// angular_velocity, mass)` member samples — the **single** implementation every
-/// thrust site (server rooms, client single-player, client predicted multiplayer)
-/// feeds its ECS gathering into, so the trims they command can never drift apart.
-/// `None` when the samples carry no mass.
+/// Measure an assembly's mass-weighted COM + motion state from `(position,
+/// linear_velocity, angular_velocity, mass)` member samples — the **single**
+/// implementation every thrust site (server rooms, client single-player, client
+/// predicted multiplayer) feeds its ECS gathering into, so the trims they command can
+/// never drift apart. `None` when the samples carry no mass.
 ///
 /// Takes a re-callable sample source and iterates it twice (COM first, then the
 /// inertia about it) instead of the one-pass parallel-axis form
 /// `Σm·|p|² − M·|com|²` — at high altitude that difference is catastrophic f32
 /// cancellation (|p| ~ 5e5 m while the true inertia arm is ~1 m), and rockets
 /// live at high altitude.
-pub fn measure_assembly_spin<I: Iterator<Item = (Vec3, Vec3, f32)>>(
+pub fn measure_assembly_spin<I: Iterator<Item = (Vec3, Vec3, Vec3, f32)>>(
     samples: impl Fn() -> I,
 ) -> Option<(Vec3, AssemblySpin)> {
     let mut mass = 0.0;
     let mut weighted_pos = Vec3::ZERO;
+    let mut weighted_lin = Vec3::ZERO;
     let mut weighted_ang = Vec3::ZERO;
-    for (position, angular, m) in samples() {
+    for (position, linear, angular, m) in samples() {
         mass += m;
         weighted_pos += position * m;
+        weighted_lin += linear * m;
         weighted_ang += angular * m;
     }
     if mass <= 0.0 {
         return None;
     }
     let com = weighted_pos / mass;
-    let inertia = samples().map(|(position, _, m)| m * position.distance_squared(com)).sum();
-    Some((com, AssemblySpin { angular_velocity: weighted_ang / mass, inertia }))
+    let inertia = samples().map(|(position, _, _, m)| m * position.distance_squared(com)).sum();
+    Some((
+        com,
+        AssemblySpin {
+            linear_velocity: weighted_lin / mass,
+            angular_velocity: weighted_ang / mass,
+            inertia,
+        },
+    ))
 }
 
 /// Attitude-hold stiffness: restoring angular acceleration (rad/s²) per radian of
-/// net-thrust tilt away from world-up. With [`STABILITY_KD`] = 2·√KP the loop is
-/// critically damped — a disturbed assembly rights itself without overshoot.
+/// net-thrust tilt away from the commanded direction. With [`STABILITY_KD`] = 2·√KP
+/// the loop is critically damped — a disturbed assembly rights itself without
+/// overshoot.
 const STABILITY_KP: f32 = 4.0;
 /// Rate damping: angular deceleration (rad/s²) per rad/s of assembly spin.
 const STABILITY_KD: f32 = 4.0;
+/// Velocity hold: how far (radians per m/s) the commanded up-direction leans
+/// *against* the assembly's lateral velocity, so drift gets braked instead of
+/// carried forever. Attitude-only control let a rider *steer* the rocket by shifting
+/// their weight: each transient tilt banked some lateral velocity that nothing ever
+/// removed. The cascade is stable because this outer loop is much slower than the
+/// attitude loop (decay rate ≈ g·KV ≈ 0.4/s vs the PD's ~2 rad/s bandwidth).
+const STABILITY_KV: f32 = 0.04;
+/// Velocity hold: the maximum lean the velocity term may command (as the length of
+/// the horizontal direction component, ≈ sin of the lean angle — ~14.5°, a 3.4% lift
+/// sacrifice when saturated). Bounds how hard the stack chases drift. 0.15 (8.5°)
+/// saturated against a rider's standing trim force on a *single*-rocket stack — the
+/// weakest vehicle drifted 5 km sideways over a 13.5 km climb, level the whole way.
+const STABILITY_MAX_LEAN: f32 = 0.25;
+/// Attitude integral (the I in PID): restoring angular acceleration (rad/s²) per
+/// rad·s of accumulated attitude error. Without it the loop is P-only against
+/// *external* torque, so holding a rider's off-centre weight required a standing
+/// attitude error `e = τ/(KP·I)` — the body stalled ~7° short of the velocity-hold
+/// lean while the rider-trim nozzle force pushed sideways, and the stack cruised
+/// off laterally forever (recorder: nozzles +0.016 rad, body −0.015, velocity
+/// pinned at 4.8 m/s — the forces exactly cancelled). The integral winds until the
+/// external torque is held with zero standing error.
+const STABILITY_KI: f32 = 0.5;
+/// Anti-windup bound on the accumulated attitude error (rad·s). Holding an external
+/// torque τ takes `∫e = τ/(KI·I)`, so SMALL-inertia assemblies need the most integral
+/// headroom: a rider's standing trim on a one-rocket stack (I ≈ 3 kg·m²) needs
+/// ~2.7 rad·s — a 2.0 clamp saturated exactly there and the un-held remainder drifted
+/// the stack ~2 km sideways (level the whole way). But the clamp also bounds how much
+/// integral energy can couple into a riderless single rocket's free roll (TVC can't
+/// damp roll): at 8.0 the unmanned single wobbled (|ω| ~2, altitude oscillating)
+/// where 2.0 flew clean. 4.0 = rider trim + 50% margin, roll coupling still bounded.
+const ATTITUDE_INTEGRAL_MAX: f32 = 4.0;
 
 /// Balanced launch thrust for the rockets of one assembly. Each rocket at full throttle
 /// would exert a torque `τᵢ = (application point − COM) × Fᵢ` about the assembly's centre
@@ -205,12 +251,16 @@ const STABILITY_KD: f32 = 4.0;
 ///
 /// `rockets` is `(entity, world translation, world rotation, current gimbal)` for the
 /// assembly's rockets; `com` is the assembly's centre of mass (mass-weighted over all
-/// its parts); `spin` is the assembly's measured rotational state (see [`AssemblySpin`]).
+/// its parts); `spin` is the assembly's measured motion state (see [`AssemblySpin`]);
+/// `integral` is the assembly's accumulated attitude error (the PID's I state — one
+/// `Vec3` the caller persists per assembly across ticks; see [`STABILITY_KI`]).
 pub fn balanced_assembly_thrust(
     com: Vec3,
     gravity: Vec3,
+    dt: f32,
     rockets: &[(Entity, Vec3, Quat, Vec2)],
     spin: &AssemblySpin,
+    integral: &mut Vec3,
 ) -> Vec<RocketThrust> {
     let full = full_rocket_thrust(gravity);
     let mut points = Vec::with_capacity(rockets.len());
@@ -222,12 +272,20 @@ pub fn balanced_assembly_thrust(
         points.push(point);
         forces.push(force);
     }
-    // Attitude error: the axis (with sin-of-angle magnitude) that rotates the net
-    // full-thrust direction onto world-up. Zero when pointing straight up — the PD
-    // then only damps spin.
+    // Commanded up-direction: world-up, leaned *against* the assembly's lateral
+    // velocity (velocity hold — see `STABILITY_KV`) so drift brakes out instead of
+    // accumulating. Attitude error: the axis (with sin-of-angle magnitude) that
+    // rotates the net full-thrust direction onto that command. Zero when pointing
+    // along it — the PD then only damps spin.
+    let lateral = Vec3::new(spin.linear_velocity.x, 0.0, spin.linear_velocity.z);
+    let up_command =
+        (Vec3::Y - (lateral * STABILITY_KV).clamp_length_max(STABILITY_MAX_LEAN)).normalize();
     let thrust_dir = forces.iter().copied().sum::<Vec3>().normalize_or_zero();
+    let error = thrust_dir.cross(up_command);
+    *integral = (*integral + error * dt).clamp_length_max(ATTITUDE_INTEGRAL_MAX);
     let target = spin.inertia
-        * (STABILITY_KP * thrust_dir.cross(Vec3::Y) - STABILITY_KD * spin.angular_velocity);
+        * (STABILITY_KP * error + STABILITY_KI * *integral
+            - STABILITY_KD * spin.angular_velocity);
     let scales = balanced_thrust_scales_toward(&torques, target);
     // The nozzles cover whatever torque the throttles can't (they only reduce thrust,
     // the lift guard bounds how much, and 1–2 rockets barely span any torque at all).
@@ -258,7 +316,13 @@ pub fn balanced_assembly_thrust(
         .map(|(i, &(entity, _, rotation, gimbal))| RocketThrust {
             entity,
             throttle: scales[i],
-            desired_gimbal: gimbal * 0.995
+            // Leak: 0.05%/tick (~3%/s). The leak must be tiny — the integrator has to
+            // refill it every tick, which costs a standing torque error ∝ leak × held
+            // deflection. At 0.5%/tick that droop capped the body at ~2° of a
+            // commanded 8.5° velocity-hold lean while the rider-trim deflection kept
+            // pushing sideways: recorder showed a ridden stack accelerating to
+            // −41 m/s lateral (kilometres of drift) *against* its own lean.
+            desired_gimbal: gimbal * 0.9995
                 + gimbal_correction(points[i] - com, rotation, full * scales[i], share),
         })
         .collect()
@@ -460,16 +524,16 @@ mod tests {
         let com = Vec3::new(0.0, -(crate::part::ROCKET_BODY_HEIGHT / 2.0), 0.0);
         // Spinning about +Z: the assist must torque about -Z, i.e. throttle the
         // rocket whose full-thrust torque is +Z (the -x one) relative to the other.
-        let spin = AssemblySpin { angular_velocity: Vec3::new(0.0, 0.0, 1.0), inertia: 10.0 };
-        let thrusts = balanced_assembly_thrust(com, gravity, &rockets, &spin);
+        let spin = AssemblySpin { linear_velocity: Vec3::ZERO, angular_velocity: Vec3::new(0.0, 0.0, 1.0), inertia: 10.0 };
+        let thrusts = balanced_assembly_thrust(com, gravity, 1.0 / 60.0, &rockets, &spin, &mut Vec3::ZERO);
         let net_torque: Vec3 = world_thrusts(&rockets, gravity, &thrusts)
             .iter()
             .map(|(point, force)| (*point - com).cross(*force))
             .sum();
         assert!(net_torque.z < -1.0, "expected counter-spin torque, got {net_torque:?}");
         // And a still, upright assembly keeps the symmetric full-throttle solution.
-        let still = AssemblySpin { angular_velocity: Vec3::ZERO, inertia: 10.0 };
-        let thrusts = balanced_assembly_thrust(com, gravity, &rockets, &still);
+        let still = AssemblySpin { linear_velocity: Vec3::ZERO, angular_velocity: Vec3::ZERO, inertia: 10.0 };
+        let thrusts = balanced_assembly_thrust(com, gravity, 1.0 / 60.0, &rockets, &still, &mut Vec3::ZERO);
         assert!(
             thrusts.iter().all(|t| t.throttle > 0.99),
             "still assembly should fire (near) full"
@@ -503,8 +567,8 @@ mod tests {
         let rockets = [(Entity::from_raw_u32(1).unwrap(), Vec3::ZERO, Quat::IDENTITY, Vec2::ZERO)];
         let gravity = Vec3::new(0.0, -9.81, 0.0);
         let com = Vec3::new(0.0, 0.3, 0.0); // payload above: COM sits above the nozzle
-        let spin = AssemblySpin { angular_velocity: Vec3::new(0.0, 0.0, 1.0), inertia: 2.0 };
-        let thrusts = balanced_assembly_thrust(com, gravity, &rockets, &spin);
+        let spin = AssemblySpin { linear_velocity: Vec3::ZERO, angular_velocity: Vec3::new(0.0, 0.0, 1.0), inertia: 2.0 };
+        let thrusts = balanced_assembly_thrust(com, gravity, 1.0 / 60.0, &rockets, &spin, &mut Vec3::ZERO);
         let desired = thrusts[0].desired_gimbal;
         assert!(desired.length() > 1e-4, "expected a gimbal command, got {desired:?}");
         assert!(desired.length() <= GIMBAL_MAX_RAD + 1e-6, "over-range: {desired:?}");
@@ -526,8 +590,8 @@ mod tests {
         ];
         let gravity = Vec3::new(0.0, -9.81, 0.0);
         let com = Vec3::new(0.0, 0.0, 0.0);
-        let spin = AssemblySpin { angular_velocity: Vec3::new(1.0, 0.0, 0.0), inertia: 4.0 };
-        let thrusts = balanced_assembly_thrust(com, gravity, &rockets, &spin);
+        let spin = AssemblySpin { linear_velocity: Vec3::ZERO, angular_velocity: Vec3::new(1.0, 0.0, 0.0), inertia: 4.0 };
+        let thrusts = balanced_assembly_thrust(com, gravity, 1.0 / 60.0, &rockets, &spin, &mut Vec3::ZERO);
         let net_torque: Vec3 = world_thrusts(&rockets, gravity, &thrusts)
             .iter()
             .map(|(point, force)| (*point - com).cross(*force))

@@ -202,3 +202,14 @@ pub struct MouseWheelLabel;
 
 #[derive(Component)]
 pub struct LookPitch(pub f32);
+
+/// Wall-clock acceleration factor for tests (`BS_TIME_SCALE`, default 1): the whole
+/// stack runs N× faster than wall clock — the fixed 1/60 s tick is unchanged, ticks
+/// just fire N× as often. Read once (it's consulted per frame on the client side).
+pub fn time_scale() -> f64 {
+    static SCALE: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *SCALE.get_or_init(|| {
+        std::env::var("BS_TIME_SCALE").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0)
+    })
+}
+

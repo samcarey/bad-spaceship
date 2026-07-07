@@ -19,8 +19,8 @@
 //!   force, so prediction converges).
 
 use avian3d::prelude::{
-    AngularVelocity, ComputedMass, Forces, Gravity, Position, Rotation, SphericalJoint,
-    WriteRigidBodyForces,
+    AngularVelocity, ComputedMass, Forces, Gravity, LinearVelocity, Position, Rotation,
+    SphericalJoint, WriteRigidBodyForces,
 };
 use bad_spaceship_shared::launch::{
     assembly_burn, measure_assembly_spin, AssemblySpin, LAUNCH_COUNTDOWN_SECS,
@@ -153,6 +153,8 @@ fn cut_ground_joints(
 /// Apply balanced thrust to the single-player main assembly's rockets each physics tick.
 fn apply_sp_thrust(
     time: Res<Time>,
+    // The launch autopilot's per-assembly PID integral state (see `assembly_burn`).
+    mut integral: Local<Vec3>,
     local: Res<LaunchLocal>,
     parts: Query<(Entity, &GlobalTransform, &ComputedMass), With<Holdable>>,
     joints: Query<&SphericalJoint>,
@@ -160,7 +162,7 @@ fn apply_sp_thrust(
     // `Gimbal` the geometry pass reads), so the spin/geometry reads and the force
     // write cannot coexist as sibling queries (B0001) — sequence them.
     mut set: ParamSet<(
-        Query<&AngularVelocity>,
+        Query<(&LinearVelocity, &AngularVelocity)>,
         Query<(Entity, &GlobalTransform, &Gimbal), With<RocketEngine>>,
         Query<(Entity, Forces, &mut Gimbal), With<RocketEngine>>,
     )>,
@@ -172,15 +174,18 @@ fn apply_sp_thrust(
     let Some((members, _)) = main_assembly(&parts, &joints) else {
         return;
     };
-    // The assembly's COM + rotational state, via the shared measurement (see
+    // The assembly's COM + motion state, via the shared measurement (see
     // `measure_assembly_spin`) so the trim matches the server/MP paths exactly.
     let Some((com, spin)) = ({
         let velocities = set.p0();
         let samples = || {
             parts.iter().filter(|(entity, ..)| members.contains(entity)).map(
                 |(entity, transform, part_mass)| {
-                    let angular = velocities.get(entity).map(|w| w.0).unwrap_or_default();
-                    (transform.translation(), angular, part_mass.value())
+                    let (linear, angular) = velocities
+                        .get(entity)
+                        .map(|(l, a)| (l.0, a.0))
+                        .unwrap_or_default();
+                    (transform.translation(), linear, angular, part_mass.value())
                 },
             )
         };
@@ -197,7 +202,7 @@ fn apply_sp_thrust(
             (entity, translation, rotation, gimbal.0)
         })
         .collect();
-    apply_thrust(com, gravity.0, &geometry, &spin, time.delta_secs(), &mut set.p2());
+    apply_thrust(com, gravity.0, &geometry, &spin, time.delta_secs(), &mut integral, &mut set.p2());
 }
 
 /// Apply balanced thrust to the multiplayer assembly's **predicted** rockets each physics
@@ -206,12 +211,22 @@ fn apply_sp_thrust(
 /// `GlobalTransform`, which `lightyear_avian` drives out of the fixed schedule).
 fn apply_mp_thrust(
     time: Res<Time>,
+    // The launch autopilot's per-assembly PID integral state (see `assembly_burn`).
+    mut integral: Local<Vec3>,
     orb: Query<&NetLaunch>,
     // `Forces` takes `AngularVelocity` mutably inside, so the member read and the
     // force write cannot coexist as sibling queries (B0001) — sequence them.
     mut set: ParamSet<(
         Query<
-            (Entity, &Position, &Rotation, &AngularVelocity, &ComputedMass, Option<&Gimbal>),
+            (
+                Entity,
+                &Position,
+                &Rotation,
+                &LinearVelocity,
+                &AngularVelocity,
+                &ComputedMass,
+                Option<&Gimbal>,
+            ),
             (With<NetPart>, With<Predicted>, With<InLargestAssembly>),
         >,
         Query<(Entity, Forces, &mut Gimbal), (With<RocketEngine>, With<Predicted>)>,
@@ -221,7 +236,7 @@ fn apply_mp_thrust(
     if !orb.iter().next().is_some_and(|l| l.launched) {
         return;
     }
-    // The assembly's COM + rotational state, via the shared measurement (see
+    // The assembly's COM + motion state, via the shared measurement (see
     // `measure_assembly_spin`) so the trim matches the server exactly; collect
     // the member rockets' poses alongside (`Gimbal` marks the rockets — it rides
     // `insert_rocket_physics`).
@@ -230,13 +245,13 @@ fn apply_mp_thrust(
         let samples = || {
             members
                 .iter()
-                .map(|(_, position, _, angular, part_mass, _)| {
-                    (position.0, angular.0, part_mass.value())
+                .map(|(_, position, _, linear, angular, part_mass, _)| {
+                    (position.0, linear.0, angular.0, part_mass.value())
                 })
         };
         let geometry: Vec<(Entity, Vec3, Quat, bevy::math::Vec2)> = members
             .iter()
-            .filter_map(|(entity, position, rotation, _, _, gimbal)| {
+            .filter_map(|(entity, position, rotation, _, _, _, gimbal)| {
                 gimbal.map(|g| (entity, position.0, rotation.0, g.0))
             })
             .collect();
@@ -245,7 +260,7 @@ fn apply_mp_thrust(
     let Some((com, spin)) = measured else {
         return;
     };
-    apply_thrust(com, gravity.0, &geometry, &spin, time.delta_secs(), &mut set.p1());
+    apply_thrust(com, gravity.0, &geometry, &spin, time.delta_secs(), &mut integral, &mut set.p1());
 }
 
 /// Resolve the assembly's burn for this tick (shared `assembly_burn`) and write each
@@ -257,12 +272,13 @@ fn apply_thrust(
     geometry: &[(Entity, Vec3, Quat, bevy::math::Vec2)],
     spin: &AssemblySpin,
     dt: f32,
+    integral: &mut Vec3,
     rocket_forces: &mut Query<(Entity, Forces, &mut Gimbal), impl bevy::ecs::query::QueryFilter>,
 ) {
     if geometry.is_empty() {
         return;
     }
-    for burn in assembly_burn(com, gravity, dt, geometry, spin) {
+    for burn in assembly_burn(com, gravity, dt, geometry, spin, integral) {
         if let Ok((_, mut forces, mut gimbal)) = rocket_forces.get_mut(burn.entity) {
             gimbal.0 = burn.gimbal;
             forces.apply_force_at_point(burn.force, burn.point);

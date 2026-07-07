@@ -1188,6 +1188,37 @@ fps-dependent). Key facts that shaped the design:
   standing riders get level rides to the ~10–20 km rider-contact f32 wall. Gimbal
   state is deliberately NOT replicated or saved — each side integrates the same law
   from the same measured state (like the throttle trim), and it starts at zero.
+- **Autopilot is a full PID + velocity hold** (`shared/src/launch.rs`). P-only attitude
+  hold against an *external* torque (a rider's off-centre weight) needs a standing error
+  `e = τ/(KP·I)` — the body stalls short of any commanded lean while the rider-trim
+  nozzle force pushes sideways (recorder: body −0.015 rad, nozzles +0.016, lateral
+  velocity pinned at 4.8 m/s, forces exactly cancelled). `STABILITY_KI` (0.5 — 2.0
+  limit-cycles riderless single-rocket stacks: tiny inertia + free roll, no rider-feet
+  damping) integrates attitude error into zero-standing-error hold; the integral state
+  is one `Vec3` per assembly, persisted by each thrust site (server: per-room map;
+  clients: `Local`). `STABILITY_KV` leans the attitude target against measured lateral
+  velocity (capped ~8.5°) so weight-shift "steering" brakes out instead of accumulating.
+- **Jointed pairs and contact: the weld-rigidity census** (`maintain_weld_rigidity`,
+  `shared/src/part.rs`, runs in all three worlds). Collision between two jointed bodies
+  is disabled exactly when their joints already make the pair rotationally rigid (3+
+  non-collinear anchors) and kept otherwise. Rigid weld + touching contact = Avian's
+  impulse-contact and XPBD-joint solvers correcting each other's mm-scale disagreement
+  every substep — a deck bridging two rockets in real contact exploded ~30 s after
+  every blastoff (single-contact pairs are constraint *trees*, no loop, and fly fine).
+  Contact IS structure for a 1–2-point hinge weld (braced flat by the touched face), so
+  hinges keep it — and ground clamps keep theirs (a pad on collision-less spherical
+  pivots pendulums over when a rider boards). Rejected by experiment: joint compliance
+  1e-5/1e-4 (still explodes), 12 substeps (calmer, dies), restitution 0 (identical —
+  the fight is positional, not bounce).
+- **Accelerated full-stack tests (`BS_TIME_SCALE`)**. The whole multiplayer stack runs
+  N× wall clock (same 1/60 s tick, fired N× as often): set it on BOTH server and bot.
+  Two lightyear integration points (bot/src/main.rs): its sync *overwrites*
+  `Time<Virtual>`'s relative speed each frame (crate TODO — re-multiply in `First`
+  before `TimeSystems`), and input-lead margins are denominated in TICKS, so at 10×
+  loopback RTT (~3 ms) is 1.7 ticks and 100% of inputs arrive late (`late=126/126` in
+  telemetry) — `SyncConfig` margins scale with N. A 110-sim-second rider flight runs in
+  ~13 wall seconds. Caveat: the input lead in ticks grows with N, so the simulated
+  rider is effectively laggier — iterate vehicles accelerated, verify rider feel at 1×.
 - **Divergence guard (NaN kills the whole app).** A blown constraint solve drives a part's
   state to NaN, and Avian's next broadphase *asserts* (`b.min.cmple(b.max)`) — panicking
   the entire server (every room) or the SP client. All part recyclers (`replace_fallen_*`

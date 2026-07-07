@@ -31,6 +31,7 @@
 //!                  testing the server's session-resume behaviour across rooms.
 
 use avian3d::prelude::Position;
+use bad_spaceship_shared::time_scale;
 use bad_spaceship_shared::net::{
     resume_user_data, room_code_bytes, ControlChannel, NetInput, NetPart, NetPlayer, PartShape,
     ProtocolPlugin, RequestLaunch, BS_PROTOCOL_ID, TICK,
@@ -94,7 +95,9 @@ fn main() {
     app.add_plugins(
         // Tighter than the sim tick so input writing never starves the 60 Hz
         // fixed schedule.
-        MinimalPlugins.set(ScheduleRunnerPlugin::run_loop(Duration::from_secs_f64(1.0 / 120.0))),
+        MinimalPlugins.set(ScheduleRunnerPlugin::run_loop(Duration::from_secs_f64(
+            1.0 / (120.0 * time_scale()),
+        ))),
     );
     // lightyear uses Bevy states internally; MinimalPlugins omits StatesPlugin.
     app.add_plugins(bevy::state::app::StatesPlugin);
@@ -104,6 +107,7 @@ fn main() {
     app.insert_resource(BotConfig::from_env());
     app.init_resource::<Boarded>();
     app.add_systems(Startup, connect);
+    app.add_systems(First, apply_time_scale.before(bevy::time::TimeSystems));
     app.add_systems(Update, (adopt_avatar, send_launch, exit_when_done));
     app.add_systems(
         FixedPreUpdate,
@@ -131,7 +135,23 @@ fn connect(mut commands: Commands, config: Res<BotConfig>) {
         .expect("netcode client");
     let url = format!("ws://{server_addr}");
     let io = WebSocketClientIo::from_url(ClientConfig::builder().with_no_encryption(), url.clone());
-    let client = commands.spawn((netcode, io, PredictionManager::default())).id();
+    let mut client_entity = commands.spawn((netcode, io, PredictionManager::default()));
+    // Accelerated runs (BS_TIME_SCALE): lightyear's input-lead margins are counted
+    // in TICKS, so at N x wall speed their real-time value shrinks N x — loopback
+    // RTT (~3 ms) becomes multiple ticks and EVERY input arrives late (server
+    // telemetry: late=126/126 at 10 x). Scale the sync margins so the wall-clock
+    // safety margin matches a 1 x run.
+    let scale = time_scale() as f32;
+    if scale > 1.0 {
+        use lightyear::prelude::{InputTimelineConfig, SyncConfig};
+        client_entity.insert(InputTimelineConfig::default().with_sync_config(SyncConfig {
+            jitter_margin: scale.mul_add(1.5, 1.0),
+            error_margin: 2.0,
+            max_error_margin: 2.0 * scale.max(10.0),
+            ..Default::default()
+        }));
+    }
+    let client = client_entity.id();
     commands.trigger(Connect { entity: client });
     println!("[bot] connecting to {url}");
 }
@@ -306,5 +326,24 @@ fn exit_when_done(time: Res<Time>, config: Res<BotConfig>, mut exit: MessageWrit
     if time.elapsed_secs() >= run_secs {
         println!("[bot] run time reached ({run_secs:.0}s), exiting");
         exit.write(AppExit::Success);
+    }
+}
+
+/// Compose `BS_TIME_SCALE` onto whatever clock speed lightyear's sync set last
+/// frame. lightyear's `update_virtual_time` (schedule `Last`) OVERWRITES
+/// `Time<Virtual>`'s relative speed with its tick-sync correction (~1.0 +/- 5%,
+/// `SyncConfig::speedup_factor`) — the crate has a TODO about composing with a
+/// user-applied speed instead. Running in `First`, before Bevy's `TimeSystem`
+/// advances the clock, we re-multiply the sync's value by the scale each frame:
+/// the client then paces its ticks N x wall clock (matching an N x server) while
+/// the sync's +/- 5% still trims on top. The `< scale/2` guard keeps the multiply
+/// from compounding on frames where lightyear didn't overwrite (pre-connection).
+fn apply_time_scale(mut time: ResMut<Time<Virtual>>) {
+    let scale = time_scale() as f32;
+    if scale != 1.0 {
+        let current = time.relative_speed();
+        if current < scale * 0.5 {
+            time.set_relative_speed(current * scale);
+        }
     }
 }
