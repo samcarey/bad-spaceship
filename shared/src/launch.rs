@@ -98,6 +98,45 @@ pub fn gimbaled_rocket_thrust(
     (point, force)
 }
 
+/// One rocket's resolved burn for a physics tick: the nozzle deflection to store back
+/// on its [`Gimbal`](crate::part::Gimbal) and the deflected force to apply at `point`.
+pub struct RocketBurn {
+    pub entity: Entity,
+    pub gimbal: Vec2,
+    pub point: Vec3,
+    pub force: Vec3,
+}
+
+/// One physics tick of an assembly's launch burn, start to finish: balance the
+/// throttles + gimbal commands ([`balanced_assembly_thrust`]), slew each nozzle toward
+/// its command at the actuator's rate limit ([`gimbal_step`]), and resolve the deflected
+/// world force ([`gimbaled_rocket_thrust`]). The single entry point all three thrust
+/// sites (server rooms, single-player, predicted multiplayer) drive their `Forces` +
+/// `Gimbal` writes from, so the sites stay thin and identical.
+///
+/// `geometry` is `(entity, world translation, world rotation, current gimbal)` per
+/// rocket; `com`/`spin` as for [`balanced_assembly_thrust`].
+pub fn assembly_burn(
+    com: Vec3,
+    gravity: Vec3,
+    dt: f32,
+    geometry: &[(Entity, Vec3, Quat, Vec2)],
+    spin: &AssemblySpin,
+) -> Vec<RocketBurn> {
+    let full = full_rocket_thrust(gravity);
+    balanced_assembly_thrust(com, gravity, geometry, spin)
+        .into_iter()
+        .zip(geometry)
+        .map(|(thrust, &(entity, translation, rotation, current))| {
+            debug_assert_eq!(entity, thrust.entity);
+            let gimbal = gimbal_step(current, thrust.desired_gimbal, dt);
+            let (point, force) =
+                gimbaled_rocket_thrust(translation, rotation, full, thrust.throttle, gimbal);
+            RocketBurn { entity, gimbal, point, force }
+        })
+        .collect()
+}
+
 /// The assembly's rotational state, for the launch stability assist: differential
 /// throttle can only *react* to rotation it can measure. Both are computed over the
 /// assembly's **members** (not just its rockets), by every thrust site the same way,

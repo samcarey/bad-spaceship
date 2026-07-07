@@ -23,8 +23,7 @@ use avian3d::prelude::{
     WriteRigidBodyForces,
 };
 use bad_spaceship_shared::launch::{
-    balanced_assembly_thrust, full_rocket_thrust, gimbal_step, gimbaled_rocket_thrust,
-    measure_assembly_spin, AssemblySpin, LAUNCH_COUNTDOWN_SECS,
+    assembly_burn, measure_assembly_spin, AssemblySpin, LAUNCH_COUNTDOWN_SECS,
 };
 use bad_spaceship_shared::net::{ControlChannel, InLargestAssembly, NetLaunch, NetPart, RequestLaunch};
 use bad_spaceship_shared::part::{Gimbal, Holdable, RocketEngine, SuppressLocalParts};
@@ -35,7 +34,7 @@ use bevy_egui::{
     EguiContexts,
 };
 use lightyear::prelude::{Connected, MessageSender, Predicted};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use crate::render_secondary_pass::main_assembly;
 use crate::ui::EguiDrawSystems;
@@ -249,10 +248,9 @@ fn apply_mp_thrust(
     apply_thrust(com, gravity.0, &geometry, &spin, time.delta_secs(), &mut set.p1());
 }
 
-/// Compute the balanced per-rocket commands for an assembly, slew each rocket's gimbal
-/// toward its target, and apply the deflected force at its flare base through the
-/// rockets' `Forces`. Shared by the single-player and multiplayer thrust systems (which
-/// differ only in how they gather membership + pose).
+/// Resolve the assembly's burn for this tick (shared `assembly_burn`) and write each
+/// rocket's slewed gimbal + deflected flare-base force. Shared by the single-player and
+/// multiplayer thrust systems (which differ only in how they gather membership + pose).
 fn apply_thrust(
     com: Vec3,
     gravity: Vec3,
@@ -264,24 +262,11 @@ fn apply_thrust(
     if geometry.is_empty() {
         return;
     }
-    let to_apply: HashMap<Entity, (f32, bevy::math::Vec2)> =
-        balanced_assembly_thrust(com, gravity, geometry, spin)
-            .into_iter()
-            .map(|thrust| (thrust.entity, (thrust.throttle, thrust.desired_gimbal)))
-            .collect();
-    let poses: HashMap<Entity, (Vec3, Quat)> = geometry
-        .iter()
-        .map(|&(entity, translation, rotation, _)| (entity, (translation, rotation)))
-        .collect();
-    let full = full_rocket_thrust(gravity);
-    for (entity, mut forces, mut gimbal) in rocket_forces.iter_mut() {
-        let Some(&(throttle, desired)) = to_apply.get(&entity) else {
-            continue;
-        };
-        let (translation, rotation) = poses[&entity];
-        gimbal.0 = gimbal_step(gimbal.0, desired, dt);
-        let (point, force) = gimbaled_rocket_thrust(translation, rotation, full, throttle, gimbal.0);
-        forces.apply_force_at_point(force, point);
+    for burn in assembly_burn(com, gravity, dt, geometry, spin) {
+        if let Ok((_, mut forces, mut gimbal)) = rocket_forces.get_mut(burn.entity) {
+            gimbal.0 = burn.gimbal;
+            forces.apply_force_at_point(burn.force, burn.point);
+        }
     }
 }
 

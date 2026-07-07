@@ -26,10 +26,7 @@ use avian3d::prelude::{
     Gravity, LinearVelocity, Position, Rotation, SphericalJoint, WriteRigidBodyForces,
 };
 use bad_spaceship_shared::assembly::largest_assembly_per_room;
-use bad_spaceship_shared::launch::{
-    balanced_assembly_thrust, full_rocket_thrust, gimbal_step, gimbaled_rocket_thrust,
-    measure_assembly_spin, LAUNCH_COUNTDOWN_SECS,
-};
+use bad_spaceship_shared::launch::{assembly_burn, measure_assembly_spin, LAUNCH_COUNTDOWN_SECS};
 use bad_spaceship_shared::character::{spawn_position, CharacterMovement, InitialPose, ServerAvatar};
 use bad_spaceship_shared::net::{
     apply_hold_spring, apply_net_input, focused_part, monster_index, sanitize_name,
@@ -1463,27 +1460,25 @@ fn apply_room_rocket_thrust(
         Query<(Entity, Forces, &mut Gimbal), With<RocketEngine>>,
     )>,
 ) {
-    // Group launched rooms' member rockets by room, keeping each pose for the
-    // gimbal-deflected force computation at apply time.
+    // Group launched rooms' member rockets by room.
     let mut per_room: HashMap<RoomId, Vec<(Entity, Vec3, Quat, Vec2)>> = HashMap::new();
-    let mut poses: HashMap<Entity, (Vec3, Quat)> = HashMap::new();
     for (entity, position, rotation, room, gimbal) in &set.p0() {
         if registry.is_launched(room.id) {
             per_room
                 .entry(room.id)
                 .or_default()
                 .push((entity, position.0, rotation.0, gimbal.0));
-            poses.insert(entity, (position.0, rotation.0));
         }
     }
     if per_room.is_empty() {
         return;
     }
 
-    // Balanced thrust per room → (throttle, gimbal command) per rocket entity. The COM
-    // + rotational state come from the shared `measure_assembly_spin` (the same
-    // measurement the client's predicted twin makes, from the same `ComputedMass`).
-    let mut to_apply: HashMap<Entity, (f32, Vec2)> = HashMap::new();
+    // Resolve each room's burn (shared `assembly_burn`, so the client's predicted twin
+    // computes the identical trims + gimbal slews). The COM + rotational state come
+    // from the shared `measure_assembly_spin`, over the same `ComputedMass`.
+    let dt = time.delta_secs();
+    let mut burns = Vec::new();
     {
         let members = set.p1();
         for (room, rockets) in &per_room {
@@ -1496,21 +1491,15 @@ fn apply_room_rocket_thrust(
             let Some((com, spin)) = measure_assembly_spin(samples) else {
                 continue;
             };
-            for thrust in balanced_assembly_thrust(com, gravity.0, rockets, &spin) {
-                to_apply.insert(thrust.entity, (thrust.throttle, thrust.desired_gimbal));
-            }
+            burns.extend(assembly_burn(com, gravity.0, dt, rockets, &spin));
         }
     }
-    let full = full_rocket_thrust(gravity.0);
-    let dt = time.delta_secs();
-    for (entity, mut forces, mut gimbal) in &mut set.p2() {
-        let Some(&(throttle, desired)) = to_apply.get(&entity) else {
-            continue;
-        };
-        let (translation, rotation) = poses[&entity];
-        gimbal.0 = gimbal_step(gimbal.0, desired, dt);
-        let (point, force) = gimbaled_rocket_thrust(translation, rotation, full, throttle, gimbal.0);
-        forces.apply_force_at_point(force, point);
+    let mut rockets = set.p2();
+    for burn in burns {
+        if let Ok((_, mut forces, mut gimbal)) = rockets.get_mut(burn.entity) {
+            gimbal.0 = burn.gimbal;
+            forces.apply_force_at_point(burn.force, burn.point);
+        }
     }
 }
 
