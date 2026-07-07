@@ -315,6 +315,7 @@ impl Plugin for NetServerPlugin {
         app.init_resource::<RoomRegistry>();
         // Per-room rocket-launch countdown state (see `LaunchRegistry`).
         app.init_resource::<LaunchRegistry>();
+        app.init_resource::<RoomAttitudeIntegrals>();
         // Server-authoritative session resume: remember each player's last position
         // (keyed by its persistent `resume_id`) so a reconnect after an iOS reload
         // lands back in place rather than at the origin.
@@ -1358,6 +1359,13 @@ struct LaunchRegistry {
     by_room: HashMap<RoomId, RoomLaunch>,
 }
 
+/// Per-room attitude-integral state for the launch autopilot's PID (the `integral`
+/// argument of `assembly_burn`) — one `Vec3` per launched room, persisted across
+/// ticks so a standing external torque (a rider off-centre) is held with zero
+/// standing attitude error.
+#[derive(Resource, Default)]
+struct RoomAttitudeIntegrals(HashMap<RoomId, Vec3>);
+
 impl LaunchRegistry {
     /// Whether a room has blasted off — the state the rocket thrust keys on and
     /// the save snapshot persists.
@@ -1447,6 +1455,7 @@ fn publish_room_launch(registry: Res<LaunchRegistry>, mut orbs: Query<(&OrbRoom,
 fn apply_room_rocket_thrust(
     time: Res<Time>,
     registry: Res<LaunchRegistry>,
+    mut integrals: ResMut<RoomAttitudeIntegrals>,
     gravity: Res<Gravity>,
     // `Forces` takes `AngularVelocity` mutably inside (and writes each rocket's
     // `Gimbal` the geometry pass reads), so the member/geometry reads and the force
@@ -1456,7 +1465,10 @@ fn apply_room_rocket_thrust(
             (Entity, &Position, &Rotation, &PartRoom, &Gimbal),
             (With<InLargestAssembly>, With<RocketEngine>),
         >,
-        Query<(&Position, &AngularVelocity, &ComputedMass, &PartRoom), With<InLargestAssembly>>,
+        Query<
+            (&Position, &LinearVelocity, &AngularVelocity, &ComputedMass, &PartRoom),
+            With<InLargestAssembly>,
+        >,
         Query<(Entity, Forces, &mut Gimbal), With<RocketEngine>>,
     )>,
 ) {
@@ -1483,15 +1495,37 @@ fn apply_room_rocket_thrust(
         let members = set.p1();
         for (room, rockets) in &per_room {
             let samples = || {
-                members
-                    .iter()
-                    .filter(|(.., r)| r.id == *room)
-                    .map(|(position, angular, mass, _)| (position.0, angular.0, mass.value()))
+                members.iter().filter(|(.., r)| r.id == *room).map(
+                    |(position, linear, angular, mass, _)| {
+                        (position.0, linear.0, angular.0, mass.value())
+                    },
+                )
             };
             let Some((com, spin)) = measure_assembly_spin(samples) else {
                 continue;
             };
-            burns.extend(assembly_burn(com, gravity.0, dt, rockets, &spin));
+            let integral = integrals.0.entry(*room).or_default();
+            let burn = assembly_burn(com, gravity.0, dt, rockets, &spin, integral);
+            // Diagnostics (BS_DEBUG_GIMBAL): once a second, the controller state the
+            // flight recorder can't see - body axis vs velocity vs nozzle deflections.
+            static DEBUG_GIMBAL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            if *DEBUG_GIMBAL.get_or_init(|| std::env::var("BS_DEBUG_GIMBAL").is_ok()) {
+                use std::sync::atomic::{AtomicU32, Ordering};
+                static TICKS: AtomicU32 = AtomicU32::new(0);
+                if TICKS.fetch_add(1, Ordering::Relaxed) % 60 == 0 {
+                    let axis = rockets[0].2 * Vec3::Y;
+                    let v = spin.linear_velocity;
+                    let gims: Vec<String> =
+                        burn.iter().map(|b| format!("({:+.3},{:+.3})", b.gimbal.x, b.gimbal.y)).collect();
+                    println!(
+                        "[gimbal] axis=({:+.3},{:+.3}) vlat=({:+.1},{:+.1}) w=({:+.2},{:+.2},{:+.2}) gims={}",
+                        axis.x, axis.z, v.x, v.z,
+                        spin.angular_velocity.x, spin.angular_velocity.y, spin.angular_velocity.z,
+                        gims.join(" ")
+                    );
+                }
+            }
+            burns.extend(burn);
         }
     }
     let mut rockets = set.p2();

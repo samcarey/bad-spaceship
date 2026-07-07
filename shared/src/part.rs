@@ -7,8 +7,8 @@ use crate::{
 };
 use avian3d::prelude::{
     AngularVelocity, Collider, ColliderDensity, Collisions, ComputedCenterOfMass, Forces, Friction,
-    Gravity, LinearVelocity, Position, ReadRigidBodyForces, Restitution, RigidBody, SphericalJoint,
-    SweptCcd, WriteRigidBodyForces,
+    Gravity, JointCollisionDisabled, LinearVelocity, Position, ReadRigidBodyForces, Restitution,
+    RigidBody, SphericalJoint, SweptCcd, WriteRigidBodyForces,
 };
 use bevy::prelude::*;
 use rand::prelude::ThreadRng;
@@ -41,6 +41,10 @@ impl Plugin for PartPlugin {
                 (replace_fallen_parts, replace_fallen_rocket_engines)
                     .run_if(not(resource_exists::<SuppressLocalParts>)),
             )
+            // Weld-rigidity census: runs in EVERY mode (the multiplayer client's
+            // predicted joints need the same collision filtering as the server's,
+            // or the predicted contact set diverges from the authoritative one).
+            .add_systems(FixedUpdate, maintain_weld_rigidity)
             .add_systems(
                 Update,
                 (
@@ -492,6 +496,83 @@ fn replace_fallen_rocket_engines(
     }
 }
 
+/// Maintain [`JointCollisionDisabled`] per **welded pair**: collision between two
+/// jointed bodies is turned off exactly when their joints already make the pair
+/// **rotationally rigid** (3+ non-collinear anchor points — a real weld), and kept
+/// on otherwise.
+///
+/// Why both halves matter (both recorder-verified):
+/// - A rigid weld that also *touches* (player-built joints form exactly where parts
+///   touch) puts a contact and a joint set on the same pair; Avian solves contacts
+///   and XPBD joints in different passes, and on a rigid pair they "correct" each
+///   other's mm-scale disagreement every substep — a deck bridging two rockets in
+///   real contact pumped up and exploded ~30 s after every blastoff. Contact adds
+///   nothing physical to a rigid weld (the joints fully own the relative pose), so
+///   it is dropped. Joint compliance (1e-5…1e-4) and doubled solver substeps were
+///   both tried first and neither stops the pump.
+/// - A 1-2-point weld is a pivot/hinge, and its contact is **structure**: a part
+///   welded by two points along an edge is braced flat by the face it touches (it
+///   may swing *away*, never *through*). Disabling contact there turns builds
+///   floppy — and un-footed ground clamps let a whole launch pad pendulum over the
+///   moment a rider stepped aboard.
+///
+/// The census reruns whenever joints change (attach, delete-zone, blastoff clamp
+/// cut), so deleting joints off a rigid weld automatically re-arms its contact.
+fn maintain_weld_rigidity(
+    mut commands: Commands,
+    joints: Query<(Entity, &SphericalJoint)>,
+    changed: Query<(), Changed<SphericalJoint>>,
+    mut removed: RemovedComponents<SphericalJoint>,
+) {
+    if changed.is_empty() && removed.read().next().is_none() {
+        return;
+    }
+    // Group each pair's joints, with anchors expressed in the pair's first body's
+    // frame (joints between the same two bodies may disagree on body1/body2 order).
+    let mut pairs: std::collections::HashMap<(Entity, Entity), Vec<(Entity, Vec3)>> =
+        std::collections::HashMap::new();
+    for (entity, joint) in &joints {
+        let (key, anchor) = if joint.body1 <= joint.body2 {
+            ((joint.body1, joint.body2), joint.local_anchor1())
+        } else {
+            ((joint.body2, joint.body1), joint.local_anchor2())
+        };
+        pairs.entry(key).or_default().push((entity, anchor.unwrap_or_default()));
+    }
+    for members in pairs.values() {
+        let rigid = anchors_are_rigid(members.iter().map(|(_, anchor)| *anchor));
+        for &(entity, _) in members {
+            if rigid {
+                commands.entity(entity).insert(JointCollisionDisabled);
+            } else {
+                commands.entity(entity).remove::<JointCollisionDisabled>();
+            }
+        }
+    }
+}
+
+/// Whether a set of anchor points pins *all* relative rotation: 3+ points spanning a
+/// non-degenerate triangle. 1 point = ball pivot, 2 (or collinear) = hinge — those
+/// pairs keep their contact as bracing.
+fn anchors_are_rigid(anchors: impl Iterator<Item = Vec3>) -> bool {
+    let points: Vec<Vec3> = anchors.collect();
+    if points.len() < 3 {
+        return false;
+    }
+    for i in 0..points.len() {
+        for j in (i + 1)..points.len() {
+            for k in (j + 1)..points.len() {
+                let area2 =
+                    (points[j] - points[i]).cross(points[k] - points[i]).length_squared();
+                if area2 > 1e-8 {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 fn replace_fallen_parts(
     mut commands: Commands,
     parts: Query<(&Position, &LinearVelocity, &AngularVelocity, Entity), With<GetsReplaced>>,
@@ -860,5 +941,30 @@ fn delete_joints(
             // `despawn_recursive()` is gone).
             commands.entity(*entity).despawn();
         }
+    }
+}
+
+#[cfg(test)]
+mod weld_tests {
+    use super::*;
+
+    /// 1 point = ball pivot, 2 points = hinge, 3 collinear = still a hinge — all
+    /// keep their contact. Only a spanning triangle counts as a rigid weld.
+    #[test]
+    fn rigidity_census_classifies_welds() {
+        let p = |x: f32, y: f32, z: f32| Vec3::new(x, y, z);
+        assert!(!anchors_are_rigid([p(0.0, 0.0, 0.0)].into_iter()));
+        assert!(!anchors_are_rigid([p(0.0, 0.0, 0.0), p(1.0, 0.0, 0.0)].into_iter()));
+        assert!(!anchors_are_rigid(
+            [p(0.0, 0.0, 0.0), p(1.0, 0.0, 0.0), p(2.0, 0.0, 0.0)].into_iter()
+        ));
+        assert!(anchors_are_rigid(
+            [p(0.0, 0.0, 0.0), p(1.0, 0.0, 0.0), p(0.0, 0.0, 1.0)].into_iter()
+        ));
+        // A face weld (4 corner points) is rigid.
+        assert!(anchors_are_rigid(
+            [p(-0.5, 0.0, -0.5), p(0.5, 0.0, -0.5), p(0.5, 0.0, 0.5), p(-0.5, 0.0, 0.5)]
+                .into_iter()
+        ));
     }
 }

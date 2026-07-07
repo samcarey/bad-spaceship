@@ -36,6 +36,7 @@ fn main() {
             ..default()
         })
         .add_plugins(CommonPlugins)
+
         .add_systems(Startup, load_configs);
 
     // Opt-in multiplayer host: set BS_MULTIPLAYER to run as the authoritative
