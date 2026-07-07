@@ -23,10 +23,11 @@ use avian3d::prelude::{
     WriteRigidBodyForces,
 };
 use bad_spaceship_shared::launch::{
-    balanced_assembly_thrust, measure_assembly_spin, AssemblySpin, LAUNCH_COUNTDOWN_SECS,
+    balanced_assembly_thrust, full_rocket_thrust, gimbal_step, gimbaled_rocket_thrust,
+    measure_assembly_spin, AssemblySpin, LAUNCH_COUNTDOWN_SECS,
 };
 use bad_spaceship_shared::net::{ControlChannel, InLargestAssembly, NetLaunch, NetPart, RequestLaunch};
-use bad_spaceship_shared::part::{Holdable, RocketEngine, SuppressLocalParts};
+use bad_spaceship_shared::part::{Gimbal, Holdable, RocketEngine, SuppressLocalParts};
 use bad_spaceship_shared::Character;
 use bevy::prelude::*;
 use bevy_egui::{
@@ -152,15 +153,17 @@ fn cut_ground_joints(
 
 /// Apply balanced thrust to the single-player main assembly's rockets each physics tick.
 fn apply_sp_thrust(
+    time: Res<Time>,
     local: Res<LaunchLocal>,
     parts: Query<(Entity, &GlobalTransform, &ComputedMass), With<Holdable>>,
     joints: Query<&SphericalJoint>,
-    rockets: Query<(Entity, &GlobalTransform), With<RocketEngine>>,
-    // `Forces` takes `AngularVelocity` mutably inside, so the spin read and the
-    // force write cannot coexist as sibling queries (B0001) — sequence them.
+    // `Forces` takes `AngularVelocity` mutably inside (and writes each rocket's
+    // `Gimbal` the geometry pass reads), so the spin/geometry reads and the force
+    // write cannot coexist as sibling queries (B0001) — sequence them.
     mut set: ParamSet<(
         Query<&AngularVelocity>,
-        Query<(Entity, Forces), With<RocketEngine>>,
+        Query<(Entity, &GlobalTransform, &Gimbal), With<RocketEngine>>,
+        Query<(Entity, Forces, &mut Gimbal), With<RocketEngine>>,
     )>,
     gravity: Res<Gravity>,
 ) {
@@ -186,15 +189,16 @@ fn apply_sp_thrust(
     }) else {
         return;
     };
-    let geometry: Vec<(Entity, Vec3, Quat)> = rockets
+    let geometry: Vec<(Entity, Vec3, Quat, bevy::math::Vec2)> = set
+        .p1()
         .iter()
-        .filter(|(entity, _)| members.contains(entity))
-        .map(|(entity, transform)| {
+        .filter(|(entity, ..)| members.contains(entity))
+        .map(|(entity, transform, gimbal)| {
             let (_, rotation, translation) = transform.to_scale_rotation_translation();
-            (entity, translation, rotation)
+            (entity, translation, rotation, gimbal.0)
         })
         .collect();
-    apply_thrust(com, gravity.0, &geometry, &spin, &mut set.p1());
+    apply_thrust(com, gravity.0, &geometry, &spin, time.delta_secs(), &mut set.p2());
 }
 
 /// Apply balanced thrust to the multiplayer assembly's **predicted** rockets each physics
@@ -202,15 +206,16 @@ fn apply_sp_thrust(
 /// `InLargestAssembly` markers and the predicted Avian `Position`/`Rotation` (not
 /// `GlobalTransform`, which `lightyear_avian` drives out of the fixed schedule).
 fn apply_mp_thrust(
+    time: Res<Time>,
     orb: Query<&NetLaunch>,
     // `Forces` takes `AngularVelocity` mutably inside, so the member read and the
     // force write cannot coexist as sibling queries (B0001) — sequence them.
     mut set: ParamSet<(
         Query<
-            (Entity, &Position, &Rotation, &AngularVelocity, &ComputedMass, Has<RocketEngine>),
+            (Entity, &Position, &Rotation, &AngularVelocity, &ComputedMass, Option<&Gimbal>),
             (With<NetPart>, With<Predicted>, With<InLargestAssembly>),
         >,
-        Query<(Entity, Forces), (With<RocketEngine>, With<Predicted>)>,
+        Query<(Entity, Forces, &mut Gimbal), (With<RocketEngine>, With<Predicted>)>,
     )>,
     gravity: Res<Gravity>,
 ) {
@@ -219,7 +224,8 @@ fn apply_mp_thrust(
     }
     // The assembly's COM + rotational state, via the shared measurement (see
     // `measure_assembly_spin`) so the trim matches the server exactly; collect
-    // the member rockets' poses alongside.
+    // the member rockets' poses alongside (`Gimbal` marks the rockets — it rides
+    // `insert_rocket_physics`).
     let (measured, geometry) = {
         let members = set.p0();
         let samples = || {
@@ -229,41 +235,53 @@ fn apply_mp_thrust(
                     (position.0, angular.0, part_mass.value())
                 })
         };
-        let geometry: Vec<(Entity, Vec3, Quat)> = members
+        let geometry: Vec<(Entity, Vec3, Quat, bevy::math::Vec2)> = members
             .iter()
-            .filter(|(.., is_rocket)| *is_rocket)
-            .map(|(entity, position, rotation, ..)| (entity, position.0, rotation.0))
+            .filter_map(|(entity, position, rotation, _, _, gimbal)| {
+                gimbal.map(|g| (entity, position.0, rotation.0, g.0))
+            })
             .collect();
         (measure_assembly_spin(samples), geometry)
     };
     let Some((com, spin)) = measured else {
         return;
     };
-    apply_thrust(com, gravity.0, &geometry, &spin, &mut set.p1());
+    apply_thrust(com, gravity.0, &geometry, &spin, time.delta_secs(), &mut set.p1());
 }
 
-/// Compute the balanced per-rocket forces for an assembly and apply each at its flare
-/// base through the rockets' `Forces`. Shared by the single-player and multiplayer thrust
-/// systems (which differ only in how they gather membership + pose).
+/// Compute the balanced per-rocket commands for an assembly, slew each rocket's gimbal
+/// toward its target, and apply the deflected force at its flare base through the
+/// rockets' `Forces`. Shared by the single-player and multiplayer thrust systems (which
+/// differ only in how they gather membership + pose).
 fn apply_thrust(
     com: Vec3,
     gravity: Vec3,
-    geometry: &[(Entity, Vec3, Quat)],
+    geometry: &[(Entity, Vec3, Quat, bevy::math::Vec2)],
     spin: &AssemblySpin,
-    rocket_forces: &mut Query<(Entity, Forces), impl bevy::ecs::query::QueryFilter>,
+    dt: f32,
+    rocket_forces: &mut Query<(Entity, Forces, &mut Gimbal), impl bevy::ecs::query::QueryFilter>,
 ) {
     if geometry.is_empty() {
         return;
     }
-    let to_apply: HashMap<Entity, (Vec3, Vec3)> =
+    let to_apply: HashMap<Entity, (f32, bevy::math::Vec2)> =
         balanced_assembly_thrust(com, gravity, geometry, spin)
             .into_iter()
-            .map(|thrust| (thrust.entity, (thrust.force, thrust.point)))
+            .map(|thrust| (thrust.entity, (thrust.throttle, thrust.desired_gimbal)))
             .collect();
-    for (entity, mut forces) in rocket_forces.iter_mut() {
-        if let Some((force, point)) = to_apply.get(&entity) {
-            forces.apply_force_at_point(*force, *point);
-        }
+    let poses: HashMap<Entity, (Vec3, Quat)> = geometry
+        .iter()
+        .map(|&(entity, translation, rotation, _)| (entity, (translation, rotation)))
+        .collect();
+    let full = full_rocket_thrust(gravity);
+    for (entity, mut forces, mut gimbal) in rocket_forces.iter_mut() {
+        let Some(&(throttle, desired)) = to_apply.get(&entity) else {
+            continue;
+        };
+        let (translation, rotation) = poses[&entity];
+        gimbal.0 = gimbal_step(gimbal.0, desired, dt);
+        let (point, force) = gimbaled_rocket_thrust(translation, rotation, full, throttle, gimbal.0);
+        forces.apply_force_at_point(force, point);
     }
 }
 

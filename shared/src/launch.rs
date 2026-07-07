@@ -12,7 +12,7 @@ use crate::part::{
     NOMINAL_PART_MASS, ROCKET_THRUST_DIR_LOCAL, ROCKET_THRUST_ORIGIN_LOCAL,
     ROCKET_THRUST_PART_WEIGHTS,
 };
-use bevy::math::{Mat3, Quat, Vec3};
+use bevy::math::{Mat3, Quat, Vec2, Vec3};
 use bevy::prelude::Entity;
 
 /// Launch countdown duration in seconds — long enough to show `3 → 2 → 1`. Shared so
@@ -37,12 +37,65 @@ pub fn rocket_world_thrust(translation: Vec3, rotation: Quat, full_thrust: f32) 
     (point, force)
 }
 
-/// One rocket's balanced launch thrust: the (throttled) force to apply and the world
-/// point to apply it at.
+/// Thrust vectoring: how far a rocket's nozzle can deflect off the body axis (±15°).
+pub const GIMBAL_MAX_RAD: f32 = 15.0 * std::f32::consts::PI / 180.0;
+/// Thrust vectoring: how fast the nozzle can slew toward its commanded deflection.
+/// Tested up the ladder (flight-recorder-verified at each step): 20°/s (real-TVC
+/// plausible) puts the full ±15° traverse at 0.75 s — the nozzle always torques about
+/// half a correction cycle late, and a rider's off-centre weight at blastoff flipped
+/// the stack outright; 60°/s survives blastoff; 120°/s is what a rider-disturbed
+/// 1–2-rocket stack needs to hold attitude through boarding shoves and weight
+/// shifts, while still being a visibly rate-limited actuator.
+pub const GIMBAL_RATE_RAD: f32 = 120.0 * std::f32::consts::PI / 180.0;
+
+/// One rocket's balanced launch command: how hard to fire (`throttle` ∈ [0, 1] of
+/// [`full_rocket_thrust`]) and where the autopilot wants the nozzle pointed
+/// (`desired_gimbal`, a local-frame tilt vector — see [`Gimbal`](crate::part::Gimbal)).
+/// The *applied* force comes from [`gimbaled_rocket_thrust`] after the caller slews the
+/// rocket's actual gimbal toward the target with [`gimbal_step`] — the nozzle is a real
+/// rate-limited actuator, not an instant one.
 pub struct RocketThrust {
     pub entity: Entity,
-    pub force: Vec3,
-    pub point: Vec3,
+    pub throttle: f32,
+    pub desired_gimbal: Vec2,
+}
+
+/// Slew a nozzle's current deflection toward `desired` at the gimbal's rate limit
+/// ([`GIMBAL_RATE_RAD`]), keeping it inside the ±[`GIMBAL_MAX_RAD`] cone. Pure and
+/// shared so the server and the client's predicted twin integrate the same actuator.
+pub fn gimbal_step(current: Vec2, desired: Vec2, dt: f32) -> Vec2 {
+    let desired = desired.clamp_length_max(GIMBAL_MAX_RAD);
+    let step = desired - current;
+    let max_step = GIMBAL_RATE_RAD * dt;
+    let next = if step.length() <= max_step {
+        desired
+    } else {
+        current + step.normalize() * max_step
+    };
+    next.clamp_length_max(GIMBAL_MAX_RAD)
+}
+
+/// A rocket's world-space thrust with its nozzle deflected by `gimbal` (a local-frame
+/// tilt vector: direction = which way the thrust tips off the body axis, length = the
+/// tilt angle in radians) at `throttle` of full thrust. The application point is the
+/// flare base, same as [`rocket_world_thrust`] — the nozzle pivots there.
+pub fn gimbaled_rocket_thrust(
+    translation: Vec3,
+    rotation: Quat,
+    full_thrust: f32,
+    throttle: f32,
+    gimbal: Vec2,
+) -> (Vec3, Vec3) {
+    let point = translation + rotation * ROCKET_THRUST_ORIGIN_LOCAL;
+    let angle = gimbal.length();
+    let dir_local = if angle < 1e-6 {
+        ROCKET_THRUST_DIR_LOCAL
+    } else {
+        ROCKET_THRUST_DIR_LOCAL * angle.cos()
+            + Vec3::new(gimbal.x, 0.0, gimbal.y) / angle * angle.sin()
+    };
+    let force = (rotation * dir_local).normalize_or_zero() * full_thrust * throttle;
+    (point, force)
 }
 
 /// The assembly's rotational state, for the launch stability assist: differential
@@ -111,20 +164,20 @@ const STABILITY_KD: f32 = 4.0;
 /// so a rideable stack stays upright — within throttle authority: scales stay clamped
 /// to `[0, 1]` and the lift guard still keeps the average at [`LIFT_FLOOR`].
 ///
-/// `rockets` is `(entity, world translation, world rotation)` for the assembly's rockets;
-/// `com` is the assembly's centre of mass (mass-weighted over all its parts); `spin` is
-/// the assembly's measured rotational state (see [`AssemblySpin`]).
+/// `rockets` is `(entity, world translation, world rotation, current gimbal)` for the
+/// assembly's rockets; `com` is the assembly's centre of mass (mass-weighted over all
+/// its parts); `spin` is the assembly's measured rotational state (see [`AssemblySpin`]).
 pub fn balanced_assembly_thrust(
     com: Vec3,
     gravity: Vec3,
-    rockets: &[(Entity, Vec3, Quat)],
+    rockets: &[(Entity, Vec3, Quat, Vec2)],
     spin: &AssemblySpin,
 ) -> Vec<RocketThrust> {
     let full = full_rocket_thrust(gravity);
     let mut points = Vec::with_capacity(rockets.len());
     let mut forces = Vec::with_capacity(rockets.len());
     let mut torques = Vec::with_capacity(rockets.len());
-    for &(_, translation, rotation) in rockets {
+    for &(_, translation, rotation, _) in rockets {
         let (point, force) = rocket_world_thrust(translation, rotation, full);
         torques.push((point - com).cross(force));
         points.push(point);
@@ -137,15 +190,65 @@ pub fn balanced_assembly_thrust(
     let target = spin.inertia
         * (STABILITY_KP * thrust_dir.cross(Vec3::Y) - STABILITY_KD * spin.angular_velocity);
     let scales = balanced_thrust_scales_toward(&torques, target);
+    // The nozzles cover whatever torque the throttles can't (they only reduce thrust,
+    // the lift guard bounds how much, and 1–2 rockets barely span any torque at all).
+    // The gimbal command is **incremental** — current deflection + the correction for
+    // the torque still missing from the *actually applied* thrust (gimbals included) —
+    // which makes the nozzle an integrator, exactly like real TVC: a steady external
+    // torque (a rider standing off-centre) ends up absorbed by a *held* deflection
+    // with zero steady-state tilt. The earlier positional form (deflection recomputed
+    // from scratch against nominal thrust) needed a standing attitude ERROR to hold a
+    // standing disturbance — e = τ/(KP·I), and on a one-rocket stack (I ≈ 2 kg·m²) a
+    // rider 0.45 m off-centre made that ~30° of trim heel: the stack leaned until it
+    // fell over (recorder-verified). The slight leak (×0.995) bleeds off deflection
+    // the loop no longer asks for, so paired nozzles can't wander into an
+    // equal-and-opposite null-space set point.
+    let net: Vec3 = rockets
+        .iter()
+        .enumerate()
+        .map(|(i, &(_, translation, rotation, gimbal))| {
+            let (point, force) =
+                gimbaled_rocket_thrust(translation, rotation, full, scales[i], gimbal);
+            (point - com).cross(force)
+        })
+        .sum();
+    let share = (target - net) / rockets.len() as f32;
     rockets
         .iter()
         .enumerate()
-        .map(|(i, &(entity, _, _))| RocketThrust {
+        .map(|(i, &(entity, _, rotation, gimbal))| RocketThrust {
             entity,
-            force: forces[i] * scales[i],
-            point: points[i],
+            throttle: scales[i],
+            desired_gimbal: gimbal * 0.995
+                + gimbal_correction(points[i] - com, rotation, full * scales[i], share),
         })
         .collect()
+}
+
+/// The nozzle-deflection *increment* (local-frame tilt vector, ≤ [`GIMBAL_MAX_RAD`])
+/// that makes a rocket's thrust produce `torque_share` more torque about the assembly
+/// COM. `arm` is flare base − COM, `axial_thrust` the rocket's throttled thrust
+/// magnitude.
+///
+/// The minimum lateral force with `arm × l = torque_share` is `l = (share × arm)/|arm|²`
+/// (the arm-parallel component of the share — roll about the lever — is unreachable by a
+/// force at its tip and drops out). Only force ⊥ the nozzle axis is reachable by tilting
+/// the nozzle, so `l` is projected off the axis; the tilt angle then satisfies
+/// `sin θ = |l| / axial_thrust`, clamped to the gimbal cone.
+fn gimbal_correction(arm: Vec3, rotation: Quat, axial_thrust: f32, torque_share: Vec3) -> Vec2 {
+    if axial_thrust < 1e-6 || arm.length_squared() < 1e-6 {
+        return Vec2::ZERO;
+    }
+    let mut lateral = torque_share.cross(arm) / arm.length_squared();
+    let axis = (rotation * ROCKET_THRUST_DIR_LOCAL).normalize_or_zero();
+    lateral -= axis * axis.dot(lateral);
+    let magnitude = lateral.length();
+    if magnitude < 1e-6 {
+        return Vec2::ZERO;
+    }
+    let angle = (magnitude / axial_thrust).min(1.0).asin().min(GIMBAL_MAX_RAD);
+    let local = rotation.inverse() * (lateral / magnitude);
+    Vec2::new(local.x, local.z).normalize_or_zero() * angle
 }
 
 /// The launch will not trade away more than `1 - LIFT_FLOOR` of its average thrust for
@@ -235,6 +338,24 @@ pub fn balanced_thrust_scales_toward(torques: &[Vec3], target: Vec3) -> Vec<f32>
 mod tests {
     use super::*;
 
+    /// Steady-state world (point, force) per command — the gimbal assumed to have
+    /// reached its target — for checking the torque the autopilot converges on.
+    fn world_thrusts(
+        rockets: &[(Entity, Vec3, Quat, Vec2)],
+        gravity: Vec3,
+        thrusts: &[RocketThrust],
+    ) -> Vec<(Vec3, Vec3)> {
+        let full = full_rocket_thrust(gravity);
+        thrusts
+            .iter()
+            .map(|t| {
+                let &(_, pos, rot, _) =
+                    rockets.iter().find(|(entity, ..)| *entity == t.entity).unwrap();
+                gimbaled_rocket_thrust(pos, rot, full, t.throttle, t.desired_gimbal)
+            })
+            .collect()
+    }
+
     /// A symmetric pair of upright rockets straddling the COM needs no throttling —
     /// their torques cancel, so both fire at full.
     #[test]
@@ -293,8 +414,8 @@ mod tests {
     fn stability_assist_counters_spin() {
         // Two upright rockets straddling the COM on the x axis.
         let rockets = [
-            (Entity::from_raw_u32(1).unwrap(), Vec3::new(-1.0, 0.0, 0.0), Quat::IDENTITY),
-            (Entity::from_raw_u32(2).unwrap(), Vec3::new(1.0, 0.0, 0.0), Quat::IDENTITY),
+            (Entity::from_raw_u32(1).unwrap(), Vec3::new(-1.0, 0.0, 0.0), Quat::IDENTITY, Vec2::ZERO),
+            (Entity::from_raw_u32(2).unwrap(), Vec3::new(1.0, 0.0, 0.0), Quat::IDENTITY, Vec2::ZERO),
         ];
         let gravity = Vec3::new(0.0, -9.81, 0.0);
         let com = Vec3::new(0.0, -(crate::part::ROCKET_BODY_HEIGHT / 2.0), 0.0);
@@ -302,17 +423,76 @@ mod tests {
         // rocket whose full-thrust torque is +Z (the -x one) relative to the other.
         let spin = AssemblySpin { angular_velocity: Vec3::new(0.0, 0.0, 1.0), inertia: 10.0 };
         let thrusts = balanced_assembly_thrust(com, gravity, &rockets, &spin);
-        let net_torque: Vec3 = thrusts
+        let net_torque: Vec3 = world_thrusts(&rockets, gravity, &thrusts)
             .iter()
-            .map(|t| (t.point - com).cross(t.force))
+            .map(|(point, force)| (*point - com).cross(*force))
             .sum();
         assert!(net_torque.z < -1.0, "expected counter-spin torque, got {net_torque:?}");
         // And a still, upright assembly keeps the symmetric full-throttle solution.
         let still = AssemblySpin { angular_velocity: Vec3::ZERO, inertia: 10.0 };
         let thrusts = balanced_assembly_thrust(com, gravity, &rockets, &still);
         assert!(
-            thrusts.iter().all(|t| t.force.length() > 0.99 * full_rocket_thrust(gravity)),
+            thrusts.iter().all(|t| t.throttle > 0.99),
             "still assembly should fire (near) full"
         );
+    }
+
+    /// The nozzle actuator honors both its limits: it never moves faster than
+    /// `GIMBAL_RATE_RAD` per second and never leaves the `GIMBAL_MAX_RAD` cone.
+    #[test]
+    fn gimbal_step_respects_rate_and_range() {
+        let dt = 1.0 / 60.0;
+        // A big commanded deflection: one step moves exactly the rate limit toward it.
+        let step = gimbal_step(Vec2::ZERO, Vec2::new(1.0, 0.0), dt);
+        assert!((step.length() - GIMBAL_RATE_RAD * dt).abs() < 1e-6, "step = {step:?}");
+        // Slewing forever saturates at the cone edge, not the (over-range) command.
+        let mut current = Vec2::ZERO;
+        for _ in 0..600 {
+            current = gimbal_step(current, Vec2::new(1.0, 0.0), dt);
+        }
+        assert!((current.length() - GIMBAL_MAX_RAD).abs() < 1e-5, "saturated = {current:?}");
+        // A reachable command is hit exactly (no overshoot, no dithering).
+        let near = Vec2::new(0.001, 0.0);
+        assert_eq!(gimbal_step(Vec2::ZERO, near, dt), near);
+    }
+
+    /// A *single* rocket has no throttle authority at all (its thrust passes through
+    /// the COM), so the whole PD correction must come out of the nozzle: a spinning
+    /// lone rocket gets a non-zero gimbal whose steady-state torque counters the spin.
+    #[test]
+    fn single_rocket_gimbal_counters_spin() {
+        let rockets = [(Entity::from_raw_u32(1).unwrap(), Vec3::ZERO, Quat::IDENTITY, Vec2::ZERO)];
+        let gravity = Vec3::new(0.0, -9.81, 0.0);
+        let com = Vec3::new(0.0, 0.3, 0.0); // payload above: COM sits above the nozzle
+        let spin = AssemblySpin { angular_velocity: Vec3::new(0.0, 0.0, 1.0), inertia: 2.0 };
+        let thrusts = balanced_assembly_thrust(com, gravity, &rockets, &spin);
+        let desired = thrusts[0].desired_gimbal;
+        assert!(desired.length() > 1e-4, "expected a gimbal command, got {desired:?}");
+        assert!(desired.length() <= GIMBAL_MAX_RAD + 1e-6, "over-range: {desired:?}");
+        let net_torque: Vec3 = world_thrusts(&rockets, gravity, &thrusts)
+            .iter()
+            .map(|(point, force)| (*point - com).cross(*force))
+            .sum();
+        assert!(net_torque.z < 0.0, "expected counter-spin torque, got {net_torque:?}");
+    }
+
+    /// A rocket *pair* spans only one torque axis with throttle (perpendicular to the
+    /// line between them); spin about the pair line itself is throttle-invisible and
+    /// must be countered by the gimbals.
+    #[test]
+    fn pair_roll_axis_handled_by_gimbal() {
+        let rockets = [
+            (Entity::from_raw_u32(1).unwrap(), Vec3::new(-1.0, 0.0, 0.0), Quat::IDENTITY, Vec2::ZERO),
+            (Entity::from_raw_u32(2).unwrap(), Vec3::new(1.0, 0.0, 0.0), Quat::IDENTITY, Vec2::ZERO),
+        ];
+        let gravity = Vec3::new(0.0, -9.81, 0.0);
+        let com = Vec3::new(0.0, 0.0, 0.0);
+        let spin = AssemblySpin { angular_velocity: Vec3::new(1.0, 0.0, 0.0), inertia: 4.0 };
+        let thrusts = balanced_assembly_thrust(com, gravity, &rockets, &spin);
+        let net_torque: Vec3 = world_thrusts(&rockets, gravity, &thrusts)
+            .iter()
+            .map(|(point, force)| (*point - com).cross(*force))
+            .sum();
+        assert!(net_torque.x < -0.5, "expected counter-roll torque, got {net_torque:?}");
     }
 }

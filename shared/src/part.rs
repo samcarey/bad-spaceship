@@ -182,6 +182,17 @@ pub struct Holdable;
 #[derive(Default, Component)]
 pub struct RocketEngine;
 
+/// The rocket's current thrust-vector deflection: a local-frame nozzle tilt vector
+/// whose direction is which way the thrust tips off the body axis (local x/z) and
+/// whose length is the tilt angle in radians (≤ `launch::GIMBAL_MAX_RAD`). The launch
+/// autopilot slews it toward a commanded deflection at the gimbal's rate limit each
+/// physics tick (`launch::gimbal_step`) — it's a real actuator with travel and slew
+/// limits, not an instant one. Local integrator state on every side (server, SP,
+/// predicted MP), not replicated: each side follows the same command law from the
+/// same measured state, so they converge like the throttle trim does.
+#[derive(Default, Component, Debug, Clone, Copy)]
+pub struct Gimbal(pub Vec2);
+
 /// The part's random-appearance seed, minted at spawn. The client derives the
 /// whole metal look (tint, brushing, flakes, scratches) deterministically from
 /// it; in multiplayer it rides `NetPart` so every client renders the same part
@@ -429,7 +440,7 @@ pub fn insert_rocket_physics(entity: &mut EntityCommands) {
     // the body centre is the flare's bottom rim.
     let flare_bottom_y = ROCKET_BODY_HEIGHT / 2.0 + ROCKET_FLARE_HEIGHT;
     let bounding_radius = (ROCKET_FLARE_BOTTOM_RADIUS.powi(2) + flare_bottom_y.powi(2)).sqrt();
-    entity.insert((RocketEngine, collider, BoundingRadius(bounding_radius)));
+    entity.insert((RocketEngine, Gimbal::default(), collider, BoundingRadius(bounding_radius)));
     // Density/friction/restitution/CCD/rigid-body — shared with the cuboid parts.
     insert_part_dynamics(entity);
 }

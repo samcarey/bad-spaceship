@@ -651,6 +651,15 @@ fn jump_based_on_input(
                 }
                 velocity.0.y = last_support.velocity.y + 1.0;
             }
+            // Horizontally, keep the flat `max_speed + 3` cap. (An earned-speed cap —
+            // "what the walk model commanded on the last grounded tick + margin" — was
+            // tried against the 8–11 m/s diagonal kicks seen on thrust-vectoring
+            // stacks, and made things WORSE: a stand-still rider's earned speed is ~0,
+            // so every micro-bounce on a swaying deck velocity-yanked the rider to
+            // match it, pumping momentum into the light deck through the next contact
+            // until the stack spun apart — recorder showed |ω| → 173 rad/s with a
+            // rider standing dead still. The diagonal drift that remains under this
+            // flat cap is real airborne motion over a swaying deck, not a kick.)
             let horizontal = Vec3::new(rel.x, 0.0, rel.z);
             let cap = tuning.max_speed + 3.0;
             if horizontal.length() > cap {
