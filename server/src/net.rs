@@ -37,8 +37,8 @@ use bad_spaceship_shared::net::{
 };
 use bad_spaceship_shared::map::GROUND_LAYER;
 use bad_spaceship_shared::part::{
-    local_contact_anchor, part_state_diverged, spawn_random_part, spawn_random_rocket,
-    spawn_rocket_engine, spawn_saved_cuboid, Gimbal, RocketEngine, SuppressLocalParts, DELETE_RADIUS,
+    ground_clamp_anchor_pairs, local_contact_anchor, part_state_diverged, spawn_random_part,
+    spawn_random_rocket, spawn_rocket_engine, spawn_saved_cuboid, Gimbal, RocketEngine, SuppressLocalParts, DELETE_RADIUS,
     NUM_PARTS, NUM_ROCKET_ENGINES, PART_FALL_Y, ROCKET_VOLUME,
 };
 use bad_spaceship_shared::{Grass, SuppressLocalPlayer, Yaw};
@@ -1425,12 +1425,26 @@ fn server_attach(
                     let net_id = |e: Entity| {
                         if grounds.get(e).is_ok() { GROUND_JOINT_ID } else { e.to_bits() }
                     };
-                    spawn_room_joint(
-                        &mut commands,
-                        member.0,
-                        (b1, a1, net_id(b1)),
-                        (b2, a2, net_id(b2)),
-                    );
+                    if grounds.get(b2).is_ok() {
+                        // Ground clamps are a rigid anchor TRIANGLE, not a ball
+                        // pivot (see `ground_clamp_anchor_pairs`) - a one-anchor
+                        // clamp braced by a live contact buzzes forever.
+                        for (pa, ga) in ground_clamp_anchor_pairs(a1, a2, rot(b1)) {
+                            spawn_room_joint(
+                                &mut commands,
+                                member.0,
+                                (b1, pa, net_id(b1)),
+                                (b2, ga, GROUND_JOINT_ID),
+                            );
+                        }
+                    } else {
+                        spawn_room_joint(
+                            &mut commands,
+                            member.0,
+                            (b1, a1, net_id(b1)),
+                            (b2, a2, net_id(b2)),
+                        );
+                    }
                     attached = true;
                     // Replenish the pool for each *part* endpoint joining for the
                     // first time (the ground isn't a loose part — no replacement).
