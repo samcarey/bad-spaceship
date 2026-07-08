@@ -13,11 +13,12 @@
 //! interpolated Avian pose.
 
 use avian3d::prelude::{
-    Forces, Gravity, PhysicsSystems, Position, RigidBody, Rotation, SphericalJoint,
+    Forces, Gravity, LinearVelocity, PhysicsSystems, Position, RigidBody, Rotation,
+    SphericalJoint,
 };
 use bevy::math::DVec3;
 use bevy::transform::TransformSystems;
-use std::collections::HashMap;
+use lightyear::prediction::correction::VisualCorrection;
 
 use crate::render_main_pass::AshMaterial;
 use bad_spaceship_shared::character::{
@@ -876,10 +877,16 @@ fn draw_replicated_parts(
 /// target it converges back to.
 #[derive(Resource, Default)]
 pub struct ClientRoomFrame {
+    /// The reconciled frame origin: the replicated offset, except while it's a
+    /// rebase behind/ahead of the entity state (see `sync_visual_room_frame`).
     pub offset: DVec3,
     pub velocity: Vec3,
-    /// Frames spent holding while the replicated frame disagrees by a
-    /// rebase-sized gap (see the reconciliation step) — a snap-anyway backstop.
+    /// Where world-anchored *visuals* belong: `offset - avatar correction error`,
+    /// so the ground/ash slide through a rebase correction exactly with the scene.
+    pub visual_offset: DVec3,
+    /// The avatar's true position last frame — the continuity anchor.
+    prev_true: Option<DVec3>,
+    /// Frames spent holding a stale replicated offset — a snap-anyway backstop.
     held_frames: u8,
 }
 
@@ -897,25 +904,42 @@ pub struct ClientRoomFrame {
 ///   streaming and a rebase doesn't reset the apparent fall speed to the
 ///   co-moving frame's near-zero local velocity.
 ///
-/// Runs in `PostUpdate` after `PhysicsSystems::Writeback` (the avatar's rendered
-/// `Transform` — frame-interpolated + visual-corrected — is final) and before
-/// transform propagation, and folds the avatar's current render-vs-sim error into
-/// the visual offset: if the predicted world is easing through a correction, the
-/// ground and ash ease with it instead of snapping ahead of the scene.
+/// **How a rebase actually reaches the rendered world** (measured, not guessed —
+/// see PR #140): the rollback snaps the *sim* `Position`s, and in the same frame
+/// lightyear parks the whole km-scale jump in a [`VisualCorrection<Position>`]
+/// whose error is *folded into the rendered `Position`* and decayed over ~2 s
+/// (200 ms half-life) — so the scene never jumps, it slides. Two consequences:
+///
+/// 1. World visuals must slide with it: they belong at `-(offset - error)`,
+///    where `error` is the avatar's current correction error (the camera rides
+///    the avatar).
+/// 2. The replicated `NetRoomFrame` (a different entity on the wire) can land a
+///    packet or two before/after the entity snap. The reconciliation below
+///    anchors on the one thing that is continuous by construction — the
+///    avatar's TRUE position (`offset + sim`, where `sim = Position - error`) —
+///    and holds the previous offset (extrapolated at the true velocity)
+///    whenever pairing the replicated offset with the current sim would break
+///    that continuity by a rebase-sized gap. This bridges both orderings and
+///    self-heals the moment the two agree again.
+///
+/// Runs in `PostUpdate` after `PhysicsSystems::Writeback` and before transform
+/// propagation, so it pairs the frame's *final* rendered state (post-decay
+/// `Position` + its matching error) and its ground/ash writes propagate this
+/// frame.
 #[allow(clippy::type_complexity)]
 fn sync_visual_room_frame(
     time: Res<Time>,
     net_frames: Query<&NetRoomFrame>,
-    parts: Query<(Entity, &Position), (With<NetPart>, With<Predicted>)>,
-    avatar: Query<(&Position, &Transform), (With<Character>, Without<Grass>)>,
-    mut prev_parts: Local<HashMap<Entity, Vec3>>,
+    avatar: Query<
+        (&Position, &LinearVelocity, Option<&VisualCorrection<Position>>),
+        (With<Character>, Without<Grass>),
+    >,
     mut client: ResMut<ClientRoomFrame>,
-    // `Without<NetPart>` + `Without<Character>`: proves disjointness from the
-    // read-only part/avatar queries above (B0001 — the conflict is a runtime
-    // panic on the first run, not a compile error).
+    // `Without<Character>`: proves disjointness from the avatar read (B0001 —
+    // the conflict is a runtime panic on the first run, not a compile error).
     mut grounds: Query<
         (&mut Position, &mut Transform),
-        (With<Grass>, With<RigidBody>, Without<Character>, Without<NetPart>),
+        (With<Grass>, With<RigidBody>, Without<Character>),
     >,
     ash: Query<&MeshMaterial3d<AshMaterial>>,
     mut ash_materials: ResMut<Assets<AshMaterial>>,
@@ -924,82 +948,42 @@ fn sync_visual_room_frame(
     let Some(net) = net_frames.iter().next() else {
         return;
     };
+    let net_offset = DVec3::from_array(net.offset);
+    client.velocity = Vec3::from_array(net.velocity);
 
-    // 1. Infer a rebase from the parts' own sim jump: at a rebase EVERY room part
-    //    teleports by the same delta in the same tick, which nothing else does (a
-    //    lone diverging part isn't uniform; a fall-net respawn only moves an
-    //    avatar; normal motion is < a few m/frame).
-    const JUMP_M: f32 = 500.0;
-    let mut jumps: Vec<Vec3> = Vec::new();
-    for (entity, position) in &parts {
-        if let Some(prev) = prev_parts.get(&entity) {
-            let d = position.0 - *prev;
-            if d.length_squared() > JUMP_M * JUMP_M {
-                jumps.push(d);
-            }
+    let Ok((position, linear, correction)) = avatar.single() else {
+        // No avatar yet (boot): nothing to anchor continuity on.
+        client.offset = net_offset;
+        client.visual_offset = net_offset;
+        client.prev_true = None;
+        return;
+    };
+    let error = correction.map(|c| c.error.0).unwrap_or(Vec3::ZERO);
+    let sim = (position.0 - error).as_dvec3();
+
+    // Reconcile (see the doc comment): keep `offset + sim` continuous.
+    const REBASE_GAP_M: f64 = 500.0;
+    let mut offset = net_offset;
+    if let Some(prev_true) = client.prev_true {
+        let true_velocity = (client.velocity + linear.0).as_dvec3();
+        let expected = prev_true + true_velocity * time.delta_secs_f64();
+        if (net_offset + sim - expected).length() > REBASE_GAP_M && client.held_frames < 30 {
+            offset = expected - sim;
+            client.held_frames += 1;
+        } else {
+            client.held_frames = 0;
         }
     }
-    prev_parts.clear();
-    prev_parts.extend(parts.iter().map(|(entity, position)| (entity, position.0)));
-    let uniform_jump = (jumps.len() >= 2
-        && jumps.iter().all(|d| d.distance(jumps[0]) < 50.0))
-    .then(|| jumps[0]);
-
-    // 2. Reconcile: positions moved by `-shift`, so the frame origin moved by
-    //    `+shift` = `-jump`. Otherwise follow the authoritative replicated frame —
-    //    unless it currently disagrees by a rebase-sized gap (it jumped ahead of
-    //    the world snap, or the world snapped ahead of it): hold ours, integrating
-    //    at the frame velocity, until the two re-agree (snap after ~1/3 s anyway —
-    //    the backstop for a jump the inference missed).
-    let net_offset = DVec3::from_array(net.offset);
-    if let Some(jump) = uniform_jump {
-        client.offset -= jump.as_dvec3();
-        client.held_frames = 0;
-    }
-    if (net_offset - client.offset).length() < JUMP_M as f64 || client.held_frames > 20 {
-        client.offset = net_offset;
-        client.velocity = Vec3::from_array(net.velocity);
-        client.held_frames = 0;
-    } else {
-        let velocity = client.velocity.as_dvec3();
-        client.offset += velocity * time.delta_secs_f64();
-        client.held_frames += 1;
-    }
-
-    // 3. Fold in the avatar's current render-vs-sim error (visual correction +
-    //    frame interpolation): the scene renders at `sim + error`, so world-fixed
-    //    visuals belong at `-(offset - error)` to move with it.
-    let ease = avatar
-        .single()
-        .map(|(position, transform)| transform.translation - position.0)
-        .unwrap_or(Vec3::ZERO);
-    let visual_offset = client.offset - ease.as_dvec3();
-
-    // TEMP rebase diagnostics: log the frame math around any disturbance.
-    if uniform_jump.is_some()
-        || (net_offset - client.offset).length() > 100.0
-        || ease.length() > 10.0
-    {
-        let avatar_y = avatar.single().map(|(p, _)| p.0.y).unwrap_or(f32::NAN);
-        warn!(
-            "[vframe] jump={:?} net_y={:.1} client_y={:.1} ease_y={:.2} avatar_y={:.1} hud_alt={:.1}",
-            uniform_jump.map(|j| j.y),
-            net_offset.y,
-            client.offset.y,
-            ease.y,
-            avatar_y,
-            client.offset.y + avatar_y as f64,
-        );
-    }
+    client.offset = offset;
+    client.prev_true = Some(offset + sim);
+    client.visual_offset = offset - error.as_dvec3();
+    let visual_offset = client.visual_offset;
 
     let ground_target = (-visual_offset).as_vec3();
-    let ground_sim = (-client.offset).as_vec3();
     for (mut position, mut transform) in &mut grounds {
         if transform.translation != ground_target {
             transform.translation = ground_target;
-        }
-        if position.0 != ground_sim {
-            position.0 = ground_sim;
+            position.0 = ground_target;
         }
     }
 

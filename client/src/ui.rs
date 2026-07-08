@@ -463,6 +463,7 @@ fn show_flight_hud(
     mut contexts: EguiContexts,
     character: Query<(&Position, &LinearVelocity), With<Character>>,
     frame: Option<Res<crate::net::ClientRoomFrame>>,
+    mut smoothed_speed: Local<f32>,
 ) -> Result {
     /// Below this true altitude the readout is clutter (the pad, block towers,
     /// jumping), not flight.
@@ -470,13 +471,24 @@ fn show_flight_hud(
     let Ok((position, velocity)) = character.single() else {
         return Ok(());
     };
+    // `visual_offset` pairs exactly with the *rendered* avatar position (both
+    // fold in the same correction error), so altitude is continuous through a
+    // rebase; see `sync_visual_room_frame`.
     let (frame_offset_y, frame_velocity) =
-        frame.map(|f| (f.offset.y, f.velocity)).unwrap_or((0.0, Vec3::ZERO));
+        frame.map(|f| (f.visual_offset.y, f.velocity)).unwrap_or((0.0, Vec3::ZERO));
     let altitude = frame_offset_y + position.0.y as f64;
     if altitude < SHOW_ABOVE_M {
         return Ok(());
     }
-    let speed = (frame_velocity + velocity.0).length();
+    // The two velocity halves swap magnitude at a rebase (the boost moves from
+    // local to frame) 1-2 frames apart on the wire — smooth the *displayed*
+    // number over ~0.2 s so that window can't flicker the readout.
+    let raw_speed = (frame_velocity + velocity.0).length();
+    *smoothed_speed += (raw_speed - *smoothed_speed) * 0.08;
+    if (raw_speed - *smoothed_speed).abs() < 2.0 {
+        *smoothed_speed = raw_speed;
+    }
+    let speed = *smoothed_speed;
     let altitude_text = if altitude < 10_000.0 {
         format!("{altitude:.0} m")
     } else {
