@@ -886,11 +886,14 @@ fn draw_replicated_parts(
 pub struct ClientRoomFrame {
     /// The reconciled frame origin: the replicated offset, except while it's a
     /// rebase behind/ahead of the entity state (see `sync_visual_room_frame`).
+    /// World-anchored visuals sit at exactly `-offset`. NOT adjusted by the
+    /// avatar's prediction-correction error: rebase-scale errors are snapped
+    /// away before this is read (`snap_large_corrections`), and the routine
+    /// centimetre errors left over are exactly what the ground must NOT follow —
+    /// nudging the ground *collider* under resting bodies by the walking
+    /// avatar's correction error each frame shook the whole level.
     pub offset: DVec3,
     pub velocity: Vec3,
-    /// Where world-anchored *visuals* belong: `offset - avatar correction error`,
-    /// so the ground/ash slide through a rebase correction exactly with the scene.
-    pub visual_offset: DVec3,
     /// The avatar's true position last frame — the continuity anchor.
     prev_true: Option<DVec3>,
     /// Frames spent holding a stale replicated offset — a snap-anyway backstop.
@@ -941,35 +944,28 @@ fn snap_large_corrections(
 ///   co-moving frame's near-zero local velocity.
 ///
 /// **How a rebase actually reaches the rendered world** (measured, not guessed —
-/// see PR #140): the rollback snaps the *sim* `Position`s, and in the same frame
-/// lightyear parks the whole km-scale jump in a [`VisualCorrection<Position>`]
-/// whose error is *folded into the rendered `Position`* and decayed over ~2 s
-/// (200 ms half-life) — so the scene never jumps, it slides. Two consequences:
+/// see PR #140): the rollback snaps the *sim* `Position`s; a rebase-scale
+/// correction is snapped rather than eased (`snap_large_corrections`, ordered
+/// before this system), so by the time this runs the rendered world never
+/// diverges from the sim by more than routine centimetre mispredictions — which
+/// world-fixed things must NOT follow (moving the ground collider under resting
+/// bodies by the walking avatar's correction error shook the whole level).
 ///
-/// 1. World visuals must slide with it: they belong at `-(offset - error)`,
-///    where `error` is the avatar's current correction error (the camera rides
-///    the avatar).
-/// 2. The replicated `NetRoomFrame` (a different entity on the wire) can land a
-///    packet or two before/after the entity snap. The reconciliation below
-///    anchors on the one thing that is continuous by construction — the
-///    avatar's TRUE position (`offset + sim`, where `sim = Position - error`) —
-///    and holds the previous offset (extrapolated at the true velocity)
-///    whenever pairing the replicated offset with the current sim would break
-///    that continuity by a rebase-sized gap. This bridges both orderings and
-///    self-heals the moment the two agree again.
+/// The replicated `NetRoomFrame` (a different entity on the wire) can land a
+/// packet or two before/after the entity snap. The reconciliation below anchors
+/// on the one thing that is continuous by construction — the avatar's TRUE
+/// position (`offset + local`) — and holds the previous offset (extrapolated at
+/// the true velocity) whenever pairing the replicated offset with the current
+/// local position would break that continuity by a rebase-sized gap. This
+/// bridges both packet orderings and self-heals the moment the two agree again.
 ///
 /// Runs in `PostUpdate` after `PhysicsSystems::Writeback` and before transform
-/// propagation, so it pairs the frame's *final* rendered state (post-decay
-/// `Position` + its matching error) and its ground/ash writes propagate this
-/// frame.
+/// propagation, so its ground/ash writes propagate this frame.
 #[allow(clippy::type_complexity)]
 fn sync_visual_room_frame(
     time: Res<Time>,
     net_frames: Query<&NetRoomFrame>,
-    avatar: Query<
-        (&Position, &LinearVelocity, Option<&VisualCorrection<Position>>),
-        (With<Character>, Without<Grass>),
-    >,
+    avatar: Query<(&Position, &LinearVelocity), (With<Character>, Without<Grass>)>,
     mut client: ResMut<ClientRoomFrame>,
     // `Without<Character>`: proves disjointness from the avatar read (B0001 —
     // the conflict is a runtime panic on the first run, not a compile error).
@@ -987,35 +983,31 @@ fn sync_visual_room_frame(
     let net_offset = DVec3::from_array(net.offset);
     client.velocity = Vec3::from_array(net.velocity);
 
-    let Ok((position, linear, correction)) = avatar.single() else {
+    let Ok((position, linear)) = avatar.single() else {
         // No avatar yet (boot): nothing to anchor continuity on.
         client.offset = net_offset;
-        client.visual_offset = net_offset;
         client.prev_true = None;
         return;
     };
-    let error = correction.map(|c| c.error.0).unwrap_or(Vec3::ZERO);
-    let sim = (position.0 - error).as_dvec3();
+    let local = position.0.as_dvec3();
 
-    // Reconcile (see the doc comment): keep `offset + sim` continuous.
+    // Reconcile (see the doc comment): keep `offset + local` continuous.
     const REBASE_GAP_M: f64 = 500.0;
     let mut offset = net_offset;
     if let Some(prev_true) = client.prev_true {
         let true_velocity = (client.velocity + linear.0).as_dvec3();
         let expected = prev_true + true_velocity * time.delta_secs_f64();
-        if (net_offset + sim - expected).length() > REBASE_GAP_M && client.held_frames < 30 {
-            offset = expected - sim;
+        if (net_offset + local - expected).length() > REBASE_GAP_M && client.held_frames < 30 {
+            offset = expected - local;
             client.held_frames += 1;
         } else {
             client.held_frames = 0;
         }
     }
     client.offset = offset;
-    client.prev_true = Some(offset + sim);
-    client.visual_offset = offset - error.as_dvec3();
-    let visual_offset = client.visual_offset;
+    client.prev_true = Some(offset + local);
 
-    let ground_target = (-visual_offset).as_vec3();
+    let ground_target = (-offset).as_vec3();
     for (mut position, mut transform) in &mut grounds {
         if transform.translation != ground_target {
             transform.translation = ground_target;
@@ -1025,9 +1017,9 @@ fn sync_visual_room_frame(
 
     for material in &ash {
         // Read-check before `get_mut` — mutating the asset re-uploads the uniform.
-        if ash_materials.get(material.id()).is_some_and(|m| m.frame_needs_update(visual_offset)) {
+        if ash_materials.get(material.id()).is_some_and(|m| m.frame_needs_update(offset)) {
             if let Some(mut mat) = ash_materials.get_mut(material.id()) {
-                mat.set_frame(visual_offset);
+                mat.set_frame(offset);
             }
         }
     }

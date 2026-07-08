@@ -471,11 +471,10 @@ fn show_flight_hud(
     let Ok((position, velocity)) = character.single() else {
         return Ok(());
     };
-    // `visual_offset` pairs exactly with the *rendered* avatar position (both
-    // fold in the same correction error), so altitude is continuous through a
+    // The reconciled frame offset keeps `offset + local` continuous through a
     // rebase; see `sync_visual_room_frame`.
     let (frame_offset_y, frame_velocity) =
-        frame.map(|f| (f.visual_offset.y, f.velocity)).unwrap_or((0.0, Vec3::ZERO));
+        frame.map(|f| (f.offset.y, f.velocity)).unwrap_or((0.0, Vec3::ZERO));
     let altitude = frame_offset_y + position.0.y as f64;
     if altitude < SHOW_ABOVE_M {
         return Ok(());
