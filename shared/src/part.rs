@@ -8,6 +8,7 @@ use crate::{
 use avian3d::prelude::{
     AngularVelocity, Collider, ColliderDensity, Collisions, ComputedCenterOfMass, Forces, Friction,
     Gravity, JointCollisionDisabled, LinearVelocity, Position, ReadRigidBodyForces, Restitution,
+    Rotation,
     RigidBody, SphericalJoint, SweptCcd, WriteRigidBodyForces,
 };
 use bevy::prelude::*;
@@ -754,6 +755,43 @@ fn orient_held_part(mut parts: Query<(&Transform, &TargetOrientation, Forces)>) 
 /// not — omitting it there offset the ground anchor and dragged the joined part down
 /// into the bowl. Shared by single-player `update_active_joints` and the server's
 /// `server_attach` so the anchor convention stays in one place.
+/// The three anchor pairs of a **ground clamp**: a small horizontal triangle
+/// around the contact point instead of a single ball pivot.
+///
+/// Why: a one-anchor part-to-ground joint braced by a live contact is the weld
+/// census's "hinge keeps its contact" case — and the XPBD joint solver and the
+/// impulse contact solver then fight over the pair forever. Measured on the
+/// Rocket Ride pad at rest (flight recorder): the four clamped rockets BUZZ at
+/// a mean 1.2 m/s (peaks 2.6 m/s, 3.3 rad/s) — never sleeping, wasting solver
+/// time, and (worst) making the client's predicted copy chronically disagree
+/// with the server (the buzz is chaotic, so the two sims can't phase-match:
+/// ~69% of velocity comparisons diverged > 0.5 m/s with the world at rest).
+/// Three non-collinear anchors make the pair rotationally rigid, so
+/// `maintain_weld_rigidity` disables the pair's contact — no fight, no buzz,
+/// the assembly can actually rest (and sleep). The ground is static with
+/// identity rotation, so ground-local offsets are world offsets.
+pub fn ground_clamp_anchor_pairs(
+    part_anchor: Vec3,
+    ground_anchor: Vec3,
+    part_rotation: Quat,
+) -> [(Vec3, Vec3); 3] {
+    /// Triangle circumradius (m): small enough to sit within any part's footprint,
+    /// large enough that the census's non-collinearity check is nowhere near its
+    /// epsilon.
+    const GROUND_CLAMP_RADIUS_M: f32 = 0.12;
+    /// Three anchors 120° apart.
+    const ANGLES: [f32; 3] = [
+        0.0,
+        core::f32::consts::TAU / 3.0,
+        2.0 * core::f32::consts::TAU / 3.0,
+    ];
+    ANGLES.map(|angle| {
+        let offset =
+            Vec3::new(libm::cosf(angle), 0.0, libm::sinf(angle)) * GROUND_CLAMP_RADIUS_M;
+        (part_anchor + part_rotation.inverse() * offset, ground_anchor + offset)
+    })
+}
+
 pub fn local_contact_anchor(rotation: Quat, com: Vec3, anchor: Vec3) -> Vec3 {
     rotation.inverse() * anchor + com
 }
@@ -899,6 +937,8 @@ fn attach(
     mut attach_events: MessageReader<AttachEvent>,
     attach_points: Res<PotentialJoints>,
     joints: Query<&SphericalJoint>,
+    rotations: Query<&Rotation>,
+    grounds: Query<(), With<crate::Grass>>,
     mut new_part_events: MessageWriter<NewPart>,
 ) {
     if attach_events.read().next().is_some() {
@@ -915,11 +955,32 @@ fn attach(
             // anchor mapping: body1/anchor1 = entities.1/points.1, and
             // body2/anchor2 = entities.0/points.0 — which keeps `update_*_joints`
             // and the gizmo rendering (which read back `body2`/`anchor2`) consistent.
-            commands.spawn(
-                SphericalJoint::new(entities.1, entities.0)
-                    .with_local_anchor1(points.1)
-                    .with_local_anchor2(points.0),
-            );
+            let ground0 = grounds.get(entities.0).is_ok();
+            let ground1 = grounds.get(entities.1).is_ok();
+            if ground0 || ground1 {
+                // Ground clamps are a rigid anchor TRIANGLE, not a ball pivot
+                // (see `ground_clamp_anchor_pairs`). Part as body1, ground as
+                // body2 - the same normalization the server uses.
+                let (part, ground, pa, ga) = if ground0 {
+                    (entities.1, entities.0, points.1, points.0)
+                } else {
+                    (entities.0, entities.1, points.0, points.1)
+                };
+                let rot = rotations.get(part).map(|r| r.0).unwrap_or(Quat::IDENTITY);
+                for (pk, gk) in ground_clamp_anchor_pairs(pa, ga, rot) {
+                    commands.spawn(
+                        SphericalJoint::new(part, ground)
+                            .with_local_anchor1(pk)
+                            .with_local_anchor2(gk),
+                    );
+                }
+            } else {
+                commands.spawn(
+                    SphericalJoint::new(entities.1, entities.0)
+                        .with_local_anchor1(points.1)
+                        .with_local_anchor2(points.0),
+                );
+            }
             for endpoint in [entities.0, entities.1] {
                 if !had_joint.contains(&endpoint) && !replaced.contains(&endpoint) {
                     replaced.push(endpoint);
@@ -947,6 +1008,23 @@ fn delete_joints(
 #[cfg(test)]
 mod weld_tests {
     use super::*;
+
+    /// A ground clamp's synthesized anchor triangle must read as RIGID to the
+    /// census (that's its whole purpose — see `ground_clamp_anchor_pairs`), for
+    /// any part orientation, on both the part side and the ground side.
+    #[test]
+    fn ground_clamp_triangle_is_rigid() {
+        for rot in [
+            Quat::IDENTITY,
+            Quat::from_rotation_x(0.7),
+            Quat::from_axis_angle(Vec3::new(1.0, 2.0, -0.5).normalize(), 2.2),
+        ] {
+            let pairs =
+                ground_clamp_anchor_pairs(Vec3::new(0.0, -1.6, 0.0), Vec3::new(1.1, -1.45, 1.1), rot);
+            assert!(anchors_are_rigid(pairs.iter().map(|(pa, _)| *pa)));
+            assert!(anchors_are_rigid(pairs.iter().map(|(_, ga)| *ga)));
+        }
+    }
 
     /// 1 point = ball pivot, 2 points = hinge, 3 collinear = still a hinge — all
     /// keep their contact. Only a spanning triangle counts as a rigid weld.

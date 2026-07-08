@@ -101,8 +101,9 @@ pub fn gimbal_thrust_dir_local(gimbal: Vec2) -> Vec3 {
     if angle < 1e-6 {
         ROCKET_THRUST_DIR_LOCAL
     } else {
-        ROCKET_THRUST_DIR_LOCAL * angle.cos()
-            + Vec3::new(gimbal.x, 0.0, gimbal.y) / angle * angle.sin()
+        // libm: identical across wasm/native (prediction determinism).
+        ROCKET_THRUST_DIR_LOCAL * libm::cosf(angle)
+            + Vec3::new(gimbal.x, 0.0, gimbal.y) / angle * libm::sinf(angle)
     }
 }
 
@@ -357,7 +358,8 @@ fn gimbal_correction(arm: Vec3, rotation: Quat, axial_thrust: f32, torque_share:
     if magnitude < 1e-6 {
         return Vec2::ZERO;
     }
-    let angle = (magnitude / axial_thrust).min(1.0).asin().min(GIMBAL_MAX_RAD);
+    // libm: identical across wasm/native (prediction determinism).
+    let angle = libm::asinf((magnitude / axial_thrust).min(1.0)).min(GIMBAL_MAX_RAD);
     let local = rotation.inverse() * (lateral / magnitude);
     Vec2::new(local.x, local.z).normalize_or_zero() * angle
 }

@@ -36,9 +36,9 @@ serde_json = "1"
 
 [features]
 default = [
-    # Avian perf features (rapier's `simd-stable`/`parallel` equivalents).
-    "avian3d/simd",
-    "avian3d/parallel",
+    # NOTE: avian `simd`/`parallel` are deliberately ABSENT (see the workspace
+    # avian3d pin): the server must run the byte-identical scalar sim the wasm
+    # clients predict with, or solver noise diverges -> chronic rollbacks.
     # Hot-reload of RON config assets (watch_for_changes). The file watcher needs
     # the `multi_threaded` feature on to function.
     "bevy/file_watcher",

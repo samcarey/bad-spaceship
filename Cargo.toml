@@ -31,10 +31,19 @@ bevy = { version = "0.19", default-features = false }
 # Avian (XPBD physics). 0.7.0 is the release that targets Bevy 0.19 (parry3d 0.27).
 # Only the minimal common base lives here (workspace features are additive, so
 # members can't subtract them): `shared` adds `xpbd_joints` (joint solver) +
-# `serialize` (needed to replicate Position/Rotation) for the game crates, and
-# native/server re-add `simd`/`parallel` for perf; the size-sensitive `buoyancy`
-# wasm build takes just this base. See shared/Cargo.toml for the full rationale.
-avian3d = { version = "0.7.0", default-features = false, features = ["3d", "f32", "parry-f32"] }
+# `serialize` (needed to replicate Position/Rotation) for the game crates; the
+# size-sensitive `buoyancy` wasm build takes just this base. See shared/Cargo.toml
+# for the full rationale.
+#
+# `enhanced-determinism` (libm for avian + parry + bevy_math/glam) and the ABSENCE
+# of `simd`/`parallel` are deliberate netcode requirements, not oversights: the
+# wasm client can never have simd/parallel, and any avian arithmetic difference
+# between the server and a predicting client is a chronic prediction-divergence
+# source - solver noise amplifies it to m/s-scale velocity disagreements -> constant
+# rollbacks -> the world-shake (#143/#145 measurements). Every peer must run
+# byte-identical scalar, sequential, libm-backed physics. Do NOT re-add
+# simd/parallel "for perf" (rooms are <= a few dozen bodies; it never mattered).
+avian3d = { version = "0.7.0", default-features = false, features = ["3d", "f32", "parry-f32", "enhanced-determinism"] }
 # bevy_egui 0.40 is the release that targets Bevy 0.19 (egui 0.34). Client-only,
 # but pinned here so all engine-coupled versions live in one place. Workspace
 # features are additive (members can't subtract them), so only the universally
