@@ -959,6 +959,15 @@ fn snap_large_corrections(
 /// local position would break that continuity by a rebase-sized gap. This
 /// bridges both packet orderings and self-heals the moment the two agree again.
 ///
+/// The offset **integrates locally at the frame velocity every frame** and uses
+/// the replicated value only as a correction target: on the wire `NetRoomFrame`
+/// refreshes at the packet rate (~20 Hz), and reading it raw gives world visuals
+/// a staircase — worse, the *smooth* component of the ash streaming collapses to
+/// the local velocity, which is exactly what each co-moving rebase zeroes, so
+/// the flakes' apparent fall speed visibly reset every rebase. Rebase-scale
+/// corrections snap (paired with the entity snap, via the continuity hold);
+/// packet-quantization drift is pulled out smoothly.
+///
 /// Runs in `PostUpdate` after `PhysicsSystems::Writeback` and before transform
 /// propagation, so its ground/ash writes propagate this frame.
 #[allow(clippy::type_complexity)]
@@ -990,21 +999,40 @@ fn sync_visual_room_frame(
         return;
     };
     let local = position.0.as_dvec3();
+    let dt = time.delta_secs_f64();
 
-    // Reconcile (see the doc comment): keep `offset + local` continuous.
+    // Advance smoothly (see the doc comment), exactly like the server integrates
+    // the authoritative offset.
+    let frame_velocity = client.velocity.as_dvec3();
+    client.offset += frame_velocity * dt;
+
+    // The correction target: the replicated offset, bridged across the rebase
+    // packet window by the `offset + local` continuity anchor.
     const REBASE_GAP_M: f64 = 500.0;
-    let mut offset = net_offset;
+    let mut target = net_offset;
     if let Some(prev_true) = client.prev_true {
-        let true_velocity = (client.velocity + linear.0).as_dvec3();
-        let expected = prev_true + true_velocity * time.delta_secs_f64();
+        let expected = prev_true + (frame_velocity + linear.0.as_dvec3()) * dt;
         if (net_offset + local - expected).length() > REBASE_GAP_M && client.held_frames < 30 {
-            offset = expected - local;
+            target = expected - local;
             client.held_frames += 1;
         } else {
             client.held_frames = 0;
         }
     }
-    client.offset = offset;
+    // Converge on the target: snap across a rebase-scale error (the same frame
+    // the entities snap — that's what the continuity anchor arranges), pull out
+    // sub-rebase drift smoothly, and land exactly once the gap is negligible
+    // (so a grounded room sits at literally zero and the ground never moves).
+    let error = target - client.offset;
+    if error.length() > REBASE_GAP_M {
+        client.offset = target;
+    } else {
+        client.offset += error * (1.0 - (-12.0 * dt).exp());
+        if (target - client.offset).length() < 1.0e-3 {
+            client.offset = target;
+        }
+    }
+    let offset = client.offset;
     client.prev_true = Some(offset + local);
 
     let ground_target = (-offset).as_vec3();
