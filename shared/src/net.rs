@@ -536,11 +536,21 @@ fn lerp_facing(start: NetFacing, other: NetFacing, t: f32) -> NetFacing {
 /// single-threaded phone), and NOT never (which lets velocity drift unbounded until
 /// it surfaces as a delayed position snap — e.g. coasting to a stop then jumping
 /// back, because the client and server decayed momentum slightly differently and
-/// nothing re-synced the velocity). A ~0.5 m/s margin ignores steady-motion float
-/// noise but catches the larger divergence that builds up across an acceleration or
-/// deceleration transition, keeping the coast-to-stop consistent.
-const LINEAR_VELOCITY_ROLLBACK_TOLERANCE: f32 = 0.5; // m/s
-const ANGULAR_VELOCITY_ROLLBACK_TOLERANCE: f32 = 1.0; // rad/s
+/// nothing re-synced the velocity).
+///
+/// Sizing (measured, PR #143): contact/constraint noise — dominated by clamped
+/// assemblies whose joints and contacts resolve slightly differently on client and
+/// server — routinely diverges by 0.3–2.4 m/s, so the old 0.5 m/s margin fired a
+/// whole-world rollback ~14×/s **with everything at rest**. Each rollback re-sims
+/// ~8 ticks; while the player walks, every replay re-resolves their ground contact
+/// slightly differently, and the accumulated decimetre errors + their corrections
+/// were the reported "dizzying" world shake. At 2.5 m/s the chronic trigger is
+/// gone (measured: 13.6/s → 1.1/s while walking; camera jerk RMS −33%); genuine
+/// divergence is still caught — a velocity error this size moves a body past the
+/// position tolerance within a snapshot or two, and the position rollback restores
+/// the full state, velocity included.
+const LINEAR_VELOCITY_ROLLBACK_TOLERANCE: f32 = 2.5; // m/s
+const ANGULAR_VELOCITY_ROLLBACK_TOLERANCE: f32 = 5.0; // rad/s
 
 /// Euclidean divergence of two `Vec3`-newtype values past a tolerance — the shared
 /// body of the per-component (position / linear-vel / angular-vel) rollback conditions.
@@ -571,7 +581,11 @@ fn angular_velocity_should_rollback(
 /// wall hit, a shove — which exceeds the margin and snaps, eased by visual
 /// correction), so prediction stays smooth. Applies to every predicted body
 /// (registration is global): the character *and* the loose parts.
-const POSITION_ROLLBACK_TOLERANCE: f32 = 0.05; // metres
+/// Position sized with the velocity margin above (PR #143): 0.05 m is under one
+/// tick of walk motion (~0.07 m at 4.2 m/s), so any tick-phase wobble while
+/// walking fired chronic rollbacks; 0.10 m keeps a standing block visually honest
+/// while letting ordinary walking prediction breathe.
+const POSITION_ROLLBACK_TOLERANCE: f32 = 0.10; // metres
 const ROTATION_ROLLBACK_TOLERANCE: f32 = 0.05; // radians (~3°)
 
 /// Diagnostics for the determinism/lag work: the largest position divergence (mm)
