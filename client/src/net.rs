@@ -190,13 +190,27 @@ impl Plugin for NetClientPlugin {
         app.add_plugins(ProtocolPlugin);
         // Owns the Avian `Position`↔`Transform` sync (its sub-plugins are disabled
         // in multiplayer by `add_physics`), frame interpolation, and client-side
-        // prediction rollback for replicated Avian bodies. State replication, so no
-        // `rollback_resources`.
+        // prediction rollback for replicated Avian bodies.
+        //
+        // `rollback_resources: true` also snapshots avian's solver-internal state
+        // (contact graph, constraint graph, broadphase proxies, islands, sleeping)
+        // into the rollback history. The flag is documented for deterministic
+        // replication, but it's load-bearing for state replication too: without
+        // it, a rollback restores Position/velocity and replays against the
+        // *current* contact state — warm-starting and contact sets differ from the
+        // original prediction, so every replayed tick re-resolves the avatar's
+        // ground contact slightly differently. Measured (#143 diagnostics): those
+        // replay differences were the decimetre walking mispredictions behind the
+        // "dizzying" world shake.
         app.add_plugins(lightyear_avian3d::prelude::LightyearAvianPlugin {
             replication_mode: lightyear_avian3d::plugin::AvianReplicationMode::Position,
             update_syncs_manually: false,
-            rollback_resources: false,
+            rollback_resources: true,
         });
+        // The character's ground-contact state rolls back too — must register
+        // here (after `ClientPlugins` created the prediction registry), not in
+        // `CharacterPlugin` (see the fn doc).
+        bad_spaceship_shared::character::register_ground_state_rollback(app);
         // Render-interpolate predicted bodies between fixed (60 Hz) sim ticks.
         // Prediction/rollback advance Position/Rotation only in `FixedUpdate`; without
         // this the rendered pose is held constant between ticks and the camera (a

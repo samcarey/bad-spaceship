@@ -59,6 +59,24 @@ impl Plugin for CharacterPlugin {
     }
 }
 
+/// Roll the character's ground-contact state back with the physics state. Without
+/// this, a rollback restores the avatar's Position/velocity to the confirmed tick
+/// but replays with the CURRENT tick's support state — a stale
+/// `GroundVelocity`/`TouchingGround`/`LastSupport` for the first replayed movement
+/// ticks, one more systematic source of replay divergence (and so of visible
+/// correction wobble while walking).
+///
+/// Called by the multiplayer client AFTER lightyear's `ClientPlugins`: the
+/// registration silently no-ops unless the `PredictionRegistry` resource already
+/// exists (it does NOT defer), so registering from `CharacterPlugin::build` —
+/// which runs before the netcode plugins — would do nothing.
+pub fn register_ground_state_rollback(app: &mut App) {
+    use lightyear::prelude::PredictionAppRegistrationExt;
+    app.local_rollback::<TouchingGround>();
+    app.local_rollback::<GroundVelocity>();
+    app.local_rollback::<LastSupport>();
+}
+
 /// Selectable horizontal-movement model, chosen live from the in-game Movement
 /// panel (`client::ui::show_movement_panel`). Each is a different way of steering the
 /// character's horizontal velocity toward the input direction; they exist so the
@@ -432,7 +450,7 @@ fn move_toward(from: Vec3, to: Vec3, max_delta: f32) -> Vec3 {
     }
 }
 
-#[derive(Default, Component)]
+#[derive(Default, Component, Clone, PartialEq, Debug)]
 struct TouchingGround(bool);
 
 /// The velocity of whatever the character is standing on (zero when airborne or
@@ -440,7 +458,7 @@ struct TouchingGround(bool);
 /// works on *moving* supports: standing on an ascending rocket platform
 /// (~120 m/s up), a world-frame jump (`vy = jump_force`) instantly flung the
 /// rider off — the platform out-accelerated them within a tick.
-#[derive(Default, Component)]
+#[derive(Default, Component, Clone, PartialEq, Debug)]
 struct GroundVelocity(Vec3);
 
 /// The support's velocity at the character's last grounded tick, plus how many
@@ -451,7 +469,7 @@ struct GroundVelocity(Vec3);
 /// (a deep landing or an edge contact on a fast platform occasionally ejects
 /// at +15…+200 m/s relative, vertically or diagonally) and gets clamped,
 /// turning a violent buck into motion the deck can catch.
-#[derive(Default, Component)]
+#[derive(Default, Component, Clone, PartialEq, Debug)]
 struct LastSupport {
     velocity: Vec3,
     ticks_since_grounded: u32,
