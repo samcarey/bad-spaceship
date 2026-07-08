@@ -41,12 +41,14 @@ pub const FLAME_MESH_HANDLE: Handle<Mesh> =
 pub fn register_flame_mesh(meshes: &mut Assets<Mesh>) {
     meshes.insert(
         FLAME_MESH_HANDLE.id(),
-        Cylinder::new(1.0, 1.0).mesh().resolution(28).segments(20).into(),
+        // Enough rings for the ground-splash bend AND the ragged silhouette
+        // ripple to read smoothly over the (long) plume.
+        Cylinder::new(1.0, 1.0).mesh().resolution(32).segments(32).into(),
     );
 }
 
 /// Flame-local distance from the nozzle to the plume tip at full throttle.
-const FLAME_LENGTH: f32 = 3.2;
+const FLAME_LENGTH: f32 = 9.6;
 
 /// `ground_dist` sentinel for "no ground within reach" (any value far past the
 /// plume's length disables the splash branch in the vertex shader).

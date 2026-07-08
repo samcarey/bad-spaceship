@@ -2,8 +2,9 @@
 // height 1, many height segments) parented at the flare exit with -Y = exhaust;
 // ALL shaping happens in the vertex stage:
 //
-//  - a bulge-then-taper radius profile + value-noise wobble makes the plume,
-//  - length scales with the eased throttle (`strength`) and flickers with time,
+//  - a bulge-then-taper radius profile + two octaves of value-noise ripple make
+//    a ragged, licking plume; length scales with the eased throttle (`strength`)
+//    and flickers with time,
 //  - **ground splash**: `ground_dist` is the CPU-raycast distance from the nozzle
 //    to the ground along the exhaust axis (in flame-local units; huge = no hit).
 //    Vertices whose along-flame distance `s` exceeds it stop travelling down the
@@ -13,11 +14,17 @@
 //    flame splashes into a spreading skirt instead of clipping through terrain.
 //
 // The fragment stage is an unlit white→orange→red ramp scrolled by two octaves
-// of the shared value noise; the material blends ADDITIVELY (AlphaMode::Add), so
-// alpha is the emission strength, overlap glows, and no depth-write is needed.
+// of the shared value noise, eroded by a noise threshold so the tip and rim
+// break into ragged tongues, and faded by view angle (fresnel) so the silhouette
+// goes translucent — a cheap volumetric read on a surface mesh. The material
+// blends ADDITIVELY (AlphaMode::Add): alpha is emission strength, overlap glows,
+// no depth-write needed.
 
-#import bevy_pbr::mesh_functions::{get_world_from_local, mesh_position_local_to_clip}
-#import bevy_pbr::mesh_view_bindings::globals
+#import bevy_pbr::mesh_functions::{
+    get_world_from_local, mesh_normal_local_to_world, mesh_position_local_to_world,
+}
+#import bevy_pbr::mesh_view_bindings::{globals, view}
+#import bevy_pbr::view_transformations::position_world_to_clip
 #import bad_spaceship::noise::vnoise
 
 struct FlameParams {
@@ -52,10 +59,13 @@ struct VertexOutput {
     @location(1) splash: f32,
     // Angle around the exhaust axis; scrolls the turbulence around the plume.
     @location(2) ang: f32,
+    // World-space position + (approximate) surface normal for the view fade.
+    @location(3) world_position: vec3<f32>,
+    @location(4) world_normal: vec3<f32>,
 };
 
 // Flame radius at the nozzle exit (the flare's exit radius is 0.8).
-const NOZZLE_RADIUS: f32 = 0.55;
+const NOZZLE_RADIUS: f32 = 0.65;
 // The splash skirt spreads faster along the ground than the free plume flows.
 const SPLASH_SPREAD: f32 = 1.6;
 
@@ -81,12 +91,14 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     let breathe = vnoise(vec2<f32>(material.phase * 17.0, time * 6.0)) - 0.5;
     let len = material.flame_len * (0.35 + 0.65 * strength) * (1.0 + 0.12 * breathe);
 
-    // Bulge-then-taper profile, rippled by scrolling noise so the silhouette
-    // licks instead of reading as a rigid cone.
-    var r = NOZZLE_RADIUS * (1.0 + 0.55 * t) * pow(max(1.0 - t, 0.0), 0.55)
+    // Bulge-then-taper profile, rippled by two octaves of scrolling noise — a
+    // slow structural lick plus a fast fine chop — so the silhouette is ragged
+    // rather than a rigid cone.
+    var r = NOZZLE_RADIUS * (1.0 + 3.5 * t) * pow(max(1.0 - t, 0.0), 0.55)
         * (0.75 + 0.25 * strength);
     let ripple = vnoise(vec2<f32>(ang * 1.9 + material.phase, t * 3.5 - time * 5.0)) - 0.5;
-    r = r * (1.0 + 0.55 * ripple);
+    let chop = vnoise(vec2<f32>(ang * 4.3 - time * 1.3, t * 8.0 - time * 9.0 + material.phase)) - 0.5;
+    r = r * max(1.0 + 0.7 * ripple + 0.45 * chop, 0.15);
 
     // Along-flame distance, split at the ground hit.
     let s = t * len;
@@ -96,10 +108,10 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     // Blend factor into the splash skirt (soft over ~0.25 units of travel).
     let splash = clamp(s_gnd / 0.25, 0.0, 1.0);
 
+    let n = material.ground_normal.xyz;
     let axis = vec3<f32>(0.0, -1.0, 0.0);
     var pos = axis * s_air + c * r * (1.0 - 0.6 * splash);
     if s_gnd > 0.0 {
-        let n = material.ground_normal.xyz;
         // Deflected flow: the axis' ground-tangential component (grazing hits
         // keep flowing "forward") topped up with this vertex's own radial
         // direction projected onto the plane (a square hit fans out evenly).
@@ -118,10 +130,14 @@ fn vertex(vertex: Vertex) -> VertexOutput {
             + n * splash * (0.07 + 0.3 * r * (0.5 + ripple));
     }
 
-    out.clip_position = mesh_position_local_to_clip(
-        get_world_from_local(vertex.instance_index),
-        vec4<f32>(pos, 1.0),
-    );
+    let world_from_local = get_world_from_local(vertex.instance_index);
+    let world_position = mesh_position_local_to_world(world_from_local, vec4<f32>(pos, 1.0));
+    out.clip_position = position_world_to_clip(world_position.xyz);
+    out.world_position = world_position.xyz;
+    // Approximate post-deformation normal: the tube's radial direction, tipped
+    // toward the ground normal across the splash skirt. Exact shading isn't the
+    // goal — this only drives the silhouette translucency in the fragment stage.
+    out.world_normal = mesh_normal_local_to_world(normalize(mix(c, n, splash)), vertex.instance_index);
     out.t = t;
     out.splash = splash;
     out.ang = ang;
@@ -145,9 +161,16 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     col = mix(col, vec3<f32>(1.1, 0.18, 0.03), smoothstep(0.4, 1.0, t));
     col = mix(col, vec3<f32>(2.2, 1.3, 0.3), in.splash * 0.5);
 
-    var alpha = material.strength * pow(max(1.0 - t, 0.0), 1.3) * (0.35 + 0.65 * turbulence);
-    // Feather the very tip so the last ring never pops.
-    alpha = alpha * smoothstep(0.0, 0.12, 1.0 - t);
+    var alpha = material.strength * pow(max(1.0 - t, 0.0), 1.3) * (0.5 + 0.5 * turbulence);
+    // Ragged erosion: tipward fragments need ever-stronger turbulence to
+    // survive, so the plume dissolves into detached tongues instead of ending
+    // at a clean mesh edge.
+    alpha = alpha * smoothstep(t * 0.85 - 0.35, t * 0.85 + 0.15, turbulence + 0.25);
+    // View fade: translucent at the silhouette (grazing view angles), denser
+    // through the core — reads volumetric despite being a surface.
+    let v = normalize(view.world_position.xyz - in.world_position);
+    let facing = abs(dot(normalize(in.world_normal), v));
+    alpha = alpha * pow(facing, 1.4);
 
     return vec4<f32>(col, alpha);
 }
