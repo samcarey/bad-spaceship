@@ -7,6 +7,7 @@ use bad_spaceship_shared::{
     Grass,
 };
 mod ash_material;
+pub mod flame_material;
 mod grass_material;
 pub mod metal_material;
 
@@ -22,6 +23,9 @@ use bevy::{
     prelude::*,
 };
 use ash_material::{spawn_ash_field, AshMaterial, ASH_SHADER_HANDLE};
+use flame_material::{
+    register_flame_mesh, spawn_flame, update_flames, FlameMaterial, FLAME_SHADER_HANDLE,
+};
 use grass_material::{GrassExtension, GrassMaterial, GRASS_SHADER_HANDLE};
 use metal_material::{part_visual, rocket_body_material, MetalMaterial, METAL_SHADER_HANDLE};
 use avian3d::prelude::Collider;
@@ -58,12 +62,23 @@ impl Plugin for RenderMainPassPlugin {
             "../../assets/ash_material.wgsl",
             Shader::from_wgsl
         );
+        load_internal_asset!(
+            app,
+            FLAME_SHADER_HANDLE,
+            "../../assets/flame_material.wgsl",
+            Shader::from_wgsl
+        );
         app.add_plugins((
             MaterialPlugin::<GrassMaterial>::default(),
             MaterialPlugin::<MetalMaterial>::default(),
             MaterialPlugin::<AshMaterial>::default(),
+            MaterialPlugin::<FlameMaterial>::default(),
         ))
             .add_systems(Startup, (add_lighting, spawn_ash_field))
+            .add_systems(
+                Startup,
+                |mut meshes: ResMut<Assets<Mesh>>| register_flame_mesh(&mut meshes),
+            )
             .add_systems(
                 Update,
                 (
@@ -73,6 +88,8 @@ impl Plugin for RenderMainPassPlugin {
                     assign_parts.run_if(not(resource_exists::<SuppressLocalParts>)),
                     assign_rocket_engines.run_if(not(resource_exists::<SuppressLocalParts>)),
                     assign_grass,
+                    // Both modes: the flame child rides `insert_rocket_visual`.
+                    update_flames,
                 ),
             );
     }
@@ -155,12 +172,19 @@ fn assign_rocket_engines(
     >,
     mut metal_materials: ResMut<Assets<MetalMaterial>>,
     mut standard_materials: ResMut<Assets<StandardMaterial>>,
+    mut flame_materials: ResMut<Assets<FlameMaterial>>,
     mut meshes: ResMut<Assets<Mesh>>,
 ) {
     for (entity, transform, global_transform) in unassigned.iter() {
         let mut e = commands.entity(entity);
         e.insert((transform.clone(), global_transform.clone(), AssignedMaterial));
-        insert_rocket_visual(&mut e, &mut meshes, &mut metal_materials, &mut standard_materials);
+        insert_rocket_visual(
+            &mut e,
+            &mut meshes,
+            &mut metal_materials,
+            &mut standard_materials,
+            &mut flame_materials,
+        );
     }
 }
 
@@ -176,6 +200,7 @@ pub fn insert_rocket_visual(
     meshes: &mut Assets<Mesh>,
     metal_materials: &mut Assets<MetalMaterial>,
     standard_materials: &mut Assets<StandardMaterial>,
+    flame_materials: &mut Assets<FlameMaterial>,
 ) {
     let body_mesh = meshes.add(Cylinder::new(ROCKET_BODY_RADIUS, ROCKET_BODY_HEIGHT));
     let flare_mesh = meshes.add(ConicalFrustum {
@@ -203,6 +228,7 @@ pub fn insert_rocket_visual(
                 Transform::from_xyz(0.0, ROCKET_FLARE_Y_OFFSET, 0.0),
             ));
         });
+    spawn_flame(entity, flame_materials);
 }
 
 fn assign_grass(

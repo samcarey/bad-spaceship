@@ -36,6 +36,7 @@ use bevy_egui::{
 use lightyear::prelude::{Connected, MessageSender, Predicted};
 use std::collections::HashSet;
 
+use crate::render_main_pass::flame_material::FlameThrottle;
 use crate::render_secondary_pass::main_assembly;
 use crate::ui::EguiDrawSystems;
 
@@ -55,9 +56,14 @@ impl Plugin for LaunchPlugin {
             .add_systems(
                 FixedUpdate,
                 (
+                    // Zero every rocket's flame target first: only rockets the burn
+                    // below actually fires this tick read back non-zero (a rocket
+                    // that breaks off the assembly goes dark).
+                    reset_flame_targets,
                     apply_sp_thrust.run_if(not(resource_exists::<SuppressLocalParts>)),
                     apply_mp_thrust.run_if(resource_exists::<SuppressLocalParts>),
-                ),
+                )
+                    .chain(),
             );
     }
 }
@@ -164,7 +170,7 @@ fn apply_sp_thrust(
     mut set: ParamSet<(
         Query<(&LinearVelocity, &AngularVelocity)>,
         Query<(Entity, &GlobalTransform, &Gimbal), With<RocketEngine>>,
-        Query<(Entity, Forces, &mut Gimbal), With<RocketEngine>>,
+        Query<(Entity, Forces, &mut Gimbal, Option<&mut FlameThrottle>), With<RocketEngine>>,
     )>,
     gravity: Res<Gravity>,
 ) {
@@ -229,7 +235,10 @@ fn apply_mp_thrust(
             ),
             (With<NetPart>, With<Predicted>, With<InLargestAssembly>),
         >,
-        Query<(Entity, Forces, &mut Gimbal), (With<RocketEngine>, With<Predicted>)>,
+        Query<
+            (Entity, Forces, &mut Gimbal, Option<&mut FlameThrottle>),
+            (With<RocketEngine>, With<Predicted>),
+        >,
     )>,
     gravity: Res<Gravity>,
 ) {
@@ -263,9 +272,18 @@ fn apply_mp_thrust(
     apply_thrust(com, gravity.0, &geometry, &spin, time.delta_secs(), &mut integral, &mut set.p1());
 }
 
+/// Per-tick flame reset — see the registration comment and
+/// [`FlameThrottle`](crate::render_main_pass::flame_material::FlameThrottle).
+fn reset_flame_targets(mut throttles: Query<&mut FlameThrottle>) {
+    for mut throttle in &mut throttles {
+        throttle.target = 0.0;
+    }
+}
+
 /// Resolve the assembly's burn for this tick (shared `assembly_burn`) and write each
-/// rocket's slewed gimbal + deflected flare-base force. Shared by the single-player and
-/// multiplayer thrust systems (which differ only in how they gather membership + pose).
+/// rocket's slewed gimbal + deflected flare-base force (plus its flame's throttle, for
+/// the exhaust visual). Shared by the single-player and multiplayer thrust systems
+/// (which differ only in how they gather membership + pose).
 fn apply_thrust(
     com: Vec3,
     gravity: Vec3,
@@ -273,15 +291,24 @@ fn apply_thrust(
     spin: &AssemblySpin,
     dt: f32,
     integral: &mut Vec3,
-    rocket_forces: &mut Query<(Entity, Forces, &mut Gimbal), impl bevy::ecs::query::QueryFilter>,
+    rocket_forces: &mut Query<
+        (Entity, Forces, &mut Gimbal, Option<&mut FlameThrottle>),
+        impl bevy::ecs::query::QueryFilter,
+    >,
 ) {
     if geometry.is_empty() {
         return;
     }
+    let full = bad_spaceship_shared::launch::full_rocket_thrust(gravity);
     for burn in assembly_burn(com, gravity, dt, geometry, spin, integral) {
-        if let Ok((_, mut forces, mut gimbal)) = rocket_forces.get_mut(burn.entity) {
+        if let Ok((_, mut forces, mut gimbal, flame)) = rocket_forces.get_mut(burn.entity) {
             gimbal.0 = burn.gimbal;
             forces.apply_force_at_point(burn.force, burn.point);
+            // `Option`: the flame rides the render visual, which may lag the
+            // physics by a frame — thrust must not depend on it.
+            if let Some(mut flame) = flame {
+                flame.target = (burn.force.length() / full).clamp(0.0, 1.0);
+            }
         }
     }
 }
