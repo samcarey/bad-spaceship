@@ -354,7 +354,7 @@ impl Plugin for NetServerPlugin {
         // the physics step (`FixedPostUpdate`) on every tick, while an `Update`
         // system can be skipped between two back-to-back fixed steps in a lagging
         // frame — exactly when an explosion is underway.
-        app.add_systems(FixedUpdate, replace_fallen_room_parts);
+        app.add_systems(FixedUpdate, (replace_fallen_room_parts, respawn_fallen_avatars));
         // Assign each client (and its avatar) to its reported room on the first
         // input, lazily creating the room's world, and apply client rename +
         // avatar-pick + reset-position requests.
@@ -716,6 +716,33 @@ fn apply_position_resets(
                 linear.0 = Vec3::ZERO;
                 angular.0 = Vec3::ZERO;
             }
+        }
+    }
+}
+
+/// The avatar equivalent of single-player's fall→respawn cycle (`player::despawn`
+/// + `spawn`, both suppressed on the server): a fallen or diverged avatar is
+/// *teleported* back to a fresh spawn, never despawned. Despawning would
+/// replicate as a recursive despawn of the client's predicted avatar — taking the
+/// camera rig mounted under it with it — and nothing would respawn it. Gated on
+/// `RoomMember` because a not-yet-roomed avatar is deliberately parked at
+/// y = -1000 (the bootstrap hiding spot); the same threshold as single-player
+/// (-30) sits safely above `PART_FALL_Y` so a rider falls visibly past the part
+/// cull line before snapping home. Runs in `FixedUpdate` for the same reason as
+/// `replace_fallen_room_parts`: a diverged (non-finite) body must be repaired
+/// before the next Avian step or the broadphase panics the whole server.
+fn respawn_fallen_avatars(
+    mut avatars: Query<
+        (&mut Position, &mut LinearVelocity, &mut AngularVelocity),
+        (With<ServerAvatar>, With<RoomMember>),
+    >,
+) {
+    const AVATAR_FALL_Y: f32 = -30.0;
+    for (mut position, mut linear, mut angular) in &mut avatars {
+        if position.0.y < AVATAR_FALL_Y || part_state_diverged(position.0, linear.0, angular.0) {
+            position.0 = spawn_position();
+            linear.0 = Vec3::ZERO;
+            angular.0 = Vec3::ZERO;
         }
     }
 }
@@ -1984,5 +2011,62 @@ fn client_identity(link: Entity, remote: &Query<&RemoteId>) -> u64 {
         | Ok(PeerId::Local(id))
         | Ok(PeerId::Entity(id)) => id,
         _ => link.to_bits(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A fallen (or diverged) roomed avatar is teleported to a fresh spawn with
+    /// zeroed velocity — never despawned (a replicated despawn would recursively
+    /// take the client's camera rig down with the predicted avatar). An avatar
+    /// still parked at the y = -1000 bootstrap spot (no `RoomMember`) is left alone.
+    #[test]
+    fn fallen_avatars_respawn_in_place() {
+        let mut app = App::new();
+        app.add_systems(Update, respawn_fallen_avatars);
+
+        let room = RoomAllocator::default().allocate();
+        let fallen = app
+            .world_mut()
+            .spawn((
+                ServerAvatar,
+                RoomMember(room),
+                Position(Vec3::new(5.0, -31.0, 2.0)),
+                LinearVelocity(Vec3::new(0.0, -40.0, 0.0)),
+                AngularVelocity(Vec3::ZERO),
+            ))
+            .id();
+        let diverged = app
+            .world_mut()
+            .spawn((
+                ServerAvatar,
+                RoomMember(room),
+                Position(Vec3::new(f32::NAN, 100.0, 0.0)),
+                LinearVelocity(Vec3::ZERO),
+                AngularVelocity(Vec3::ZERO),
+            ))
+            .id();
+        let parked = app
+            .world_mut()
+            .spawn((
+                ServerAvatar,
+                Position(Vec3::new(0.0, -1000.0, 0.0)),
+                LinearVelocity(Vec3::ZERO),
+                AngularVelocity(Vec3::ZERO),
+            ))
+            .id();
+
+        app.update();
+
+        for entity in [fallen, diverged] {
+            let pos = app.world().get::<Position>(entity).unwrap().0;
+            assert_eq!(pos.y, 0.0, "respawned on the ground plane");
+            assert!(pos.length() < 100.0, "respawned near the spawn disc");
+            assert_eq!(app.world().get::<LinearVelocity>(entity).unwrap().0, Vec3::ZERO);
+        }
+        let parked_pos = app.world().get::<Position>(parked).unwrap().0;
+        assert_eq!(parked_pos.y, -1000.0, "un-roomed bootstrap avatar untouched");
     }
 }

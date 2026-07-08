@@ -35,6 +35,9 @@ impl Plugin for PlayerPlugin {
                     // Suppressed in multiplayer — the client controls its predicted
                     // networked avatar, not a separate local player.
                     spawn.run_if(not(resource_exists::<crate::SuppressLocalPlayer>)),
+                    // Self-heal: re-spawn the camera if a despawn took it (see the
+                    // fn doc); `add_camera_to_player` re-mounts it next frame.
+                    spawn_camera,
                     mouse_motion.after(EaseLabel),
                     toggle_holding
                         .in_set(ToggleHoldingSystemLabel)
@@ -42,7 +45,11 @@ impl Plugin for PlayerPlugin {
                         // In multiplayer the netcode owns grab/attach; the local
                         // toggle would fight the mirrored Holding state.
                         .run_if(not(resource_exists::<crate::part::SuppressLocalParts>)),
-                    despawn,
+                    // Single-player only: the fall→despawn→respawn cycle. In
+                    // multiplayer the avatar is a lightyear-predicted entity the
+                    // server owns — locally despawning it corrupts prediction, and
+                    // the server respawns fallen avatars instead (`respawn_fallen_avatars`).
+                    despawn.run_if(not(resource_exists::<crate::SuppressLocalPlayer>)),
                     attach_camera_orbit.in_set(AttachCameraOrbitSystem),
                     apply_part_rotation,
                     // The pickup camera/hold-point "feel" reacts to the shared `Holding`
@@ -105,7 +112,18 @@ pub struct HoldPointBundle {
 
 const BEVY_YAW_PITCH_ROLL_ANGLES: EulerRot = EulerRot::YXZ;
 
-fn spawn_camera(mut commands: Commands) {
+/// Spawn the app-lifetime camera when none exists. Runs at startup *and* every
+/// frame as a self-heal: in multiplayer the camera is mounted under the predicted
+/// avatar's orbit hierarchy, and lightyear despawns that avatar recursively —
+/// camera included — whenever the replicated world is torn down (most commonly a
+/// websocket drop; the server can also despawn the avatar). No system can detach
+/// the camera first (the despawn happens inside lightyear), so instead a fresh
+/// camera is spawned at the boot pose and `attach_camera_orbit` +
+/// `add_camera_to_player` re-mount it on the next avatar, exactly like app start.
+fn spawn_camera(mut commands: Commands, cameras: Query<(), With<Camera>>) {
+    if !cameras.is_empty() {
+        return;
+    }
     let mut camera_transform = Transform::from_rotation(Quat::from_euler(
         BEVY_YAW_PITCH_ROLL_ANGLES,
         std::f32::consts::PI,
