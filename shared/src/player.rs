@@ -35,8 +35,7 @@ impl Plugin for PlayerPlugin {
                     // Suppressed in multiplayer — the client controls its predicted
                     // networked avatar, not a separate local player.
                     spawn.run_if(not(resource_exists::<crate::SuppressLocalPlayer>)),
-                    // Self-heal: re-spawn the camera if a despawn took it (see the
-                    // fn doc); `add_camera_to_player` re-mounts it next frame.
+                    // Camera self-heal (see the fn doc).
                     spawn_camera,
                     mouse_motion.after(EaseLabel),
                     toggle_holding

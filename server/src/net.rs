@@ -726,11 +726,10 @@ fn apply_position_resets(
 /// replicate as a recursive despawn of the client's predicted avatar — taking the
 /// camera rig mounted under it with it — and nothing would respawn it. Gated on
 /// `RoomMember` because a not-yet-roomed avatar is deliberately parked at
-/// y = -1000 (the bootstrap hiding spot); the same threshold as single-player
-/// (-30) sits safely above `PART_FALL_Y` so a rider falls visibly past the part
-/// cull line before snapping home. Runs in `FixedUpdate` for the same reason as
-/// `replace_fallen_room_parts`: a diverged (non-finite) body must be repaired
-/// before the next Avian step or the broadphase panics the whole server.
+/// y = -1000 (the bootstrap hiding spot). The threshold matches single-player's
+/// -30, deeper than `PART_FALL_Y` so a rider falls visibly past the part cull
+/// line before snapping home. Runs in `FixedUpdate` for the same NaN-broadphase
+/// reason as `replace_fallen_room_parts`.
 fn respawn_fallen_avatars(
     mut avatars: Query<
         (&mut Position, &mut LinearVelocity, &mut AngularVelocity),
