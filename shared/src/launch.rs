@@ -87,15 +87,23 @@ pub fn gimbaled_rocket_thrust(
     gimbal: Vec2,
 ) -> (Vec3, Vec3) {
     let point = translation + rotation * ROCKET_THRUST_ORIGIN_LOCAL;
+    let force =
+        (rotation * gimbal_thrust_dir_local(gimbal)).normalize_or_zero() * full_thrust * throttle;
+    (point, force)
+}
+
+/// The body-local thrust direction for a nozzle deflection: [`ROCKET_THRUST_DIR_LOCAL`]
+/// tipped by `gimbal` (direction = tip direction, length = tilt angle in radians).
+/// The single source of the tilt law — the exhaust-flame visual aims by it too, so
+/// the drawn plume can never disagree with the applied force.
+pub fn gimbal_thrust_dir_local(gimbal: Vec2) -> Vec3 {
     let angle = gimbal.length();
-    let dir_local = if angle < 1e-6 {
+    if angle < 1e-6 {
         ROCKET_THRUST_DIR_LOCAL
     } else {
         ROCKET_THRUST_DIR_LOCAL * angle.cos()
             + Vec3::new(gimbal.x, 0.0, gimbal.y) / angle * angle.sin()
-    };
-    let force = (rotation * dir_local).normalize_or_zero() * full_thrust * throttle;
-    (point, force)
+    }
 }
 
 /// One rocket's resolved burn for a physics tick: the nozzle deflection to store back

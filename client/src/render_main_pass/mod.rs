@@ -23,7 +23,9 @@ use bevy::{
     prelude::*,
 };
 use ash_material::{spawn_ash_field, AshMaterial, ASH_SHADER_HANDLE};
-use flame_material::{spawn_flame, update_flames, FlameMaterial, FLAME_SHADER_HANDLE};
+use flame_material::{
+    register_flame_mesh, spawn_flame, update_flames, FlameMaterial, FLAME_SHADER_HANDLE,
+};
 use grass_material::{GrassExtension, GrassMaterial, GRASS_SHADER_HANDLE};
 use metal_material::{part_visual, rocket_body_material, MetalMaterial, METAL_SHADER_HANDLE};
 use avian3d::prelude::Collider;
@@ -73,6 +75,10 @@ impl Plugin for RenderMainPassPlugin {
             MaterialPlugin::<FlameMaterial>::default(),
         ))
             .add_systems(Startup, (add_lighting, spawn_ash_field))
+            .add_systems(
+                Startup,
+                |mut meshes: ResMut<Assets<Mesh>>| register_flame_mesh(&mut meshes),
+            )
             .add_systems(
                 Update,
                 (
@@ -222,7 +228,7 @@ pub fn insert_rocket_visual(
                 Transform::from_xyz(0.0, ROCKET_FLARE_Y_OFFSET, 0.0),
             ));
         });
-    spawn_flame(entity, meshes, flame_materials);
+    spawn_flame(entity, flame_materials);
 }
 
 fn assign_grass(
