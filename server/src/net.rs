@@ -31,8 +31,9 @@ use bad_spaceship_shared::character::{spawn_position, CharacterMovement, Initial
 use bad_spaceship_shared::net::{
     apply_hold_spring, apply_net_input, focused_part, monster_index, sanitize_name,
     ClientPanicReport, InLargestAssembly, NetCenterOfMass, NetFacing, NetHold, NetInput, NetJoint,
-    NetLaunch, NetName, NetPart, NetPlayer, PartShape, ProtocolPlugin, RequestLaunch, ResetPosition,
-    RollbackReport, SaveGame, SetAvatar, SetName, GROUND_JOINT_ID, MONSTER_COUNT, TICK,
+    NetLaunch, NetName, NetPart, NetPlayer, NetRoomFrame, PartShape, ProtocolPlugin, RequestLaunch,
+    ResetPosition, RollbackReport, SaveGame, SetAvatar, SetName, GROUND_JOINT_ID, MONSTER_COUNT,
+    TICK,
 };
 use bad_spaceship_shared::map::GROUND_LAYER;
 use bad_spaceship_shared::part::{
@@ -41,10 +42,12 @@ use bad_spaceship_shared::part::{
     NUM_PARTS, NUM_ROCKET_ENGINES, PART_FALL_Y, ROCKET_VOLUME,
 };
 use bad_spaceship_shared::{Grass, SuppressLocalPlayer, Yaw};
+use bevy::math::DVec3;
 use bevy::prelude::*;
 
 use crate::save::{
-    self, SaveAvatar, SaveBody, SaveFile, SaveJoint, SavePart, SaveShape, SaveWorld, AUTOSAVE_SECS,
+    self, SaveAvatar, SaveBody, SaveFile, SaveFrame, SaveJoint, SavePart, SaveShape, SaveWorld,
+    AUTOSAVE_SECS,
 };
 use lightyear::prelude::input::native::ActionState;
 use lightyear::prelude::input::InputBuffer;
@@ -354,7 +357,18 @@ impl Plugin for NetServerPlugin {
         // the physics step (`FixedPostUpdate`) on every tick, while an `Update`
         // system can be skipped between two back-to-back fixed steps in a lagging
         // frame — exactly when an explosion is underway.
-        app.add_systems(FixedUpdate, (replace_fallen_room_parts, respawn_fallen_avatars));
+        //
+        // The floating-origin rebase leads the chain: the fall checks it precedes
+        // read frame-consistent positions, and (see `rebase_room_frames`) it must
+        // run before anything that computes world-space force targets this tick.
+        app.init_resource::<RoomFrames>();
+        app.add_systems(
+            FixedUpdate,
+            (rebase_room_frames, replace_fallen_room_parts, respawn_fallen_avatars)
+                .chain()
+                .before(server_grab)
+                .before(apply_room_rocket_thrust),
+        );
         // Assign each client (and its avatar) to its reported room on the first
         // input, lazily creating the room's world, and apply client rename +
         // avatar-pick + reset-position requests.
@@ -497,6 +511,234 @@ struct PartRoom {
 #[derive(Component, Clone, Copy)]
 struct OrbRoom(RoomId);
 
+// ---- Floating-origin rebase (per room) ----------------------------------------
+//
+// f32 starves the solver (and the client renderer) at extreme altitude — the old
+// hard ceilings were ~33 km with a rider / ~524 km unmanned. So each room carries a
+// floating-origin frame: when its assembly drifts `REBASE_TRIGGER_M` from the local
+// origin, `rebase_room_frames` subtracts the assembly's position AND mean velocity
+// from every entity in the room (a Galilean boost — physics is invariant), and
+// accumulates both in the frame (`offset` integrates at `velocity` per tick, in
+// f64). Ascent is then unbounded: the sim always runs near the origin at small
+// local velocities. The frame replicates on the room orb (`NetRoomFrame`) so
+// clients can move their ground to `-offset` and derive true altitude/speed.
+//
+// While a frame is active the true ground is far away, but the shared ground
+// *collider* still sits at the local origin (it serves every room at once and
+// cannot move per-room) — so active rooms drop `GROUND_LAYER` from their collision
+// filters, and the rebase parks content `REBASE_REST_Y` above the origin so nothing
+// overlaps the phantom bowl even transiently. When the room descends below
+// `REBASE_RESET_M` true, the frame snaps back to exactly zero and the ground bit is
+// restored — landings happen on the real ground, and the loose parts left behind at
+// the pad (which fell out of the world while the frame flew) get recycled by the
+// normal fall check the moment coordinates are true again.
+
+/// Local drift of the room's assembly that triggers a rebase.
+const REBASE_TRIGGER_M: f32 = 2000.0;
+
+/// True distance from the origin below which an active frame resets to exactly
+/// zero (real coordinates, real ground). Half of `REBASE_TRIGGER_M`, so the two
+/// can't flap: right after a reset the local drift is under the trigger.
+const REBASE_RESET_M: f64 = 1000.0;
+
+/// Where a rebase parks the assembly above the local origin. Keeps the freshly
+/// shifted content clear of the phantom ground collider (and of the client's
+/// not-yet-moved local ground during the rollback that applies the shift).
+const REBASE_REST_Y: f32 = 100.0;
+
+/// A room's authoritative floating-origin frame: local + frame = true. `offset`
+/// is f64 — it grows without bound and integrates every tick, and f32 would
+/// accumulate error in exactly the quantity this feature exists to keep exact.
+#[derive(Clone, Copy, Default)]
+struct RoomFrame {
+    offset: DVec3,
+    velocity: Vec3,
+}
+
+impl RoomFrame {
+    fn is_active(&self) -> bool {
+        self.offset != DVec3::ZERO || self.velocity != Vec3::ZERO
+    }
+    fn net(&self) -> NetRoomFrame {
+        NetRoomFrame { offset: self.offset.to_array(), velocity: self.velocity.to_array() }
+    }
+    fn save(&self) -> SaveFrame {
+        SaveFrame { offset: self.offset.to_array(), velocity: self.velocity.to_array() }
+    }
+}
+
+/// Every room's floating-origin frame, keyed by `RoomId`. Rooms absent from the
+/// map are grounded (zero frame).
+#[derive(Resource, Default)]
+struct RoomFrames {
+    by_room: HashMap<RoomId, RoomFrame>,
+}
+
+impl RoomFrames {
+    fn get(&self, room: RoomId) -> RoomFrame {
+        self.by_room.get(&room).copied().unwrap_or_default()
+    }
+}
+
+/// A room entity's collision layers for its frame state: membership on the room's
+/// bit; filters the room's bit plus — only while grounded — the ground's bit 0
+/// (rebased rooms must not collide with the ground collider left at the local
+/// origin: it serves every room at once and cannot move per-room, so while the
+/// frame is active it's a phantom — the true ground is at `-offset`). The single
+/// construction point for parts (`tag_room_part`), avatars (`assign_rooms`), and
+/// the rebase transitions. `CollisionLayers` is immutable (avian), so transitions
+/// re-insert it.
+fn room_layers(bit: u32, grounded: bool) -> CollisionLayers {
+    CollisionLayers::from_bits(bit, bit | if grounded { GROUND_LAYER } else { 0 })
+}
+
+/// Integrate each room's frame and rebase rooms whose assembly drifted from the
+/// local origin (see the module-section comment above). Runs in `FixedUpdate`
+/// *before* every system that computes world-space force targets for the same tick
+/// (`server_grab`/`server_hold` chain, `apply_room_rocket_thrust`) — a thrust
+/// application point computed in the pre-shift frame but applied post-shift would
+/// be a km-scale lever arm. Movement/contact systems are frame-invariant and need
+/// no ordering.
+fn rebase_room_frames(
+    time: Res<Time>,
+    mut commands: Commands,
+    mut frames: ResMut<RoomFrames>,
+    joints: Query<(Entity, &SphericalJoint, Option<&RoomMember>)>,
+    mut orbs: Query<(&OrbRoom, &mut NetRoomFrame)>,
+    mut parts: Query<(Entity, &NetPart, &PartRoom, &mut Position, &mut LinearVelocity)>,
+    mut avatars: Query<
+        (Entity, &RoomMember, &mut Position, &mut LinearVelocity),
+        (With<ServerAvatar>, Without<NetPart>),
+    >,
+) {
+    // 1. Integrate every moving frame's origin along its velocity (exact, in f64).
+    let dt = time.delta_secs_f64();
+    for frame in frames.by_room.values_mut() {
+        if frame.velocity != Vec3::ZERO {
+            frame.offset += frame.velocity.as_dvec3() * dt;
+        }
+    }
+
+    // Fast path for the common case — no frame active and nothing anywhere near
+    // the rebase band: skip the per-room anchor work (index + union-find) entirely.
+    // Publishing still runs (a fresh orb needs its zero frame written once).
+    const TRIGGER_SQ: f32 = REBASE_TRIGGER_M * REBASE_TRIGGER_M;
+    if frames.by_room.values().all(|f| !f.is_active())
+        && parts.iter().all(|(.., position, _)| position.0.length_squared() < TRIGGER_SQ)
+    {
+        for (_, mut net_frame) in &mut orbs {
+            net_frame.set_if_neq(NetRoomFrame::default());
+        }
+        return;
+    }
+
+    // 2. Anchor each room on its largest assembly — the thing whose solver
+    //    precision matters (and whose deck the riders stand on).
+    let mut index: HashMap<Entity, usize> = HashMap::new();
+    let mut items: Vec<(Vec3, f32, RoomId)> = Vec::new();
+    let mut velocities: Vec<Vec3> = Vec::new();
+    for (entity, part, room, position, linear) in &parts {
+        index.insert(entity, items.len());
+        items.push((position.0, part_volume(part.shape), room.id));
+        velocities.push(linear.0);
+    }
+    let mut edges: Vec<(usize, usize)> = Vec::new();
+    for (_, joint, _) in &joints {
+        if let (Some(&a), Some(&b)) = (index.get(&joint.body1), index.get(&joint.body2)) {
+            edges.push((a, b));
+        }
+    }
+    let assemblies = largest_assembly_per_room(&items, &edges);
+    // Mass-weighted position + velocity of a room's anchor: its largest assembly,
+    // or (no assembly — e.g. the ride broke up entirely) all of its parts, so the
+    // frame keeps tracking whatever is left.
+    let anchor = |room: RoomId| -> Option<(Vec3, Vec3)> {
+        let com = |member_indices: &mut dyn Iterator<Item = usize>| {
+            let (mut weighted_pos, mut weighted_vel, mut mass) = (Vec3::ZERO, Vec3::ZERO, 0.0);
+            for i in member_indices {
+                let (position, weight, _) = items[i];
+                weighted_pos += position * weight;
+                weighted_vel += velocities[i] * weight;
+                mass += weight;
+            }
+            (mass > 0.0).then(|| (weighted_pos / mass, weighted_vel / mass))
+        };
+        match assemblies.get(&room) {
+            Some(a) => com(&mut a.members.iter().copied()),
+            None => com(&mut (0..items.len()).filter(|&i| items[i].2 == room)),
+        }
+    };
+
+    // 3. Per room: rebase on drift, reset near the true origin, publish the frame.
+    for (orb_room, mut net_frame) in &mut orbs {
+        let room = orb_room.0;
+        let frame = frames.by_room.entry(room).or_default();
+        if let Some((anchor_pos, anchor_vel)) = anchor(room) {
+            let true_anchor = frame.offset + anchor_pos.as_dvec3();
+            // (shift, boost) to subtract from every room entity's position/velocity.
+            let shift = if frame.is_active() && true_anchor.length() < REBASE_RESET_M {
+                // Back near the true origin: land the frame exactly on zero so the
+                // ground is real again (assign directly — accumulating the inverse
+                // shift in f32 would leave a residue).
+                let shift = (-frame.offset.as_vec3(), -frame.velocity);
+                (frame.offset, frame.velocity) = (DVec3::ZERO, Vec3::ZERO);
+                Some(shift)
+            } else if anchor_pos.length() > REBASE_TRIGGER_M {
+                let dpos = anchor_pos - Vec3::Y * REBASE_REST_Y;
+                frame.offset += dpos.as_dvec3();
+                frame.velocity += anchor_vel;
+                Some((dpos, anchor_vel))
+            } else {
+                None
+            };
+            if let Some((dpos, dvel)) = shift {
+                let grounded = !frame.is_active();
+                // A rebased room must have no part↔ground joints: the shared
+                // ground body does not ride the frame, so such a joint would pin
+                // the assembly to an anchor the shift just moved km away — a
+                // constraint violation violent enough to explode the assembly.
+                // Real flights cut them at blastoff; cut any stragglers here.
+                if !grounded {
+                    for (joint_entity, joint, member) in &joints {
+                        if member.is_some_and(|m| m.0 == room)
+                            && (!index.contains_key(&joint.body1)
+                                || !index.contains_key(&joint.body2))
+                        {
+                            println!("[rebase] room {room:?}: cutting ground joint");
+                            commands.entity(joint_entity).despawn();
+                        }
+                    }
+                }
+                // Avatars don't carry the room's collision bit; pick it up from the
+                // room's parts (a room always has parts).
+                let mut bit = None;
+                for (entity, _, part_room, mut position, mut linear) in &mut parts {
+                    if part_room.id == room {
+                        position.0 -= dpos;
+                        linear.0 -= dvel;
+                        bit = Some(part_room.bit);
+                        commands.entity(entity).insert(room_layers(part_room.bit, grounded));
+                    }
+                }
+                for (entity, member, mut position, mut linear) in &mut avatars {
+                    if member.0 == room {
+                        position.0 -= dpos;
+                        linear.0 -= dvel;
+                        if let Some(bit) = bit {
+                            commands.entity(entity).insert(room_layers(bit, grounded));
+                        }
+                    }
+                }
+                println!(
+                    "[rebase] room {room:?}: shift {dpos:?} boost {dvel:?} -> offset {:?} vel {:?}",
+                    frame.offset, frame.velocity
+                );
+            }
+        }
+        net_frame.set_if_neq(frame.net());
+    }
+}
+
 /// The part a networked player is currently holding (server-authoritative).
 #[derive(Component, Default)]
 struct HeldPart(Option<Entity>);
@@ -533,6 +775,7 @@ fn assign_rooms(
     // re-anchor to it) and the launch registry (a launched save resumes thrusting).
     grounds: Query<Entity, With<Grass>>,
     mut launches: ResMut<LaunchRegistry>,
+    mut frames: ResMut<RoomFrames>,
     players: Query<
         (Entity, &ActionState<NetInput>, &ControlledBy, &NetName, Option<&ResumeRoom>),
         Without<RoomMember>,
@@ -599,8 +842,9 @@ fn assign_rooms(
                     &world,
                     grounds.iter().next(),
                     &mut launches,
+                    &mut frames,
                 ),
-                None => spawn_room_world(&mut commands, room),
+                None => spawn_room_world(&mut commands, room, &frames),
             }
         }
         // Scope this avatar and this client to the room (`Rooms` is immutable, so
@@ -608,11 +852,13 @@ fn assign_rooms(
         // in the one shared Avian world, so isolate it to the room's collision layer
         // too (membership = room bit, filter = room bit + ground's default bit 0) —
         // otherwise it would shove *every* room's blocks. Matches `tag_room_part`,
-        // so same-room avatars/parts/ground interact and cross-room ones don't.
+        // so same-room avatars/parts/ground interact and cross-room ones don't —
+        // including the frame-aware ground bit (a mid-flight room has no ground).
+        let grounded = !frames.get(room.id).is_active();
         commands.entity(entity).insert((
             Rooms::single(room.id),
             RoomMember(room.id),
-            CollisionLayers::from_bits(room.bit, room.bit | GROUND_LAYER),
+            room_layers(room.bit, grounded),
         ));
         commands.entity(controlled.owner).insert(Rooms::single(room.id));
         // Give a still-unnamed avatar the lowest free "Player N" in its room, reserving
@@ -693,26 +939,48 @@ fn apply_avatar_changes(
 /// avatar's `Position` and zero its velocity, so the reset replicates/corrects on the
 /// owner's predicted body. Maps the client link to its avatar via `ControlledBy`, the
 /// same way `apply_name_changes` does. `spawn_position` is the shared spawn rule, so a
-/// reset lands on the same valid on-platform disc a fresh join uses.
+/// reset lands on the same valid on-platform disc a fresh join uses — except in a room
+/// whose floating-origin frame is active, where the pad disc is mid-air: there a reset
+/// puts the player back aboard the assembly deck (the only place to stand).
 fn apply_position_resets(
+    frames: Res<RoomFrames>,
+    deck_parts: DeckParts,
     mut links: Query<
         (Entity, &mut MessageReceiver<ResetPosition>),
         (With<ClientOf>, With<Connected>),
     >,
     mut avatars: Query<
-        (&ControlledBy, &mut Position, &mut LinearVelocity, &mut AngularVelocity),
-        With<ServerAvatar>,
+        (
+            &ControlledBy,
+            Option<&RoomMember>,
+            &mut Position,
+            &mut LinearVelocity,
+            &mut AngularVelocity,
+        ),
+        (With<ServerAvatar>, Without<NetPart>),
     >,
 ) {
+    let mut decks: Option<HashMap<RoomId, Vec3>> = None;
     for (link, mut receiver) in &mut links {
         // Drain the window; act once if any reset was requested (a single teleport is
         // idempotent, so coalescing repeats is correct).
         if receiver.receive().count() == 0 {
             continue;
         }
-        for (controlled, mut position, mut linear, mut angular) in &mut avatars {
+        for (controlled, member, mut position, mut linear, mut angular) in &mut avatars {
             if controlled.owner == link {
-                position.0 = spawn_position();
+                let deck = member
+                    .filter(|member| frames.get(member.0).is_active())
+                    .and_then(|member| {
+                        decks
+                            .get_or_insert_with(|| {
+                                deck_respawn_points(deck_parts.iter().map(|(p, part, room)| {
+                                    (p.0, part_volume(part.shape), room.id)
+                                }))
+                            })
+                            .get(&member.0)
+                    });
+                position.0 = deck.copied().unwrap_or_else(spawn_position);
                 linear.0 = Vec3::ZERO;
                 angular.0 = Vec3::ZERO;
             }
@@ -720,26 +988,95 @@ fn apply_position_resets(
     }
 }
 
+/// How far below its room's deck a rider can fall (in flight, co-moving frame)
+/// before being put back aboard. Generous enough that a jump off the edge reads
+/// as a real fall first.
+const FLIGHT_FALL_MARGIN: f32 = 50.0;
+
+/// Per-room "back aboard" point for a room whose frame is active: over the
+/// largest assembly's mass-weighted XZ (the deck's balance point) and just above
+/// its highest part, so a respawned rider drops onto the deck. `members` yields
+/// each assembly member as `(local position, mass weight, room)`.
+fn deck_respawn_points<I: Iterator<Item = (Vec3, f32, RoomId)>>(
+    members: I,
+) -> HashMap<RoomId, Vec3> {
+    const DECK_CLEARANCE: f32 = 2.0;
+    let mut acc: HashMap<RoomId, (Vec3, f32, f32)> = HashMap::new();
+    for (position, weight, room) in members {
+        let (weighted, mass, top) = acc.entry(room).or_insert((Vec3::ZERO, 0.0, f32::MIN));
+        *weighted += position * weight;
+        *mass += weight;
+        *top = top.max(position.y);
+    }
+    acc.into_iter()
+        .filter(|(_, (_, mass, _))| *mass > 0.0)
+        .map(|(room, (weighted, mass, top))| {
+            let com = weighted / mass;
+            (room, Vec3::new(com.x, top + DECK_CLEARANCE, com.z))
+        })
+        .collect()
+}
+
+/// The query behind [`deck_respawn_points`]: every largest-assembly member's local
+/// pose + mass weight + room. Reading `&NetPart` makes it provably disjoint from
+/// the avatar queries the callers mutate `Position` through (avatars never carry
+/// `NetPart` — they filter `Without<NetPart>`).
+type DeckParts<'w, 's> = Query<
+    'w,
+    's,
+    (&'static Position, &'static NetPart, &'static PartRoom),
+    With<InLargestAssembly>,
+>;
+
 /// The avatar equivalent of single-player's fall→respawn cycle (`player::despawn`
 /// + `spawn`, both suppressed on the server): a fallen or diverged avatar is
-/// *teleported* back to a fresh spawn, never despawned. Despawning would
-/// replicate as a recursive despawn of the client's predicted avatar — taking the
-/// camera rig mounted under it with it — and nothing would respawn it. Gated on
-/// `RoomMember` because a not-yet-roomed avatar is deliberately parked at
-/// y = -1000 (the bootstrap hiding spot). The threshold matches single-player's
-/// -30, deeper than `PART_FALL_Y` so a rider falls visibly past the part cull
-/// line before snapping home. Runs in `FixedUpdate` for the same NaN-broadphase
-/// reason as `replace_fallen_room_parts`.
+/// *teleported* back, never despawned. Despawning would replicate as a recursive
+/// despawn of the client's predicted avatar — taking the camera rig mounted under
+/// it with it — and nothing would respawn it. Gated on `RoomMember` because a
+/// not-yet-roomed avatar is deliberately parked at y = -1000 (the bootstrap
+/// hiding spot). Runs in `FixedUpdate` for the same NaN-broadphase reason as
+/// `replace_fallen_room_parts`.
+///
+/// Grounded rooms: fall below -30 (matching single-player, deeper than
+/// `PART_FALL_Y` so a rider falls visibly past the part cull line) → a fresh pad
+/// spawn. Rooms with an active floating-origin frame have no ground and their
+/// deck can sit anywhere within the rebase band, so the check is deck-relative:
+/// fall `FLIGHT_FALL_MARGIN` below the assembly deck → back aboard it. This is
+/// also what catches a mid-flight joiner (spawned at the pad disc, which in an
+/// active frame is mid-air near the assembly): they free-fall briefly, then land
+/// on the deck.
 fn respawn_fallen_avatars(
+    frames: Res<RoomFrames>,
+    deck_parts: DeckParts,
     mut avatars: Query<
-        (&mut Position, &mut LinearVelocity, &mut AngularVelocity),
-        (With<ServerAvatar>, With<RoomMember>),
+        (&RoomMember, &mut Position, &mut LinearVelocity, &mut AngularVelocity),
+        (With<ServerAvatar>, Without<NetPart>),
     >,
 ) {
     const AVATAR_FALL_Y: f32 = -30.0;
-    for (mut position, mut linear, mut angular) in &mut avatars {
-        if position.0.y < AVATAR_FALL_Y || part_state_diverged(position.0, linear.0, angular.0) {
-            position.0 = spawn_position();
+    // Deck points are only needed for avatars in active-frame rooms — computed
+    // lazily so the (common) all-grounded case never builds them.
+    let mut decks: Option<HashMap<RoomId, Vec3>> = None;
+    for (member, mut position, mut linear, mut angular) in &mut avatars {
+        let deck = frames
+            .get(member.0)
+            .is_active()
+            .then(|| {
+                decks
+                    .get_or_insert_with(|| {
+                        deck_respawn_points(deck_parts.iter().map(|(p, part, room)| {
+                            (p.0, part_volume(part.shape), room.id)
+                        }))
+                    })
+                    .get(&member.0)
+            })
+            .flatten();
+        let fallen = match deck {
+            Some(deck) => position.0.y < deck.y - FLIGHT_FALL_MARGIN,
+            None => position.0.y < AVATAR_FALL_Y,
+        };
+        if fallen || part_state_diverged(position.0, linear.0, angular.0) {
+            position.0 = deck.copied().unwrap_or_else(spawn_position);
             linear.0 = Vec3::ZERO;
             angular.0 = Vec3::ZERO;
         }
@@ -780,10 +1117,17 @@ fn record_resume_positions(
 /// collision-isolated to the room). Parts replicate immediately — a client that
 /// joins mid-fall (or mid-shove) now receives their velocity too, so its predicted
 /// copy falls in sync rather than drifting.
-fn spawn_room_world(commands: &mut Commands, room: Room) {
+fn spawn_room_world(commands: &mut Commands, room: Room, frames: &RoomFrames) {
     for _ in 0..NUM_PARTS {
         let (entity, half_extents, seed) = spawn_random_part(commands);
-        tag_room_part(commands, entity, PartShape::Cuboid { half_extents: half_extents.to_array() }, seed, room);
+        tag_room_part(
+            commands,
+            entity,
+            PartShape::Cuboid { half_extents: half_extents.to_array() },
+            seed,
+            room,
+            frames,
+        );
     }
     // Rocket engines join the loose-parts pool (see `spawn_random_part` above): same
     // room-scoped replication + prediction, distinguished only by `PartShape::RocketEngine`
@@ -791,9 +1135,9 @@ fn spawn_room_world(commands: &mut Commands, room: Room) {
     // appearance seed (their striped body material is fixed) — pass 0.
     for _ in 0..NUM_ROCKET_ENGINES {
         let entity = spawn_random_rocket(commands);
-        tag_room_part(commands, entity, PartShape::RocketEngine, 0, room);
+        tag_room_part(commands, entity, PartShape::RocketEngine, 0, room, frames);
     }
-    spawn_room_orb(commands, room);
+    spawn_room_orb(commands, room, NetRoomFrame::default());
 }
 
 /// One center-of-mass orb per room: a server-owned, replicated marker whose
@@ -801,12 +1145,14 @@ fn spawn_room_world(commands: &mut Commands, room: Room) {
 /// moves (`update_assembly_center_of_mass`). It carries no physics body — it's a
 /// pure data holder the client renders a floating orb from. Scoped to the room so
 /// only that room's clients receive it. The same entity carries the room's
-/// launch/countdown state (`NetLaunch`), so a single replicated entity per room
-/// tells clients both where the COM is and where the launch sequence is.
-fn spawn_room_orb(commands: &mut Commands, room: Room) {
+/// launch/countdown state (`NetLaunch`) and floating-origin frame (`NetRoomFrame`),
+/// so a single replicated entity per room tells clients where the COM is, where the
+/// launch sequence is, and where the room is in true coordinates.
+fn spawn_room_orb(commands: &mut Commands, room: Room, frame: NetRoomFrame) {
     commands.spawn((
         NetCenterOfMass::default(),
         NetLaunch::default(),
+        frame,
         Replicate::to_clients(NetworkTarget::All),
         Rooms::single(room.id),
         OrbRoom(room.id),
@@ -817,14 +1163,23 @@ fn spawn_room_orb(commands: &mut Commands, room: Room) {
 /// (the load half of the save-game feature — see `crate::save`): respawn every
 /// saved part at its saved pose/velocity, rebuild the joints (remapping saved
 /// part indices to the new entities; ground endpoints to the shared `Grass`
-/// entity), restore the launched flag, and spawn the room orb.
+/// entity), restore the launched flag and floating-origin frame (saved poses are
+/// room-local, so a mid-flight save resumes its flight — same local world, same
+/// frame), and spawn the room orb.
 fn spawn_room_world_from_save(
     commands: &mut Commands,
     room: Room,
     world: &SaveWorld,
     ground: Option<Entity>,
     launches: &mut LaunchRegistry,
+    frames: &mut RoomFrames,
 ) {
+    let frame = RoomFrame {
+        offset: DVec3::from_array(world.frame.offset),
+        velocity: Vec3::from_array(world.frame.velocity),
+    };
+    frames.by_room.insert(room.id, frame);
+    let grounded = !frame.is_active();
     let entities: Vec<Entity> = world
         .parts
         .iter()
@@ -851,12 +1206,22 @@ fn spawn_room_world_from_save(
                 LinearVelocity(Vec3::from_array(p.linear_velocity)),
                 AngularVelocity(Vec3::from_array(p.angular_velocity)),
             ));
-            tag_room_part(commands, entity, shape, p.seed, room);
+            tag_room_part(commands, entity, shape, p.seed, room, frames);
             entity
         })
         .collect();
 
     for joint in &world.joints {
+        // A ground joint is meaningless (and dangerous) in a room whose frame is
+        // active: the shared ground body does NOT ride the frame, so the joint
+        // would pin the assembly to the phantom ground at the local origin — and
+        // the next rebase would shift the bodies km away from the unmoved anchor,
+        // exploding the constraint. Real saves never combine the two (blastoff
+        // cuts ground joints long before the first rebase); refuse it anyway.
+        if !grounded && (joint.body1 == SaveBody::Ground || joint.body2 == SaveBody::Ground) {
+            println!("[save] skipping ground joint (room frame is active: {joint:?})");
+            continue;
+        }
         let resolve = |body: SaveBody| match body {
             SaveBody::Part(i) => entities.get(i as usize).copied(),
             SaveBody::Ground => ground,
@@ -885,15 +1250,24 @@ fn spawn_room_world_from_save(
     if world.launched {
         launches.by_room.insert(room.id, RoomLaunch::Launched);
     }
-    spawn_room_orb(commands, room);
+    spawn_room_orb(commands, room, frame.net());
 }
 
 /// Tag a freshly-spawned part for room-scoped replication: its shape + stable id
 /// via `NetPart`, its pose via the predicted Avian `Position`/`Rotation`,
 /// replicated + predicted, scoped to the room's `Rooms`, and isolated to the
-/// room's collision layer (it collides only with same-room parts and the ground —
-/// default bit 0).
-fn tag_room_part(commands: &mut Commands, entity: Entity, shape: PartShape, seed: u32, room: Room) {
+/// room's collision layer. It reads the room's floating-origin frame itself, so
+/// no caller can tag a part with the wrong ground bit: grounded rooms collide
+/// with the ground, rebased rooms don't.
+fn tag_room_part(
+    commands: &mut Commands,
+    entity: Entity,
+    shape: PartShape,
+    seed: u32,
+    room: Room,
+    frames: &RoomFrames,
+) {
+    let grounded = !frames.get(room.id).is_active();
     commands.entity(entity).insert((
         // `id` is the part's stable cross-network identity (this entity's bits), so
         // a replicated `NetJoint` can name its two endpoints and the client can find
@@ -907,7 +1281,7 @@ fn tag_room_part(commands: &mut Commands, entity: Entity, shape: PartShape, seed
         PredictionTarget::to_clients(NetworkTarget::All),
         Rooms::single(room.id),
         PartRoom { id: room.id, bit: room.bit },
-        CollisionLayers::from_bits(room.bit, room.bit | GROUND_LAYER),
+        room_layers(room.bit, grounded),
     ));
 }
 
@@ -998,6 +1372,7 @@ fn server_attach(
     // part's room (to spawn the replacement in the same room).
     joints: Query<&SphericalJoint>,
     part_rooms: Query<&PartRoom>,
+    frames: Res<RoomFrames>,
     mut players: Query<(&ActionState<NetInput>, &HeldPart, &RoomMember, &mut AttachState)>,
 ) {
     // Parts that already had a joint before this tick. A part gaining its first
@@ -1073,6 +1448,7 @@ fn server_attach(
                                     PartShape::Cuboid { half_extents: half_extents.to_array() },
                                     seed,
                                     room,
+                                    &frames,
                                 );
                             }
                         }
@@ -1245,6 +1621,7 @@ fn sync_net_hold(
 /// fallen one.
 fn replace_fallen_room_parts(
     mut commands: Commands,
+    frames: Res<RoomFrames>,
     parts: Query<(Entity, &Position, &LinearVelocity, &AngularVelocity, &PartRoom, &NetPart)>,
 ) {
     for (entity, position, linear, angular, part_room, part) in &parts {
@@ -1255,7 +1632,15 @@ fn replace_fallen_room_parts(
                 position.0, linear.0, angular.0
             );
         }
-        if position.0.y < PART_FALL_Y || diverged {
+        // The fall check only means something in true coordinates: while the room's
+        // floating-origin frame is active there is no ground, and the parts left
+        // behind at the pad sit far below the local origin *on purpose* — recycling
+        // them mid-flight would respawn them mid-air next to the assembly and they'd
+        // fall (and recycle) forever. They keep falling out of the world instead,
+        // and the moment the frame resets to zero this check sees true coordinates
+        // again and restocks the pad. Divergence still recycles anywhere.
+        let grounded = !frames.get(part_room.id).is_active();
+        if (grounded && position.0.y < PART_FALL_Y) || diverged {
             commands.entity(entity).despawn();
             let room = Room { id: part_room.id, bit: part_room.bit };
             // Respawn the same kind that fell so the pool's composition is stable.
@@ -1268,11 +1653,19 @@ fn replace_fallen_room_parts(
                         PartShape::Cuboid { half_extents: half_extents.to_array() },
                         seed,
                         room,
+                        &frames,
                     );
                 }
                 PartShape::RocketEngine => {
                     let new_entity = spawn_random_rocket(&mut commands);
-                    tag_room_part(&mut commands, new_entity, PartShape::RocketEngine, 0, room);
+                    tag_room_part(
+                        &mut commands,
+                        new_entity,
+                        PartShape::RocketEngine,
+                        0,
+                        room,
+                        &frames,
+                    );
                 }
             }
         }
@@ -1613,6 +2006,7 @@ type SnapshotAvatars<'w, 's> = Query<
 fn snapshot_room(
     room: RoomId,
     launched: bool,
+    frame: SaveFrame,
     avatars: &SnapshotAvatars,
     parts: &SnapshotParts,
     joints: &SnapshotJoints,
@@ -1675,7 +2069,7 @@ fn snapshot_room(
         })
         .collect();
 
-    SaveWorld { parts: save_parts, joints: save_joints, avatars: save_avatars, launched }
+    SaveWorld { parts: save_parts, joints: save_joints, avatars: save_avatars, launched, frame }
 }
 
 /// A snapshot's identity for the autosave's skip-if-unchanged check. Settled
@@ -1709,6 +2103,7 @@ fn autosave_rooms(
     mut last_hash: Local<HashMap<RoomId, u64>>,
     registry: Res<RoomRegistry>,
     launches: Res<LaunchRegistry>,
+    frames: Res<RoomFrames>,
     avatars: SnapshotAvatars,
     parts: SnapshotParts,
     joints: SnapshotJoints,
@@ -1723,7 +2118,14 @@ fn autosave_rooms(
         if !occupied.contains(&room.id) {
             continue;
         }
-        let world = snapshot_room(room.id, launches.is_launched(room.id), &avatars, &parts, &joints);
+        let world = snapshot_room(
+            room.id,
+            launches.is_launched(room.id),
+            frames.get(room.id).save(),
+            &avatars,
+            &parts,
+            &joints,
+        );
         let hash = world_hash(&world);
         if last_hash.get(&room.id) == Some(&hash) {
             continue;
@@ -1748,6 +2150,7 @@ fn apply_manual_saves(
     avatars: Query<(&ControlledBy, &RoomMember)>,
     registry: Res<RoomRegistry>,
     launches: Res<LaunchRegistry>,
+    frames: Res<RoomFrames>,
     snapshot_avatars: SnapshotAvatars,
     parts: SnapshotParts,
     joints: SnapshotJoints,
@@ -1774,8 +2177,14 @@ fn apply_manual_saves(
         else {
             continue;
         };
-        let world =
-            snapshot_room(room_id, launches.is_launched(room_id), &snapshot_avatars, &parts, &joints);
+        let world = snapshot_room(
+            room_id,
+            launches.is_launched(room_id),
+            frames.get(room_id).save(),
+            &snapshot_avatars,
+            &parts,
+            &joints,
+        );
         let code = save::code_string(code);
         let file = SaveFile::new(name.clone(), code.clone(), "manual", world);
         match save::write_save(&save::manual_file_name(&code, &name), &file) {
@@ -1831,6 +2240,7 @@ fn record_room_frames(
     mut recordings: ResMut<RecordingRegistry>,
     registry: Res<RoomRegistry>,
     launches: Res<LaunchRegistry>,
+    frames: Res<RoomFrames>,
     avatars: SnapshotAvatars,
     inputs: Query<(&NetPlayer, &RoomMember, &ActionState<NetInput>)>,
     parts: SnapshotParts,
@@ -1855,7 +2265,14 @@ fn record_room_frames(
             continue;
         };
 
-        let world = snapshot_room(room.id, launches.is_launched(room.id), &avatars, &parts, &joints);
+        let world = snapshot_room(
+            room.id,
+            launches.is_launched(room.id),
+            frames.get(room.id).save(),
+            &avatars,
+            &parts,
+            &joints,
+        );
         let frame = RecordedFrame {
             tick: *tick,
             unix_ms: save::now_unix_ms(),
@@ -2024,6 +2441,7 @@ mod tests {
     #[test]
     fn fallen_avatars_respawn_in_place() {
         let mut app = App::new();
+        app.init_resource::<RoomFrames>();
         app.add_systems(Update, respawn_fallen_avatars);
 
         let room = RoomAllocator::default().allocate();
@@ -2067,5 +2485,180 @@ mod tests {
         }
         let parked_pos = app.world().get::<Position>(parked).unwrap().0;
         assert_eq!(parked_pos.y, -1000.0, "un-roomed bootstrap avatar untouched");
+    }
+
+    /// A part bundle for the rebase tests: a unit-volume cuboid in `room`.
+    fn test_part(
+        room: RoomId,
+        bit: u32,
+        grounded: bool,
+        pos: Vec3,
+        vel: Vec3,
+    ) -> impl Bundle {
+        (
+            NetPart { shape: PartShape::Cuboid { half_extents: [0.5; 3] }, id: 0, seed: 0 },
+            PartRoom { id: room, bit },
+            Position(pos),
+            LinearVelocity(vel),
+            CollisionLayers::from_bits(bit, bit | if grounded { GROUND_LAYER } else { 0 }),
+        )
+    }
+
+    /// When a room's assembly drifts past `REBASE_TRIGGER_M`, the whole room —
+    /// assembly, stray pad parts, avatars — is shifted into the assembly's
+    /// co-moving frame (positions AND velocities), the frame accumulates the
+    /// shift, and the ground bit is dropped (the ground collider at the local
+    /// origin is a phantom now).
+    #[test]
+    fn rebase_shifts_room_into_comoving_frame() {
+        let mut app = App::new();
+        app.init_resource::<Time>();
+        app.init_resource::<RoomFrames>();
+        app.add_systems(Update, rebase_room_frames);
+
+        let room = RoomAllocator::default().allocate();
+        let bit = 1u32 << 1;
+        let climb = Vec3::new(0.0, 120.0, 0.0);
+        let a = app
+            .world_mut()
+            .spawn(test_part(room, bit, true, Vec3::new(0.0, 2499.0, 0.0), climb))
+            .id();
+        let b = app
+            .world_mut()
+            .spawn(test_part(room, bit, true, Vec3::new(0.0, 2501.0, 0.0), climb))
+            .id();
+        app.world_mut().spawn(SphericalJoint::new(a, b));
+        // A loose part left behind at the pad — shifted like everything else.
+        let stray = app
+            .world_mut()
+            .spawn(test_part(room, bit, true, Vec3::new(3.0, 1.0, 0.0), Vec3::ZERO))
+            .id();
+        let rider = app
+            .world_mut()
+            .spawn((
+                ServerAvatar,
+                RoomMember(room),
+                Position(Vec3::new(0.0, 2502.0, 0.0)),
+                LinearVelocity(climb),
+                CollisionLayers::from_bits(bit, bit | GROUND_LAYER),
+            ))
+            .id();
+        let orb = app.world_mut().spawn((OrbRoom(room), NetRoomFrame::default())).id();
+
+        app.update();
+
+        // Assembly COM was (0, 2500, 0) at 120 m/s up → parked at REBASE_REST_Y,
+        // co-moving (local velocity zero).
+        assert_eq!(app.world().get::<Position>(a).unwrap().0.y, REBASE_REST_Y - 1.0);
+        assert_eq!(app.world().get::<Position>(b).unwrap().0.y, REBASE_REST_Y + 1.0);
+        assert_eq!(app.world().get::<LinearVelocity>(a).unwrap().0, Vec3::ZERO);
+        assert_eq!(app.world().get::<Position>(rider).unwrap().0.y, REBASE_REST_Y + 2.0);
+        assert_eq!(app.world().get::<LinearVelocity>(rider).unwrap().0, Vec3::ZERO);
+        // The stray pad part rides the same frame: now far below, falling behind.
+        assert_eq!(app.world().get::<Position>(stray).unwrap().0.y, 1.0 - 2400.0);
+        assert_eq!(app.world().get::<LinearVelocity>(stray).unwrap().0, -climb);
+        // Frame bookkeeping: local + frame = true.
+        let frame = app.world().get::<NetRoomFrame>(orb).unwrap();
+        assert_eq!(frame.offset, [0.0, 2400.0, 0.0]);
+        assert_eq!(frame.velocity, climb.to_array());
+        // Ground bit dropped while the frame is active.
+        let layers = app.world().get::<CollisionLayers>(a).unwrap();
+        assert_eq!(*layers, room_layers(bit, false));
+    }
+
+    /// A room descending back under `REBASE_RESET_M` true altitude snaps its frame
+    /// to exactly zero: coordinates are true again, velocities get their frame
+    /// boost back, and the ground bit is restored for the landing.
+    #[test]
+    fn rebase_resets_to_true_coordinates_near_ground() {
+        let mut app = App::new();
+        app.init_resource::<Time>();
+        app.init_resource::<RoomFrames>();
+        app.add_systems(Update, rebase_room_frames);
+
+        let room = RoomAllocator::default().allocate();
+        let bit = 1u32 << 1;
+        app.world_mut().resource_mut::<RoomFrames>().by_room.insert(
+            room,
+            RoomFrame {
+                offset: DVec3::new(0.0, 500.0, 0.0),
+                velocity: Vec3::new(0.0, -50.0, 0.0),
+            },
+        );
+        let sink = Vec3::new(0.0, -60.0, 0.0);
+        let a = app
+            .world_mut()
+            .spawn(test_part(room, bit, false, Vec3::new(0.0, 99.0, 0.0), sink))
+            .id();
+        let b = app
+            .world_mut()
+            .spawn(test_part(room, bit, false, Vec3::new(0.0, 101.0, 0.0), sink))
+            .id();
+        app.world_mut().spawn(SphericalJoint::new(a, b));
+        let orb = app.world_mut().spawn((OrbRoom(room), NetRoomFrame::default())).id();
+
+        app.update();
+
+        // True COM was 600 m up (< reset threshold) → back to true coordinates.
+        assert_eq!(app.world().get::<Position>(a).unwrap().0.y, 599.0);
+        // True velocity = frame velocity + local = -50 + -60 = -110.
+        assert_eq!(app.world().get::<LinearVelocity>(a).unwrap().0.y, -110.0);
+        let frame = app.world().get::<NetRoomFrame>(orb).unwrap();
+        assert!(!frame.is_active(), "frame landed on exactly zero");
+        let layers = app.world().get::<CollisionLayers>(a).unwrap();
+        assert_eq!(*layers, room_layers(bit, true));
+    }
+
+    /// In a room with an active frame there is no ground and the deck can sit
+    /// anywhere in the rebase band, so the avatar fall check is deck-relative and
+    /// the respawn point is back aboard the assembly.
+    #[test]
+    fn fallen_flight_avatars_respawn_on_deck() {
+        let mut app = App::new();
+        app.init_resource::<RoomFrames>();
+        app.add_systems(Update, respawn_fallen_avatars);
+
+        let room = RoomAllocator::default().allocate();
+        let bit = 1u32 << 1;
+        app.world_mut().resource_mut::<RoomFrames>().by_room.insert(
+            room,
+            RoomFrame { offset: DVec3::new(0.0, 10_000.0, 0.0), velocity: Vec3::ZERO },
+        );
+        // Two equal-mass assembly members: COM XZ (2, 0), top y 20 → deck (2, 22, 0).
+        for pos in [Vec3::new(0.0, 10.0, 0.0), Vec3::new(4.0, 20.0, 0.0)] {
+            app.world_mut().spawn((test_part(room, bit, false, pos, Vec3::ZERO), InLargestAssembly));
+        }
+        let overboard = app
+            .world_mut()
+            .spawn((
+                ServerAvatar,
+                RoomMember(room),
+                Position(Vec3::new(9.0, -30.0, 0.0)),
+                LinearVelocity(Vec3::new(0.0, -80.0, 0.0)),
+                AngularVelocity(Vec3::ZERO),
+            ))
+            .id();
+        // Below the grounded -30 threshold but within the deck margin: in flight
+        // that is a rider mid-jump/fall, not a loss — untouched.
+        let falling = app
+            .world_mut()
+            .spawn((
+                ServerAvatar,
+                RoomMember(room),
+                Position(Vec3::new(0.0, -20.0, 0.0)),
+                LinearVelocity(Vec3::ZERO),
+                AngularVelocity(Vec3::ZERO),
+            ))
+            .id();
+
+        app.update();
+
+        assert_eq!(
+            app.world().get::<Position>(overboard).unwrap().0,
+            Vec3::new(2.0, 22.0, 0.0),
+            "back aboard the deck"
+        );
+        assert_eq!(app.world().get::<LinearVelocity>(overboard).unwrap().0, Vec3::ZERO);
+        assert_eq!(app.world().get::<Position>(falling).unwrap().0.y, -20.0, "still falling");
     }
 }

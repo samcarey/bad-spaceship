@@ -1226,7 +1226,33 @@ fps-dependent). Key facts that shaped the design:
   `Update` guard can be skipped between back-to-back fixed steps) and also recycle on the
   shared `part_state_diverged` predicate (`shared/src/part.rs`: non-finite, |pos| > 1000 km,
   |v| > 100 km/s, |ω| > 1000 rad/s).
-- **Riders on moving platforms (support velocity).** The character tracks what it stands on
+- **Floating-origin rebase (unbounded ascent).** The old hard ceilings — ~33 km with a
+  rider / ~524 km unmanned, f32 ULP starving the solver and renderer — are gone: each room
+  carries a floating-origin frame (`RoomFrames` server-side; replicated as `NetRoomFrame`
+  on the room orb). When the assembly drifts 2 km from the local origin,
+  `rebase_room_frames` (server `FixedUpdate`, ordered **before** everything that computes
+  world-space force points — a stale thrust application point is a km-scale lever arm)
+  subtracts the assembly's position **and mean velocity** from every room entity — a
+  Galilean boost into a co-moving frame, so the sim always runs near the origin at small
+  local velocities. `offset` accumulates in **f64** and integrates `+= velocity·dt` per
+  tick; true altitude = offset + local (the flight HUD shows this). The velocity half is
+  what makes the cadence sane: position-only rebasing at 1 km/s would fire every 2 s;
+  co-moving, drift only accumulates from *acceleration* (~one rebase per 20 s under
+  thrust). Verified to 11,950 km true altitude (79 rebases, recorder-checked continuity)
+  and 59 km ridden live in the browser with zero visual artifacts — the rebase reaches
+  clients as one uniform rollback whose correction slides the whole scene (camera
+  included) rigidly. Consequences handled: rooms with an active frame drop the ground
+  collision bit (the shared ground collider can't move per-room; the client instead moves
+  its local ground to `-offset`, which also fixes the flame ground raycast); the frame
+  snaps back to exactly **zero** below 1 km true altitude so landings are real; part
+  fall-recycling is suspended in flight (pad leftovers fall out of the world and restock
+  on landing / at the 1000 km divergence bound); fallen/mid-flight-joining avatars respawn
+  **onto the assembly deck** (deck-relative fall check, not y = -30); ground joints are
+  refused in active-frame rooms (loader skips, rebase cuts — the ground anchor doesn't
+  ride the frame, and a surviving joint explodes at the next shift); a stale-hold-target
+  guard in `apply_hold_spring` skips km-scale displacements (the holder's forwarded target
+  is pre-rebase for ~1 RTT). Saves/recordings are **v2**: poses are room-local plus a
+  `frame` field (v1 migrates with a zero frame), so mid-flight saves resume their flight. The character tracks what it stands on
   (`GroundVelocity`, captured from the ground contact in `touching_ground`): jump is
   `support_vy + jump_force` and the walk models measure their horizontal target *relative
   to the support*. A world-frame `vy = jump_force` on a platform ascending at 120 m/s
