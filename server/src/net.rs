@@ -619,6 +619,19 @@ fn rebase_room_frames(
         }
     }
 
+    // Fast path for the common case — no frame active and nothing anywhere near
+    // the rebase band: skip the per-room anchor work (index + union-find) entirely.
+    // Publishing still runs (a fresh orb needs its zero frame written once).
+    const TRIGGER_SQ: f32 = REBASE_TRIGGER_M * REBASE_TRIGGER_M;
+    if frames.by_room.values().all(|f| !f.is_active())
+        && parts.iter().all(|(.., position, _)| position.0.length_squared() < TRIGGER_SQ)
+    {
+        for (_, mut net_frame) in &mut orbs {
+            net_frame.set_if_neq(NetRoomFrame::default());
+        }
+        return;
+    }
+
     // 2. Anchor each room on its largest assembly — the thing whose solver
     //    precision matters (and whose deck the riders stand on).
     let mut index: HashMap<Entity, usize> = HashMap::new();
@@ -831,7 +844,7 @@ fn assign_rooms(
                     &mut launches,
                     &mut frames,
                 ),
-                None => spawn_room_world(&mut commands, room),
+                None => spawn_room_world(&mut commands, room, &frames),
             }
         }
         // Scope this avatar and this client to the room (`Rooms` is immutable, so
@@ -1041,11 +1054,23 @@ fn respawn_fallen_avatars(
     >,
 ) {
     const AVATAR_FALL_Y: f32 = -30.0;
-    let decks = deck_respawn_points(
-        deck_parts.iter().map(|(p, part, room)| (p.0, part_volume(part.shape), room.id)),
-    );
+    // Deck points are only needed for avatars in active-frame rooms — computed
+    // lazily so the (common) all-grounded case never builds them.
+    let mut decks: Option<HashMap<RoomId, Vec3>> = None;
     for (member, mut position, mut linear, mut angular) in &mut avatars {
-        let deck = frames.get(member.0).is_active().then(|| decks.get(&member.0)).flatten();
+        let deck = frames
+            .get(member.0)
+            .is_active()
+            .then(|| {
+                decks
+                    .get_or_insert_with(|| {
+                        deck_respawn_points(deck_parts.iter().map(|(p, part, room)| {
+                            (p.0, part_volume(part.shape), room.id)
+                        }))
+                    })
+                    .get(&member.0)
+            })
+            .flatten();
         let fallen = match deck {
             Some(deck) => position.0.y < deck.y - FLIGHT_FALL_MARGIN,
             None => position.0.y < AVATAR_FALL_Y,
@@ -1092,7 +1117,7 @@ fn record_resume_positions(
 /// collision-isolated to the room). Parts replicate immediately — a client that
 /// joins mid-fall (or mid-shove) now receives their velocity too, so its predicted
 /// copy falls in sync rather than drifting.
-fn spawn_room_world(commands: &mut Commands, room: Room) {
+fn spawn_room_world(commands: &mut Commands, room: Room, frames: &RoomFrames) {
     for _ in 0..NUM_PARTS {
         let (entity, half_extents, seed) = spawn_random_part(commands);
         tag_room_part(
@@ -1101,7 +1126,7 @@ fn spawn_room_world(commands: &mut Commands, room: Room) {
             PartShape::Cuboid { half_extents: half_extents.to_array() },
             seed,
             room,
-            true,
+            frames,
         );
     }
     // Rocket engines join the loose-parts pool (see `spawn_random_part` above): same
@@ -1110,7 +1135,7 @@ fn spawn_room_world(commands: &mut Commands, room: Room) {
     // appearance seed (their striped body material is fixed) — pass 0.
     for _ in 0..NUM_ROCKET_ENGINES {
         let entity = spawn_random_rocket(commands);
-        tag_room_part(commands, entity, PartShape::RocketEngine, 0, room, true);
+        tag_room_part(commands, entity, PartShape::RocketEngine, 0, room, frames);
     }
     spawn_room_orb(commands, room, NetRoomFrame::default());
 }
@@ -1181,7 +1206,7 @@ fn spawn_room_world_from_save(
                 LinearVelocity(Vec3::from_array(p.linear_velocity)),
                 AngularVelocity(Vec3::from_array(p.angular_velocity)),
             ));
-            tag_room_part(commands, entity, shape, p.seed, room, grounded);
+            tag_room_part(commands, entity, shape, p.seed, room, frames);
             entity
         })
         .collect();
@@ -1231,17 +1256,18 @@ fn spawn_room_world_from_save(
 /// Tag a freshly-spawned part for room-scoped replication: its shape + stable id
 /// via `NetPart`, its pose via the predicted Avian `Position`/`Rotation`,
 /// replicated + predicted, scoped to the room's `Rooms`, and isolated to the
-/// room's collision layer (it collides only with same-room parts and — when the
-/// room is `grounded`, i.e. its floating-origin frame is inactive — the ground,
-/// default bit 0).
+/// room's collision layer. It reads the room's floating-origin frame itself, so
+/// no caller can tag a part with the wrong ground bit: grounded rooms collide
+/// with the ground, rebased rooms don't.
 fn tag_room_part(
     commands: &mut Commands,
     entity: Entity,
     shape: PartShape,
     seed: u32,
     room: Room,
-    grounded: bool,
+    frames: &RoomFrames,
 ) {
+    let grounded = !frames.get(room.id).is_active();
     commands.entity(entity).insert((
         // `id` is the part's stable cross-network identity (this entity's bits), so
         // a replicated `NetJoint` can name its two endpoints and the client can find
@@ -1422,7 +1448,7 @@ fn server_attach(
                                     PartShape::Cuboid { half_extents: half_extents.to_array() },
                                     seed,
                                     room,
-                                    !frames.get(room.id).is_active(),
+                                    &frames,
                                 );
                             }
                         }
@@ -1627,7 +1653,7 @@ fn replace_fallen_room_parts(
                         PartShape::Cuboid { half_extents: half_extents.to_array() },
                         seed,
                         room,
-                        grounded,
+                        &frames,
                     );
                 }
                 PartShape::RocketEngine => {
@@ -1638,7 +1664,7 @@ fn replace_fallen_room_parts(
                         PartShape::RocketEngine,
                         0,
                         room,
-                        grounded,
+                        &frames,
                     );
                 }
             }
