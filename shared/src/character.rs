@@ -56,20 +56,25 @@ impl Plugin for CharacterPlugin {
             .insert_resource(Time::<Fixed>::from_duration(crate::net::TICK))
             .init_resource::<MovementTuning>()
             .init_asset::<Config>();
-        // Roll the character's ground-contact state back with the physics state
-        // (multiplayer clients only — the registration no-ops without lightyear's
-        // prediction registry). Without this, a rollback restores the avatar's
-        // Position/velocity to the confirmed tick but replays with the CURRENT
-        // tick's support state — a stale `GroundVelocity`/`TouchingGround` for the
-        // first replayed movement ticks, one more systematic source of replay
-        // divergence (and so of visible correction wobble while walking).
-        {
-            use lightyear::prelude::PredictionAppRegistrationExt;
-            app.local_rollback::<TouchingGround>();
-            app.local_rollback::<GroundVelocity>();
-            app.local_rollback::<LastSupport>();
-        }
     }
+}
+
+/// Roll the character's ground-contact state back with the physics state. Without
+/// this, a rollback restores the avatar's Position/velocity to the confirmed tick
+/// but replays with the CURRENT tick's support state — a stale
+/// `GroundVelocity`/`TouchingGround`/`LastSupport` for the first replayed movement
+/// ticks, one more systematic source of replay divergence (and so of visible
+/// correction wobble while walking).
+///
+/// Called by the multiplayer client AFTER lightyear's `ClientPlugins`: the
+/// registration silently no-ops unless the `PredictionRegistry` resource already
+/// exists (it does NOT defer), so registering from `CharacterPlugin::build` —
+/// which runs before the netcode plugins — would do nothing.
+pub fn register_ground_state_rollback(app: &mut App) {
+    use lightyear::prelude::PredictionAppRegistrationExt;
+    app.local_rollback::<TouchingGround>();
+    app.local_rollback::<GroundVelocity>();
+    app.local_rollback::<LastSupport>();
 }
 
 /// Selectable horizontal-movement model, chosen live from the in-game Movement

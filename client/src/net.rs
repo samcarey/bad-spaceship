@@ -207,6 +207,10 @@ impl Plugin for NetClientPlugin {
             update_syncs_manually: false,
             rollback_resources: true,
         });
+        // The character's ground-contact state rolls back too — must register
+        // here (after `ClientPlugins` created the prediction registry), not in
+        // `CharacterPlugin` (see the fn doc).
+        bad_spaceship_shared::character::register_ground_state_rollback(app);
         // Render-interpolate predicted bodies between fixed (60 Hz) sim ticks.
         // Prediction/rollback advance Position/Rotation only in `FixedUpdate`; without
         // this the rendered pose is held constant between ticks and the camera (a
