@@ -24,11 +24,12 @@ pub fn normalize(
 ) {
     // TODO: can be improved by manually specifying the active camera to normalize against. The
     // majority of cases will only use a single camera for this viewer, so this is sufficient.
-    let camera_position = camera_query
-        .iter()
-        .last()
-        .cloned()
-        .expect("No camera present in scene");
+    //
+    // Camera-less frames are real in multiplayer (see `spawn_camera`'s self-heal doc);
+    // skip instead of asserting — on wasm a panic here froze the game on any ws drop.
+    let Some(camera_position) = camera_query.iter().last().cloned() else {
+        return;
+    };
 
     for mut transform in normalize_query.iter_mut() {
         // Bevy 0.17 renamed `GlobalTransform::compute_matrix` → `to_matrix`.

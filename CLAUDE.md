@@ -1354,6 +1354,26 @@ part is simply where it fell. (The player's **position** *is* now resumed across
 disconnect — see "iOS tab-suspension recovery" below — but carrying a held *part*
 across one is still not done.)
 
+**Disconnect must not kill the camera (or the app).** On `Disconnected`, lightyear's
+world teardown *recursively* despawns the predicted avatar — and with it the
+camera-orbit hierarchy and the app-lifetime camera mounted underneath. That panicked
+`normalize`'s camera `.expect()` (wasm `panic=abort` ⇒ frozen canvas) **on every real
+websocket drop** — a wifi blip mid-ride killed the game before `reconnect_dropped`
+could run. Deterministic repro: hook `window.WebSocket` in playwright (keep instances
+in an array), `.close()` the open one — the panic followed within a second. No system
+can detach the camera first (the despawn happens inside lightyear), so the fix is
+composition, not prevention: `spawn_camera` (shared `player.rs`) runs every frame as a
+**self-heal** (respawns the camera at the boot pose whenever none exists;
+`attach_camera_orbit` + `add_camera_to_player` re-mount it on the next avatar exactly
+like app start), and `normalize` treats camera-less frames as real (skip, don't
+assert). Related MP fall semantics: the SP fall→`despawn`→`spawn` cycle is **gated off
+in multiplayer** (a client must never locally despawn its lightyear-predicted avatar);
+instead the server **teleports** fallen/diverged roomed avatars back to
+`spawn_position` (`respawn_fallen_avatars`, `FixedUpdate` for the same NaN-broadphase
+reason as the part recycler) — never despawns them. Before this, a fallen MP avatar
+just fell forever (the live failure: an iOS reload resumed a rider at 7 km after his
+ride moved on → fell into the void with no way back).
+
 ### iOS tab-suspension recovery: reload + server-authoritative session resume
 
 `reconnect_dropped`'s in-place recovery works on desktop and **could not be made to work
