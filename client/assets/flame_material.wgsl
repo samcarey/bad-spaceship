@@ -66,8 +66,8 @@ struct VertexOutput {
 
 // Flame radius at the nozzle exit (the flare's exit radius is 0.8).
 const NOZZLE_RADIUS: f32 = 0.65;
-// The splash skirt spreads faster along the ground than the free plume flows.
-const SPLASH_SPREAD: f32 = 1.6;
+// The splash skirt spreads a bit faster along the ground than the plume flows.
+const SPLASH_SPREAD: f32 = 1.2;
 
 @vertex
 fn vertex(vertex: Vertex) -> VertexOutput {
@@ -159,13 +159,18 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // yellow where the plume slams the ground.
     var col = mix(vec3<f32>(2.6, 2.3, 1.6), vec3<f32>(2.3, 1.05, 0.15), smoothstep(0.0, 0.45, t));
     col = mix(col, vec3<f32>(1.1, 0.18, 0.03), smoothstep(0.4, 1.0, t));
-    col = mix(col, vec3<f32>(2.2, 1.3, 0.3), in.splash * 0.5);
+    col = mix(col, vec3<f32>(2.2, 1.3, 0.3), in.splash * 0.3);
 
-    var alpha = material.strength * pow(max(1.0 - t, 0.0), 1.3) * (0.5 + 0.5 * turbulence);
-    // Ragged erosion: tipward fragments need ever-stronger turbulence to
-    // survive, so the plume dissolves into detached tongues instead of ending
-    // at a clean mesh edge.
-    alpha = alpha * smoothstep(t * 0.85 - 0.35, t * 0.85 + 0.15, turbulence + 0.25);
+    var alpha = material.strength * pow(max(1.0 - t, 0.0), 1.3) * (0.42 + 0.48 * turbulence);
+    // Ragged erosion: tipward (and splashed) fragments need ever-stronger
+    // turbulence to survive, so the plume dissolves into detached tongues and
+    // the skirt's rim tears up instead of ending at a clean mesh edge.
+    let erode_t = t * 1.1 + in.splash * 0.25;
+    alpha = alpha * smoothstep(erode_t - 0.45, erode_t + 0.15, turbulence + 0.3);
+    // The redirected skirt would otherwise inherit the plume's full mid-body
+    // brightness across its whole disc — thin it so the pad wash reads as a
+    // glow, not an opaque pancake.
+    alpha = alpha * mix(1.0, 0.45, in.splash);
     // View fade: translucent at the silhouette (grazing view angles), denser
     // through the core — reads volumetric despite being a surface.
     let v = normalize(view.world_position.xyz - in.world_position);
