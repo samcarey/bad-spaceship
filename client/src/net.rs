@@ -910,9 +910,12 @@ fn sync_visual_room_frame(
     avatar: Query<(&Position, &Transform), (With<Character>, Without<Grass>)>,
     mut prev_parts: Local<HashMap<Entity, Vec3>>,
     mut client: ResMut<ClientRoomFrame>,
+    // `Without<NetPart>` + `Without<Character>`: proves disjointness from the
+    // read-only part/avatar queries above (B0001 — the conflict is a runtime
+    // panic on the first run, not a compile error).
     mut grounds: Query<
         (&mut Position, &mut Transform),
-        (With<Grass>, With<RigidBody>, Without<Character>),
+        (With<Grass>, With<RigidBody>, Without<Character>, Without<NetPart>),
     >,
     ash: Query<&MeshMaterial3d<AshMaterial>>,
     mut ash_materials: ResMut<Assets<AshMaterial>>,
