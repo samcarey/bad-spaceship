@@ -775,9 +775,19 @@ pub fn ground_clamp_anchor_pairs(
     ground_anchor: Vec3,
     part_rotation: Quat,
 ) -> [(Vec3, Vec3); 3] {
-    const RADIUS: f32 = 0.12;
-    [0.0f32, 2.0943951, 4.1887902].map(|angle| {
-        let offset = Vec3::new(libm::cosf(angle), 0.0, libm::sinf(angle)) * RADIUS;
+    /// Triangle circumradius (m): small enough to sit within any part's footprint,
+    /// large enough that the census's non-collinearity check is nowhere near its
+    /// epsilon.
+    const GROUND_CLAMP_RADIUS_M: f32 = 0.12;
+    /// Three anchors 120° apart.
+    const ANGLES: [f32; 3] = [
+        0.0,
+        core::f32::consts::TAU / 3.0,
+        2.0 * core::f32::consts::TAU / 3.0,
+    ];
+    ANGLES.map(|angle| {
+        let offset =
+            Vec3::new(libm::cosf(angle), 0.0, libm::sinf(angle)) * GROUND_CLAMP_RADIUS_M;
         (part_anchor + part_rotation.inverse() * offset, ground_anchor + offset)
     })
 }
