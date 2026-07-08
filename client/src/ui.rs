@@ -493,10 +493,15 @@ fn show_flight_hud(
                 .fill(Color32::from_black_alpha(160))
                 .inner_margin(egui::Margin::same(6))
                 .show(ui, |ui| {
-                    ui.label(
-                        egui::RichText::new(format!("▲ {altitude_text}   {speed_text}"))
-                            .size(18.0)
-                            .color(Color32::WHITE),
+                    // ASCII only (the subset fonts carry no ▲/↑ glyphs) and
+                    // never wrapped (the Area would fold "m/s" onto a second line).
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(format!("Alt {altitude_text} · {speed_text}"))
+                                .size(18.0)
+                                .color(Color32::WHITE),
+                        )
+                        .wrap_mode(egui::TextWrapMode::Extend),
                     );
                 });
         });
