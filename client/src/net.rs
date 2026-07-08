@@ -981,7 +981,7 @@ fn sync_visual_room_frame(
         || ease.length() > 10.0
     {
         let avatar_y = avatar.single().map(|(p, _)| p.0.y).unwrap_or(f32::NAN);
-        info!(
+        warn!(
             "[vframe] jump={:?} net_y={:.1} client_y={:.1} ease_y={:.2} avatar_y={:.1} hud_alt={:.1}",
             uniform_jump.map(|j| j.y),
             net_offset.y,
