@@ -24,6 +24,7 @@ use bad_spaceship_shared::net::{
 };
 use bad_spaceship_shared::part::{insert_part_physics, insert_rocket_physics, Holdable, SuppressLocalParts};
 use bad_spaceship_shared::player::make_local_player;
+use crate::render_main_pass::flame_material::FlameMaterial;
 use crate::render_main_pass::insert_rocket_visual;
 use crate::render_main_pass::metal_material::{part_visual, MetalMaterial};
 use crate::render_secondary_pass::gizmo_material::GizmoMaterial;
@@ -801,6 +802,7 @@ fn draw_replicated_parts(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<MetalMaterial>>,
     mut standard_materials: ResMut<Assets<StandardMaterial>>,
+    mut flame_materials: ResMut<Assets<FlameMaterial>>,
 ) {
     for (entity, part) in &new_parts {
         let mut e = commands.entity(entity);
@@ -816,7 +818,13 @@ fn draw_replicated_parts(
             }
             PartShape::RocketEngine => {
                 insert_rocket_physics(&mut e);
-                insert_rocket_visual(&mut e, &mut meshes, &mut materials, &mut standard_materials);
+                insert_rocket_visual(
+                    &mut e,
+                    &mut meshes,
+                    &mut materials,
+                    &mut standard_materials,
+                    &mut flame_materials,
+                );
             }
         }
         e.insert((
