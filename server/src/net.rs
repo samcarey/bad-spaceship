@@ -603,7 +603,7 @@ fn rebase_room_frames(
     time: Res<Time>,
     mut commands: Commands,
     mut frames: ResMut<RoomFrames>,
-    joints: Query<&SphericalJoint>,
+    joints: Query<(Entity, &SphericalJoint, Option<&RoomMember>)>,
     mut orbs: Query<(&OrbRoom, &mut NetRoomFrame)>,
     mut parts: Query<(Entity, &NetPart, &PartRoom, &mut Position, &mut LinearVelocity)>,
     mut avatars: Query<
@@ -630,7 +630,7 @@ fn rebase_room_frames(
         velocities.push(linear.0);
     }
     let mut edges: Vec<(usize, usize)> = Vec::new();
-    for joint in &joints {
+    for (_, joint, _) in &joints {
         if let (Some(&a), Some(&b)) = (index.get(&joint.body1), index.get(&joint.body2)) {
             edges.push((a, b));
         }
@@ -680,6 +680,22 @@ fn rebase_room_frames(
             };
             if let Some((dpos, dvel)) = shift {
                 let grounded = !frame.is_active();
+                // A rebased room must have no part↔ground joints: the shared
+                // ground body does not ride the frame, so such a joint would pin
+                // the assembly to an anchor the shift just moved km away — a
+                // constraint violation violent enough to explode the assembly.
+                // Real flights cut them at blastoff; cut any stragglers here.
+                if !grounded {
+                    for (joint_entity, joint, member) in &joints {
+                        if member.is_some_and(|m| m.0 == room)
+                            && (!index.contains_key(&joint.body1)
+                                || !index.contains_key(&joint.body2))
+                        {
+                            println!("[rebase] room {room:?}: cutting ground joint");
+                            commands.entity(joint_entity).despawn();
+                        }
+                    }
+                }
                 // Avatars don't carry the room's collision bit; pick it up from the
                 // room's parts (a room always has parts).
                 let mut bit = None;
@@ -1171,6 +1187,16 @@ fn spawn_room_world_from_save(
         .collect();
 
     for joint in &world.joints {
+        // A ground joint is meaningless (and dangerous) in a room whose frame is
+        // active: the shared ground body does NOT ride the frame, so the joint
+        // would pin the assembly to the phantom ground at the local origin — and
+        // the next rebase would shift the bodies km away from the unmoved anchor,
+        // exploding the constraint. Real saves never combine the two (blastoff
+        // cuts ground joints long before the first rebase); refuse it anyway.
+        if !grounded && (joint.body1 == SaveBody::Ground || joint.body2 == SaveBody::Ground) {
+            println!("[save] skipping ground joint (room frame is active: {joint:?})");
+            continue;
+        }
         let resolve = |body: SaveBody| match body {
             SaveBody::Part(i) => entities.get(i as usize).copied(),
             SaveBody::Ground => ground,
