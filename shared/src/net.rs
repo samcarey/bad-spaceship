@@ -196,6 +196,12 @@ pub fn focused_part(
     best
 }
 
+/// Hold targets farther than this from the held part are treated as stale and
+/// ignored by [`apply_hold_spring`] (see the guard there). Comfortably above any
+/// real hold distance (`MAX_INTERACT_DISTANCE` = 7.5 plus the hold-point offset),
+/// comfortably below the km-scale jump of an origin rebase.
+pub const STALE_HOLD_DISTANCE: f32 = 50.0;
+
 /// Critically-damped positioning acceleration that floats a held part to the
 /// hold point (matches `position_held_part`'s oscillator). The caller subtracts
 /// gravity to cancel the part's weight.
@@ -234,6 +240,17 @@ pub fn apply_hold_spring(
 ) {
     // Position: float to the hold point, cancelling the part's weight.
     let displacement = hold_target - position;
+    // Stale-target guard: a real hold target is never more than a few meters from
+    // the part (`MAX_INTERACT_DISTANCE` bounds the grab). A huge displacement means
+    // the target was computed in a different coordinate frame — after an origin
+    // rebase (`NetRoomFrame`), the holder's forwarded `hold_target` (and the
+    // replicated `NetHold` observers spring toward) stays in the pre-rebase frame
+    // for ~1 round trip. Springing a critically-damped oscillator across a km-scale
+    // "error" would yeet the part; skipping leaves it in free-fall for a few ticks,
+    // which the spring recovers from imperceptibly.
+    if displacement.length_squared() > STALE_HOLD_DISTANCE * STALE_HOLD_DISTANCE {
+        return;
+    }
     let lin_vel = forces.linear_velocity();
     forces.apply_linear_acceleration(hold_acceleration(displacement, lin_vel) - gravity);
     // Orientation: drive toward the target (seeded at pickup + rotate gesture). Skip
@@ -358,6 +375,43 @@ pub struct NetLaunch {
     pub remaining: f32,
     /// Whether blastoff has happened and the rockets are firing.
     pub launched: bool,
+}
+
+/// Replicated **floating-origin frame** of a room, authored by the server onto the
+/// room's orb entity (alongside [`NetCenterOfMass`]/[`NetLaunch`]). Rooms whose
+/// assembly climbs far from the origin are periodically **rebased**: the server
+/// subtracts the assembly's position AND mean velocity from every room entity (a
+/// Galilean boost into a co-moving frame — physics is invariant under it), so the
+/// solver and the renderer always work near the origin at small local velocities
+/// instead of starving f32 precision at extreme altitude (the old hard ceilings:
+/// ~33 km ridden / ~524 km unmanned). The accumulated frame is the bookkeeping:
+///
+/// - true position = `offset` + local position (offset integrates as
+///   `offset += velocity * dt` each fixed tick — f64, exact for any flight);
+/// - true velocity = `velocity` + local velocity.
+///
+/// Client duties on a frame change: move the local ground to `-offset` (the true
+/// ground position in room-local coordinates — fixes rendering, predicted physics,
+/// and the flame ground raycast in one move) and derive HUD altitude/speed from the
+/// frame. The rebase itself reaches clients as ordinary replication: every room
+/// entity's confirmed `Position`/`LinearVelocity` jumps by the same delta, one
+/// uniform rollback re-simulates, and the correction slides the whole scene (camera
+/// included — it rides the avatar) rigidly, which is invisible.
+#[derive(Component, Serialize, Deserialize, Clone, Copy, PartialEq, Debug, Default)]
+pub struct NetRoomFrame {
+    /// Room-frame origin in true world coordinates (f64: it grows without bound).
+    pub offset: [f64; 3],
+    /// Room-frame velocity in true world coordinates (the co-moving boost).
+    pub velocity: [f32; 3],
+}
+
+impl NetRoomFrame {
+    /// Whether the room is currently rebased away from the true origin. An active
+    /// frame means the true ground is far away: the server drops the ground bit from
+    /// the room's collision filters and the client moves its ground to `-offset`.
+    pub fn is_active(&self) -> bool {
+        self.offset != [0.0; 3] || self.velocity != [0.0; 3]
+    }
 }
 
 /// Replicated hold state for a part a player is currently holding: who holds it
@@ -698,6 +752,10 @@ impl Plugin for ProtocolPlugin {
         // entity so every client in the room sees the same countdown and the same
         // blastoff. Discrete, server-authored each frame — just replicate.
         app.component::<NetLaunch>().replicate();
+        // Per-room floating-origin frame (see `NetRoomFrame`), authored on the room's
+        // orb. Changes every tick while a room flies co-moving (the offset integrates),
+        // which is fine — it's one tiny component per room. Just replicate.
+        app.component::<NetRoomFrame>().replicate();
         // Held-part hold state (see `NetHold`): replicated so every client can spring a
         // held part toward the holder's hold point instead of predicting it in free-fall.
         app.component::<NetHold>().replicate();

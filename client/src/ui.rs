@@ -8,11 +8,13 @@ use bevy_egui::{
     egui::{self, Align, Align2, Color32, Frame, Layout},
     EguiContexts, EguiPlugin, EguiPrimaryContextPass, EguiTextureHandle,
 };
+use avian3d::prelude::{LinearVelocity, Position};
 use bad_spaceship_shared::character::{MovementModel, MovementTuning};
 use bad_spaceship_shared::net::{
-    sanitize_name, ControlChannel, NetName, NetPlayer, ResetPosition, SaveGame, SetAvatar,
-    SetName, MAX_NAME_LEN, MONSTER_COUNT,
+    sanitize_name, ControlChannel, NetName, NetPlayer, NetRoomFrame, ResetPosition, SaveGame,
+    SetAvatar, SetName, MAX_NAME_LEN, MONSTER_COUNT,
 };
+use bad_spaceship_shared::Character;
 use chrono::{DateTime, FixedOffset, Utc};
 use lightyear::prelude::client::Connected;
 use lightyear::prelude::{
@@ -67,6 +69,7 @@ impl Plugin for UiPlugin {
                     show_name_labels,
                     show_instructions,
                     show_bottom_panel,
+                    show_flight_hud,
                     // Live movement-feel tuner. Disabled by default (the movement feel
                     // is locked in — see `character::MovementTuning`'s Default); flip
                     // `SHOW_MOVEMENT_PANEL` to bring the panel back for experimentation.
@@ -442,6 +445,59 @@ fn show_instructions(
                 .inner_margin(egui::Margin::same(6))
                 .show(ui, |ui| {
                     ui.colored_label(Color32::from_rgb(255, 0, 0), text);
+                });
+        });
+    Ok(())
+}
+
+/// Altimeter + speedometer, shown once the player is meaningfully off the ground
+/// (a rocket ride, or just standing on a tall build). **True** values, not local
+/// coordinates: rooms flying under a floating-origin rebase keep their local
+/// coordinates near the origin on purpose — the replicated [`NetRoomFrame`] on the
+/// room orb carries the frame, so altitude = frame offset + local y and velocity =
+/// frame velocity + local velocity. Single-player has no orb (the query is empty ⇒
+/// zero frame), so it reads plain local coordinates.
+fn show_flight_hud(
+    mut contexts: EguiContexts,
+    character: Query<(&Position, &LinearVelocity), With<Character>>,
+    frames: Query<&NetRoomFrame>,
+) -> Result {
+    /// Below this true altitude the readout is clutter (the pad, block towers,
+    /// jumping), not flight.
+    const SHOW_ABOVE_M: f64 = 30.0;
+    let Ok((position, velocity)) = character.single() else {
+        return Ok(());
+    };
+    let frame = frames.iter().next().copied().unwrap_or_default();
+    let altitude = frame.offset[1] + position.0.y as f64;
+    if altitude < SHOW_ABOVE_M {
+        return Ok(());
+    }
+    let speed = (Vec3::from_array(frame.velocity) + velocity.0).length();
+    let altitude_text = if altitude < 10_000.0 {
+        format!("{altitude:.0} m")
+    } else {
+        format!("{:.1} km", altitude / 1000.0)
+    };
+    let speed_text = if speed < 3000.0 {
+        format!("{speed:.0} m/s")
+    } else {
+        format!("{:.2} km/s", speed / 1000.0)
+    };
+    let ctx = contexts.ctx_mut()?;
+    egui::Area::new(egui::Id::new("bs_flight_hud"))
+        .anchor(Align2::CENTER_TOP, egui::vec2(0.0, 44.0))
+        .show(ctx, |ui| {
+            // Translucent panel, no drop shadow — matches the roster/instructions.
+            Frame::default()
+                .fill(Color32::from_black_alpha(160))
+                .inner_margin(egui::Margin::same(6))
+                .show(ui, |ui| {
+                    ui.label(
+                        egui::RichText::new(format!("▲ {altitude_text}   {speed_text}"))
+                            .size(18.0)
+                            .color(Color32::WHITE),
+                    );
                 });
         });
     Ok(())

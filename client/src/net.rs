@@ -13,6 +13,7 @@
 //! interpolated Avian pose.
 
 use avian3d::prelude::{Forces, Gravity, Position, RigidBody, Rotation, SphericalJoint};
+use bevy::math::DVec3;
 use bad_spaceship_shared::character::{
     insert_character_body, CharacterMovement, Config as CharacterConfig,
 };
@@ -20,7 +21,8 @@ use bad_spaceship_shared::net::{
     apply_hold_spring, apply_net_input, focused_part, room_code_bytes, ClientPanicReport,
     ControlChannel,
     NetCenterOfMass, NetFacing, NetHold, NetInput, NetJoint, NetPart, PartShape, take_rollback_diag,
-    NetPlayer, ProtocolPlugin, RollbackReport, TelemetryChannel, GROUND_JOINT_ID, TICK,
+    NetPlayer, NetRoomFrame, ProtocolPlugin, RollbackReport, TelemetryChannel, GROUND_JOINT_ID,
+    TICK,
 };
 use bad_spaceship_shared::part::{insert_part_physics, insert_rocket_physics, Holdable, SuppressLocalParts};
 use bad_spaceship_shared::player::make_local_player;
@@ -255,6 +257,7 @@ impl Plugin for NetClientPlugin {
                 face_replicated_players,
                 draw_replicated_parts,
                 draw_center_of_mass_orb,
+                apply_room_frame,
                 (bind_replicated_joints, position_replicated_joints).chain(),
                 // Recolor each joint's own persistent gizmo sphere red while it's in the
                 // delete zone. Runs after the shared detector fills `PredeleteJoints`.
@@ -837,6 +840,38 @@ fn draw_replicated_parts(
     }
 }
 
+/// Keep the local world aligned with the room's floating-origin frame
+/// ([`NetRoomFrame`], replicated on the room orb): place the ground at `-offset` —
+/// the true ground position in room-local coordinates. That one move covers
+/// everything that keys off the ground: rendering (the bowl sits where it truly
+/// is, receding below a rebased room), locally predicted physics (the collider
+/// moves out of reach, matching the ground bit the server drops from the room's
+/// collision filters), and the rocket flames' ground-splash raycast (no splash at
+/// altitude). Both `Position` AND `Transform` need writing: the ground is a local
+/// (non-replicated) body, and in multiplayer `lightyear_avian` owns Position→
+/// Transform syncing only for the replicated ones.
+///
+/// The predicted room entities need no such help — a rebase reaches them as
+/// ordinary replication (every confirmed pose jumps by the same delta, one
+/// rollback re-simulates) and the correction slides the whole scene rigidly,
+/// camera included.
+fn apply_room_frame(
+    frames: Query<&NetRoomFrame>,
+    mut grounds: Query<(&mut Position, &mut Transform), (With<Grass>, With<RigidBody>)>,
+) {
+    // One room per client: its orb is the only entity carrying a frame.
+    let Some(frame) = frames.iter().next() else {
+        return;
+    };
+    let target = (-DVec3::from_array(frame.offset)).as_vec3();
+    for (mut position, mut transform) in &mut grounds {
+        if position.0 != target {
+            position.0 = target;
+            transform.translation = target;
+        }
+    }
+}
+
 /// Draw the floating white orb at each room's largest-assembly center of mass.
 ///
 /// The server owns the calculation (which parts form the largest assembly and where
@@ -868,12 +903,20 @@ fn draw_center_of_mass_orb(
     // final sub-`ORB_SNAP_EPS` gap so a settled assembly stops dirtying `Transform`.
     const ORB_SMOOTH_RATE: f32 = 12.0;
     const ORB_SNAP_EPS: f32 = 1e-4;
+    // A jump this large isn't the assembly moving — it's the room's floating-origin
+    // frame rebasing (every room entity teleported by the same delta). Easing across
+    // it would streak the orb kilometers through the scene; snap with everything else.
+    const ORB_SNAP_JUMP_M: f32 = 50.0;
     let alpha = 1.0 - (-ORB_SMOOTH_RATE * time.delta_secs()).exp();
     for (com, mut transform, mut visibility) in &mut existing {
         let target = Vec3::from_array(com.position);
         let want_visible = com.count >= 2;
-        // Smooth only while it's staying visible; otherwise jump straight to the target.
-        let next = if want_visible && *visibility == Visibility::Visible {
+        // Smooth only while it's staying visible (and not mid-rebase); otherwise
+        // jump straight to the target.
+        let next = if want_visible
+            && *visibility == Visibility::Visible
+            && transform.translation.distance_squared(target) < ORB_SNAP_JUMP_M * ORB_SNAP_JUMP_M
+        {
             let eased = transform.translation.lerp(target, alpha);
             if eased.distance_squared(target) < ORB_SNAP_EPS * ORB_SNAP_EPS {
                 target

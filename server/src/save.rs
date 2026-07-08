@@ -48,7 +48,7 @@ use serde::{Deserialize, Serialize};
 
 /// Current save-file schema version. Bump on any `world` schema change, and append
 /// the matching upgrade step to [`MIGRATIONS`].
-pub const SAVE_VERSION: u32 = 1;
+pub const SAVE_VERSION: u32 = 2;
 
 /// How often the server autosaves each occupied room (seconds).
 pub const AUTOSAVE_SECS: f32 = 10.0;
@@ -106,6 +106,22 @@ pub struct SaveWorld {
     /// A save taken mid-countdown records `false` — the countdown is not resumed;
     /// players just swipe again.
     pub launched: bool,
+    /// The room's floating-origin frame (v2+): all part/avatar poses above are
+    /// **room-local**; true position = `frame.offset` + local. Zero for grounded
+    /// rooms (and for every v1 save — the migration fills it in), so loading a
+    /// mid-flight save resumes the flight with the same frame.
+    #[serde(default)]
+    pub frame: SaveFrame,
+}
+
+/// A room's floating-origin frame at snapshot time (the save-file mirror of the
+/// wire `NetRoomFrame`, kept separate like `SaveShape` vs `PartShape`).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
+pub struct SaveFrame {
+    /// Frame origin in true world coordinates (f64 — it grows without bound).
+    pub offset: [f64; 3],
+    /// Frame velocity in true world coordinates (the co-moving boost).
+    pub velocity: [f32; 3],
 }
 
 /// One player's state at snapshot time (see [`SaveWorld::avatars`] — analysis
@@ -169,7 +185,21 @@ pub struct SaveJoint {
 /// exist by the time a migration is written.
 type Migration = fn(serde_json::Value) -> Result<serde_json::Value, String>;
 
-const MIGRATIONS: [Migration; (SAVE_VERSION - 1) as usize] = [];
+const MIGRATIONS: [Migration; (SAVE_VERSION - 1) as usize] = [migrate_v1_frame];
+
+/// v1 → v2: worlds gained a floating-origin `frame` (see [`SaveFrame`]). Every v1
+/// save was written in true world coordinates, i.e. a zero frame.
+fn migrate_v1_frame(mut value: serde_json::Value) -> Result<serde_json::Value, String> {
+    let world = value
+        .get_mut("world")
+        .and_then(serde_json::Value::as_object_mut)
+        .ok_or("save has no world object")?;
+    world.insert(
+        "frame".into(),
+        serde_json::json!({ "offset": [0.0, 0.0, 0.0], "velocity": [0.0, 0.0, 0.0] }),
+    );
+    Ok(value)
+}
 
 /// Parse a save file of **any** supported version, upgrading it step-by-step to
 /// the current schema. This is the only entry point for reading a save — never
@@ -371,6 +401,9 @@ mod tests {
         assert_eq!(save.world.avatars.len(), 1);
         assert_eq!(save.world.avatars[0].held_part, Some(1));
         assert!(!save.world.launched);
+        // v1 predates the floating-origin frame; the migration fills in zero
+        // (v1 worlds were written in true world coordinates).
+        assert_eq!(save.world.frame, SaveFrame::default());
     }
 
     /// What we write today parses back through the same (migrating) entry point.
@@ -396,6 +429,8 @@ mod tests {
                 joints: vec![],
                 avatars: vec![],
                 launched: true,
+                // A mid-flight save: the frame must survive the round trip exactly.
+                frame: SaveFrame { offset: [12.5, 123456.789, -3.25], velocity: [0.5, 812.0, -0.25] },
             },
         };
         let json = serde_json::to_string(&save).unwrap();
