@@ -27,6 +27,11 @@ bevy = { workspace = true }
 # `serialize` gives Avian's Position/Rotation the serde impls the replication
 # protocol needs. The native binary and server re-add `simd`/`parallel` for perf.
 avian3d = { workspace = true, features = ["xpbd_joints", "serialize"] }
+# Cross-platform-identical transcendentals for the few the sim calls directly
+# (movement exp, gimbal trig) - std's f32::sin/exp differ between wasm and the
+# native libm, a chronic prediction-divergence seed. glam's internal trig is
+# covered by avian's `enhanced-determinism` (bevy_math/libm).
+libm = "0.2"
 # Multiplayer protocol lives in `shared` so client and server register the exact
 # same components/messages/channels. `shared` only needs the protocol-building
 # APIs (register_component / register_message / add_channel / InputPlugin) plus

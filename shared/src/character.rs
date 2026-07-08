@@ -553,7 +553,8 @@ fn walk_based_on_input(
                 if !grounded {
                     rate *= tuning.air_control;
                 }
-                let alpha = 1.0 - (-rate * dt).exp();
+                // libm: identical across wasm/native (prediction determinism).
+                let alpha = 1.0 - libm::expf(-rate * dt);
                 horizontal.lerp(target, alpha)
             }
             MovementModel::Instant => {

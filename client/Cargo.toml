@@ -119,10 +119,11 @@ default = [
 ]
 
 native = [
-    # Avian perf features (rapier's `simd-stable`/`parallel` equivalents). `parallel`
-    # pulls `bevy/multi_threaded`, which the file watcher below also needs.
-    "avian3d/simd",
-    "avian3d/parallel",
+    # NOTE: avian `simd`/`parallel` deliberately ABSENT even on native (see the
+    # workspace avian3d pin) - every peer runs the identical scalar sim.
+    # `parallel` used to pull `bevy/multi_threaded` for the file watcher; pull it
+    # explicitly now.
+    "bevy/multi_threaded",
     "bevy/bevy_gilrs",
     # winit needs a windowing backend on Linux (was implied by the old `render`
     # umbrella feature, dropped in 0.10).
