@@ -999,6 +999,23 @@ fn delete_joints(
 mod weld_tests {
     use super::*;
 
+    /// A ground clamp's synthesized anchor triangle must read as RIGID to the
+    /// census (that's its whole purpose — see `ground_clamp_anchor_pairs`), for
+    /// any part orientation, on both the part side and the ground side.
+    #[test]
+    fn ground_clamp_triangle_is_rigid() {
+        for rot in [
+            Quat::IDENTITY,
+            Quat::from_rotation_x(0.7),
+            Quat::from_axis_angle(Vec3::new(1.0, 2.0, -0.5).normalize(), 2.2),
+        ] {
+            let pairs =
+                ground_clamp_anchor_pairs(Vec3::new(0.0, -1.6, 0.0), Vec3::new(1.1, -1.45, 1.1), rot);
+            assert!(anchors_are_rigid(pairs.iter().map(|(pa, _)| *pa)));
+            assert!(anchors_are_rigid(pairs.iter().map(|(_, ga)| *ga)));
+        }
+    }
+
     /// 1 point = ball pivot, 2 points = hinge, 3 collinear = still a hinge — all
     /// keep their contact. Only a spanning triangle counts as a rigid weld.
     #[test]
