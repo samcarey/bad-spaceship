@@ -11,8 +11,8 @@ use bevy_egui::{
 use avian3d::prelude::{LinearVelocity, Position};
 use bad_spaceship_shared::character::{MovementModel, MovementTuning};
 use bad_spaceship_shared::net::{
-    sanitize_name, ControlChannel, NetName, NetPlayer, NetRoomFrame, ResetPosition, SaveGame,
-    SetAvatar, SetName, MAX_NAME_LEN, MONSTER_COUNT,
+    sanitize_name, ControlChannel, NetName, NetPlayer, ResetPosition, SaveGame, SetAvatar,
+    SetName, MAX_NAME_LEN, MONSTER_COUNT,
 };
 use bad_spaceship_shared::Character;
 use chrono::{DateTime, FixedOffset, Utc};
@@ -453,14 +453,17 @@ fn show_instructions(
 /// Altimeter + speedometer, shown once the player is meaningfully off the ground
 /// (a rocket ride, or just standing on a tall build). **True** values, not local
 /// coordinates: rooms flying under a floating-origin rebase keep their local
-/// coordinates near the origin on purpose — the replicated [`NetRoomFrame`] on the
-/// room orb carries the frame, so altitude = frame offset + local y and velocity =
-/// frame velocity + local velocity. Single-player has no orb (the query is empty ⇒
-/// zero frame), so it reads plain local coordinates.
+/// coordinates near the origin on purpose. Reads the client's *visual* frame
+/// mirror ([`ClientRoomFrame`]) rather than the replicated `NetRoomFrame` — the
+/// mirror absorbs the few-frame gap between the world snapping to a rebase and
+/// the frame replicating, so the readout can't blip by a rebase chunk.
+/// Single-player has no netcode (the resource is absent ⇒ zero frame), so it
+/// reads plain local coordinates.
 fn show_flight_hud(
     mut contexts: EguiContexts,
     character: Query<(&Position, &LinearVelocity), With<Character>>,
-    frames: Query<&NetRoomFrame>,
+    frame: Option<Res<crate::net::ClientRoomFrame>>,
+    mut smoothed_speed: Local<f32>,
 ) -> Result {
     /// Below this true altitude the readout is clutter (the pad, block towers,
     /// jumping), not flight.
@@ -468,12 +471,24 @@ fn show_flight_hud(
     let Ok((position, velocity)) = character.single() else {
         return Ok(());
     };
-    let frame = frames.iter().next().copied().unwrap_or_default();
-    let altitude = frame.offset[1] + position.0.y as f64;
+    // `visual_offset` pairs exactly with the *rendered* avatar position (both
+    // fold in the same correction error), so altitude is continuous through a
+    // rebase; see `sync_visual_room_frame`.
+    let (frame_offset_y, frame_velocity) =
+        frame.map(|f| (f.visual_offset.y, f.velocity)).unwrap_or((0.0, Vec3::ZERO));
+    let altitude = frame_offset_y + position.0.y as f64;
     if altitude < SHOW_ABOVE_M {
         return Ok(());
     }
-    let speed = (Vec3::from_array(frame.velocity) + velocity.0).length();
+    // The two velocity halves swap magnitude at a rebase (the boost moves from
+    // local to frame) 1-2 frames apart on the wire — smooth the *displayed*
+    // number over ~0.2 s so that window can't flicker the readout.
+    let raw_speed = (frame_velocity + velocity.0).length();
+    *smoothed_speed += (raw_speed - *smoothed_speed) * 0.08;
+    if (raw_speed - *smoothed_speed).abs() < 2.0 {
+        *smoothed_speed = raw_speed;
+    }
+    let speed = *smoothed_speed;
     let altitude_text = if altitude < 10_000.0 {
         format!("{altitude:.0} m")
     } else {

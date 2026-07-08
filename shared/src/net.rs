@@ -609,6 +609,14 @@ fn rotation_should_rollback(confirmed: &Rotation, predicted: &Rotation) -> bool 
 // lightyear's `LerpFn` takes its endpoints by value; `lightyear_avian3d`'s lerps
 // take them by reference, so wrap them.
 fn position_lerp(start: Position, other: Position, t: f32) -> Position {
+    // A step this large between two interpolation snapshots is a floating-origin
+    // rebase (`NetRoomFrame`), not motion — every predicted entity snaps through
+    // it in one frame, so an *interpolated* entity (a remote avatar) must too, or
+    // it visibly streaks km across the scene over the interpolation window.
+    const REBASE_SNAP_M: f32 = 500.0;
+    if start.0.distance_squared(other.0) > REBASE_SNAP_M * REBASE_SNAP_M {
+        return other;
+    }
     position::lerp(&start, &other, t)
 }
 fn rotation_lerp(start: Rotation, other: Rotation, t: f32) -> Rotation {

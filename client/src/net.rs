@@ -12,8 +12,16 @@
 //! For every player the server replicates, draw a body at its predicted/
 //! interpolated Avian pose.
 
-use avian3d::prelude::{Forces, Gravity, Position, RigidBody, Rotation, SphericalJoint};
+use avian3d::prelude::{
+    Forces, Gravity, LinearVelocity, PhysicsSystems, Position, RigidBody, Rotation,
+    SphericalJoint,
+};
 use bevy::math::DVec3;
+use bevy::transform::TransformSystems;
+use lightyear::prediction::correction::VisualCorrection;
+use lightyear::prediction::rollback::RollbackSystems;
+
+use crate::render_main_pass::AshMaterial;
 use bad_spaceship_shared::character::{
     insert_character_body, CharacterMovement, Config as CharacterConfig,
 };
@@ -257,8 +265,7 @@ impl Plugin for NetClientPlugin {
                 face_replicated_players,
                 draw_replicated_parts,
                 draw_center_of_mass_orb,
-                apply_room_frame,
-                (bind_replicated_joints, position_replicated_joints).chain(),
+                bind_replicated_joints,
                 // Recolor each joint's own persistent gizmo sphere red while it's in the
                 // delete zone. Runs after the shared detector fills `PredeleteJoints`.
                 recolor_replicated_joints.after(UpdateJointsLabel),
@@ -290,6 +297,27 @@ impl Plugin for NetClientPlugin {
                 // `predict_remote_hold` springs every *other* player's held part toward
                 // its replicated `NetHold` target so it floats for us instead of bobbing.
                 (predict_hold, predict_remote_hold).chain(),
+            ),
+        );
+        // World-anchored visuals must move with the *rendered* world, so both run
+        // after the frame's final body transforms are written (frame interpolation
+        // + visual correction + Position→Transform writeback) and before transform
+        // propagation carries their writes to `GlobalTransform`:
+        // - joint gizmos are positioned from their body's fresh `Transform` (in
+        //   `Update` they read last frame's — a visible trail whenever the deck
+        //   moves in local coordinates, and a 2 km flash at a rebase snap);
+        // - the ground/ash follow the room's visual floating-origin frame.
+        app.init_resource::<ClientRoomFrame>();
+        app.add_systems(
+            PostUpdate,
+            (
+                // Rebase-scale corrections snap before the writeback renders them.
+                snap_large_corrections
+                    .after(RollbackSystems::VisualCorrection)
+                    .before(PhysicsSystems::Writeback),
+                (position_replicated_joints, sync_visual_room_frame)
+                    .after(PhysicsSystems::Writeback)
+                    .before(TransformSystems::Propagate),
             ),
         );
     }
@@ -840,34 +868,167 @@ fn draw_replicated_parts(
     }
 }
 
-/// Keep the local world aligned with the room's floating-origin frame
-/// ([`NetRoomFrame`], replicated on the room orb): place the ground at `-offset` —
-/// the true ground position in room-local coordinates. That one move covers
-/// everything that keys off the ground: rendering (the bowl sits where it truly
-/// is, receding below a rebased room), locally predicted physics (the collider
-/// moves out of reach, matching the ground bit the server drops from the room's
-/// collision filters), and the rocket flames' ground-splash raycast (no splash at
-/// altitude). Both `Position` AND `Transform` need writing: the ground is a local
-/// (non-replicated) body, and in multiplayer `lightyear_avian` owns Position→
-/// Transform syncing only for the replicated ones.
+/// The client's *visual* mirror of the room's floating-origin frame — what every
+/// world-anchored client visual (the ground, the ash field, the flight HUD) keys
+/// off, instead of the raw replicated [`NetRoomFrame`].
 ///
-/// The predicted room entities need no such help — a rebase reaches them as
-/// ordinary replication (every confirmed pose jumps by the same delta, one
-/// rollback re-simulates) and the correction slides the whole scene rigidly,
-/// camera included.
-fn apply_room_frame(
-    frames: Query<&NetRoomFrame>,
-    mut grounds: Query<(&mut Position, &mut Transform), (With<Grass>, With<RigidBody>)>,
+/// Why not read the replicated frame directly: a rebase moves the room's
+/// *entities* (their confirmed `Position`s jump and one rollback snaps the
+/// predicted world) and the orb's `NetRoomFrame` in the same server tick — but on
+/// the wire those are different entities, so the frame can land a packet or two
+/// after the world snap. For those frames the camera has already dropped ~2 km
+/// while the ground/ash still use the old offset: the ground flashes *closer*,
+/// the ash lattice jumps. `sync_visual_room_frame` closes the gap by inferring
+/// the rebase from the parts' own uniform position jump (same frame as the snap,
+/// by construction) and treating the replicated frame as the reconciliation
+/// target it converges back to.
+#[derive(Resource, Default)]
+pub struct ClientRoomFrame {
+    /// The reconciled frame origin: the replicated offset, except while it's a
+    /// rebase behind/ahead of the entity state (see `sync_visual_room_frame`).
+    pub offset: DVec3,
+    pub velocity: Vec3,
+    /// Where world-anchored *visuals* belong: `offset - avatar correction error`,
+    /// so the ground/ash slide through a rebase correction exactly with the scene.
+    pub visual_offset: DVec3,
+    /// The avatar's true position last frame — the continuity anchor.
+    prev_true: Option<DVec3>,
+    /// Frames spent holding a stale replicated offset — a snap-anyway backstop.
+    held_frames: u8,
+}
+
+/// Snap rebase-scale prediction corrections instead of easing them. lightyear's
+/// visual correction folds each rollback's error into the rendered `Position` and
+/// decays it (~200 ms half-life) — the right call for the routine ≤16 cm
+/// mispredictions (#41), but a floating-origin rebase parks a ~2 km error there,
+/// which then takes ~2 s to slide out. Nothing world-anchored is visible at
+/// rebase altitude, so the slide itself would be invisible — except that each
+/// predicted entity decays *its own* error on its own schedule, and the
+/// millimetre-level asymmetries between the avatar's and the deck's km-scale
+/// decays render as the deck bobbing away from the rider for ~half a second
+/// every rebase. Killing the ease for km-scale errors makes the whole rollback
+/// land rigidly in one frame (one rollback rolls back every predicted entity
+/// together), which is invisible. Runs after the correction set folded the error
+/// in (`Position = sim + error` — subtracting the error restores the exact sim
+/// value) and before the Position→Transform writeback renders it.
+fn snap_large_corrections(
+    mut commands: Commands,
+    mut corrected: Query<(Entity, &mut Position, &VisualCorrection<Position>)>,
+) {
+    /// Never produced by ordinary misprediction, always by a rebase (the
+    /// smallest shift is ~1 km); comfortably above the easing regime.
+    const SNAP_ERROR_M: f32 = 100.0;
+    for (entity, mut position, correction) in &mut corrected {
+        if correction.error.0.length_squared() > SNAP_ERROR_M * SNAP_ERROR_M {
+            position.0 -= correction.error.0;
+            commands.entity(entity).remove::<VisualCorrection<Position>>();
+        }
+    }
+}
+
+/// Keep every world-anchored client visual aligned with the room's floating-origin
+/// frame (see [`ClientRoomFrame`]), all in one place and all on the same frame:
+///
+/// - **ground**: the bowl sits at `-offset` — the true ground position in
+///   room-local coordinates. Covers rendering, locally predicted physics (the
+///   collider moves out of reach, matching the ground bit the server drops), and
+///   the rocket flames' ground-splash raycast. Both `Position` AND `Transform`
+///   need writing: the ground is a local body and `lightyear_avian` only syncs
+///   the replicated ones.
+/// - **ash flakes**: the lattice is anchored in *true* space (offset modulo the
+///   field box — full precision in f64 first), so ascent reads as ever-faster
+///   streaming and a rebase doesn't reset the apparent fall speed to the
+///   co-moving frame's near-zero local velocity.
+///
+/// **How a rebase actually reaches the rendered world** (measured, not guessed —
+/// see PR #140): the rollback snaps the *sim* `Position`s, and in the same frame
+/// lightyear parks the whole km-scale jump in a [`VisualCorrection<Position>`]
+/// whose error is *folded into the rendered `Position`* and decayed over ~2 s
+/// (200 ms half-life) — so the scene never jumps, it slides. Two consequences:
+///
+/// 1. World visuals must slide with it: they belong at `-(offset - error)`,
+///    where `error` is the avatar's current correction error (the camera rides
+///    the avatar).
+/// 2. The replicated `NetRoomFrame` (a different entity on the wire) can land a
+///    packet or two before/after the entity snap. The reconciliation below
+///    anchors on the one thing that is continuous by construction — the
+///    avatar's TRUE position (`offset + sim`, where `sim = Position - error`) —
+///    and holds the previous offset (extrapolated at the true velocity)
+///    whenever pairing the replicated offset with the current sim would break
+///    that continuity by a rebase-sized gap. This bridges both orderings and
+///    self-heals the moment the two agree again.
+///
+/// Runs in `PostUpdate` after `PhysicsSystems::Writeback` and before transform
+/// propagation, so it pairs the frame's *final* rendered state (post-decay
+/// `Position` + its matching error) and its ground/ash writes propagate this
+/// frame.
+#[allow(clippy::type_complexity)]
+fn sync_visual_room_frame(
+    time: Res<Time>,
+    net_frames: Query<&NetRoomFrame>,
+    avatar: Query<
+        (&Position, &LinearVelocity, Option<&VisualCorrection<Position>>),
+        (With<Character>, Without<Grass>),
+    >,
+    mut client: ResMut<ClientRoomFrame>,
+    // `Without<Character>`: proves disjointness from the avatar read (B0001 —
+    // the conflict is a runtime panic on the first run, not a compile error).
+    mut grounds: Query<
+        (&mut Position, &mut Transform),
+        (With<Grass>, With<RigidBody>, Without<Character>),
+    >,
+    ash: Query<&MeshMaterial3d<AshMaterial>>,
+    mut ash_materials: ResMut<Assets<AshMaterial>>,
 ) {
     // One room per client: its orb is the only entity carrying a frame.
-    let Some(frame) = frames.iter().next() else {
+    let Some(net) = net_frames.iter().next() else {
         return;
     };
-    let target = (-DVec3::from_array(frame.offset)).as_vec3();
+    let net_offset = DVec3::from_array(net.offset);
+    client.velocity = Vec3::from_array(net.velocity);
+
+    let Ok((position, linear, correction)) = avatar.single() else {
+        // No avatar yet (boot): nothing to anchor continuity on.
+        client.offset = net_offset;
+        client.visual_offset = net_offset;
+        client.prev_true = None;
+        return;
+    };
+    let error = correction.map(|c| c.error.0).unwrap_or(Vec3::ZERO);
+    let sim = (position.0 - error).as_dvec3();
+
+    // Reconcile (see the doc comment): keep `offset + sim` continuous.
+    const REBASE_GAP_M: f64 = 500.0;
+    let mut offset = net_offset;
+    if let Some(prev_true) = client.prev_true {
+        let true_velocity = (client.velocity + linear.0).as_dvec3();
+        let expected = prev_true + true_velocity * time.delta_secs_f64();
+        if (net_offset + sim - expected).length() > REBASE_GAP_M && client.held_frames < 30 {
+            offset = expected - sim;
+            client.held_frames += 1;
+        } else {
+            client.held_frames = 0;
+        }
+    }
+    client.offset = offset;
+    client.prev_true = Some(offset + sim);
+    client.visual_offset = offset - error.as_dvec3();
+    let visual_offset = client.visual_offset;
+
+    let ground_target = (-visual_offset).as_vec3();
     for (mut position, mut transform) in &mut grounds {
-        if position.0 != target {
-            position.0 = target;
-            transform.translation = target;
+        if transform.translation != ground_target {
+            transform.translation = ground_target;
+            position.0 = ground_target;
+        }
+    }
+
+    for material in &ash {
+        // Read-check before `get_mut` — mutating the asset re-uploads the uniform.
+        if ash_materials.get(material.id()).is_some_and(|m| m.frame_needs_update(visual_offset)) {
+            if let Some(mut mat) = ash_materials.get_mut(material.id()) {
+                mat.set_frame(visual_offset);
+            }
         }
     }
 }

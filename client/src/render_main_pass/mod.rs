@@ -22,7 +22,8 @@ use bevy::{
     pbr::ExtendedMaterial,
     prelude::*,
 };
-use ash_material::{spawn_ash_field, AshMaterial, ASH_SHADER_HANDLE};
+use ash_material::{spawn_ash_field, ASH_SHADER_HANDLE};
+pub use ash_material::AshMaterial;
 use flame_material::{
     register_flame_mesh, spawn_flame, update_flames, FlameMaterial, FLAME_SHADER_HANDLE,
 };

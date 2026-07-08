@@ -38,6 +38,13 @@ struct AshParams {
     spin_freq: f32,
     // Flakes closer than this (metres) fade out, so none smear across your face.
     near_fade: f32,
+    // The room's visual floating-origin offset, reduced modulo `box_size` on the
+    // CPU (xyz; w padding). Added to the camera position for the lattice wrap so
+    // the flakes live in TRUE world space: a floating-origin rebase (which
+    // teleports the local camera km downward) doesn't touch the field, and ascent
+    // keeps streaming ever faster instead of resetting to the co-moving frame's
+    // near-zero local speed.
+    frame_offset: vec4<f32>,
 }
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(0)
@@ -89,8 +96,11 @@ fn vertex(v: Vertex) -> VertexOutput {
         ash.sway_amp * cos(t * ash.sway_freq * 0.8 + phase * 1.7),
     );
 
-    // Re-centre the tiled lattice on the camera: pick the copy nearest us.
-    let rel = base + drift - cam;
+    // Re-centre the tiled lattice on the camera: pick the copy nearest us. The
+    // wrap runs against the camera's TRUE position (local + frame offset) so the
+    // lattice is anchored in true space; the flake still RENDERS relative to the
+    // local camera (`center`), where the rest of the scene lives.
+    let rel = base + drift - (cam + ash.frame_offset.xyz);
     let wrapped = rel - box * round(rel / box);
     let center = cam + wrapped;
 
