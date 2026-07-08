@@ -19,6 +19,7 @@ use avian3d::prelude::{
 use bevy::math::DVec3;
 use bevy::transform::TransformSystems;
 use lightyear::prediction::correction::VisualCorrection;
+use lightyear::prediction::rollback::RollbackSystems;
 
 use crate::render_main_pass::AshMaterial;
 use bad_spaceship_shared::character::{
@@ -309,9 +310,15 @@ impl Plugin for NetClientPlugin {
         app.init_resource::<ClientRoomFrame>();
         app.add_systems(
             PostUpdate,
-            (position_replicated_joints, sync_visual_room_frame)
-                .after(PhysicsSystems::Writeback)
-                .before(TransformSystems::Propagate),
+            (
+                // Rebase-scale corrections snap before the writeback renders them.
+                snap_large_corrections
+                    .after(RollbackSystems::VisualCorrection)
+                    .before(PhysicsSystems::Writeback),
+                (position_replicated_joints, sync_visual_room_frame)
+                    .after(PhysicsSystems::Writeback)
+                    .before(TransformSystems::Propagate),
+            ),
         );
     }
 }
@@ -888,6 +895,35 @@ pub struct ClientRoomFrame {
     prev_true: Option<DVec3>,
     /// Frames spent holding a stale replicated offset — a snap-anyway backstop.
     held_frames: u8,
+}
+
+/// Snap rebase-scale prediction corrections instead of easing them. lightyear's
+/// visual correction folds each rollback's error into the rendered `Position` and
+/// decays it (~200 ms half-life) — the right call for the routine ≤16 cm
+/// mispredictions (#41), but a floating-origin rebase parks a ~2 km error there,
+/// which then takes ~2 s to slide out. Nothing world-anchored is visible at
+/// rebase altitude, so the slide itself would be invisible — except that each
+/// predicted entity decays *its own* error on its own schedule, and the
+/// millimetre-level asymmetries between the avatar's and the deck's km-scale
+/// decays render as the deck bobbing away from the rider for ~half a second
+/// every rebase. Killing the ease for km-scale errors makes the whole rollback
+/// land rigidly in one frame (one rollback rolls back every predicted entity
+/// together), which is invisible. Runs after the correction set folded the error
+/// in (`Position = sim + error` — subtracting the error restores the exact sim
+/// value) and before the Position→Transform writeback renders it.
+fn snap_large_corrections(
+    mut commands: Commands,
+    mut corrected: Query<(Entity, &mut Position, &VisualCorrection<Position>)>,
+) {
+    /// Never produced by ordinary misprediction, always by a rebase (the
+    /// smallest shift is ~1 km); comfortably above the easing regime.
+    const SNAP_ERROR_M: f32 = 100.0;
+    for (entity, mut position, correction) in &mut corrected {
+        if correction.error.0.length_squared() > SNAP_ERROR_M * SNAP_ERROR_M {
+            position.0 -= correction.error.0;
+            commands.entity(entity).remove::<VisualCorrection<Position>>();
+        }
+    }
 }
 
 /// Keep every world-anchored client visual aligned with the room's floating-origin
