@@ -12,8 +12,14 @@
 //! For every player the server replicates, draw a body at its predicted/
 //! interpolated Avian pose.
 
-use avian3d::prelude::{Forces, Gravity, Position, RigidBody, Rotation, SphericalJoint};
+use avian3d::prelude::{
+    Forces, Gravity, PhysicsSystems, Position, RigidBody, Rotation, SphericalJoint,
+};
 use bevy::math::DVec3;
+use bevy::transform::TransformSystems;
+use std::collections::HashMap;
+
+use crate::render_main_pass::AshMaterial;
 use bad_spaceship_shared::character::{
     insert_character_body, CharacterMovement, Config as CharacterConfig,
 };
@@ -257,8 +263,7 @@ impl Plugin for NetClientPlugin {
                 face_replicated_players,
                 draw_replicated_parts,
                 draw_center_of_mass_orb,
-                apply_room_frame,
-                (bind_replicated_joints, position_replicated_joints).chain(),
+                bind_replicated_joints,
                 // Recolor each joint's own persistent gizmo sphere red while it's in the
                 // delete zone. Runs after the shared detector fills `PredeleteJoints`.
                 recolor_replicated_joints.after(UpdateJointsLabel),
@@ -291,6 +296,21 @@ impl Plugin for NetClientPlugin {
                 // its replicated `NetHold` target so it floats for us instead of bobbing.
                 (predict_hold, predict_remote_hold).chain(),
             ),
+        );
+        // World-anchored visuals must move with the *rendered* world, so both run
+        // after the frame's final body transforms are written (frame interpolation
+        // + visual correction + Position→Transform writeback) and before transform
+        // propagation carries their writes to `GlobalTransform`:
+        // - joint gizmos are positioned from their body's fresh `Transform` (in
+        //   `Update` they read last frame's — a visible trail whenever the deck
+        //   moves in local coordinates, and a 2 km flash at a rebase snap);
+        // - the ground/ash follow the room's visual floating-origin frame.
+        app.init_resource::<ClientRoomFrame>();
+        app.add_systems(
+            PostUpdate,
+            (position_replicated_joints, sync_visual_room_frame)
+                .after(PhysicsSystems::Writeback)
+                .before(TransformSystems::Propagate),
         );
     }
 }
@@ -840,34 +860,135 @@ fn draw_replicated_parts(
     }
 }
 
-/// Keep the local world aligned with the room's floating-origin frame
-/// ([`NetRoomFrame`], replicated on the room orb): place the ground at `-offset` —
-/// the true ground position in room-local coordinates. That one move covers
-/// everything that keys off the ground: rendering (the bowl sits where it truly
-/// is, receding below a rebased room), locally predicted physics (the collider
-/// moves out of reach, matching the ground bit the server drops from the room's
-/// collision filters), and the rocket flames' ground-splash raycast (no splash at
-/// altitude). Both `Position` AND `Transform` need writing: the ground is a local
-/// (non-replicated) body, and in multiplayer `lightyear_avian` owns Position→
-/// Transform syncing only for the replicated ones.
+/// The client's *visual* mirror of the room's floating-origin frame — what every
+/// world-anchored client visual (the ground, the ash field, the flight HUD) keys
+/// off, instead of the raw replicated [`NetRoomFrame`].
 ///
-/// The predicted room entities need no such help — a rebase reaches them as
-/// ordinary replication (every confirmed pose jumps by the same delta, one
-/// rollback re-simulates) and the correction slides the whole scene rigidly,
-/// camera included.
-fn apply_room_frame(
-    frames: Query<&NetRoomFrame>,
-    mut grounds: Query<(&mut Position, &mut Transform), (With<Grass>, With<RigidBody>)>,
+/// Why not read the replicated frame directly: a rebase moves the room's
+/// *entities* (their confirmed `Position`s jump and one rollback snaps the
+/// predicted world) and the orb's `NetRoomFrame` in the same server tick — but on
+/// the wire those are different entities, so the frame can land a packet or two
+/// after the world snap. For those frames the camera has already dropped ~2 km
+/// while the ground/ash still use the old offset: the ground flashes *closer*,
+/// the ash lattice jumps. `sync_visual_room_frame` closes the gap by inferring
+/// the rebase from the parts' own uniform position jump (same frame as the snap,
+/// by construction) and treating the replicated frame as the reconciliation
+/// target it converges back to.
+#[derive(Resource, Default)]
+pub struct ClientRoomFrame {
+    pub offset: DVec3,
+    pub velocity: Vec3,
+    /// Frames spent holding while the replicated frame disagrees by a
+    /// rebase-sized gap (see the reconciliation step) — a snap-anyway backstop.
+    held_frames: u8,
+}
+
+/// Keep every world-anchored client visual aligned with the room's floating-origin
+/// frame (see [`ClientRoomFrame`]), all in one place and all on the same frame:
+///
+/// - **ground**: the bowl sits at `-offset` — the true ground position in
+///   room-local coordinates. Covers rendering, locally predicted physics (the
+///   collider moves out of reach, matching the ground bit the server drops), and
+///   the rocket flames' ground-splash raycast. Both `Position` AND `Transform`
+///   need writing: the ground is a local body and `lightyear_avian` only syncs
+///   the replicated ones.
+/// - **ash flakes**: the lattice is anchored in *true* space (offset modulo the
+///   field box — full precision in f64 first), so ascent reads as ever-faster
+///   streaming and a rebase doesn't reset the apparent fall speed to the
+///   co-moving frame's near-zero local velocity.
+///
+/// Runs in `PostUpdate` after `PhysicsSystems::Writeback` (the avatar's rendered
+/// `Transform` — frame-interpolated + visual-corrected — is final) and before
+/// transform propagation, and folds the avatar's current render-vs-sim error into
+/// the visual offset: if the predicted world is easing through a correction, the
+/// ground and ash ease with it instead of snapping ahead of the scene.
+#[allow(clippy::type_complexity)]
+fn sync_visual_room_frame(
+    time: Res<Time>,
+    net_frames: Query<&NetRoomFrame>,
+    parts: Query<(Entity, &Position), (With<NetPart>, With<Predicted>)>,
+    avatar: Query<(&Position, &Transform), (With<Character>, Without<Grass>)>,
+    mut prev_parts: Local<HashMap<Entity, Vec3>>,
+    mut client: ResMut<ClientRoomFrame>,
+    mut grounds: Query<
+        (&mut Position, &mut Transform),
+        (With<Grass>, With<RigidBody>, Without<Character>),
+    >,
+    ash: Query<&MeshMaterial3d<AshMaterial>>,
+    mut ash_materials: ResMut<Assets<AshMaterial>>,
 ) {
     // One room per client: its orb is the only entity carrying a frame.
-    let Some(frame) = frames.iter().next() else {
+    let Some(net) = net_frames.iter().next() else {
         return;
     };
-    let target = (-DVec3::from_array(frame.offset)).as_vec3();
+
+    // 1. Infer a rebase from the parts' own sim jump: at a rebase EVERY room part
+    //    teleports by the same delta in the same tick, which nothing else does (a
+    //    lone diverging part isn't uniform; a fall-net respawn only moves an
+    //    avatar; normal motion is < a few m/frame).
+    const JUMP_M: f32 = 500.0;
+    let mut jumps: Vec<Vec3> = Vec::new();
+    for (entity, position) in &parts {
+        if let Some(prev) = prev_parts.get(&entity) {
+            let d = position.0 - *prev;
+            if d.length_squared() > JUMP_M * JUMP_M {
+                jumps.push(d);
+            }
+        }
+    }
+    prev_parts.clear();
+    prev_parts.extend(parts.iter().map(|(entity, position)| (entity, position.0)));
+    let uniform_jump = (jumps.len() >= 2
+        && jumps.iter().all(|d| d.distance(jumps[0]) < 50.0))
+    .then(|| jumps[0]);
+
+    // 2. Reconcile: positions moved by `-shift`, so the frame origin moved by
+    //    `+shift` = `-jump`. Otherwise follow the authoritative replicated frame —
+    //    unless it currently disagrees by a rebase-sized gap (it jumped ahead of
+    //    the world snap, or the world snapped ahead of it): hold ours, integrating
+    //    at the frame velocity, until the two re-agree (snap after ~1/3 s anyway —
+    //    the backstop for a jump the inference missed).
+    let net_offset = DVec3::from_array(net.offset);
+    if let Some(jump) = uniform_jump {
+        client.offset -= jump.as_dvec3();
+        client.held_frames = 0;
+    }
+    if (net_offset - client.offset).length() < JUMP_M as f64 || client.held_frames > 20 {
+        client.offset = net_offset;
+        client.velocity = Vec3::from_array(net.velocity);
+        client.held_frames = 0;
+    } else {
+        let velocity = client.velocity.as_dvec3();
+        client.offset += velocity * time.delta_secs_f64();
+        client.held_frames += 1;
+    }
+
+    // 3. Fold in the avatar's current render-vs-sim error (visual correction +
+    //    frame interpolation): the scene renders at `sim + error`, so world-fixed
+    //    visuals belong at `-(offset - error)` to move with it.
+    let ease = avatar
+        .single()
+        .map(|(position, transform)| transform.translation - position.0)
+        .unwrap_or(Vec3::ZERO);
+    let visual_offset = client.offset - ease.as_dvec3();
+
+    let ground_target = (-visual_offset).as_vec3();
+    let ground_sim = (-client.offset).as_vec3();
     for (mut position, mut transform) in &mut grounds {
-        if position.0 != target {
-            position.0 = target;
-            transform.translation = target;
+        if transform.translation != ground_target {
+            transform.translation = ground_target;
+        }
+        if position.0 != ground_sim {
+            position.0 = ground_sim;
+        }
+    }
+
+    for material in &ash {
+        // Read-check before `get_mut` — mutating the asset re-uploads the uniform.
+        if ash_materials.get(material.id()).is_some_and(|m| m.frame_needs_update(visual_offset)) {
+            if let Some(mut mat) = ash_materials.get_mut(material.id()) {
+                mat.set_frame(visual_offset);
+            }
         }
     }
 }

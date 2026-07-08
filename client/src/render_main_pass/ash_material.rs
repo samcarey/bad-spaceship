@@ -50,6 +50,14 @@ pub struct AshParams {
     spin_freq: f32,
     /// Flakes closer than this (m) fade out.
     near_fade: f32,
+    /// The room's visual floating-origin offset reduced modulo `box_size` (xyz; w
+    /// padding). Anchors the flake lattice in TRUE world space — the shader wraps
+    /// the lattice around `camera + frame_offset` — so a rebased room's ascent
+    /// keeps reading as ever-faster streaming instead of the apparent fall speed
+    /// resetting to the co-moving frame's near-zero local velocity. Modulo,
+    /// reduced CPU-side in f64 (`set_frame`): the raw offset outgrows f32 at
+    /// altitude, and the lattice is periodic anyway.
+    frame_offset: Vec4,
 }
 
 impl Default for AshParams {
@@ -68,6 +76,7 @@ impl Default for AshParams {
             sway_freq: 1.4,
             spin_freq: 7.0,
             near_fade: 1.5,
+            frame_offset: Vec4::ZERO,
         }
     }
 }
@@ -76,6 +85,27 @@ impl Default for AshParams {
 pub struct AshMaterial {
     #[uniform(0)]
     params: AshParams,
+}
+
+impl AshMaterial {
+    /// The box-modulo lattice anchor for a room's visual floating-origin offset
+    /// (see `AshParams::frame_offset`).
+    fn frame_target(&self, visual_offset: bevy::math::DVec3) -> Vec4 {
+        let target = visual_offset.rem_euclid(self.params.box_size.truncate().as_dvec3());
+        target.as_vec3().extend(0.0)
+    }
+
+    /// Whether `set_frame` would actually change the uniform — callers check this
+    /// on a read borrow first, so a settled frame doesn't re-upload the material
+    /// every frame (mutably borrowing the asset flags a GPU re-upload).
+    pub fn frame_needs_update(&self, visual_offset: bevy::math::DVec3) -> bool {
+        self.frame_target(visual_offset).distance_squared(self.params.frame_offset) > 1.0e-4
+    }
+
+    /// Anchor the flake lattice for the room's visual floating-origin offset.
+    pub fn set_frame(&mut self, visual_offset: bevy::math::DVec3) {
+        self.params.frame_offset = self.frame_target(visual_offset);
+    }
 }
 
 impl Material for AshMaterial {
