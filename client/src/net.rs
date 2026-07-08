@@ -975,6 +975,23 @@ fn sync_visual_room_frame(
         .unwrap_or(Vec3::ZERO);
     let visual_offset = client.offset - ease.as_dvec3();
 
+    // TEMP rebase diagnostics: log the frame math around any disturbance.
+    if uniform_jump.is_some()
+        || (net_offset - client.offset).length() > 100.0
+        || ease.length() > 10.0
+    {
+        let avatar_y = avatar.single().map(|(p, _)| p.0.y).unwrap_or(f32::NAN);
+        info!(
+            "[vframe] jump={:?} net_y={:.1} client_y={:.1} ease_y={:.2} avatar_y={:.1} hud_alt={:.1}",
+            uniform_jump.map(|j| j.y),
+            net_offset.y,
+            client.offset.y,
+            ease.y,
+            avatar_y,
+            client.offset.y + avatar_y as f64,
+        );
+    }
+
     let ground_target = (-visual_offset).as_vec3();
     let ground_sim = (-client.offset).as_vec3();
     for (mut position, mut transform) in &mut grounds {
