@@ -63,7 +63,12 @@ impl Plugin for LaunchPlugin {
                     apply_sp_thrust.run_if(not(resource_exists::<SuppressLocalParts>)),
                     apply_mp_thrust.run_if(resource_exists::<SuppressLocalParts>),
                 )
-                    .chain(),
+                    .chain()
+                    // The predicted rebase shifts every body first, so the thrust below
+                    // reads post-shift positions (a pre-shift force point is a km lever
+                    // arm). Empty/no-op in single-player, where `PredictRebase` has no
+                    // systems.
+                    .after(crate::net::PredictRebase),
             );
     }
 }

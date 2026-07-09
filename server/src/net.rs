@@ -32,8 +32,8 @@ use bad_spaceship_shared::net::{
     apply_hold_spring, apply_net_input, focused_part, monster_index, sanitize_name,
     ClientPanicReport, InLargestAssembly, NetCenterOfMass, NetFacing, NetHold, NetInput, NetJoint,
     NetLaunch, NetName, NetPart, NetPlayer, NetRoomFrame, PartShape, ProtocolPlugin, RequestLaunch,
-    ResetPosition, RollbackReport, SaveGame, SetAvatar, SetName, GROUND_JOINT_ID, MONSTER_COUNT,
-    TICK,
+    rebase_shift, ResetPosition, RollbackReport, SaveGame, SetAvatar, SetName, REBASE_TRIGGER_M,
+    GROUND_JOINT_ID, MONSTER_COUNT, TICK,
 };
 use bad_spaceship_shared::map::GROUND_LAYER;
 use bad_spaceship_shared::part::{
@@ -533,18 +533,13 @@ struct OrbRoom(RoomId);
 // the pad (which fell out of the world while the frame flew) get recycled by the
 // normal fall check the moment coordinates are true again.
 
-/// Local drift of the room's assembly that triggers a rebase.
-const REBASE_TRIGGER_M: f32 = 2000.0;
-
 /// True distance from the origin below which an active frame resets to exactly
 /// zero (real coordinates, real ground). Half of `REBASE_TRIGGER_M`, so the two
-/// can't flap: right after a reset the local drift is under the trigger.
+/// can't flap: right after a reset the local drift is under the trigger. Server-only:
+/// the landing reset happens near the origin where corrections are cheap, so the
+/// client need not predict it (`REBASE_TRIGGER_M`/`REBASE_REST_Y` are shared, this
+/// isn't).
 const REBASE_RESET_M: f64 = 1000.0;
-
-/// Where a rebase parks the assembly above the local origin. Keeps the freshly
-/// shifted content clear of the phantom ground collider (and of the client's
-/// not-yet-moved local ground during the rollback that applies the shift).
-const REBASE_REST_Y: f32 = 100.0;
 
 /// A room's authoritative floating-origin frame: local + frame = true. `offset`
 /// is f64 — it grows without bound and integrates every tick, and f32 would
@@ -683,8 +678,10 @@ fn rebase_room_frames(
                 let shift = (-frame.offset.as_vec3(), -frame.velocity);
                 (frame.offset, frame.velocity) = (DVec3::ZERO, Vec3::ZERO);
                 Some(shift)
-            } else if anchor_pos.length() > REBASE_TRIGGER_M {
-                let dpos = anchor_pos - Vec3::Y * REBASE_REST_Y;
+            } else if let Some(dpos) = rebase_shift(anchor_pos) {
+                // Ascent rebase — the client predicts this exact shift (same shared
+                // trigger on its own predicted assembly), so it reaches clients as a
+                // shift they already applied, not a km-scale correction.
                 frame.offset += dpos.as_dvec3();
                 frame.velocity += anchor_vel;
                 Some((dpos, anchor_vel))
@@ -2447,6 +2444,7 @@ fn client_identity(link: Entity, remote: &Query<&RemoteId>) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bad_spaceship_shared::net::REBASE_REST_Y;
 
     /// A fallen (or diverged) roomed avatar is teleported to a fresh spawn with
     /// zeroed velocity — never despawned (a replicated despawn would recursively

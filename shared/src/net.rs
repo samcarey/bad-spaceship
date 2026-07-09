@@ -414,6 +414,29 @@ impl NetRoomFrame {
     }
 }
 
+/// Local drift of a room's assembly (metres from the local origin) that triggers a
+/// floating-origin rebase. Shared so the server and every predicted client fire the
+/// same trigger on the same tick (see [`rebase_shift`]).
+pub const REBASE_TRIGGER_M: f32 = 2000.0;
+
+/// Where a rebase parks the assembly above the local origin after shifting. Keeps the
+/// freshly shifted content clear of the phantom ground collider at the origin. Shared
+/// for the same reason as [`REBASE_TRIGGER_M`].
+pub const REBASE_REST_Y: f32 = 100.0;
+
+/// The position shift to subtract from every room entity when the room's assembly has
+/// drifted past [`REBASE_TRIGGER_M`], or `None` if it hasn't yet. **Memoryless**: the
+/// decision is a pure function of the assembly's current local center of mass, and the
+/// shift itself drops that COM back to [`REBASE_REST_Y`] (well below the trigger), so
+/// there is no accumulated "which frame am I in" state to keep consistent. That is what
+/// lets the client run this identical check on its *predicted* assembly and rebase on
+/// the same tick as the server — turning the rebase from a km-scale correction the
+/// client absorbs into a shift it predicts. The caller pairs this with the assembly's
+/// mean velocity (the co-moving boost) to subtract from every entity's velocity too.
+pub fn rebase_shift(anchor_pos: Vec3) -> Option<Vec3> {
+    (anchor_pos.length() > REBASE_TRIGGER_M).then(|| anchor_pos - Vec3::Y * REBASE_REST_Y)
+}
+
 /// Replicated hold state for a part a player is currently holding: who holds it
 /// (their [`NetPlayer::client_id`]) and the hold point + target orientation the server
 /// is springing it toward (the holder's forwarded `hold_target`/`hold_rotation`). All

@@ -13,8 +13,8 @@
 //! interpolated Avian pose.
 
 use avian3d::prelude::{
-    Forces, Gravity, LinearVelocity, PhysicsSystems, Position, RigidBody, Rotation,
-    SphericalJoint,
+    AngularVelocity, ComputedMass, Forces, Gravity, LinearVelocity, PhysicsSystems, Position,
+    RigidBody, Rotation, SphericalJoint,
 };
 use bevy::math::DVec3;
 use bevy::transform::TransformSystems;
@@ -25,9 +25,10 @@ use crate::render_main_pass::AshMaterial;
 use bad_spaceship_shared::character::{
     insert_character_body, CharacterMovement, Config as CharacterConfig,
 };
+use bad_spaceship_shared::launch::measure_assembly_spin;
 use bad_spaceship_shared::net::{
-    apply_hold_spring, apply_net_input, focused_part, room_code_bytes, ClientPanicReport,
-    ControlChannel,
+    apply_hold_spring, apply_net_input, focused_part, rebase_shift, room_code_bytes,
+    ClientPanicReport, ControlChannel, InLargestAssembly,
     NetCenterOfMass, NetFacing, NetHold, NetInput, NetJoint, NetPart, PartShape, take_rollback_diag,
     NetPlayer, NetRoomFrame, ProtocolPlugin, RollbackReport, TelemetryChannel, GROUND_JOINT_ID,
     TICK,
@@ -315,6 +316,12 @@ impl Plugin for NetClientPlugin {
         // use exactly the inputs the server will. Before `CharacterMovement` reads them.
         // `predict_hold` applies the held-part spring locally each tick (the same
         // spring the server runs) so carrying a block is instant and rollback-replayed.
+        // Predict the floating-origin rebase on our own predicted assembly (the same
+        // shared trigger the server runs) so it lands as a shift we already applied, not
+        // a 2 km correction. Ordered first (`PredictRebase`): a world-space force point
+        // captured before the shift would be a km lever arm after it — the same reason
+        // the server runs its rebase before thrust/grab.
+        app.add_systems(FixedUpdate, predict_room_rebase.in_set(PredictRebase));
         app.add_systems(
             FixedUpdate,
             (
@@ -325,7 +332,8 @@ impl Plugin for NetClientPlugin {
                 // `predict_remote_hold` springs every *other* player's held part toward
                 // its replicated `NetHold` target so it floats for us instead of bobbing.
                 (predict_hold, predict_remote_hold).chain(),
-            ),
+            )
+                .after(PredictRebase),
         );
         // World-anchored visuals must move with the *rendered* world, so both run
         // after the frame's final body transforms are written (frame interpolation
@@ -893,6 +901,69 @@ fn draw_replicated_parts(
             FrameInterpolate::<Position>::default(),
             FrameInterpolate::<Rotation>::default(),
         ));
+    }
+}
+
+/// Ordering handle for [`predict_room_rebase`]: it must run before any predicted system
+/// that captures a world-space force application point (thrust in `launch.rs`, the hold
+/// spring). A point taken pre-shift is a km lever arm once the shift moves the body — the
+/// same reason the server runs `rebase_room_frames` before `server_grab`/thrust.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PredictRebase;
+
+/// Predict the floating-origin rebase on our own predicted assembly, so a rebase reaches
+/// us as a shift we *already applied* rather than a ~2 km correction to absorb.
+///
+/// The trigger is the SAME shared [`rebase_shift`] the server runs, evaluated on our
+/// predicted parts' local center of mass. Because that trigger is **memoryless** — the
+/// shift itself drops the COM back below the trigger (see `rebase_shift`) — it needs no
+/// accumulated "which frame am I in" state: each tick we ask "has my predicted assembly
+/// drifted past the trigger?" and, if so, subtract the identical `(position, velocity)`
+/// delta the server subtracts from the confirmed state on the same tick. Both sides shift
+/// together, so the confirmed `Position`/`LinearVelocity` we then receive already matches
+/// our prediction and there is no km-scale rollback.
+///
+/// Runs in `FixedUpdate` before the predicted thrust/hold systems ([`PredictRebase`]), and
+/// is re-evaluated during rollback replays where it reproduces deterministically from the
+/// replayed positions. The accumulated offset stays where it already lives — the
+/// replicated [`NetRoomFrame`], mirrored into the ground/HUD by `sync_visual_room_frame`;
+/// this system only moves the predicted *physics* bodies. `snap_large_corrections` remains
+/// the backstop for the rare tick where our crossing and the server's differ by one step.
+#[allow(clippy::type_complexity)]
+fn predict_room_rebase(
+    mut bodies: ParamSet<(
+        // Our largest assembly's members — the anchor whose local COM triggers the shift.
+        Query<
+            (&Position, &LinearVelocity, &AngularVelocity, &ComputedMass),
+            (With<NetPart>, With<Predicted>, With<InLargestAssembly>),
+        >,
+        // Every predicted room body (loose + assembly parts and our avatar): all shift
+        // together, exactly as the server shifts every room entity.
+        Query<
+            (&mut Position, &mut LinearVelocity),
+            (With<Predicted>, Or<(With<NetPart>, With<Character>)>),
+        >,
+    )>,
+) {
+    // Mass-weighted COM + mean velocity of our predicted assembly, via the shared
+    // measurement the server trims by. `ComputedMass` ∝ volume under uniform density, so
+    // this COM matches the server's volume-weighted anchor. No assembly (no ≥2 jointed
+    // parts) ⇒ nothing flying to the trigger ⇒ leave it to the correction path.
+    let anchor = {
+        let members = bodies.p0();
+        let samples = || members.iter().map(|(p, l, a, m)| (p.0, l.0, a.0, m.value()));
+        measure_assembly_spin(samples)
+    };
+    let Some((com, spin)) = anchor else {
+        return;
+    };
+    let Some(dpos) = rebase_shift(com) else {
+        return;
+    };
+    let dvel = spin.linear_velocity;
+    for (mut position, mut linear) in &mut bodies.p1() {
+        position.0 -= dpos;
+        linear.0 -= dvel;
     }
 }
 
