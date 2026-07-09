@@ -515,36 +515,47 @@ struct OrbRoom(RoomId);
 //
 // f32 starves the solver (and the client renderer) at extreme altitude — the old
 // hard ceilings were ~33 km with a rider / ~524 km unmanned. So each room carries a
-// floating-origin frame: when its assembly drifts `REBASE_TRIGGER_M` from the local
-// origin, `rebase_room_frames` subtracts the assembly's position AND mean velocity
-// from every entity in the room (a Galilean boost — physics is invariant), and
-// accumulates both in the frame (`offset` integrates at `velocity` per tick, in
-// f64). Ascent is then unbounded: the sim always runs near the origin at small
-// local velocities. The frame replicates on the room orb (`NetRoomFrame`) so
-// clients can move their ground to `-offset` and derive true altitude/speed.
+// floating-origin frame: once its assembly is moving faster than
+// `REBASE_ACTIVATE_SPEED`, `rebase_room_frames` continuously co-moves — EVERY tick
+// it subtracts the assembly's local COM velocity from every entity in the room (a
+// Galilean boost — forces are velocity-independent, so the dynamics are preserved)
+// and accumulates it into the frame velocity (`offset` integrates at `velocity` per
+// tick, in f64). The assembly's local velocity is thus held near zero, so it never
+// drifts and its local coordinates stay small on their own — there is no discrete
+// km-scale position jump. Ascent is unbounded: the sim always runs near the origin.
+// The frame replicates on the room orb (`NetRoomFrame`) so clients can move their
+// ground to `-offset` and derive true altitude/speed.
+//
+// (History: the original design let the assembly drift `REBASE_TRIGGER_M` = 2 km,
+// then applied one discrete position+velocity shift. That 2 km jump reached clients
+// as a single giant rollback whose island-arena restore crashed the avian solver
+// under `rollback_resources`. Continuous co-moving removes the jump entirely. The
+// 2 km drift check survives only as a fallback trigger for pathological slow drift.)
 //
 // While a frame is active the true ground is far away, but the shared ground
 // *collider* still sits at the local origin (it serves every room at once and
 // cannot move per-room) — so active rooms drop `GROUND_LAYER` from their collision
-// filters, and the rebase parks content `REBASE_REST_Y` above the origin so nothing
-// overlaps the phantom bowl even transiently. When the room descends below
-// `REBASE_RESET_M` true, the frame snaps back to exactly zero and the ground bit is
-// restored — landings happen on the real ground, and the loose parts left behind at
-// the pad (which fell out of the world while the frame flew) get recycled by the
-// normal fall check the moment coordinates are true again.
+// filters. When the room descends below `REBASE_RESET_M` true, the frame snaps back
+// to exactly zero and the ground bit is restored — landings happen on the real
+// ground, and the loose parts left behind at the pad (which fell out of the world
+// while the frame flew) get recycled by the normal fall check once coordinates are
+// true again.
 
-/// Local drift of the room's assembly that triggers a rebase.
+/// Local drift of the room's assembly that triggers a rebase (fallback — the
+/// continuous co-moving boost normally activates on speed first, well before this).
 const REBASE_TRIGGER_M: f32 = 2000.0;
 
-/// True distance from the origin below which an active frame resets to exactly
-/// zero (real coordinates, real ground). Half of `REBASE_TRIGGER_M`, so the two
-/// can't flap: right after a reset the local drift is under the trigger.
-const REBASE_RESET_M: f64 = 1000.0;
+/// Local COM speed at which a room's frame activates and begins continuously
+/// co-moving. A launched rocket crosses this within ~1 s (a few tens of metres of
+/// local altitude), so the assembly freezes into the co-moving frame while its
+/// local coordinates are still small — no km-scale drift, no discrete position
+/// jump. Ordinary play (walking ≤ max_speed, a jump ≈ 7.5 m/s, settling parts)
+/// stays well under it, so grounded rooms keep real coordinates + real ground.
+const REBASE_ACTIVATE_SPEED: f32 = 30.0; // m/s
 
-/// Where a rebase parks the assembly above the local origin. Keeps the freshly
-/// shifted content clear of the phantom ground collider (and of the client's
-/// not-yet-moved local ground during the rollback that applies the shift).
-const REBASE_REST_Y: f32 = 100.0;
+/// True distance from the origin below which an active frame resets to exactly
+/// zero (real coordinates, real ground).
+const REBASE_RESET_M: f64 = 1000.0;
 
 /// A room's authoritative floating-origin frame: local + frame = true. `offset`
 /// is f64 — it grows without bound and integrates every tick, and f32 would
@@ -601,6 +612,7 @@ fn room_layers(bit: u32, grounded: bool) -> CollisionLayers {
 /// no ordering.
 fn rebase_room_frames(
     time: Res<Time>,
+    mut diag: Local<f32>,
     mut commands: Commands,
     mut frames: ResMut<RoomFrames>,
     joints: Query<(Entity, &SphericalJoint, Option<&RoomMember>)>,
@@ -623,8 +635,11 @@ fn rebase_room_frames(
     // the rebase band: skip the per-room anchor work (index + union-find) entirely.
     // Publishing still runs (a fresh orb needs its zero frame written once).
     const TRIGGER_SQ: f32 = REBASE_TRIGGER_M * REBASE_TRIGGER_M;
+    const ACTIVATE_SQ: f32 = REBASE_ACTIVATE_SPEED * REBASE_ACTIVATE_SPEED;
     if frames.by_room.values().all(|f| !f.is_active())
-        && parts.iter().all(|(.., position, _)| position.0.length_squared() < TRIGGER_SQ)
+        && parts.iter().all(|(.., position, linear)| {
+            position.0.length_squared() < TRIGGER_SQ && linear.0.length_squared() < ACTIVATE_SQ
+        })
     {
         for (_, mut net_frame) in &mut orbs {
             net_frame.set_if_neq(NetRoomFrame::default());
@@ -669,42 +684,88 @@ fn rebase_room_frames(
         }
     };
 
+    // Throttled flight telemetry (~2 s): confirms the co-moving frame keeps the
+    // assembly's LOCAL drift small while the true altitude (offset) climbs.
+    let log_now = {
+        *diag += dt as f32;
+        if *diag > 2.0 {
+            *diag = 0.0;
+            true
+        } else {
+            false
+        }
+    };
+
     // 3. Per room: rebase on drift, reset near the true origin, publish the frame.
     for (orb_room, mut net_frame) in &mut orbs {
         let room = orb_room.0;
         let frame = frames.by_room.entry(room).or_default();
         if let Some((anchor_pos, anchor_vel)) = anchor(room) {
+            let was_active = frame.is_active();
+            if log_now && frame.is_active() {
+                println!(
+                    "[frame-tel] {room:?} alt={:.0}m vspeed={:.1}m/s local_drift={:.1}m local_vel={:.2}m/s",
+                    frame.offset.y,
+                    frame.velocity.y,
+                    anchor_pos.length(),
+                    anchor_vel.length()
+                );
+            }
             let true_anchor = frame.offset + anchor_pos.as_dvec3();
             // (shift, boost) to subtract from every room entity's position/velocity.
-            let shift = if frame.is_active() && true_anchor.length() < REBASE_RESET_M {
-                // Back near the true origin: land the frame exactly on zero so the
-                // ground is real again (assign directly — accumulating the inverse
-                // shift in f32 would leave a residue).
+            let shift = if frame.is_active()
+                && true_anchor.length() < REBASE_RESET_M
+                && frame.velocity.dot(true_anchor.as_vec3()) < 0.0
+            {
+                // Landing: near the true origin AND *approaching* it (true velocity
+                // points inward). The approach gate is what distinguishes a landing
+                // from an assembly that just activated at low altitude and is still
+                // climbing away (which is near the origin but receding, so its
+                // velocity·position is positive — no reset). Snap the frame to
+                // exactly zero so the ground is real again (assign directly —
+                // accumulating the inverse shift in f32 would leave a residue).
                 let shift = (-frame.offset.as_vec3(), -frame.velocity);
                 (frame.offset, frame.velocity) = (DVec3::ZERO, Vec3::ZERO);
                 Some(shift)
-            } else if anchor_pos.length() > REBASE_TRIGGER_M {
-                let dpos = anchor_pos - Vec3::Y * REBASE_REST_Y;
-                frame.offset += dpos.as_dvec3();
+            } else if frame.is_active()
+                || anchor_vel.length() > REBASE_ACTIVATE_SPEED
+                || anchor_pos.length() > REBASE_TRIGGER_M
+            {
+                // Continuous co-moving frame: cancel the assembly's local COM
+                // velocity EVERY tick (a Galilean boost — forces are
+                // velocity-independent, so the dynamics are preserved) so it hovers
+                // near the local origin at ~0 local velocity. Crucially there is NO
+                // position shift: with the local velocity held near zero the
+                // assembly does not drift, so its local coordinates stay small on
+                // their own and there is never a discrete km-scale position jump for
+                // the client to roll back across — which is exactly what triggered
+                // the giant rollback and the avian island-solver crash. `offset`
+                // accumulates the true position (integrated above at `velocity`);
+                // `velocity` tracks the true world velocity.
                 frame.velocity += anchor_vel;
-                Some((dpos, anchor_vel))
+                Some((Vec3::ZERO, anchor_vel))
             } else {
                 None
             };
             if let Some((dpos, dvel)) = shift {
                 let grounded = !frame.is_active();
+                // Collision layers (ground bit) only flip on the grounded↔active
+                // transition — NOT every continuous-boost tick, which would churn
+                // avian's immutable `CollisionLayers` 60×/s for every body.
+                let layers_changed = was_active == grounded;
                 // A rebased room must have no part↔ground joints: the shared
                 // ground body does not ride the frame, so such a joint would pin
                 // the assembly to an anchor the shift just moved km away — a
                 // constraint violation violent enough to explode the assembly.
-                // Real flights cut them at blastoff; cut any stragglers here.
-                if !grounded {
+                // Real flights cut them at blastoff; cut any stragglers on the
+                // transition into an active frame.
+                if layers_changed && !grounded {
                     for (joint_entity, joint, member) in &joints {
                         if member.is_some_and(|m| m.0 == room)
                             && (!index.contains_key(&joint.body1)
                                 || !index.contains_key(&joint.body2))
                         {
-                            println!("[rebase] room {room:?}: cutting ground joint");
+                            println!("[frame] room {room:?}: cutting ground joint");
                             commands.entity(joint_entity).despawn();
                         }
                     }
@@ -717,22 +778,32 @@ fn rebase_room_frames(
                         position.0 -= dpos;
                         linear.0 -= dvel;
                         bit = Some(part_room.bit);
-                        commands.entity(entity).insert(room_layers(part_room.bit, grounded));
+                        if layers_changed {
+                            commands.entity(entity).insert(room_layers(part_room.bit, grounded));
+                        }
                     }
                 }
                 for (entity, member, mut position, mut linear) in &mut avatars {
                     if member.0 == room {
                         position.0 -= dpos;
                         linear.0 -= dvel;
-                        if let Some(bit) = bit {
-                            commands.entity(entity).insert(room_layers(bit, grounded));
+                        if layers_changed {
+                            if let Some(bit) = bit {
+                                commands.entity(entity).insert(room_layers(bit, grounded));
+                            }
                         }
                     }
                 }
-                println!(
-                    "[rebase] room {room:?}: shift {dpos:?} boost {dvel:?} -> offset {:?} vel {:?}",
-                    frame.offset, frame.velocity
-                );
+                // Log only the transitions (activate / land), not every co-moving
+                // tick — otherwise this floods the server log 60×/s in flight.
+                if layers_changed {
+                    println!(
+                        "[frame] room {room:?}: {} -> offset {:?} vel {:?}",
+                        if grounded { "landed" } else { "activated" },
+                        frame.offset,
+                        frame.velocity
+                    );
+                }
             }
         }
         net_frame.set_if_neq(frame.net());
@@ -2518,13 +2589,13 @@ mod tests {
         )
     }
 
-    /// When a room's assembly drifts past `REBASE_TRIGGER_M`, the whole room —
-    /// assembly, stray pad parts, avatars — is shifted into the assembly's
-    /// co-moving frame (positions AND velocities), the frame accumulates the
-    /// shift, and the ground bit is dropped (the ground collider at the local
-    /// origin is a phantom now).
+    /// Once a room's assembly is moving faster than `REBASE_ACTIVATE_SPEED`, the
+    /// room enters a CONTINUOUS co-moving frame: the assembly's local COM velocity
+    /// is boosted into the frame with **no position shift** (so no discrete jump),
+    /// velocities go to ~zero locally, the ground bit drops, and the assembly hovers
+    /// at ~constant local coordinates while the frame velocity carries the motion.
     #[test]
-    fn rebase_shifts_room_into_comoving_frame() {
+    fn continuous_frame_boosts_velocity_without_shifting_position() {
         let mut app = App::new();
         app.init_resource::<Time>();
         app.init_resource::<RoomFrames>();
@@ -2532,17 +2603,18 @@ mod tests {
 
         let room = RoomAllocator::default().allocate();
         let bit = 1u32 << 1;
-        let climb = Vec3::new(0.0, 120.0, 0.0);
+        let climb = Vec3::new(0.0, 60.0, 0.0); // > REBASE_ACTIVATE_SPEED
+                                               // Assembly launched, low local altitude, already climbing fast.
         let a = app
             .world_mut()
-            .spawn(test_part(room, bit, true, Vec3::new(0.0, 2499.0, 0.0), climb))
+            .spawn(test_part(room, bit, true, Vec3::new(0.0, 14.0, 0.0), climb))
             .id();
         let b = app
             .world_mut()
-            .spawn(test_part(room, bit, true, Vec3::new(0.0, 2501.0, 0.0), climb))
+            .spawn(test_part(room, bit, true, Vec3::new(0.0, 16.0, 0.0), climb))
             .id();
         app.world_mut().spawn(SphericalJoint::new(a, b));
-        // A loose part left behind at the pad — shifted like everything else.
+        // A loose part left behind at the pad — velocity-boosted like everything else.
         let stray = app
             .world_mut()
             .spawn(test_part(room, bit, true, Vec3::new(3.0, 1.0, 0.0), Vec3::ZERO))
@@ -2552,7 +2624,7 @@ mod tests {
             .spawn((
                 ServerAvatar,
                 RoomMember(room),
-                Position(Vec3::new(0.0, 2502.0, 0.0)),
+                Position(Vec3::new(0.0, 17.0, 0.0)),
                 LinearVelocity(climb),
                 CollisionLayers::from_bits(bit, bit | GROUND_LAYER),
             ))
@@ -2561,23 +2633,30 @@ mod tests {
 
         app.update();
 
-        // Assembly COM was (0, 2500, 0) at 120 m/s up → parked at REBASE_REST_Y,
-        // co-moving (local velocity zero).
-        assert_eq!(app.world().get::<Position>(a).unwrap().0.y, REBASE_REST_Y - 1.0);
-        assert_eq!(app.world().get::<Position>(b).unwrap().0.y, REBASE_REST_Y + 1.0);
+        // Positions are UNCHANGED — the whole point: no discrete km-scale jump.
+        assert_eq!(app.world().get::<Position>(a).unwrap().0.y, 14.0);
+        assert_eq!(app.world().get::<Position>(b).unwrap().0.y, 16.0);
+        assert_eq!(app.world().get::<Position>(rider).unwrap().0.y, 17.0);
+        assert_eq!(app.world().get::<Position>(stray).unwrap().0.y, 1.0);
+        // The assembly's local velocity is boosted to ~zero; the stray keeps its
+        // velocity relative to the assembly (0 − climb).
         assert_eq!(app.world().get::<LinearVelocity>(a).unwrap().0, Vec3::ZERO);
-        assert_eq!(app.world().get::<Position>(rider).unwrap().0.y, REBASE_REST_Y + 2.0);
         assert_eq!(app.world().get::<LinearVelocity>(rider).unwrap().0, Vec3::ZERO);
-        // The stray pad part rides the same frame: now far below, falling behind.
-        assert_eq!(app.world().get::<Position>(stray).unwrap().0.y, 1.0 - 2400.0);
         assert_eq!(app.world().get::<LinearVelocity>(stray).unwrap().0, -climb);
-        // Frame bookkeeping: local + frame = true.
+        // Frame now carries the velocity; offset is still zero this tick (it
+        // integrates at the *previous* velocity, which was zero when the tick began).
         let frame = app.world().get::<NetRoomFrame>(orb).unwrap();
-        assert_eq!(frame.offset, [0.0, 2400.0, 0.0]);
+        assert_eq!(frame.offset, [0.0, 0.0, 0.0]);
         assert_eq!(frame.velocity, climb.to_array());
         // Ground bit dropped while the frame is active.
-        let layers = app.world().get::<CollisionLayers>(a).unwrap();
-        assert_eq!(*layers, room_layers(bit, false));
+        assert_eq!(*app.world().get::<CollisionLayers>(a).unwrap(), room_layers(bit, false));
+
+        // A second tick with no forces: the assembly stays put locally (already
+        // boosted to ~0), velocity unchanged, ground bit NOT re-inserted (no churn).
+        app.update();
+        assert_eq!(app.world().get::<Position>(a).unwrap().0.y, 14.0);
+        assert_eq!(app.world().get::<LinearVelocity>(a).unwrap().0, Vec3::ZERO);
+        assert_eq!(app.world().get::<NetRoomFrame>(orb).unwrap().velocity, climb.to_array());
     }
 
     /// A room descending back under `REBASE_RESET_M` true altitude snaps its frame
