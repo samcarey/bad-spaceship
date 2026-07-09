@@ -524,20 +524,21 @@ fn rbrate_diag(
 /// and altitude), not in these local velocities. Gated on the replicated frame
 /// being active so ordinary grounded play (walking, jumping) is untouched. Runs in
 /// `FixedUpdate` (re-runs under rollback replay, deterministic from the state).
+/// Must match the server's `REBASE_ACTIVATE_SPEED` — the client predicts the same
+/// activation locally so it boosts on the SAME tick the server does.
+const COMOVE_ACTIVATE_SPEED: f32 = 30.0;
+
 #[allow(clippy::type_complexity)]
 fn comove_predicted_frame(
     frames: Query<&NetRoomFrame>,
+    mut boosting: Local<bool>,
+    mut confirmed: Local<bool>,
     mut bodies: ParamSet<(
         Query<&LinearVelocity, (With<InLargestAssembly>, With<Predicted>)>,
         Query<&mut LinearVelocity, (With<Predicted>, Or<(With<NetPart>, With<Character>)>)>,
     )>,
 ) {
-    let Some(frame) = frames.iter().next() else {
-        return;
-    };
-    if !frame.is_active() {
-        return;
-    }
+    let frame_active = frames.iter().next().is_some_and(|f| f.is_active());
     let (mut sum, mut n) = (Vec3::ZERO, 0u32);
     for v in bodies.p0().iter() {
         sum += v.0;
@@ -547,6 +548,28 @@ fn comove_predicted_frame(
         return;
     }
     let com_vel = sum / n as f32;
+
+    // Latch the boost on locally the moment our OWN predicted assembly crosses the
+    // activation speed — do NOT wait for the replicated `NetRoomFrame` to flip
+    // active (~1 RTT later). If the client lagged the server's activation boost by
+    // even one snapshot, the resulting velocity divergence forces a rollback, and a
+    // rollback that spans the frame's ground-bit-drop restructures the island arena
+    // mid-restore → the `merge_islands` stale-id panic. Predicting activation in
+    // lockstep keeps the boost divergence-free, so the restructuring never happens
+    // inside a rollback. `confirmed` tracks that the server's frame has actually
+    // gone active, so we only latch OFF (landing) once it goes inactive again.
+    if frame_active {
+        *boosting = true;
+        *confirmed = true;
+    } else if *confirmed {
+        *boosting = false;
+        *confirmed = false;
+    } else if com_vel.length() > COMOVE_ACTIVATE_SPEED {
+        *boosting = true;
+    }
+    if !*boosting {
+        return;
+    }
     for mut v in &mut bodies.p1() {
         v.0 -= com_vel;
     }
