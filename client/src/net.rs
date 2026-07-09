@@ -192,20 +192,34 @@ impl Plugin for NetClientPlugin {
         // in multiplayer by `add_physics`), frame interpolation, and client-side
         // prediction rollback for replicated Avian bodies.
         //
-        // `rollback_resources: true` also snapshots avian's solver-internal state
-        // (contact graph, constraint graph, broadphase proxies, islands, sleeping)
-        // into the rollback history. The flag is documented for deterministic
-        // replication, but it's load-bearing for state replication too: without
-        // it, a rollback restores Position/velocity and replays against the
-        // *current* contact state — warm-starting and contact sets differ from the
-        // original prediction, so every replayed tick re-resolves the avatar's
-        // ground contact slightly differently. Measured (#143 diagnostics): those
-        // replay differences were the decimetre walking mispredictions behind the
-        // "dizzying" world shake.
+        // `rollback_resources: true` snapshots avian's solver-internal state
+        // (contact graph, constraint graph, broadphase proxies, **islands**,
+        // sleeping) into the rollback history. It was turned on to sharpen replay
+        // fidelity for the walking shake (#144), but it is **incompatible with the
+        // floating-origin rebase** and must stay off:
+        //
+        // A rebase teleports every predicted body ~2 km in one tick, which reaches
+        // the client as one enormous rollback. Restoring `PhysicsIslands` (the
+        // island arena) across a jump that big leaves a `BodyIslandNode` pointing
+        // at an island id past the end of the restored arena; the next
+        // `merge_islands` does `get_disjoint_mut2(id1, id2).unwrap()` on that stale
+        // id and panics (`islands/mod.rs:843`, "Unreachable code") — `panic=abort`,
+        // so the whole wasm app dies. Reproduced: ride the rocket past ~2 km and
+        // the client hard-crashes at the first rebase (an observer in the room
+        // crashes too — it is rider-independent). With the flag off, avian rebuilds
+        // islands fresh each rollback tick from consistent state, so the merge
+        // never sees a stale id. The rebase shipped and was verified to 59 km
+        // ridden with this flag off (#139); #144 flipped it on and broke ascent.
+        //
+        // The shake it was meant to help is now addressed at its *root*: the buzz
+        // driving the rollback storm was the pad's joint-vs-contact fight, fixed by
+        // the rigid ground clamps (#145) — with the buzz gone the rollback rate is
+        // ~0.7/s, so the replay-fidelity gain from restoring contact state is
+        // marginal, and not worth crashing every high-altitude flight for.
         app.add_plugins(lightyear_avian3d::prelude::LightyearAvianPlugin {
             replication_mode: lightyear_avian3d::plugin::AvianReplicationMode::Position,
             update_syncs_manually: false,
-            rollback_resources: true,
+            rollback_resources: false,
         });
         // The character's ground-contact state rolls back too — must register
         // here (after `ClientPlugins` created the prediction registry), not in
