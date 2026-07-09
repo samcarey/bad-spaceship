@@ -1046,3 +1046,216 @@ mod weld_tests {
         ));
     }
 }
+
+/// Physics regression guard for the multiplayer-stability class of bug (PR #145):
+/// a body clamped to the ground while resting on it must SETTLE, not buzz. A
+/// buzzing resting assembly is the root cause of chronic prediction divergence
+/// (the client can't phase-match chaotic solver noise → constant rollbacks →
+/// dizzying world shake). The fix was `ground_clamp_anchor_pairs` (a rigid anchor
+/// triangle the weld census recognizes and de-contacts); this test runs the REAL
+/// avian solver so a future change that breaks the settle — reverting to a
+/// single-anchor clamp, dropping the census wiring, changing the census
+/// threshold, an avian upgrade that regresses joint↔contact resolution — fails
+/// here instead of shipping as felt instability.
+#[cfg(test)]
+mod ground_clamp_stability {
+    use super::*;
+    use avian3d::prelude::{AngularInertia, Mass, SubstepCount};
+    use avian3d::PhysicsPlugins;
+    use bevy::time::TimeUpdateStrategy;
+    use core::time::Duration;
+
+    const TIMESTEP: f32 = 1.0 / 60.0; // matches `net::TICK`
+
+    /// Build a minimal avian world with a two-part assembly resting on static
+    /// ground: the two boxes are jointed to each other AND each clamped to the
+    /// ground with `anchor_count` ground-clamp anchors — a **closed kinematic
+    /// loop** (box → ground → box → box), which is what makes the joint and
+    /// contact solvers fight (a lone clamped box is a constraint tree and settles
+    /// either way). `anchor_count == 1` is the old buggy ball-pivot clamp; `3` is
+    /// the fixed rigid triangle. `census` toggles the weld census (the fix): the
+    /// ground clamps below pull each box slightly INTO the ground, so with the
+    /// census OFF the clamp joints fight the persistent ground contact and buzz;
+    /// with it ON, a rigid triangle clamp is de-contacted and the joint wins
+    /// cleanly. Runs the setup, steps `WARMUP + MEASURE` ticks, returns the peak
+    /// resting |v|/|ω| across both boxes over the final `MEASURE`.
+    fn peak_resting_speed(anchor_count: usize, census: bool) -> f32 {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, TransformPlugin, PhysicsPlugins::default()));
+        app.insert_resource(Gravity(Vec3::NEG_Y * 9.81));
+        app.insert_resource(SubstepCount(6));
+        app.insert_resource(Time::<Fixed>::from_duration(Duration::from_secs_f32(TIMESTEP)));
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f32(
+            TIMESTEP,
+        )));
+        // Census in `FixedUpdate`, before the physics step — exactly as the game
+        // schedules it (`CharacterPlugin`/`PartPlugin`), so a rigid weld's contact
+        // is disabled *before* the first step that would otherwise fight it.
+        if census {
+            app.add_systems(FixedUpdate, maintain_weld_rigidity);
+        }
+
+        // Static ground: a wide slab whose top face is at y = 0.
+        let ground = app
+            .world_mut()
+            .spawn((
+                RigidBody::Static,
+                Collider::cuboid(20.0, 1.0, 20.0),
+                Position(Vec3::new(0.0, -0.5, 0.0)),
+                Friction::new(0.6),
+                Restitution::new(0.0),
+            ))
+            .id();
+
+        // Two dynamic unit boxes resting on the ground, 1 m apart.
+        let spawn_box = |app: &mut App, x: f32| {
+            app.world_mut()
+                .spawn((
+                    RigidBody::Dynamic,
+                    Collider::cuboid(1.0, 1.0, 1.0),
+                    ColliderDensity(1.0),
+                    Mass(1.0),
+                    AngularInertia::new(Vec3::splat(1.0)),
+                    Position(Vec3::new(x, 0.5, 0.0)),
+                    Rotation::default(),
+                    LinearVelocity::default(),
+                    AngularVelocity::default(),
+                    Friction::new(0.6),
+                    Restitution::new(0.0),
+                ))
+                .id()
+        };
+        let a = spawn_box(&mut app, -0.5);
+        let b = spawn_box(&mut app, 0.5);
+
+        // Part-to-part joint welding the two boxes at their shared face — the
+        // assembly bond that closes the loop with the ground clamps.
+        app.world_mut().spawn(
+            SphericalJoint::new(a, b)
+                .with_local_anchor1(Vec3::new(0.5, 0.0, 0.0))
+                .with_local_anchor2(Vec3::new(-0.5, 0.0, 0.0)),
+        );
+
+        // Clamp each box's bottom-centre to the ground beneath it. One anchor =
+        // ball pivot (contact-braced, the buggy case); the triangle helper = three
+        // anchors the census recognizes as a rigid weld and de-contacts.
+        for (part, x) in [(a, -0.5), (b, 0.5)] {
+            let part_anchor = Vec3::new(0.0, -0.5, 0.0);
+            // 2 cm BELOW the rest contact (ground-local; ground centre at y=-0.5):
+            // the joint pulls the box down into the ground while the contact pushes
+            // it out — the persistent joint↔contact disagreement that buzzes when
+            // the contact isn't disabled. This is the zero-gap/over-clamp geometry
+            // the real launch pad has (rockets pulled onto the bowl).
+            let ground_anchor = Vec3::new(x, 0.48, 0.0);
+            let clamps: Vec<(Vec3, Vec3)> = if anchor_count == 1 {
+                vec![(part_anchor, ground_anchor)]
+            } else {
+                ground_clamp_anchor_pairs(part_anchor, ground_anchor, Quat::IDENTITY).to_vec()
+            };
+            for (pa, ga) in clamps {
+                app.world_mut().spawn(
+                    SphericalJoint::new(part, ground)
+                        .with_local_anchor1(pa)
+                        .with_local_anchor2(ga),
+                );
+            }
+        }
+
+        app.finish();
+
+        const WARMUP: usize = 600; // 10 s to reach steady state
+        const MEASURE: usize = 300; // 5 s of "at rest"
+        let mut peak = 0.0f32;
+        for tick in 0..(WARMUP + MEASURE) {
+            app.update();
+            if tick >= WARMUP {
+                for part in [a, b] {
+                    let lin = app.world().get::<LinearVelocity>(part).unwrap().0.length();
+                    let ang = app.world().get::<AngularVelocity>(part).unwrap().0.length();
+                    peak = peak.max(lin).max(ang);
+                }
+            }
+        }
+        peak
+    }
+
+    /// Physical guard: a helper-clamped assembly resting on the ground SETTLES to
+    /// a dead stop under the real avian solver. This is the outcome PR #145
+    /// bought — it would catch a regression that reintroduces a resting buzz
+    /// (e.g. an avian upgrade that changes joint↔contact resolution, or the
+    /// census failing to de-contact the weld). Asserts only the good direction
+    /// (settle), so it can't false-fail by failing to *reproduce* a buzz — the
+    /// teeth (that the fix actually changes solver behaviour) live in the
+    /// deterministic mechanism test below.
+    #[test]
+    fn ground_clamped_assembly_settles() {
+        let fixed = peak_resting_speed(3, true); // triangle clamp + census (the fix)
+        let buggy = peak_resting_speed(3, false); // same clamp, census off (the bug)
+        println!("[clamp] census-on peak = {fixed:.5} m/s   census-off peak = {buggy:.5} m/s");
+        // The fix: a de-contacted rigid clamp settles to a dead stop.
+        assert!(
+            fixed < 0.02,
+            "a triangle-clamped resting assembly with the census must settle (peak |v| = \
+             {fixed:.5} m/s); a buzz here is the multiplayer-instability class of bug PR #145 \
+             fixed — the client can't phase-match a buzzing server, so it rolls back constantly. \
+             See `ground_clamp_anchor_pairs`."
+        );
+        // Teeth: without the census the same over-clamped assembly buzzes, so the
+        // settle above is really the fix at work, not a scene that never moves.
+        assert!(
+            buggy > 10.0 * fixed.max(1e-4),
+            "census-off should buzz relative to census-on (off = {buggy:.5}, on = {fixed:.5}); if \
+             it doesn't, this scene no longer reproduces the joint↔contact fight and the guard is \
+             vacuous — retune the over-clamp geometry."
+        );
+    }
+
+    /// Deterministic teeth: the fix works by making the weld census recognize a
+    /// ground clamp as a *rigid weld* and disable its contact (a single-anchor
+    /// clamp stays a contact-braced pivot). Assert exactly that — no solver, no
+    /// flake — so a change that silently stops de-contacting helper clamps
+    /// (dropped census wiring, a census-threshold regression, the helper reverting
+    /// to fewer anchors) fails here.
+    #[test]
+    fn census_decontacts_triangle_clamp_but_not_single_anchor() {
+        let build = |anchor_count: usize| -> bool {
+            let mut app = App::new();
+            // `PhysicsPlugins` for the `JointGraph` resource the `JointCollisionDisabled`
+            // add-hook needs; `TransformPlugin` for the physics transform sync.
+            app.add_plugins((MinimalPlugins, TransformPlugin, PhysicsPlugins::default()));
+            app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f32(
+                TIMESTEP,
+            )));
+            app.add_systems(Update, maintain_weld_rigidity);
+            let ground =
+                app.world_mut().spawn((RigidBody::Static, Position(Vec3::ZERO))).id();
+            let part =
+                app.world_mut().spawn((RigidBody::Dynamic, Position(Vec3::new(0.0, 1.0, 0.0)))).id();
+            let clamps: Vec<(Vec3, Vec3)> = if anchor_count == 1 {
+                vec![(Vec3::new(0.0, -0.5, 0.0), Vec3::ZERO)]
+            } else {
+                ground_clamp_anchor_pairs(Vec3::new(0.0, -0.5, 0.0), Vec3::ZERO, Quat::IDENTITY)
+                    .to_vec()
+            };
+            let joints: Vec<Entity> = clamps
+                .into_iter()
+                .map(|(pa, ga)| {
+                    app.world_mut()
+                        .spawn(
+                            SphericalJoint::new(part, ground)
+                                .with_local_anchor1(pa)
+                                .with_local_anchor2(ga),
+                        )
+                        .id()
+                })
+                .collect();
+            app.update(); // census runs on the freshly-added joints
+            // Contact between the pair is disabled iff every joint got the marker.
+            joints
+                .iter()
+                .all(|&j| app.world().get::<JointCollisionDisabled>(j).is_some())
+        };
+        assert!(build(3), "helper ground clamp (triangle) must be de-contacted by the census");
+        assert!(!build(1), "single-anchor ground clamp must stay contact-braced (not de-contacted)");
+    }
+}
