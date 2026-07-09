@@ -193,33 +193,27 @@ impl Plugin for NetClientPlugin {
         // prediction rollback for replicated Avian bodies.
         //
         // `rollback_resources: true` snapshots avian's solver-internal state
-        // (contact graph, constraint graph, broadphase proxies, **islands**,
-        // sleeping) into the rollback history. It was turned on to sharpen replay
-        // fidelity for the walking shake (#144), but it is **incompatible with the
-        // floating-origin rebase** and must stay off:
+        // (contact graph, constraint graph, broadphase proxies, islands, sleeping)
+        // into the rollback history, so a rollback replays against the SAME contact
+        // state the original prediction used instead of the current one. That sharp
+        // replay fidelity is what keeps prediction stable: without it, every replay
+        // re-resolves contacts slightly differently → chronic corrections (the
+        // walking shake, #144) AND the predicted jump velocity gets stomped by
+        // resync between snapshots, so a jump waits ~250 ms for the server instead
+        // of ~135 ms.
         //
-        // A rebase teleports every predicted body ~2 km in one tick, which reaches
-        // the client as one enormous rollback. Restoring `PhysicsIslands` (the
-        // island arena) across a jump that big leaves a `BodyIslandNode` pointing
-        // at an island id past the end of the restored arena; the next
-        // `merge_islands` does `get_disjoint_mut2(id1, id2).unwrap()` on that stale
-        // id and panics (`islands/mod.rs:843`, "Unreachable code") — `panic=abort`,
-        // so the whole wasm app dies. Reproduced: ride the rocket past ~2 km and
-        // the client hard-crashes at the first rebase (an observer in the room
-        // crashes too — it is rider-independent). With the flag off, avian rebuilds
-        // islands fresh each rollback tick from consistent state, so the merge
-        // never sees a stale id. The rebase shipped and was verified to 59 km
-        // ridden with this flag off (#139); #144 flipped it on and broke ascent.
-        //
-        // The shake it was meant to help is now addressed at its *root*: the buzz
-        // driving the rollback storm was the pad's joint-vs-contact fight, fixed by
-        // the rigid ground clamps (#145) — with the buzz gone the rollback rate is
-        // ~0.7/s, so the replay-fidelity gain from restoring contact state is
-        // marginal, and not worth crashing every high-altitude flight for.
+        // It was briefly forced OFF (#147) because it CRASHED high-altitude flights:
+        // the OLD discrete rebase teleported every body 2 km in one tick, and
+        // restoring `PhysicsIslands` across a jump that large left a stale island id
+        // that panicked `merge_islands` (`islands/mod.rs:843`). The continuous
+        // co-moving frame removes that jump entirely — the assembly hovers within
+        // ~50 m of the local origin the whole climb, so a rebase is no longer a
+        // giant rollback and the island restore stays consistent. With the jump gone
+        // the flag is safe again, so we keep it ON for the fidelity.
         app.add_plugins(lightyear_avian3d::prelude::LightyearAvianPlugin {
             replication_mode: lightyear_avian3d::plugin::AvianReplicationMode::Position,
             update_syncs_manually: false,
-            rollback_resources: false,
+            rollback_resources: true,
         });
         // The character's ground-contact state rolls back too — must register
         // here (after `ClientPlugins` created the prediction registry), not in
@@ -272,6 +266,7 @@ impl Plugin for NetClientPlugin {
         // Report our prediction load to the server's log for measurement (see
         // `RollbackReport`); diagnostics only, off the gameplay path.
         app.add_systems(Update, (report_rollbacks, report_stored_panic, rbrate_diag));
+        app.add_systems(bevy::app::Last, jump_probe);
         // Each frame: track the look-focused part (empty-handed) into
         // `FocusedInteractable`, then read the click → grab/attach intent gated on it.
         // After `InputEvents` (mobile `apply_pointer` / desktop `get_modifying`) so
@@ -468,6 +463,28 @@ fn setup_predicted_avatar(
             e.insert((Yaw(resume_look.yaw), LookPitch(resume_look.pitch)));
             *look_applied = true;
         }
+    }
+}
+
+/// DIAG (temp): jump-latency probe. On each `DirectionalInput.y` (jump intent)
+/// rising edge, log a window of the predicted avatar's vy/py so the intent→liftoff
+/// delay is measurable offline.
+fn jump_probe(
+    time: Res<Time>,
+    mut window: Local<f32>,
+    mut last: Local<bool>,
+    avatar: Query<(&DirectionalInput, &LinearVelocity, &Position), With<Character>>,
+) {
+    let now = time.elapsed_secs();
+    let Ok((dir, v, pos)) = avatar.single() else { return };
+    let intent = dir.0.y > 0.0;
+    if intent && !*last {
+        *window = now + 0.6;
+        warn!("[jl] INTENT t={:.3}", now);
+    }
+    *last = intent;
+    if now < *window || v.0.y.abs() > 0.3 {
+        warn!("[jl] t={:.3} diry={:.2} vy={:.2} py={:.3}", now, dir.0.y, v.0.y, pos.0.y);
     }
 }
 
