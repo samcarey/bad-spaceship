@@ -612,7 +612,6 @@ fn room_layers(bit: u32, grounded: bool) -> CollisionLayers {
 /// no ordering.
 fn rebase_room_frames(
     time: Res<Time>,
-    mut diag: Local<f32>,
     mut commands: Commands,
     mut frames: ResMut<RoomFrames>,
     joints: Query<(Entity, &SphericalJoint, Option<&RoomMember>)>,
@@ -684,33 +683,12 @@ fn rebase_room_frames(
         }
     };
 
-    // Throttled flight telemetry (~2 s): confirms the co-moving frame keeps the
-    // assembly's LOCAL drift small while the true altitude (offset) climbs.
-    let log_now = {
-        *diag += dt as f32;
-        if *diag > 2.0 {
-            *diag = 0.0;
-            true
-        } else {
-            false
-        }
-    };
-
     // 3. Per room: rebase on drift, reset near the true origin, publish the frame.
     for (orb_room, mut net_frame) in &mut orbs {
         let room = orb_room.0;
         let frame = frames.by_room.entry(room).or_default();
         if let Some((anchor_pos, anchor_vel)) = anchor(room) {
             let was_active = frame.is_active();
-            if log_now && frame.is_active() {
-                println!(
-                    "[frame-tel] {room:?} alt={:.0}m vspeed={:.1}m/s local_drift={:.1}m local_vel={:.2}m/s",
-                    frame.offset.y,
-                    frame.velocity.y,
-                    anchor_pos.length(),
-                    anchor_vel.length()
-                );
-            }
             let true_anchor = frame.offset + anchor_pos.as_dvec3();
             // (shift, boost) to subtract from every room entity's position/velocity.
             let shift = if frame.is_active()

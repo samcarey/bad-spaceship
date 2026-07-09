@@ -505,6 +505,7 @@ dependencies = [
 [[package]]
 name = "avian3d"
 version = "0.7.0"
+source = "git+https://github.com/samcarey/avian?rev=e184f19c31db87c8ed313f8b8b988d6453d2a2ba#e184f19c31db87c8ed313f8b8b988d6453d2a2ba"
 dependencies = [
  "approx",
  "avian_derive 0.2.2",
@@ -530,6 +531,7 @@ dependencies = [
 [[package]]
 name = "avian_derive"
 version = "0.2.2"
+source = "git+https://github.com/samcarey/avian?rev=e184f19c31db87c8ed313f8b8b988d6453d2a2ba#e184f19c31db87c8ed313f8b8b988d6453d2a2ba"
 dependencies = [
  "proc-macro-error3",
  "proc-macro2",

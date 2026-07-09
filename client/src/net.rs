@@ -192,28 +192,19 @@ impl Plugin for NetClientPlugin {
         // in multiplayer by `add_physics`), frame interpolation, and client-side
         // prediction rollback for replicated Avian bodies.
         //
-        // `rollback_resources: true` snapshots avian's solver-internal state
-        // (contact graph, constraint graph, broadphase proxies, islands, sleeping)
-        // into the rollback history, so a rollback replays against the SAME contact
-        // state the original prediction used instead of the current one. That sharp
-        // replay fidelity is what keeps prediction stable: without it, every replay
-        // re-resolves contacts slightly differently → chronic corrections (the
-        // walking shake, #144) AND the predicted jump velocity gets stomped by
-        // resync between snapshots, so a jump waits ~250 ms for the server instead
-        // of ~135 ms.
-        //
-        // It was briefly forced OFF (#147) because it CRASHED high-altitude flights:
-        // the OLD discrete rebase teleported every body 2 km in one tick, and
-        // restoring `PhysicsIslands` across a jump that large left a stale island id
-        // that panicked `merge_islands` (`islands/mod.rs:843`). The continuous
-        // co-moving frame removes that jump entirely — the assembly hovers within
-        // ~50 m of the local origin the whole climb, so a rebase is no longer a
-        // giant rollback and the island restore stays consistent. With the jump gone
-        // the flag is safe again, so we keep it ON for the fidelity.
+        // `rollback_resources: true` would restore avian's solver-internal state
+        // (contact/constraint graph, islands, sleeping) in rollback, sharpening
+        // replay fidelity — it roughly halves the multiplayer jump lag (~250→150 ms).
+        // It is kept OFF here deliberately: with the flag on, ANY island
+        // restructuring during a rollback (a rebase, but also ordinary loose parts
+        // settling) can hit an avian island-solver stale-id panic; enabling it
+        // safely needs the extended tolerant-island avian patch AND trades higher
+        // in-flight rollback churn, so the jump/fidelity work is a separate follow-up.
+        // The continuous co-moving frame below stands on its own with the flag off.
         app.add_plugins(lightyear_avian3d::prelude::LightyearAvianPlugin {
             replication_mode: lightyear_avian3d::plugin::AvianReplicationMode::Position,
             update_syncs_manually: false,
-            rollback_resources: true,
+            rollback_resources: false,
         });
         // The character's ground-contact state rolls back too — must register
         // here (after `ClientPlugins` created the prediction registry), not in
@@ -265,8 +256,7 @@ impl Plugin for NetClientPlugin {
         app.add_systems(Update, reconnect_dropped);
         // Report our prediction load to the server's log for measurement (see
         // `RollbackReport`); diagnostics only, off the gameplay path.
-        app.add_systems(Update, (report_rollbacks, report_stored_panic, rbrate_diag));
-        app.add_systems(bevy::app::Last, jump_probe);
+        app.add_systems(Update, (report_rollbacks, report_stored_panic));
         // Each frame: track the look-focused part (empty-handed) into
         // `FocusedInteractable`, then read the click → grab/attach intent gated on it.
         // After `InputEvents` (mobile `apply_pointer` / desktop `get_modifying`) so
@@ -464,49 +454,6 @@ fn setup_predicted_avatar(
             *look_applied = true;
         }
     }
-}
-
-/// DIAG (temp): jump-latency probe. On each `DirectionalInput.y` (jump intent)
-/// rising edge, log a window of the predicted avatar's vy/py so the intent→liftoff
-/// delay is measurable offline.
-fn jump_probe(
-    time: Res<Time>,
-    mut window: Local<f32>,
-    mut last: Local<bool>,
-    avatar: Query<(&DirectionalInput, &LinearVelocity, &Position), With<Character>>,
-) {
-    let now = time.elapsed_secs();
-    let Ok((dir, v, pos)) = avatar.single() else { return };
-    let intent = dir.0.y > 0.0;
-    if intent && !*last {
-        *window = now + 0.6;
-        warn!("[jl] INTENT t={:.3}", now);
-    }
-    *last = intent;
-    if now < *window || v.0.y.abs() > 0.3 {
-        warn!("[jl] t={:.3} diry={:.2} vy={:.2} py={:.3}", now, dir.0.y, v.0.y, pos.0.y);
-    }
-}
-
-/// DIAG (temp): log the client rollback rate + altitude once a second so a
-/// headless flight can confirm the continuous co-moving frame doesn't storm.
-fn rbrate_diag(
-    time: Res<Time>,
-    mut acc: Local<f32>,
-    mut last: Local<u32>,
-    metrics: Option<Res<PredictionMetrics>>,
-    frames: Query<&NetRoomFrame>,
-) {
-    *acc += time.delta_secs();
-    if *acc < 1.0 {
-        return;
-    }
-    *acc = 0.0;
-    let rb = metrics.as_ref().map(|m| m.rollbacks).unwrap_or(0);
-    let delta = rb.saturating_sub(*last);
-    *last = rb;
-    let alt = frames.iter().next().map(|f| f.offset[1]).unwrap_or(0.0);
-    warn!("[rbrate] rb/s={} alt={:.0}m", delta, alt);
 }
 
 /// Client mirror of the server's continuous co-moving boost (`rebase_room_frames`):

@@ -99,6 +99,4 @@ panic = "abort"
 # WebKit via headless Playwright. Drop this patch when upstream fixes it
 # (Jondolf/avian#950 family).
 [patch.crates-io]
-# TEMP local path for testing the extended tolerant-island patch; repoint to the
-# samcarey/avian git rev once pushed.
-avian3d = { path = "/private/tmp/claude-501/-Users-sccarey/915107ed-1732-43b0-9c5f-d216b3bc8826/scratchpad/avian-fork/crates/avian3d" }
+avian3d = { git = "https://github.com/samcarey/avian", rev = "e184f19c31db87c8ed313f8b8b988d6453d2a2ba" }
