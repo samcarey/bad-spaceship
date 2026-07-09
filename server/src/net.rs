@@ -750,15 +750,17 @@ fn rebase_room_frames(
             if let Some((dpos, dvel)) = shift {
                 let grounded = !frame.is_active();
                 let transitioned = was_active != frame.is_active();
-                // Collision layers are DELIBERATELY left unchanged across the
-                // grounded↔active transition. The continuous frame keeps the
-                // assembly hovering only ~50 m off the local origin (not km away),
-                // so it clears the phantom ground collider on its own — there is no
-                // need to drop the ground bit. Crucially, a mass CollisionLayers
-                // flip on every room body at once restructures avian's island arena
-                // in a single tick, and with `rollback_resources` on the client, a
-                // rollback spanning that restructuring hits the island-solver
-                // stale-id panic. Never touching the layers removes that entirely.
+                // Drop (activate) / restore (land) the room's ground collision bit on
+                // the transition — NOT every continuous-boost tick, which would churn
+                // avian's immutable `CollisionLayers` 60×/s. Active rooms MUST drop
+                // the bit: the shared ground collider sits at the local origin and
+                // can't ride the frame, so while active it's a phantom — a loose pad
+                // part or a fallen rider that kept the bit would rest ON that phantom
+                // and appear to hover alongside the rocket instead of falling away.
+                // The mass layer flip restructures avian's island arena in one tick;
+                // with `rollback_resources` on the client a rollback spanning it used
+                // to hit the island-solver stale-id panic — now made crash-safe by the
+                // extended tolerant-island patch in the samcarey/avian fork.
                 //
                 // A rebased room must have no part↔ground joints (the shared ground
                 // body does not ride the frame); real flights cut them at blastoff,
@@ -774,16 +776,28 @@ fn rebase_room_frames(
                         }
                     }
                 }
-                for (_, _, part_room, mut position, mut linear) in &mut parts {
+                // Avatars don't carry the room's collision bit; pick it up from the
+                // room's parts (a room always has parts).
+                let mut bit = None;
+                for (entity, _, part_room, mut position, mut linear) in &mut parts {
                     if part_room.id == room {
                         position.0 -= dpos;
                         linear.0 -= dvel;
+                        bit = Some(part_room.bit);
+                        if transitioned {
+                            commands.entity(entity).insert(room_layers(part_room.bit, grounded));
+                        }
                     }
                 }
-                for (_, member, mut position, mut linear) in &mut avatars {
+                for (entity, member, mut position, mut linear) in &mut avatars {
                     if member.0 == room {
                         position.0 -= dpos;
                         linear.0 -= dvel;
+                        if transitioned {
+                            if let Some(bit) = bit {
+                                commands.entity(entity).insert(room_layers(bit, grounded));
+                            }
+                        }
                     }
                 }
                 // Log only the transitions (activate / land), not every co-moving
