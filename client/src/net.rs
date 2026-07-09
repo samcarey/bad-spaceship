@@ -27,7 +27,7 @@ use bad_spaceship_shared::character::{
 };
 use bad_spaceship_shared::net::{
     apply_hold_spring, apply_net_input, focused_part, room_code_bytes, ClientPanicReport,
-    ControlChannel,
+    ControlChannel, InLargestAssembly,
     NetCenterOfMass, NetFacing, NetHold, NetInput, NetJoint, NetPart, PartShape, take_rollback_diag,
     NetPlayer, NetRoomFrame, ProtocolPlugin, RollbackReport, TelemetryChannel, GROUND_JOINT_ID,
     TICK,
@@ -271,7 +271,7 @@ impl Plugin for NetClientPlugin {
         app.add_systems(Update, reconnect_dropped);
         // Report our prediction load to the server's log for measurement (see
         // `RollbackReport`); diagnostics only, off the gameplay path.
-        app.add_systems(Update, (report_rollbacks, report_stored_panic));
+        app.add_systems(Update, (report_rollbacks, report_stored_panic, rbrate_diag));
         // Each frame: track the look-focused part (empty-handed) into
         // `FocusedInteractable`, then read the click → grab/attach intent gated on it.
         // After `InputEvents` (mobile `apply_pointer` / desktop `get_modifying`) so
@@ -318,6 +318,9 @@ impl Plugin for NetClientPlugin {
         app.add_systems(
             FixedUpdate,
             (
+                // Mirror the server's continuous co-moving boost onto the predicted
+                // world, before movement/thrust advance it (see the fn doc).
+                comove_predicted_frame.before(CharacterMovement),
                 apply_net_input.before(CharacterMovement),
                 // Both spring held parts through `Forces`; order them so the shared
                 // `Forces` accumulation isn't an ambiguous double-write. `predict_hold`
@@ -465,6 +468,70 @@ fn setup_predicted_avatar(
             e.insert((Yaw(resume_look.yaw), LookPitch(resume_look.pitch)));
             *look_applied = true;
         }
+    }
+}
+
+/// DIAG (temp): log the client rollback rate + altitude once a second so a
+/// headless flight can confirm the continuous co-moving frame doesn't storm.
+fn rbrate_diag(
+    time: Res<Time>,
+    mut acc: Local<f32>,
+    mut last: Local<u32>,
+    metrics: Option<Res<PredictionMetrics>>,
+    frames: Query<&NetRoomFrame>,
+) {
+    *acc += time.delta_secs();
+    if *acc < 1.0 {
+        return;
+    }
+    *acc = 0.0;
+    let rb = metrics.as_ref().map(|m| m.rollbacks).unwrap_or(0);
+    let delta = rb.saturating_sub(*last);
+    *last = rb;
+    let alt = frames.iter().next().map(|f| f.offset[1]).unwrap_or(0.0);
+    warn!("[rbrate] rb/s={} alt={:.0}m", delta, alt);
+}
+
+/// Client mirror of the server's continuous co-moving boost (`rebase_room_frames`):
+/// while the room's floating-origin frame is active, cancel the predicted
+/// assembly's local COM velocity from every predicted room body each tick, so the
+/// client's predicted world hovers near the local origin in lockstep with the
+/// server's. Without it the free-running prediction flies the rocket away in local
+/// coordinates (the server hovers it), diverging past tolerance every snapshot — a
+/// perpetual rollback storm on every flight.
+///
+/// The boost need NOT equal the server's mass-weighted COM value: the client only
+/// needs its bodies to hover (~0 local velocity), and a jointed assembly moves as
+/// one so the unweighted mean is within tolerance of the server's. The true motion
+/// lives in the replicated `NetRoomFrame` offset (used for rendering the ground/ash
+/// and altitude), not in these local velocities. Gated on the replicated frame
+/// being active so ordinary grounded play (walking, jumping) is untouched. Runs in
+/// `FixedUpdate` (re-runs under rollback replay, deterministic from the state).
+#[allow(clippy::type_complexity)]
+fn comove_predicted_frame(
+    frames: Query<&NetRoomFrame>,
+    mut bodies: ParamSet<(
+        Query<&LinearVelocity, (With<InLargestAssembly>, With<Predicted>)>,
+        Query<&mut LinearVelocity, (With<Predicted>, Or<(With<NetPart>, With<Character>)>)>,
+    )>,
+) {
+    let Some(frame) = frames.iter().next() else {
+        return;
+    };
+    if !frame.is_active() {
+        return;
+    }
+    let (mut sum, mut n) = (Vec3::ZERO, 0u32);
+    for v in bodies.p0().iter() {
+        sum += v.0;
+        n += 1;
+    }
+    if n == 0 {
+        return;
+    }
+    let com_vel = sum / n as f32;
+    for mut v in &mut bodies.p1() {
+        v.0 -= com_vel;
     }
 }
 
