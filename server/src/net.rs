@@ -749,17 +749,21 @@ fn rebase_room_frames(
             };
             if let Some((dpos, dvel)) = shift {
                 let grounded = !frame.is_active();
-                // Collision layers (ground bit) only flip on the grounded↔active
-                // transition — NOT every continuous-boost tick, which would churn
-                // avian's immutable `CollisionLayers` 60×/s for every body.
-                let layers_changed = was_active == grounded;
-                // A rebased room must have no part↔ground joints: the shared
-                // ground body does not ride the frame, so such a joint would pin
-                // the assembly to an anchor the shift just moved km away — a
-                // constraint violation violent enough to explode the assembly.
-                // Real flights cut them at blastoff; cut any stragglers on the
-                // transition into an active frame.
-                if layers_changed && !grounded {
+                let transitioned = was_active != frame.is_active();
+                // Collision layers are DELIBERATELY left unchanged across the
+                // grounded↔active transition. The continuous frame keeps the
+                // assembly hovering only ~50 m off the local origin (not km away),
+                // so it clears the phantom ground collider on its own — there is no
+                // need to drop the ground bit. Crucially, a mass CollisionLayers
+                // flip on every room body at once restructures avian's island arena
+                // in a single tick, and with `rollback_resources` on the client, a
+                // rollback spanning that restructuring hits the island-solver
+                // stale-id panic. Never touching the layers removes that entirely.
+                //
+                // A rebased room must have no part↔ground joints (the shared ground
+                // body does not ride the frame); real flights cut them at blastoff,
+                // so cut any stragglers on the transition into an active frame.
+                if transitioned && !grounded {
                     for (joint_entity, joint, member) in &joints {
                         if member.is_some_and(|m| m.0 == room)
                             && (!index.contains_key(&joint.body1)
@@ -770,33 +774,21 @@ fn rebase_room_frames(
                         }
                     }
                 }
-                // Avatars don't carry the room's collision bit; pick it up from the
-                // room's parts (a room always has parts).
-                let mut bit = None;
-                for (entity, _, part_room, mut position, mut linear) in &mut parts {
+                for (_, _, part_room, mut position, mut linear) in &mut parts {
                     if part_room.id == room {
                         position.0 -= dpos;
                         linear.0 -= dvel;
-                        bit = Some(part_room.bit);
-                        if layers_changed {
-                            commands.entity(entity).insert(room_layers(part_room.bit, grounded));
-                        }
                     }
                 }
-                for (entity, member, mut position, mut linear) in &mut avatars {
+                for (_, member, mut position, mut linear) in &mut avatars {
                     if member.0 == room {
                         position.0 -= dpos;
                         linear.0 -= dvel;
-                        if layers_changed {
-                            if let Some(bit) = bit {
-                                commands.entity(entity).insert(room_layers(bit, grounded));
-                            }
-                        }
                     }
                 }
                 // Log only the transitions (activate / land), not every co-moving
                 // tick — otherwise this floods the server log 60×/s in flight.
-                if layers_changed {
+                if transitioned {
                     println!(
                         "[frame] room {room:?}: {} -> offset {:?} vel {:?}",
                         if grounded { "landed" } else { "activated" },
