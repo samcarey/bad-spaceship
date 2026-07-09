@@ -13,8 +13,8 @@
 //! interpolated Avian pose.
 
 use avian3d::prelude::{
-    Forces, Gravity, LinearVelocity, PhysicsSystems, Position, RigidBody, Rotation,
-    SphericalJoint,
+    AngularVelocity, ComputedMass, Forces, Gravity, LinearVelocity, PhysicsSystems, Position,
+    RigidBody, Rotation, SphericalJoint,
 };
 use bevy::math::DVec3;
 use bevy::transform::TransformSystems;
@@ -27,7 +27,7 @@ use bad_spaceship_shared::character::{
 };
 use bad_spaceship_shared::net::{
     apply_hold_spring, apply_net_input, focused_part, room_code_bytes, ClientPanicReport,
-    ControlChannel, InLargestAssembly,
+    ControlChannel, InLargestAssembly, FRAME_ACTIVATE_SPEED,
     NetCenterOfMass, NetFacing, NetHold, NetInput, NetJoint, NetPart, PartShape, take_rollback_diag,
     NetPlayer, NetRoomFrame, ProtocolPlugin, RollbackReport, TelemetryChannel, GROUND_JOINT_ID,
     TICK,
@@ -471,47 +471,48 @@ fn setup_predicted_avatar(
 /// and altitude), not in these local velocities. Gated on the replicated frame
 /// being active so ordinary grounded play (walking, jumping) is untouched. Runs in
 /// `FixedUpdate` (re-runs under rollback replay, deterministic from the state).
-/// Must match the server's `REBASE_ACTIVATE_SPEED` — the client predicts the same
-/// activation locally so it boosts on the SAME tick the server does.
-const COMOVE_ACTIVATE_SPEED: f32 = 30.0;
-
 #[allow(clippy::type_complexity)]
 fn comove_predicted_frame(
     frames: Query<&NetRoomFrame>,
     mut boosting: Local<bool>,
     mut confirmed: Local<bool>,
     mut bodies: ParamSet<(
-        Query<&LinearVelocity, (With<InLargestAssembly>, With<Predicted>)>,
+        Query<
+            (&Position, &LinearVelocity, &AngularVelocity, &ComputedMass),
+            (With<InLargestAssembly>, With<Predicted>),
+        >,
         Query<&mut LinearVelocity, (With<Predicted>, Or<(With<NetPart>, With<Character>)>)>,
     )>,
 ) {
     let frame_active = frames.iter().next().is_some_and(|f| f.is_active());
-    let (mut sum, mut n) = (Vec3::ZERO, 0u32);
-    for v in bodies.p0().iter() {
-        sum += v.0;
-        n += 1;
-    }
-    if n == 0 {
-        return;
-    }
-    let com_vel = sum / n as f32;
+    // The predicted assembly's mass-weighted COM velocity, via the SAME shared
+    // measurement the server boosts by (`measure_assembly_spin`) — so client and
+    // server hover in lockstep even during staging/breakup, where an unweighted
+    // mean would diverge from the server and reintroduce rollback churn.
+    let com_vel = {
+        let members = bodies.p0();
+        let samples = || members.iter().map(|(p, l, a, m)| (p.0, l.0, a.0, m.value()));
+        match bad_spaceship_shared::launch::measure_assembly_spin(samples) {
+            Some((_, spin)) => spin.linear_velocity,
+            None => return,
+        }
+    };
 
     // Latch the boost on locally the moment our OWN predicted assembly crosses the
     // activation speed — do NOT wait for the replicated `NetRoomFrame` to flip
-    // active (~1 RTT later). If the client lagged the server's activation boost by
-    // even one snapshot, the resulting velocity divergence forces a rollback, and a
-    // rollback that spans the frame's ground-bit-drop restructures the island arena
-    // mid-restore → the `merge_islands` stale-id panic. Predicting activation in
-    // lockstep keeps the boost divergence-free, so the restructuring never happens
-    // inside a rollback. `confirmed` tracks that the server's frame has actually
-    // gone active, so we only latch OFF (landing) once it goes inactive again.
+    // active (~1 RTT later). Lagging the server's activation boost by even a
+    // snapshot forces a velocity-divergence rollback, and a rollback spanning the
+    // frame's ground-bit-drop restructures the island arena mid-restore.
+    // Predicting activation off the shared `FRAME_ACTIVATE_SPEED` keeps the boost
+    // divergence-free. `confirmed` tracks that the server's frame has actually gone
+    // active, so we only latch OFF (landing) once it goes inactive again.
     if frame_active {
         *boosting = true;
         *confirmed = true;
     } else if *confirmed {
         *boosting = false;
         *confirmed = false;
-    } else if com_vel.length() > COMOVE_ACTIVATE_SPEED {
+    } else if com_vel.length() > FRAME_ACTIVATE_SPEED {
         *boosting = true;
     }
     if !*boosting {

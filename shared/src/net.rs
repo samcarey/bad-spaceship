@@ -405,6 +405,15 @@ pub struct NetRoomFrame {
     pub velocity: [f32; 3],
 }
 
+/// Local COM speed at which a room's floating-origin frame activates and begins
+/// continuously co-moving. Shared because it is a **cross-process invariant**: the
+/// client predicts the server's activation tick off this exact value to boost its
+/// predicted world in lockstep — a mismatch desyncs the boost and reintroduces a
+/// perpetual rollback storm. A launched rocket crosses it within ~1 s (tens of
+/// metres of local altitude); ordinary play (walking, a ~7.5 m/s jump, settling
+/// parts) stays well under it, so grounded rooms keep real coordinates + ground.
+pub const FRAME_ACTIVATE_SPEED: f32 = 30.0; // m/s
+
 impl NetRoomFrame {
     /// Whether the room is currently rebased away from the true origin. An active
     /// frame means the true ground is far away: the server drops the ground bit from

@@ -31,6 +31,7 @@ use bad_spaceship_shared::character::{spawn_position, CharacterMovement, Initial
 use bad_spaceship_shared::net::{
     apply_hold_spring, apply_net_input, focused_part, monster_index, sanitize_name,
     ClientPanicReport, InLargestAssembly, NetCenterOfMass, NetFacing, NetHold, NetInput, NetJoint,
+    FRAME_ACTIVATE_SPEED,
     NetLaunch, NetName, NetPart, NetPlayer, NetRoomFrame, PartShape, ProtocolPlugin, RequestLaunch,
     ResetPosition, RollbackReport, SaveGame, SetAvatar, SetName, GROUND_JOINT_ID, MONSTER_COUNT,
     TICK,
@@ -516,7 +517,7 @@ struct OrbRoom(RoomId);
 // f32 starves the solver (and the client renderer) at extreme altitude — the old
 // hard ceilings were ~33 km with a rider / ~524 km unmanned. So each room carries a
 // floating-origin frame: once its assembly is moving faster than
-// `REBASE_ACTIVATE_SPEED`, `rebase_room_frames` continuously co-moves — EVERY tick
+// `FRAME_ACTIVATE_SPEED`, `rebase_room_frames` continuously co-moves — EVERY tick
 // it subtracts the assembly's local COM velocity from every entity in the room (a
 // Galilean boost — forces are velocity-independent, so the dynamics are preserved)
 // and accumulates it into the frame velocity (`offset` integrates at `velocity` per
@@ -545,13 +546,8 @@ struct OrbRoom(RoomId);
 /// continuous co-moving boost normally activates on speed first, well before this).
 const REBASE_TRIGGER_M: f32 = 2000.0;
 
-/// Local COM speed at which a room's frame activates and begins continuously
-/// co-moving. A launched rocket crosses this within ~1 s (a few tens of metres of
-/// local altitude), so the assembly freezes into the co-moving frame while its
-/// local coordinates are still small — no km-scale drift, no discrete position
-/// jump. Ordinary play (walking ≤ max_speed, a jump ≈ 7.5 m/s, settling parts)
-/// stays well under it, so grounded rooms keep real coordinates + real ground.
-const REBASE_ACTIVATE_SPEED: f32 = 30.0; // m/s
+// Frame-activation speed lives in `shared::net` (`FRAME_ACTIVATE_SPEED`) — the
+// client predicts activation off the same value, so it must be identical.
 
 /// True distance from the origin below which an active frame resets to exactly
 /// zero (real coordinates, real ground).
@@ -634,7 +630,7 @@ fn rebase_room_frames(
     // the rebase band: skip the per-room anchor work (index + union-find) entirely.
     // Publishing still runs (a fresh orb needs its zero frame written once).
     const TRIGGER_SQ: f32 = REBASE_TRIGGER_M * REBASE_TRIGGER_M;
-    const ACTIVATE_SQ: f32 = REBASE_ACTIVATE_SPEED * REBASE_ACTIVATE_SPEED;
+    const ACTIVATE_SQ: f32 = FRAME_ACTIVATE_SPEED * FRAME_ACTIVATE_SPEED;
     if frames.by_room.values().all(|f| !f.is_active())
         && parts.iter().all(|(.., position, linear)| {
             position.0.length_squared() < TRIGGER_SQ && linear.0.length_squared() < ACTIVATE_SQ
@@ -706,7 +702,7 @@ fn rebase_room_frames(
                 (frame.offset, frame.velocity) = (DVec3::ZERO, Vec3::ZERO);
                 Some(shift)
             } else if frame.is_active()
-                || anchor_vel.length() > REBASE_ACTIVATE_SPEED
+                || anchor_vel.length() > FRAME_ACTIVATE_SPEED
                 || anchor_pos.length() > REBASE_TRIGGER_M
             {
                 // Continuous co-moving frame: cancel the assembly's local COM
@@ -754,12 +750,19 @@ fn rebase_room_frames(
                         }
                     }
                 }
+                // The continuous-boost branch shifts velocity only (`dpos` is zero);
+                // skip the position write so it doesn't dirty every body's `Position`
+                // change-detection 60×/s in flight — only the reset/landing branch
+                // carries a real position shift.
+                let shift_pos = dpos != Vec3::ZERO;
                 // Avatars don't carry the room's collision bit; pick it up from the
                 // room's parts (a room always has parts).
                 let mut bit = None;
                 for (entity, _, part_room, mut position, mut linear) in &mut parts {
                     if part_room.id == room {
-                        position.0 -= dpos;
+                        if shift_pos {
+                            position.0 -= dpos;
+                        }
                         linear.0 -= dvel;
                         bit = Some(part_room.bit);
                         if transitioned {
@@ -769,7 +772,9 @@ fn rebase_room_frames(
                 }
                 for (entity, member, mut position, mut linear) in &mut avatars {
                     if member.0 == room {
-                        position.0 -= dpos;
+                        if shift_pos {
+                            position.0 -= dpos;
+                        }
                         linear.0 -= dvel;
                         if transitioned {
                             if let Some(bit) = bit {
@@ -2573,7 +2578,7 @@ mod tests {
         )
     }
 
-    /// Once a room's assembly is moving faster than `REBASE_ACTIVATE_SPEED`, the
+    /// Once a room's assembly is moving faster than `FRAME_ACTIVATE_SPEED`, the
     /// room enters a CONTINUOUS co-moving frame: the assembly's local COM velocity
     /// is boosted into the frame with **no position shift** (so no discrete jump),
     /// velocities go to ~zero locally, the ground bit drops, and the assembly hovers
@@ -2587,7 +2592,7 @@ mod tests {
 
         let room = RoomAllocator::default().allocate();
         let bit = 1u32 << 1;
-        let climb = Vec3::new(0.0, 60.0, 0.0); // > REBASE_ACTIVATE_SPEED
+        let climb = Vec3::new(0.0, 60.0, 0.0); // > FRAME_ACTIVATE_SPEED
                                                // Assembly launched, low local altitude, already climbing fast.
         let a = app
             .world_mut()
