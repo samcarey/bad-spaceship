@@ -91,6 +91,27 @@ pub fn largest_assembly_per_room<R: Copy + Eq + Hash>(
     out
 }
 
+/// Mass-weighted mean position and velocity of a set of `(position, velocity, weight)`
+/// samples — the floating-origin rebase's anchor. `None` when the samples carry no mass.
+///
+/// A single pass, unlike `launch::measure_assembly_spin` (which also makes a second pass
+/// for the rotational inertia the rebase doesn't need). Shared so the server's
+/// `rebase_room_frames` and the client's `predict_room_rebase` derive the anchor with
+/// one arithmetic definition — the rebase is only predictable if both sides compute the
+/// same COM (the weights themselves coincide because density is uniform, so the server's
+/// volume weights and the client's `ComputedMass` give the same normalized mean).
+pub fn mass_weighted_com_velocity(
+    samples: impl Iterator<Item = (Vec3, Vec3, f32)>,
+) -> Option<(Vec3, Vec3)> {
+    let (mut weighted_pos, mut weighted_vel, mut mass) = (Vec3::ZERO, Vec3::ZERO, 0.0);
+    for (position, velocity, weight) in samples {
+        weighted_pos += position * weight;
+        weighted_vel += velocity * weight;
+        mass += weight;
+    }
+    (mass > 0.0).then(|| (weighted_pos / mass, weighted_vel / mass))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{largest_assembly_per_room, Vec3};

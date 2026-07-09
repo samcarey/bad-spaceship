@@ -13,8 +13,8 @@
 //! interpolated Avian pose.
 
 use avian3d::prelude::{
-    AngularVelocity, ComputedMass, Forces, Gravity, LinearVelocity, PhysicsSystems, Position,
-    RigidBody, Rotation, SphericalJoint,
+    ComputedMass, Forces, Gravity, LinearVelocity, PhysicsSystems, Position, RigidBody, Rotation,
+    SphericalJoint,
 };
 use bevy::math::DVec3;
 use bevy::transform::TransformSystems;
@@ -25,7 +25,7 @@ use crate::render_main_pass::AshMaterial;
 use bad_spaceship_shared::character::{
     insert_character_body, CharacterMovement, Config as CharacterConfig,
 };
-use bad_spaceship_shared::launch::measure_assembly_spin;
+use bad_spaceship_shared::assembly::mass_weighted_com_velocity;
 use bad_spaceship_shared::net::{
     apply_hold_spring, apply_net_input, focused_part, rebase_shift, room_code_bytes,
     ClientPanicReport, ControlChannel, InLargestAssembly,
@@ -934,7 +934,7 @@ fn predict_room_rebase(
     mut bodies: ParamSet<(
         // Our largest assembly's members — the anchor whose local COM triggers the shift.
         Query<
-            (&Position, &LinearVelocity, &AngularVelocity, &ComputedMass),
+            (&Position, &LinearVelocity, &ComputedMass),
             (With<NetPart>, With<Predicted>, With<InLargestAssembly>),
         >,
         // Every predicted room body (loose + assembly parts and our avatar): all shift
@@ -945,22 +945,20 @@ fn predict_room_rebase(
         >,
     )>,
 ) {
-    // Mass-weighted COM + mean velocity of our predicted assembly, via the shared
-    // measurement the server trims by. `ComputedMass` ∝ volume under uniform density, so
-    // this COM matches the server's volume-weighted anchor. No assembly (no ≥2 jointed
-    // parts) ⇒ nothing flying to the trigger ⇒ leave it to the correction path.
+    // Mass-weighted COM + mean velocity of our predicted assembly, via the same shared
+    // helper the server's rebase anchor uses. `ComputedMass` ∝ volume under uniform
+    // density, so this matches the server's volume-weighted anchor. No assembly (no ≥2
+    // jointed parts) ⇒ nothing flying to the trigger ⇒ leave it to the correction path.
     let anchor = {
         let members = bodies.p0();
-        let samples = || members.iter().map(|(p, l, a, m)| (p.0, l.0, a.0, m.value()));
-        measure_assembly_spin(samples)
+        mass_weighted_com_velocity(members.iter().map(|(p, l, m)| (p.0, l.0, m.value())))
     };
-    let Some((com, spin)) = anchor else {
+    let Some((com, dvel)) = anchor else {
         return;
     };
     let Some(dpos) = rebase_shift(com) else {
         return;
     };
-    let dvel = spin.linear_velocity;
     for (mut position, mut linear) in &mut bodies.p1() {
         position.0 -= dpos;
         linear.0 -= dvel;

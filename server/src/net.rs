@@ -25,7 +25,7 @@ use avian3d::prelude::{
     AngularVelocity, CollisionLayers, Collisions, ComputedCenterOfMass, ComputedMass, Forces,
     Gravity, LinearVelocity, Position, Rotation, SphericalJoint, WriteRigidBodyForces,
 };
-use bad_spaceship_shared::assembly::largest_assembly_per_room;
+use bad_spaceship_shared::assembly::{largest_assembly_per_room, mass_weighted_com_velocity};
 use bad_spaceship_shared::launch::{assembly_burn, measure_assembly_spin, LAUNCH_COUNTDOWN_SECS};
 use bad_spaceship_shared::character::{spawn_position, CharacterMovement, InitialPose, ServerAvatar};
 use bad_spaceship_shared::net::{
@@ -535,10 +535,14 @@ struct OrbRoom(RoomId);
 
 /// True distance from the origin below which an active frame resets to exactly
 /// zero (real coordinates, real ground). Half of `REBASE_TRIGGER_M`, so the two
-/// can't flap: right after a reset the local drift is under the trigger. Server-only:
-/// the landing reset happens near the origin where corrections are cheap, so the
-/// client need not predict it (`REBASE_TRIGGER_M`/`REBASE_REST_Y` are shared, this
-/// isn't).
+/// can't flap: right after a reset the local drift is under the trigger. Server-only,
+/// and *unlike the ascent trigger it is not shared/predicted*: it fires on `true_anchor
+/// = frame.offset + local`, i.e. on the server-authoritative accumulated `offset` — a
+/// stateful quantity the client can't reproduce without replicating `offset` in-phase.
+/// The ascent trigger (`REBASE_TRIGGER_M`/`REBASE_REST_Y`, shared) is memoryless (pure
+/// function of the local COM), which is exactly what makes *it* predictable and this
+/// not. The landing reset lands near the origin, so leaving it to the correction path
+/// costs one cheap rollback per flight.
 const REBASE_RESET_M: f64 = 1000.0;
 
 /// A room's authoritative floating-origin frame: local + frame = true. `offset`
@@ -649,14 +653,9 @@ fn rebase_room_frames(
     // frame keeps tracking whatever is left.
     let anchor = |room: RoomId| -> Option<(Vec3, Vec3)> {
         let com = |member_indices: &mut dyn Iterator<Item = usize>| {
-            let (mut weighted_pos, mut weighted_vel, mut mass) = (Vec3::ZERO, Vec3::ZERO, 0.0);
-            for i in member_indices {
-                let (position, weight, _) = items[i];
-                weighted_pos += position * weight;
-                weighted_vel += velocities[i] * weight;
-                mass += weight;
-            }
-            (mass > 0.0).then(|| (weighted_pos / mass, weighted_vel / mass))
+            mass_weighted_com_velocity(
+                member_indices.map(|i| (items[i].0, velocities[i], items[i].1)),
+            )
         };
         match assemblies.get(&room) {
             Some(a) => com(&mut a.members.iter().copied()),
