@@ -2,7 +2,7 @@ use crate::map::PLATFORM_WIDTH_M;
 use crate::utils::{self, QuatExt, Vec3Ext};
 use crate::{
     AttachEvent, Attachable, BoundingRadius, CameraOrbitCenter, DisplayableJoint, ExistingJoints,
-    Focused, FocusedInteractable, HoldPoint, Holding, Modifying, Player, PlayerClick, PlayerHoldPoint,
+    FocusedInteractable, HoldPoint, Holding, Modifying, Player, PlayerClick, PlayerHoldPoint,
     PotentialJoints, PredeleteJoint, PredeleteJoints, ToggleHoldingSystemLabel, UpdateJointsLabel,
 };
 use avian3d::prelude::{
@@ -595,7 +595,6 @@ const MAX_INTERACT_ANGLE_DEGREES: f32 = 20.0;
 pub const MAX_INTERACT_ANGLE: f32 = MAX_INTERACT_ANGLE_DEGREES * utils::DEG_TO_RADIANS;
 
 fn update_focused(
-    mut commands: Commands,
     mut players: Query<(&mut FocusedInteractable, &Holding, &Children), With<Player>>,
     mut interactables: Query<(&mut Transform, Entity), With<Interactable>>,
     camera_orbit_centers: Query<&GlobalTransform, With<CameraOrbitCenter>>,
@@ -633,31 +632,7 @@ fn update_focused(
                 }
             }
 
-            let mut interactable_to_unfocus = None;
-            if let Some(newly_focused_interactable) = newly_focused_interactable_option {
-                let mut interactable_to_focus = Some(newly_focused_interactable);
-                if let Some(previously_focused_interactable) = focused_interactable.0 {
-                    if newly_focused_interactable == previously_focused_interactable {
-                        interactable_to_focus = None;
-                    } else {
-                        interactable_to_unfocus = Some(previously_focused_interactable);
-                    }
-                }
-                if let Some(entity) = interactable_to_focus {
-                    commands.entity(entity).insert(Focused);
-                }
-
-                focused_interactable.0 = Some(newly_focused_interactable);
-            } else {
-                if let Some(previous_focused_interactable) = focused_interactable.0 {
-                    interactable_to_unfocus = Some(previous_focused_interactable);
-                }
-                focused_interactable.0 = None;
-            }
-
-            if let Some(interactable) = interactable_to_unfocus {
-                commands.entity(interactable).remove::<Focused>();
-            }
+            focused_interactable.0 = newly_focused_interactable_option;
         }
     }
 }
