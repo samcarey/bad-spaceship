@@ -300,11 +300,9 @@ impl Plugin for NetClientPlugin {
                 // delete zone. Runs after the shared detector fills `PredeleteJoints`.
                 recolor_replicated_joints.after(UpdateJointsLabel),
                 // After the click → grab intent writes `Holding`, track the held part's
-                // target orientation, then highlight the focused part — in that order so
-                // each reads the previous one's freshly-written state this frame.
-                (track_hold_rotation, highlight_grabbable)
-                    .chain()
-                    .after(read_grab_intent),
+                // target orientation. (The focus outline is driven mode-agnostically
+                // from `FocusedInteractable` in `outline.rs`.)
+                track_hold_rotation.after(read_grab_intent),
             ),
         );
         // Forward our input intent each tick, in lightyear's input-writing set.
@@ -576,45 +574,6 @@ fn write_input(
     // Assert the attach/delete intents for a few ticks after a press, then lapse.
     want_attach.0 = want_attach.0.saturating_sub(1);
     want_delete.0 = want_delete.0.saturating_sub(1);
-}
-
-/// Highlight the focused part in single-player's yellow focus colour. Follows
-/// `FocusedInteractable` (maintained by `update_focus`): the grab preview while
-/// empty-handed, or the held part while holding — so the glow doesn't jump to whatever
-/// you look at next once you've grabbed.
-fn highlight_grabbable(
-    player: Query<&FocusedInteractable, With<Player>>,
-    parts: Query<&MeshMaterial3d<MetalMaterial>, With<NetPart>>,
-    mut materials: ResMut<Assets<MetalMaterial>>,
-    // The previously-highlighted part, so we only re-colour on change. Mutating a
-    // material flags it for GPU re-upload, so recolouring every part every frame
-    // (when nothing moved) would needlessly re-upload all of them.
-    mut lit: Local<Option<Entity>>,
-) {
-    let highlighted = player.iter().next().and_then(|f| f.0);
-    if *lit == highlighted {
-        return;
-    }
-    // Glow via the metal shader's `highlight` uniform — the same single mechanism the
-    // single-player focus highlight uses (`highlight.rs`), so it lights the whole part
-    // (striped rockets included) and needs nothing saved/restored: reset is `ZERO`.
-    let recolour = |entity, materials: &mut Assets<MetalMaterial>, lit: bool| {
-        if let Ok(material) = parts.get(entity) {
-            if let Some(mut mat) = materials.get_mut(&material.0) {
-                mat.extension
-                    .set_highlight(if lit { Vec4::new(1.0, 1.0, 0.0, 1.0) } else { Vec4::ZERO });
-            }
-        }
-    };
-    // Reset the part that just lost focus, light the one that gained it. (Newly
-    // replicated parts already spawn with the base colour, so they need no reset.)
-    if let Some(prev) = *lit {
-        recolour(prev, &mut materials, false);
-    }
-    if let Some(now) = highlighted {
-        recolour(now, &mut materials, true);
-    }
-    *lit = highlighted;
 }
 
 /// Attach intent as a small countdown of ticks, set on a modifier click (the join

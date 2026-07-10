@@ -7,9 +7,9 @@
 // Like the grass, this is a `MaterialExtension` on StandardMaterial: it only
 // perturbs `base_color` and `perceptual_roughness` before the stock PBR path
 // (sun, ambient, shadows, tonemapping) runs. The per-part *scalar* look
-// (tint, metallic, base roughness) stays on the base StandardMaterial — which
-// is also what lets the focus-highlight systems keep recoloring parts by
-// writing `base.base_color`/`emissive` exactly as before.
+// (tint, metallic, base roughness) stays on the base StandardMaterial. The
+// focus/held highlight is no longer a shader tint — it's a separate silhouette
+// outline mesh (`client/src/outline.rs`).
 //
 // Cost: 1-2 value-noise evaluations per fragment for brushed/circular (flake
 // and scratch layers are skipped entirely for parts whose strength is zero —
@@ -47,8 +47,9 @@ struct MetalParams {
     center_x: f32,
     center_y: f32,
     finish: u32,
+    // Pads the struct to a 16-byte multiple (48 bytes), required for a uniform
+    // buffer; matches `_pad` in `metal_material.rs`.
     _pad: u32,
-    highlight: vec4<f32>,
 }
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(100)
@@ -166,10 +167,6 @@ fn fragment(
         color = mix(color, vec3(0.75), scratch);
         roughness += scratch * 0.4;
     }
-
-    // Focus/attach highlight: tint the whole albedo (bands included) toward the glow
-    // colour, so a striped part glows uniformly. No-op at the default strength 0.
-    color = mix(color, metal.highlight.rgb, metal.highlight.a);
 
     pbr_input.material.base_color = vec4(color, pbr_input.material.base_color.a);
     pbr_input.material.perceptual_roughness = clamp(roughness, 0.04, 1.0);

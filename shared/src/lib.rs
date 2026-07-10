@@ -134,9 +134,6 @@ pub struct InputEvents;
 pub struct PartRotation(pub Quat);
 
 #[derive(Component)]
-pub struct Focused;
-
-#[derive(Component)]
 pub struct Attachable;
 
 #[derive(Default, Component)]

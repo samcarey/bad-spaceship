@@ -1,7 +1,6 @@
 use bad_spaceship_shared::{
     character, CommonPlugins, OrbitingCamera, Player, PlayerCameraOrbitCenter,
 };
-pub mod highlight;
 use bad_spaceship_shared::player;
 // Bevy 0.17 split the renderer into focused crates: light types moved from
 // `bevy_pbr` to `bevy_light` (facade `bevy::light`). Bevy 0.18 then split the
@@ -11,7 +10,6 @@ use bevy::light::GlobalAmbientLight;
 use bevy::prelude::*;
 
 use gamepad::GamepadPlugin;
-use highlight::HighlightPlugin;
 use input::InputPlugin;
 use launch::LaunchPlugin;
 use mobile::MobilePlugin;
@@ -26,6 +24,7 @@ mod launch;
 mod mobile;
 mod monster;
 mod net;
+mod outline;
 mod platform;
 mod render_main_pass;
 mod render_secondary_pass;
@@ -82,7 +81,7 @@ fn main() {
             MobilePlugin,
             GamepadPlugin,
             PlatformPlugin,
-            HighlightPlugin,
+            outline::OutlinePlugin,
             LaunchPlugin,
             RenderMainPassPlugin,
             monster::MonsterPlugin,

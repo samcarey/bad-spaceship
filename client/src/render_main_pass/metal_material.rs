@@ -73,29 +73,17 @@ pub struct MetalParams {
     center_y: f32,
     /// `Finish` discriminant.
     finish: u32,
+    /// Pads the struct to 48 bytes (a 16-byte multiple), which a uniform buffer
+    /// requires — the all-scalar fields only force 4-byte alignment, so without
+    /// this the binding size mismatches the shader and the metal pipeline fails to
+    /// build (a blank scene). Must match `_pad` in `metal_material.wgsl`.
     _pad: u32,
-    /// Focus/attach highlight: `rgb` = glow colour (linear), `a` = strength. The
-    /// fragment shader mixes the *whole* albedo toward this — bands included — so a
-    /// striped part glows uniformly instead of only its coloured bands (the "blue
-    /// stripes" bug). Strength 0 (the default) leaves the part un-highlighted. Driven
-    /// by `highlight.rs` for rockets, whose striped material can't be uniformly tinted
-    /// via `base_color` alone.
-    highlight: Vec4,
 }
 
 #[derive(Asset, AsBindGroup, Debug, Clone, Default, TypePath)]
 pub struct MetalExtension {
     #[uniform(100)]
     params: MetalParams,
-}
-
-impl MetalExtension {
-    /// Set the focus/attach highlight glow: `rgb` = colour (linear), `a` = strength
-    /// (0 = off). Used by `highlight.rs` to light a rocket body up uniformly, past the
-    /// striped finish. `Vec4::ZERO` clears it.
-    pub fn set_highlight(&mut self, tint: Vec4) {
-        self.params.highlight = tint;
-    }
 }
 
 impl MaterialExtension for MetalExtension {
@@ -109,10 +97,10 @@ impl MaterialExtension for MetalExtension {
 const ROCKET_STRIPE_BANDS: f32 = 5.0;
 
 /// The rocket engine's body material: a striped orange finish. Uses the same
-/// `MetalMaterial` as the cuboid parts so the focus/attach highlight
-/// (`highlight.rs`, which recolours `base.base_color`) lights the body up just
-/// like any other part. The flare is a separate dark-grey `StandardMaterial`
-/// (built by the renderer), and is intentionally not highlighted.
+/// `MetalMaterial` as the cuboid parts. The focus/held silhouette outline is a
+/// separate child mesh (`outline.rs`) keyed off the part entity, so it works the
+/// same here as on any part. The flare is a separate dark-grey `StandardMaterial`
+/// (built by the renderer) with no outline of its own.
 pub fn rocket_body_material() -> MetalMaterial {
     ExtendedMaterial {
         base: StandardMaterial {
@@ -237,8 +225,6 @@ pub fn metal_material(seed: u32) -> MetalMaterial {
                 center_y: range(0.25, 0.75),
                 finish: finish as u32,
                 _pad: 0,
-                // Un-highlighted until `highlight.rs` lights it up (rockets only).
-                highlight: Vec4::ZERO,
             },
         },
     }
