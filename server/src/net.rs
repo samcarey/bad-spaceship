@@ -22,8 +22,8 @@ use std::sync::Mutex;
 use std::time::SystemTime;
 
 use avian3d::prelude::{
-    AngularVelocity, CollisionLayers, Collisions, ComputedCenterOfMass, ComputedMass, Forces,
-    Gravity, LinearVelocity, Position, Rotation, SphericalJoint, WriteRigidBodyForces,
+    AngularVelocity, Collider, CollisionLayers, ComputedMass, Forces, Gravity, LinearVelocity,
+    Position, Rotation, SphericalJoint, WriteRigidBodyForces,
 };
 use bad_spaceship_shared::assembly::largest_assembly_per_room;
 use bad_spaceship_shared::launch::{assembly_burn, measure_assembly_spin, LAUNCH_COUNTDOWN_SECS};
@@ -37,7 +37,7 @@ use bad_spaceship_shared::net::{
 };
 use bad_spaceship_shared::map::GROUND_LAYER;
 use bad_spaceship_shared::part::{
-    ground_clamp_anchor_pairs, local_contact_anchor, part_state_diverged, spawn_random_part,
+    part_gap_contacts, part_state_diverged, spawn_random_part,
     spawn_random_rocket, spawn_rocket_engine, spawn_saved_cuboid, Gimbal, RocketEngine, SuppressLocalParts, DELETE_RADIUS,
     NUM_PARTS, NUM_ROCKET_ENGINES, PART_FALL_Y, ROCKET_VOLUME,
 };
@@ -1348,25 +1348,24 @@ fn server_hold(
     }
 }
 
-/// On the attach intent, joint the held part to whatever (other) part — or the
-/// ground — it's touching, at the contact anchors — then release it (it's now part
-/// of the assembly). Cross-room parts can't touch (collision layers isolate rooms)
-/// and the ground is shared but the joint itself is room-tagged, so the join is
-/// room-scoped automatically. Ports single-player's
-/// `update_active_joints`/`attach`, recovering each body-local anchor via the shared
-/// `local_contact_anchor` (the COM-relative anchor convention lives there). Joints
-/// are server physics, so the joined parts move together and their replicated poses
-/// tell the story (no joint replication needed).
+/// On the attach intent, joint the held part to any nearby part — or the ground —
+/// within `JOINT_GAP`, at the (thinned) manifold anchors, then release it (it's now
+/// part of the assembly). Cross-room parts are filtered out and the ground is shared
+/// but the joint itself is room-tagged, so the join is room-scoped automatically. The
+/// same shared `part_gap_contacts` the single-player path uses. Joints are server
+/// physics, so the joined parts move together and their replicated poses tell the
+/// story (no joint replication needed).
 fn server_attach(
     mut commands: Commands,
-    collisions: Collisions,
-    // Recover the anchors from the authoritative Avian `Rotation`, not `Transform`:
-    // in multiplayer `lightyear_avian` owns the Position→Transform sync, so a body's
-    // `Transform` can lag the rotation the contact anchors were computed against.
-    rotations: Query<&Rotation>,
-    coms: Query<&ComputedCenterOfMass>,
-    net_parts: Query<(), With<NetPart>>,
-    grounds: Query<(), With<Grass>>,
+    // Every part's collider + authoritative pose + room, for the gap weld query
+    // (`part_gap_contacts`). Includes the held part. Poses come from Avian `Position`/
+    // `Rotation`, not `Transform` (`lightyear_avian` owns the Position→Transform sync,
+    // so `Transform` can lag).
+    parts_q: Query<(Entity, &Collider, &Position, &Rotation, &PartRoom), With<NetPart>>,
+    // The shared ground bowl (`RigidBody::Static` at the world origin) is a weld
+    // candidate too — `part_gap_contacts` thins its faceted manifold to a spread rigid
+    // set, so a rocket clamps to the ground with no anchor triangle.
+    ground_q: Query<(Entity, &Collider), With<Grass>>,
     // Existing joints (to tell which parts are joining for the FIRST time) and each
     // part's room (to spawn the replacement in the same room).
     joints: Query<&SphericalJoint>,
@@ -1395,80 +1394,74 @@ fn server_attach(
         let held_room = part_rooms.get(held_entity).ok().map(|pr| Room { id: pr.id, bit: pr.bit });
         let mut attached = false;
         let mut replaced: Vec<Entity> = Vec::new();
-        for pair in collisions.collisions_with(held_entity) {
-            if !pair.is_touching() {
-                continue;
+        // Replenish the loose-parts pool when a part joins its FIRST joint (it's been
+        // consumed into a structure). `commands.spawn` is deferred, so `had_joint`
+        // reflects the pre-attach state. Ground/characters never reach here.
+        let mut replenish = |commands: &mut Commands, endpoint: Entity| {
+            if !had_joint.contains(&endpoint) && !replaced.contains(&endpoint) {
+                replaced.push(endpoint);
+                if let Some(room) = held_room {
+                    let (new_entity, half_extents, seed) = spawn_random_part(commands);
+                    tag_room_part(
+                        commands,
+                        new_entity,
+                        PartShape::Cuboid { half_extents: half_extents.to_array() },
+                        seed,
+                        room,
+                        &frames,
+                    );
+                }
             }
-            let (c1, c2) = (pair.collider1, pair.collider2);
-            // Only attach to another replicated part or the ground (not a character).
-            let other = if c1 == held_entity { c2 } else { c1 };
-            if net_parts.get(other).is_err() && grounds.get(other).is_err() {
-                continue;
-            }
-            let rot = |e| rotations.get(e).map(|r| r.0).unwrap_or(Quat::IDENTITY);
-            let com = |e| coms.get(e).map(|c| c.0).unwrap_or(Vec3::ZERO);
-            for manifold in &pair.manifolds {
-                for contact in &manifold.points {
-                    let p1 = local_contact_anchor(rot(c1), com(c1), contact.anchor1);
-                    let p2 = local_contact_anchor(rot(c2), com(c2), contact.anchor2);
-                    // Default order body1=c2, body2=c1 — but a ground joint is
-                    // normalized so the *part* is body1: the client anchors the
-                    // joint gizmo to body1 (`position_replicated_joints` looks it
-                    // up as a `NetPart`), and the ground endpoint is named by the
-                    // `GROUND_JOINT_ID` sentinel (it has no `NetPart::id`).
-                    let ((b1, a1), (b2, a2)) = if grounds.get(c2).is_ok() {
-                        ((c1, p1), (c2, p2))
-                    } else {
-                        ((c2, p2), (c1, p1))
-                    };
-                    let net_id = |e: Entity| {
-                        if grounds.get(e).is_ok() { GROUND_JOINT_ID } else { e.to_bits() }
-                    };
-                    if grounds.get(b2).is_ok() {
-                        // Ground clamps are a rigid anchor TRIANGLE, not a ball
-                        // pivot (see `ground_clamp_anchor_pairs`) - a one-anchor
-                        // clamp braced by a live contact buzzes forever.
-                        for (pa, ga) in ground_clamp_anchor_pairs(a1, a2, rot(b1)) {
-                            spawn_room_joint(
-                                &mut commands,
-                                member.0,
-                                (b1, pa, net_id(b1)),
-                                (b2, ga, GROUND_JOINT_ID),
-                            );
-                        }
-                    } else {
-                        spawn_room_joint(
-                            &mut commands,
-                            member.0,
-                            (b1, a1, net_id(b1)),
-                            (b2, a2, net_id(b2)),
-                        );
-                    }
+        };
+
+        // Weld the held part to any same-room part OR the shared ground within
+        // `JOINT_GAP`, from the thinned contact manifold (flush faces → a spread rigid
+        // set of welds; the faceted bowl is thinned to a handful, so no special ground
+        // path). The held part is body1 so the client anchors the gizmo to it (a
+        // `NetPart`); the ground endpoint is named by the `GROUND_JOINT_ID` sentinel.
+        // Each weld freezes the pair at its current relative pose (zero rest error).
+        if let Ok((_, held_collider, held_pos, held_rot, held_pr)) = parts_q.get(held_entity) {
+            let parts_iter = parts_q
+                .iter()
+                .filter(|(o, _, _, _, pr)| *o != held_entity && pr.id == held_pr.id)
+                .map(|(o, c, p, r, _)| (o, c, p.0, r.0, o.to_bits()));
+            let ground_iter = ground_q
+                .iter()
+                .map(|(o, c)| (o, c, Vec3::ZERO, Quat::IDENTITY, GROUND_JOINT_ID));
+            let mut contacts = Vec::new();
+            for (other, other_collider, other_pos, other_rot, other_net_id) in
+                parts_iter.chain(ground_iter)
+            {
+                contacts.clear();
+                part_gap_contacts(
+                    held_collider,
+                    held_pos.0,
+                    held_rot.0,
+                    other_collider,
+                    other_pos,
+                    other_rot,
+                    &mut contacts,
+                );
+                for (held_local, other_local) in contacts.iter().copied() {
+                    spawn_room_joint(
+                        &mut commands,
+                        member.0,
+                        (held_entity, held_local, held_entity.to_bits()),
+                        (other, other_local, other_net_id),
+                    );
                     attached = true;
-                    // Replenish the pool for each *part* endpoint joining for the
-                    // first time (the ground isn't a loose part — no replacement).
-                    for endpoint in [held_entity, other] {
-                        if net_parts.get(endpoint).is_ok()
-                            && !had_joint.contains(&endpoint)
-                            && !replaced.contains(&endpoint)
-                        {
-                            replaced.push(endpoint);
-                            if let Some(room) = held_room {
-                                let (new_entity, half_extents, seed) = spawn_random_part(&mut commands);
-                                tag_room_part(
-                                    &mut commands,
-                                    new_entity,
-                                    PartShape::Cuboid { half_extents: half_extents.to_array() },
-                                    seed,
-                                    room,
-                                    &frames,
-                                );
-                            }
-                        }
+                }
+                if !contacts.is_empty() {
+                    replenish(&mut commands, held_entity);
+                    // The ground (its endpoint is the `GROUND_JOINT_ID` sentinel) isn't a
+                    // loose part — never replace it.
+                    if other_net_id != GROUND_JOINT_ID {
+                        replenish(&mut commands, other);
                     }
                 }
             }
         }
+
         if attached {
             // Keep holding the part after joining (like single-player): you lift your
             // block and the one you joined hangs below it on the new joint. Just close

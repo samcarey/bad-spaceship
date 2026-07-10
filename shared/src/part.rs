@@ -5,8 +5,9 @@ use crate::{
     FocusedInteractable, HoldPoint, Holding, Modifying, Player, PlayerClick, PlayerHoldPoint,
     PotentialJoints, PredeleteJoint, PredeleteJoints, ToggleHoldingSystemLabel, UpdateJointsLabel,
 };
+use avian3d::collision::collider::contact_query::contact_manifolds;
 use avian3d::prelude::{
-    AngularVelocity, Collider, ColliderDensity, Collisions, ComputedCenterOfMass, Forces, Friction,
+    AngularVelocity, Collider, ColliderDensity, Collisions, Forces, Friction,
     Gravity, JointCollisionDisabled, LinearVelocity, Position, ReadRigidBodyForces, Restitution,
     Rotation,
     RigidBody, SphericalJoint, SweptCcd, WriteRigidBodyForces,
@@ -720,72 +721,140 @@ fn orient_held_part(mut parts: Query<(&Transform, &TargetOrientation, Forces)>) 
     }
 }
 
-/// Recover a contact point in a body's local frame from Avian's contact anchor.
-///
-/// Avian reports contact anchors in **world orientation, relative to each body's
-/// center of mass**: `anchor = world_point - (pos + rot * com_local)`. The joint
-/// builders want a **body-local** anchor, recovered as `rot⁻¹ * anchor + com_local`.
-/// The `+ com_local` term matters: dropping it only happens to work when the COM
-/// sits at the origin (the centered cuboid parts), but the ground trimesh's COM does
-/// not — omitting it there offset the ground anchor and dragged the joined part down
-/// into the bowl. Shared by single-player `update_active_joints` and the server's
-/// `server_attach` so the anchor convention stays in one place.
-/// The three anchor pairs of a **ground clamp**: a small horizontal triangle
-/// around the contact point instead of a single ball pivot.
-///
-/// Why: a one-anchor part-to-ground joint braced by a live contact is the weld
-/// census's "hinge keeps its contact" case — and the XPBD joint solver and the
-/// impulse contact solver then fight over the pair forever. Measured on the
-/// Rocket Ride pad at rest (flight recorder): the four clamped rockets BUZZ at
-/// a mean 1.2 m/s (peaks 2.6 m/s, 3.3 rad/s) — never sleeping, wasting solver
-/// time, and (worst) making the client's predicted copy chronically disagree
-/// with the server (the buzz is chaotic, so the two sims can't phase-match:
-/// ~69% of velocity comparisons diverged > 0.5 m/s with the world at rest).
-/// Three non-collinear anchors make the pair rotationally rigid, so
-/// `maintain_weld_rigidity` disables the pair's contact — no fight, no buzz,
-/// the assembly can actually rest (and sleep). The ground is static with
-/// identity rotation, so ground-local offsets are world offsets.
-pub fn ground_clamp_anchor_pairs(
-    part_anchor: Vec3,
-    ground_anchor: Vec3,
-    part_rotation: Quat,
-) -> [(Vec3, Vec3); 3] {
-    /// Triangle circumradius (m): small enough to sit within any part's footprint,
-    /// large enough that the census's non-collinearity check is nowhere near its
-    /// epsilon.
-    const GROUND_CLAMP_RADIUS_M: f32 = 0.12;
-    /// Three anchors 120° apart.
-    const ANGLES: [f32; 3] = [
-        0.0,
-        core::f32::consts::TAU / 3.0,
-        2.0 * core::f32::consts::TAU / 3.0,
-    ];
-    ANGLES.map(|angle| {
-        let offset =
-            Vec3::new(libm::cosf(angle), 0.0, libm::sinf(angle)) * GROUND_CLAMP_RADIUS_M;
-        (part_anchor + part_rotation.inverse() * offset, ground_anchor + offset)
-    })
-}
+/// Maximum face separation (metres) at which two parts can still weld together.
+/// Lets you join a part that's merely *close* to another without a pixel-perfect
+/// touch — the common cause of a rocket stack forming too few joints to stay
+/// upright. The parts are welded **where they sit** (see [`part_gap_contacts`]) —
+/// they stay at their fixed separation, bridged by a rigid strut — so the weld
+/// never yanks them together. Tunable by feel.
+pub const JOINT_GAP: f32 = 0.1;
 
-pub fn local_contact_anchor(rotation: Quat, com: Vec3, anchor: Vec3) -> Vec3 {
-    rotation.inverse() * anchor + com
+/// Minimum spacing (metres) between two welds of the SAME pair. The contact manifold
+/// against a faceted surface (above all the concave trimesh ground bowl) yields one
+/// point per overlapping triangle — dozens crammed together — which is over-constrained
+/// and floods joint replication. So the welds are thinned: keep the closest contact,
+/// then greedily add the point farthest from those already kept, until no candidate is
+/// at least this far from every kept weld. Tuned (0.55) so a platform on a rocket's top
+/// (cylinder ⌀0.8) still gets 4 welds — a rigid mount, not a hinge — while the faceted
+/// ground bowl collapses to ~5-9 spread welds instead of ~20. Tunable.
+///
+/// Distinct from [`MIN_JOINT_SPACING`] (much smaller): that dedups a *new* weld against
+/// the pair's *existing* joints; this thins welds *within* one fresh manifold.
+pub const MIN_JOINT_DIST: f32 = 0.55;
+
+/// Gap-tolerant weld points between two part colliders, returned as `(anchor_on_a,
+/// anchor_on_b)` pairs in each body's **local (origin-relative)** frame — exactly
+/// what [`SphericalJoint`] anchors want. Appends to `out`.
+///
+/// Uses a pure geometry contact-manifold query with a prediction distance of
+/// [`JOINT_GAP`], so it (a) does **not** perturb the physics sim, and (b) yields the
+/// full multi-point manifold even across a small gap — a flush near-approach still
+/// produces the corner welds that make a stack rotationally rigid, instead of one
+/// wobbly pivot. The points are then **thinned** to a minimum spacing (see
+/// [`MIN_JOINT_DIST`]) so a faceted contact (the trimesh ground) can't explode into
+/// dozens of welds.
+///
+/// Each weld freezes the two parts at their **current relative pose**: both anchors
+/// are the material point on each body that currently sits at the contact midpoint,
+/// so they coincide in world space *right now*. The weld therefore has **zero rest
+/// error** — it holds the parts at their fixed separation (a rigid strut across the
+/// gap) rather than snapping them together, and stores no hidden load, so it's
+/// launch-stable at *any* approach angle. Parts are centred cuboids, so the local
+/// anchor is `rot⁻¹ · (midpoint − position)` (independent of centre of mass).
+pub fn part_gap_contacts(
+    a_collider: &Collider,
+    a_pos: Vec3,
+    a_rot: Quat,
+    b_collider: &Collider,
+    b_pos: Vec3,
+    b_rot: Quat,
+    out: &mut Vec<(Vec3, Vec3)>,
+) {
+    // Enforce one "finite pose in" invariant at this shared boundary: a rollback can
+    // transiently give a predicted part a non-finite position OR rotation before the
+    // divergence recycler runs, and parry asserts on non-finite input — which would
+    // crash the whole app.
+    if !a_pos.is_finite() || !b_pos.is_finite() || !a_rot.is_finite() || !b_rot.is_finite() {
+        return;
+    }
+    // `contact_manifolds` internally rejects far-apart shapes cheaply, so no manual
+    // broad-phase pre-filter is needed for the handful of parts in a room.
+    let mut manifolds = Vec::new();
+    contact_manifolds(a_collider, a_pos, a_rot, b_collider, b_pos, b_rot, JOINT_GAP, &mut manifolds);
+
+    // Gather every in-gap contact point: its world position (for thinning by distance),
+    // separation (smallest = closest contact, the preferred seed), and body-local anchors.
+    let (a_inv, b_inv) = (a_rot.inverse(), b_rot.inverse());
+    let mut cands: Vec<(Vec3, f32, Vec3, Vec3)> = Vec::new();
+    for manifold in &manifolds {
+        for contact in &manifold.points {
+            // `penetration` is positive when overlapping, so a separation of `g` is
+            // `penetration = -g`; keep points within the weld gap.
+            if contact.penetration < -JOINT_GAP || !contact.point.is_finite() {
+                continue;
+            }
+            cands.push((
+                contact.point,
+                -contact.penetration,
+                a_inv * (contact.point - a_pos),
+                b_inv * (contact.point - b_pos),
+            ));
+        }
+    }
+    if cands.is_empty() {
+        return;
+    }
+
+    // Thin to a minimum spacing. Seed with the closest contact (smallest separation),
+    // then repeatedly add the candidate whose nearest already-kept weld is farthest —
+    // stopping once no candidate is at least `MIN_JOINT_DIST` from every kept weld. This
+    // is farthest-point (Poisson-disk) selection: it spreads the welds for maximum
+    // rigidity and caps their count regardless of how faceted the contact is.
+    let seed = cands
+        .iter()
+        .enumerate()
+        .min_by(|(_, x), (_, y)| x.1.total_cmp(&y.1))
+        .map(|(i, _)| i)
+        .unwrap();
+    let mut kept = vec![seed];
+    loop {
+        let mut best: Option<(usize, f32)> = None;
+        for (i, cand) in cands.iter().enumerate() {
+            if kept.contains(&i) {
+                continue;
+            }
+            let nearest = kept
+                .iter()
+                .map(|&k| cands[k].0.distance(cand.0))
+                .fold(f32::INFINITY, f32::min);
+            if nearest >= MIN_JOINT_DIST && best.map_or(true, |(_, b)| nearest > b) {
+                best = Some((i, nearest));
+            }
+        }
+        match best {
+            Some((i, _)) => kept.push(i),
+            None => break,
+        }
+    }
+    for &i in &kept {
+        out.push((cands[i].2, cands[i].3));
+    }
 }
 
 fn update_active_joints(
-    collisions: Collisions,
-    // Body rotations + centers of mass, used to map Avian's world-space,
-    // COM-relative contact anchors into each body's local frame (see the per-point
-    // conversion below). The cuboid parts have their COM at the origin, but the
-    // ground bowl is a trimesh whose COM is *not* at its origin — so the COM term
-    // is required, otherwise a part joined to the ground gets yanked into it.
-    transforms: Query<&Transform>,
-    centers_of_mass: Query<&ComputedCenterOfMass>,
     mut potential_joints: ResMut<PotentialJoints>,
     mut existing_joints: ResMut<ExistingJoints>,
     players: Query<(&Holding, &FocusedInteractable)>,
     // Avian joints are standalone entities carrying `body1`/`body2` (rapier's
     // joint was a child of one body, with the other reached via `joint.parent`).
     joints: Query<&SphericalJoint>,
+    // Every part's collider + authoritative pose, for the gap weld query
+    // (`part_gap_contacts`). Includes the held part itself.
+    parts: Query<(Entity, &Collider, &Position, &Rotation), With<Holdable>>,
+    // The ground bowl is a weld candidate too — `RigidBody::Static` at the world origin
+    // (identity), so its pose is a constant. `part_gap_contacts` thins the faceted-bowl
+    // manifold to a spread rigid set, so no synthesized anchor triangle is needed.
+    ground_q: Query<(Entity, &Collider), With<crate::Grass>>,
 ) {
     potential_joints.0.clear();
     existing_joints.0.clear();
@@ -793,71 +862,65 @@ fn update_active_joints(
     if let Some((holding, interactable)) = players.iter().next() {
         if holding.0 {
             if let Some(held_entity) = interactable.0 {
-                for contact_pair in collisions.collisions_with(held_entity) {
-                    // Avian's `collider1/2` are plain `Entity` (rapier's were `Option`).
-                    let (collider1, collider2) =
-                        (contact_pair.collider1, contact_pair.collider2);
-                    let attachable_entity = if collider1 == held_entity {
-                        collider2
-                    } else {
-                        collider1
+                // Existing joints on the held part → GREEN (`display_existing_joints`).
+                // Read straight from the joint graph, NOT from live contacts: a gap
+                // weld holds the parts apart (not touching), so a contact-based scan
+                // would miss it and the joint would never turn green once it's real.
+                // `entities.0` is the held part, which the display draws the sphere on.
+                for joint in joints.iter() {
+                    let (Some(a1), Some(a2)) = (joint.local_anchor1(), joint.local_anchor2())
+                    else {
+                        continue;
                     };
-
-                    // The `DisplayableJoint` convention is "points.0 is the local
-                    // anchor on entities.0"; `attach` maps body2/anchor2 → entities.0.
-                    for joint in joints.iter() {
-                        let (Some(anchor1), Some(anchor2)) =
-                            (joint.local_anchor1(), joint.local_anchor2())
-                        else {
-                            continue;
-                        };
-                        if joint.body2 == held_entity && joint.body1 == attachable_entity {
-                            existing_joints.0.push(DisplayableJoint {
-                                entities: (held_entity, attachable_entity),
-                                points: (anchor2, anchor1),
-                            });
-                        } else if joint.body2 == attachable_entity && joint.body1 == held_entity {
-                            existing_joints.0.push(DisplayableJoint {
-                                entities: (attachable_entity, held_entity),
-                                points: (anchor2, anchor1),
-                            });
-                        }
+                    if joint.body2 == held_entity {
+                        existing_joints.0.push(DisplayableJoint {
+                            entities: (held_entity, joint.body1),
+                            points: (a2, a1),
+                        });
+                    } else if joint.body1 == held_entity {
+                        existing_joints.0.push(DisplayableJoint {
+                            entities: (held_entity, joint.body2),
+                            points: (a1, a2),
+                        });
                     }
+                }
 
-                    if contact_pair.is_touching() {
-                        // Recover each contact point in its body's local frame (see
-                        // `local_contact_anchor` for the COM-relative anchor convention).
-                        let rot1 = transforms
-                            .get(collider1)
-                            .map(|t| t.rotation)
-                            .unwrap_or(Quat::IDENTITY);
-                        let rot2 = transforms
-                            .get(collider2)
-                            .map(|t| t.rotation)
-                            .unwrap_or(Quat::IDENTITY);
-                        let com1 = centers_of_mass
-                            .get(collider1)
-                            .map(|c| c.0)
-                            .unwrap_or(Vec3::ZERO);
-                        let com2 = centers_of_mass
-                            .get(collider2)
-                            .map(|c| c.0)
-                            .unwrap_or(Vec3::ZERO);
-                        for manifold in &contact_pair.manifolds {
-                            for contact in &manifold.points {
-                                let local_p1 = local_contact_anchor(rot1, com1, contact.anchor1);
-                                let local_p2 = local_contact_anchor(rot2, com2, contact.anchor2);
-                                if existing_joints
-                                    .0
-                                    .iter()
-                                    .map(|p| (p.points.0 - local_p1).norm())
-                                    .all(|d| d > MIN_JOINT_SPACING)
-                                {
-                                    potential_joints.0.push(DisplayableJoint {
-                                        entities: (collider1, collider2),
-                                        points: (local_p1, local_p2),
-                                    });
-                                }
+                // Weld the held part to any nearby part OR the ground within `JOINT_GAP`,
+                // using the thinned contact manifold (flush faces → a spread rigid set of
+                // welds; the faceted bowl is thinned to a handful, so no special ground
+                // path is needed). Each weld freezes the pair at its current relative pose
+                // (zero rest error — see `part_gap_contacts`), so nothing is yanked.
+                if let Ok((_, held_collider, held_pos, held_rot)) = parts.get(held_entity) {
+                    let parts_iter = parts.iter().map(|(e, c, p, r)| (e, c, p.0, r.0));
+                    let ground_iter =
+                        ground_q.iter().map(|(e, c)| (e, c, Vec3::ZERO, Quat::IDENTITY));
+                    let mut contacts = Vec::new();
+                    for (other, other_collider, other_pos, other_rot) in parts_iter.chain(ground_iter) {
+                        if other == held_entity {
+                            continue;
+                        }
+                        contacts.clear();
+                        part_gap_contacts(
+                            held_collider,
+                            held_pos.0,
+                            held_rot.0,
+                            other_collider,
+                            other_pos,
+                            other_rot,
+                            &mut contacts,
+                        );
+                        for (held_local, other_local) in contacts.iter().copied() {
+                            // Skip a weld coinciding with one this pair already has
+                            // (`entities.0` is always the held part in `existing_joints`).
+                            let duplicate = existing_joints.0.iter().any(|p| {
+                                p.entities == (held_entity, other)
+                                    && (p.points.0 - held_local).norm() <= MIN_JOINT_SPACING
+                            });
+                            if !duplicate {
+                                potential_joints.0.push(DisplayableJoint {
+                                    entities: (held_entity, other),
+                                    points: (held_local, other_local),
+                                });
                             }
                         }
                     }
@@ -912,8 +975,6 @@ fn attach(
     mut attach_events: MessageReader<AttachEvent>,
     attach_points: Res<PotentialJoints>,
     joints: Query<&SphericalJoint>,
-    rotations: Query<&Rotation>,
-    grounds: Query<(), With<crate::Grass>>,
     mut new_part_events: MessageWriter<NewPart>,
 ) {
     if attach_events.read().next().is_some() {
@@ -925,37 +986,16 @@ fn attach(
         let had_joint: Vec<Entity> = joints.iter().flat_map(|j| [j.body1, j.body2]).collect();
         let mut replaced: Vec<Entity> = Vec::new();
         for DisplayableJoint { points, entities } in attach_points.0.iter() {
-            // Avian joints are standalone entities referencing both bodies (rapier
-            // spawned the joint as a child of `entities.0`). Preserve the rapier
-            // anchor mapping: body1/anchor1 = entities.1/points.1, and
-            // body2/anchor2 = entities.0/points.0 — which keeps `update_*_joints`
-            // and the gizmo rendering (which read back `body2`/`anchor2`) consistent.
-            let ground0 = grounds.get(entities.0).is_ok();
-            let ground1 = grounds.get(entities.1).is_ok();
-            if ground0 || ground1 {
-                // Ground clamps are a rigid anchor TRIANGLE, not a ball pivot
-                // (see `ground_clamp_anchor_pairs`). Part as body1, ground as
-                // body2 - the same normalization the server uses.
-                let (part, ground, pa, ga) = if ground0 {
-                    (entities.1, entities.0, points.1, points.0)
-                } else {
-                    (entities.0, entities.1, points.0, points.1)
-                };
-                let rot = rotations.get(part).map(|r| r.0).unwrap_or(Quat::IDENTITY);
-                for (pk, gk) in ground_clamp_anchor_pairs(pa, ga, rot) {
-                    commands.spawn(
-                        SphericalJoint::new(part, ground)
-                            .with_local_anchor1(pk)
-                            .with_local_anchor2(gk),
-                    );
-                }
-            } else {
-                commands.spawn(
-                    SphericalJoint::new(entities.1, entities.0)
-                        .with_local_anchor1(points.1)
-                        .with_local_anchor2(points.0),
-                );
-            }
+            // One SphericalJoint per (thinned) weld point — part-to-part AND part-to-ground
+            // alike; the ground clamp is just the thinned manifold's points, no synthesized
+            // triangle. Anchor mapping: body1/anchor1 = entities.1/points.1 and
+            // body2/anchor2 = entities.0/points.0 — the convention `update_active_joints`
+            // and the gizmo rendering read back.
+            commands.spawn(
+                SphericalJoint::new(entities.1, entities.0)
+                    .with_local_anchor1(points.1)
+                    .with_local_anchor2(points.0),
+            );
             for endpoint in [entities.0, entities.1] {
                 if !had_joint.contains(&endpoint) && !replaced.contains(&endpoint) {
                     replaced.push(endpoint);
@@ -981,25 +1021,207 @@ fn delete_joints(
 }
 
 #[cfg(test)]
-mod weld_tests {
+mod ground_gap_tuning {
+    use super::*;
+    use avian3d::prelude::{AngularInertia, Mass, SubstepCount};
+    use avian3d::PhysicsPlugins;
+    use bevy::time::TimeUpdateStrategy;
+    use core::time::Duration;
+
+    const TIMESTEP: f32 = 1.0 / 60.0;
+
+    use crate::map::bowl_collider as bowl;
+
+    /// Clamp `collider` (resting at `rest_y`) to the real bowl via `part_gap_contacts`,
+    /// then run the sim (with the weld census) and return `(weld count, rigid?, peak
+    /// resting |v|/|ω|)`. This is the tuning rig for `MIN_JOINT_DIST`.
+    fn clamp_to_bowl(collider: Collider, rest_y: f32) -> (usize, bool, f32) {
+        let ground_col = bowl();
+        let part_pos = Vec3::new(0.0, rest_y, 0.0);
+        let mut welds = Vec::new();
+        part_gap_contacts(
+            &collider,
+            part_pos,
+            Quat::IDENTITY,
+            &ground_col,
+            Vec3::ZERO,
+            Quat::IDENTITY,
+            &mut welds,
+        );
+        let n = welds.len();
+        let rigid = anchors_are_rigid(welds.iter().map(|(a, _)| *a));
+
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, TransformPlugin, PhysicsPlugins::default()));
+        app.insert_resource(Gravity(Vec3::NEG_Y * 9.81));
+        app.insert_resource(SubstepCount(6));
+        app.insert_resource(Time::<Fixed>::from_duration(Duration::from_secs_f32(TIMESTEP)));
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f32(TIMESTEP)));
+        app.add_systems(FixedUpdate, maintain_weld_rigidity);
+        let ground = app
+            .world_mut()
+            .spawn((RigidBody::Static, ground_col, Position(Vec3::ZERO), Friction::new(0.6), Restitution::new(0.0)))
+            .id();
+        let part = app
+            .world_mut()
+            .spawn((
+                RigidBody::Dynamic,
+                collider,
+                ColliderDensity(1.0),
+                Mass(1.0),
+                AngularInertia::new(Vec3::splat(1.0)),
+                Position(part_pos),
+                Rotation::default(),
+                LinearVelocity::default(),
+                AngularVelocity::default(),
+                Friction::new(0.6),
+                Restitution::new(0.0),
+            ))
+            .id();
+        for (pa, ga) in &welds {
+            app.world_mut()
+                .spawn(SphericalJoint::new(part, ground).with_local_anchor1(*pa).with_local_anchor2(*ga));
+        }
+        app.finish();
+        const WARMUP: usize = 600;
+        const MEASURE: usize = 300;
+        let mut peak = 0.0f32;
+        for tick in 0..(WARMUP + MEASURE) {
+            app.update();
+            if tick >= WARMUP {
+                let lin = app.world().get::<LinearVelocity>(part).unwrap().0.length();
+                let ang = app.world().get::<AngularVelocity>(part).unwrap().0.length();
+                peak = peak.max(lin).max(ang);
+            }
+        }
+        (n, rigid, peak)
+    }
+
+    fn rocket() -> Collider {
+        Collider::compound(vec![
+            (Vec3::ZERO, Quat::IDENTITY, Collider::cylinder(ROCKET_BODY_RADIUS, ROCKET_BODY_HEIGHT)),
+            (
+                Vec3::new(0.0, ROCKET_FLARE_Y_OFFSET, 0.0),
+                Quat::IDENTITY,
+                Collider::cone(ROCKET_FLARE_BOTTOM_RADIUS, ROCKET_FLARE_HEIGHT),
+            ),
+        ])
+    }
+
+    /// A platform (wide thin cuboid) resting on a rocket's top (cylinder ⌀0.8). The
+    /// user wants this to weld with 4 joints, so `MIN_JOINT_DIST` must keep 4 points
+    /// on that 0.8-diameter circle. Prints the weld count for the current tuning.
+    #[test]
+    fn rocket_top_weld_count() {
+        let rocket = rocket();
+        let platform = Collider::cuboid(3.0, 0.36, 2.4); // TVCDUO-deck-ish, full extents
+        // Rocket body top is at y = ROCKET_BODY_HEIGHT/2 = 0.9; platform bottom sits there.
+        let plat_pos = Vec3::new(0.0, ROCKET_BODY_HEIGHT / 2.0 + 0.18, 0.0);
+        let mut out = Vec::new();
+        part_gap_contacts(&rocket, Vec3::ZERO, Quat::IDENTITY, &platform, plat_pos, Quat::IDENTITY, &mut out);
+        println!("[rocket-top] MIN_JOINT_DIST={MIN_JOINT_DIST} -> {} welds on rocket top", out.len());
+        for (a, _) in &out {
+            println!("    weld at rocket-local {:?}", a.to_array().map(|v| (v * 100.0).round() / 100.0));
+        }
+        // A platform on a rocket's top must get 4 welds (a rigid mount), not a hinge —
+        // this is what `MIN_JOINT_DIST` is tuned for.
+        assert!(out.len() >= 4, "rocket-top mount must form 4 welds, got {}", out.len());
+    }
+
+    #[test]
+    fn tune_ground_clamp() {
+        // Cuboid resting on the near-flat bowl centre (bowl bottom ≈ y = -1.5).
+        let (n1, r1, p1) = clamp_to_bowl(Collider::cuboid(1.0, 1.0, 1.0), -1.0);
+        println!("[tune] cuboid: {n1} welds, rigid={r1}, peak |v| = {p1:.5} m/s");
+
+        // Rocket resting on its wide flare base.
+        let rocket = Collider::compound(vec![
+            (Vec3::ZERO, Quat::IDENTITY, Collider::cylinder(ROCKET_BODY_RADIUS, ROCKET_BODY_HEIGHT)),
+            (
+                Vec3::new(0.0, ROCKET_FLARE_Y_OFFSET, 0.0),
+                Quat::IDENTITY,
+                Collider::cone(ROCKET_FLARE_BOTTOM_RADIUS, ROCKET_FLARE_HEIGHT),
+            ),
+        ]);
+        // Flare bottom sits ~ y = -1.5 → body centre at -1.5 + (BODY_H/2 + FLARE_H).
+        let rest = -1.5 + ROCKET_BODY_HEIGHT / 2.0 + ROCKET_FLARE_HEIGHT;
+        let (n2, r2, p2) = clamp_to_bowl(rocket, rest);
+        println!("[tune] rocket: {n2} welds, rigid={r2}, peak |v| = {p2:.5} m/s");
+
+        assert!(r1, "cuboid ground clamp must be rigid (3+ non-collinear welds)");
+        assert!(p1 < 0.05, "cuboid ground clamp must settle, peak = {p1}");
+        assert!(r2, "rocket ground clamp must be rigid");
+        assert!(p2 < 0.05, "rocket ground clamp must settle, peak = {p2}");
+    }
+}
+
+#[cfg(test)]
+mod gap_tests {
     use super::*;
 
-    /// A ground clamp's synthesized anchor triangle must read as RIGID to the
-    /// census (that's its whole purpose — see `ground_clamp_anchor_pairs`), for
-    /// any part orientation, on both the part side and the ground side.
+    /// Two axis-aligned unit cubes separated by a small gap along X must produce a
+    /// full 4-corner manifold, and every weld must have ZERO rest error — both anchors
+    /// map to the same world point now — so the parts stay at their fixed separation
+    /// instead of being yanked together.
     #[test]
-    fn ground_clamp_triangle_is_rigid() {
-        for rot in [
-            Quat::IDENTITY,
-            Quat::from_rotation_x(0.7),
-            Quat::from_axis_angle(Vec3::new(1.0, 2.0, -0.5).normalize(), 2.2),
-        ] {
-            let pairs =
-                ground_clamp_anchor_pairs(Vec3::new(0.0, -1.6, 0.0), Vec3::new(1.1, -1.45, 1.1), rot);
-            assert!(anchors_are_rigid(pairs.iter().map(|(pa, _)| *pa)));
-            assert!(anchors_are_rigid(pairs.iter().map(|(_, ga)| *ga)));
+    fn gap_weld_is_rigid_and_zero_rest_error() {
+        let gap = 0.05; // within JOINT_GAP
+        let cube = Collider::cuboid(1.0, 1.0, 1.0); // full extents → faces at ±0.5
+        let a_pos = Vec3::ZERO;
+        let b_pos = Vec3::new(1.0 + gap, 0.0, 0.0);
+        let mut out = Vec::new();
+        part_gap_contacts(&cube, a_pos, Quat::IDENTITY, &cube, b_pos, Quat::IDENTITY, &mut out);
+
+        assert!(out.len() >= 3, "a flush near-touch must form a rigid (3+) weld");
+        for (a_local, b_local) in &out {
+            // The weld starts satisfied: a's anchor and b's anchor are the same world
+            // point (the gap midpoint at x = 0.5 + gap/2), so nothing is pulled.
+            let a_world = a_pos + *a_local;
+            let b_world = b_pos + *b_local;
+            assert!((a_world - b_world).length() < 1e-4, "zero rest error: {a_world:?} vs {b_world:?}");
+            assert!((a_world.x - (0.5 + gap * 0.5)).abs() < 1e-3, "anchor at gap midpoint: {a_world:?}");
         }
     }
+
+    /// An angled approach still welds (zero rest error means it's launch-safe at any
+    /// angle) — the parts are simply frozen at their current relative pose.
+    #[test]
+    fn angled_gap_still_welds_with_zero_rest_error() {
+        let cube = Collider::cuboid(1.0, 1.0, 1.0);
+        let tilt = Quat::from_rotation_z(8.0_f32.to_radians());
+        let a_pos = Vec3::ZERO;
+        let b_pos = Vec3::new(1.0 + 0.05, 0.0, 0.0);
+        let mut out = Vec::new();
+        part_gap_contacts(&cube, a_pos, Quat::IDENTITY, &cube, b_pos, tilt, &mut out);
+        assert!(!out.is_empty(), "an angled near-touch still welds");
+        for (a_local, b_local) in &out {
+            let a_world = a_pos + *a_local;
+            let b_world = b_pos + tilt * *b_local;
+            assert!((a_world - b_world).length() < 1e-4, "zero rest error even when angled");
+        }
+    }
+
+    /// Beyond the gap, no weld forms.
+    #[test]
+    fn no_weld_past_the_gap() {
+        let cube = Collider::cuboid(1.0, 1.0, 1.0);
+        let mut out = Vec::new();
+        part_gap_contacts(
+            &cube,
+            Vec3::ZERO,
+            Quat::IDENTITY,
+            &cube,
+            Vec3::new(1.0 + JOINT_GAP + 0.05, 0.0, 0.0),
+            Quat::IDENTITY,
+            &mut out,
+        );
+        assert!(out.is_empty(), "faces farther apart than JOINT_GAP must not weld");
+    }
+}
+
+#[cfg(test)]
+mod weld_tests {
+    use super::*;
 
     /// 1 point = ball pivot, 2 points = hinge, 3 collinear = still a hinge — all
     /// keep their contact. Only a spanning triangle counts as a rigid weld.
@@ -1019,218 +1241,5 @@ mod weld_tests {
             [p(-0.5, 0.0, -0.5), p(0.5, 0.0, -0.5), p(0.5, 0.0, 0.5), p(-0.5, 0.0, 0.5)]
                 .into_iter()
         ));
-    }
-}
-
-/// Physics regression guard for the multiplayer-stability class of bug (PR #145):
-/// a body clamped to the ground while resting on it must SETTLE, not buzz. A
-/// buzzing resting assembly is the root cause of chronic prediction divergence
-/// (the client can't phase-match chaotic solver noise → constant rollbacks →
-/// dizzying world shake). The fix was `ground_clamp_anchor_pairs` (a rigid anchor
-/// triangle the weld census recognizes and de-contacts); this test runs the REAL
-/// avian solver so a future change that breaks the settle — reverting to a
-/// single-anchor clamp, dropping the census wiring, changing the census
-/// threshold, an avian upgrade that regresses joint↔contact resolution — fails
-/// here instead of shipping as felt instability.
-#[cfg(test)]
-mod ground_clamp_stability {
-    use super::*;
-    use avian3d::prelude::{AngularInertia, Mass, SubstepCount};
-    use avian3d::PhysicsPlugins;
-    use bevy::time::TimeUpdateStrategy;
-    use core::time::Duration;
-
-    const TIMESTEP: f32 = 1.0 / 60.0; // matches `net::TICK`
-
-    /// Build a minimal avian world with a two-part assembly resting on static
-    /// ground: the two boxes are jointed to each other AND each clamped to the
-    /// ground with `anchor_count` ground-clamp anchors — a **closed kinematic
-    /// loop** (box → ground → box → box), which is what makes the joint and
-    /// contact solvers fight (a lone clamped box is a constraint tree and settles
-    /// either way). `anchor_count == 1` is the old buggy ball-pivot clamp; `3` is
-    /// the fixed rigid triangle. `census` toggles the weld census (the fix): the
-    /// ground clamps below pull each box slightly INTO the ground, so with the
-    /// census OFF the clamp joints fight the persistent ground contact and buzz;
-    /// with it ON, a rigid triangle clamp is de-contacted and the joint wins
-    /// cleanly. Runs the setup, steps `WARMUP + MEASURE` ticks, returns the peak
-    /// resting |v|/|ω| across both boxes over the final `MEASURE`.
-    fn peak_resting_speed(anchor_count: usize, census: bool) -> f32 {
-        let mut app = App::new();
-        app.add_plugins((MinimalPlugins, TransformPlugin, PhysicsPlugins::default()));
-        app.insert_resource(Gravity(Vec3::NEG_Y * 9.81));
-        app.insert_resource(SubstepCount(6));
-        app.insert_resource(Time::<Fixed>::from_duration(Duration::from_secs_f32(TIMESTEP)));
-        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f32(
-            TIMESTEP,
-        )));
-        // Census in `FixedUpdate`, before the physics step — exactly as the game
-        // schedules it (`CharacterPlugin`/`PartPlugin`), so a rigid weld's contact
-        // is disabled *before* the first step that would otherwise fight it.
-        if census {
-            app.add_systems(FixedUpdate, maintain_weld_rigidity);
-        }
-
-        // Static ground: a wide slab whose top face is at y = 0.
-        let ground = app
-            .world_mut()
-            .spawn((
-                RigidBody::Static,
-                Collider::cuboid(20.0, 1.0, 20.0),
-                Position(Vec3::new(0.0, -0.5, 0.0)),
-                Friction::new(0.6),
-                Restitution::new(0.0),
-            ))
-            .id();
-
-        // Two dynamic unit boxes resting on the ground, 1 m apart.
-        let spawn_box = |app: &mut App, x: f32| {
-            app.world_mut()
-                .spawn((
-                    RigidBody::Dynamic,
-                    Collider::cuboid(1.0, 1.0, 1.0),
-                    ColliderDensity(1.0),
-                    Mass(1.0),
-                    AngularInertia::new(Vec3::splat(1.0)),
-                    Position(Vec3::new(x, 0.5, 0.0)),
-                    Rotation::default(),
-                    LinearVelocity::default(),
-                    AngularVelocity::default(),
-                    Friction::new(0.6),
-                    Restitution::new(0.0),
-                ))
-                .id()
-        };
-        let a = spawn_box(&mut app, -0.5);
-        let b = spawn_box(&mut app, 0.5);
-
-        // Part-to-part joint welding the two boxes at their shared face — the
-        // assembly bond that closes the loop with the ground clamps.
-        app.world_mut().spawn(
-            SphericalJoint::new(a, b)
-                .with_local_anchor1(Vec3::new(0.5, 0.0, 0.0))
-                .with_local_anchor2(Vec3::new(-0.5, 0.0, 0.0)),
-        );
-
-        // Clamp each box's bottom-centre to the ground beneath it. One anchor =
-        // ball pivot (contact-braced, the buggy case); the triangle helper = three
-        // anchors the census recognizes as a rigid weld and de-contacts.
-        for (part, x) in [(a, -0.5), (b, 0.5)] {
-            let part_anchor = Vec3::new(0.0, -0.5, 0.0);
-            // 2 cm BELOW the rest contact (ground-local; ground centre at y=-0.5):
-            // the joint pulls the box down into the ground while the contact pushes
-            // it out — the persistent joint↔contact disagreement that buzzes when
-            // the contact isn't disabled. This is the zero-gap/over-clamp geometry
-            // the real launch pad has (rockets pulled onto the bowl).
-            let ground_anchor = Vec3::new(x, 0.48, 0.0);
-            let clamps: Vec<(Vec3, Vec3)> = if anchor_count == 1 {
-                vec![(part_anchor, ground_anchor)]
-            } else {
-                ground_clamp_anchor_pairs(part_anchor, ground_anchor, Quat::IDENTITY).to_vec()
-            };
-            for (pa, ga) in clamps {
-                app.world_mut().spawn(
-                    SphericalJoint::new(part, ground)
-                        .with_local_anchor1(pa)
-                        .with_local_anchor2(ga),
-                );
-            }
-        }
-
-        app.finish();
-
-        const WARMUP: usize = 600; // 10 s to reach steady state
-        const MEASURE: usize = 300; // 5 s of "at rest"
-        let mut peak = 0.0f32;
-        for tick in 0..(WARMUP + MEASURE) {
-            app.update();
-            if tick >= WARMUP {
-                for part in [a, b] {
-                    let lin = app.world().get::<LinearVelocity>(part).unwrap().0.length();
-                    let ang = app.world().get::<AngularVelocity>(part).unwrap().0.length();
-                    peak = peak.max(lin).max(ang);
-                }
-            }
-        }
-        peak
-    }
-
-    /// Physical guard: a helper-clamped assembly resting on the ground SETTLES to
-    /// a dead stop under the real avian solver. This is the outcome PR #145
-    /// bought — it would catch a regression that reintroduces a resting buzz
-    /// (e.g. an avian upgrade that changes joint↔contact resolution, or the
-    /// census failing to de-contact the weld). Asserts only the good direction
-    /// (settle), so it can't false-fail by failing to *reproduce* a buzz — the
-    /// teeth (that the fix actually changes solver behaviour) live in the
-    /// deterministic mechanism test below.
-    #[test]
-    fn ground_clamped_assembly_settles() {
-        let fixed = peak_resting_speed(3, true); // triangle clamp + census (the fix)
-        let buggy = peak_resting_speed(3, false); // same clamp, census off (the bug)
-        println!("[clamp] census-on peak = {fixed:.5} m/s   census-off peak = {buggy:.5} m/s");
-        // The fix: a de-contacted rigid clamp settles to a dead stop.
-        assert!(
-            fixed < 0.02,
-            "a triangle-clamped resting assembly with the census must settle (peak |v| = \
-             {fixed:.5} m/s); a buzz here is the multiplayer-instability class of bug PR #145 \
-             fixed — the client can't phase-match a buzzing server, so it rolls back constantly. \
-             See `ground_clamp_anchor_pairs`."
-        );
-        // Teeth: without the census the same over-clamped assembly buzzes, so the
-        // settle above is really the fix at work, not a scene that never moves.
-        assert!(
-            buggy > 10.0 * fixed.max(1e-4),
-            "census-off should buzz relative to census-on (off = {buggy:.5}, on = {fixed:.5}); if \
-             it doesn't, this scene no longer reproduces the joint↔contact fight and the guard is \
-             vacuous — retune the over-clamp geometry."
-        );
-    }
-
-    /// Deterministic teeth: the fix works by making the weld census recognize a
-    /// ground clamp as a *rigid weld* and disable its contact (a single-anchor
-    /// clamp stays a contact-braced pivot). Assert exactly that — no solver, no
-    /// flake — so a change that silently stops de-contacting helper clamps
-    /// (dropped census wiring, a census-threshold regression, the helper reverting
-    /// to fewer anchors) fails here.
-    #[test]
-    fn census_decontacts_triangle_clamp_but_not_single_anchor() {
-        let build = |anchor_count: usize| -> bool {
-            let mut app = App::new();
-            // `PhysicsPlugins` for the `JointGraph` resource the `JointCollisionDisabled`
-            // add-hook needs; `TransformPlugin` for the physics transform sync.
-            app.add_plugins((MinimalPlugins, TransformPlugin, PhysicsPlugins::default()));
-            app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f32(
-                TIMESTEP,
-            )));
-            app.add_systems(Update, maintain_weld_rigidity);
-            let ground =
-                app.world_mut().spawn((RigidBody::Static, Position(Vec3::ZERO))).id();
-            let part =
-                app.world_mut().spawn((RigidBody::Dynamic, Position(Vec3::new(0.0, 1.0, 0.0)))).id();
-            let clamps: Vec<(Vec3, Vec3)> = if anchor_count == 1 {
-                vec![(Vec3::new(0.0, -0.5, 0.0), Vec3::ZERO)]
-            } else {
-                ground_clamp_anchor_pairs(Vec3::new(0.0, -0.5, 0.0), Vec3::ZERO, Quat::IDENTITY)
-                    .to_vec()
-            };
-            let joints: Vec<Entity> = clamps
-                .into_iter()
-                .map(|(pa, ga)| {
-                    app.world_mut()
-                        .spawn(
-                            SphericalJoint::new(part, ground)
-                                .with_local_anchor1(pa)
-                                .with_local_anchor2(ga),
-                        )
-                        .id()
-                })
-                .collect();
-            app.update(); // census runs on the freshly-added joints
-            // Contact between the pair is disabled iff every joint got the marker.
-            joints
-                .iter()
-                .all(|&j| app.world().get::<JointCollisionDisabled>(j).is_some())
-        };
-        assert!(build(3), "helper ground clamp (triangle) must be de-contacted by the census");
-        assert!(!build(1), "single-anchor ground clamp must stay contact-braced (not de-contacted)");
     }
 }

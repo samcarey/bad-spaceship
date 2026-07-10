@@ -23,8 +23,10 @@ pub const PLATFORM_THICKNESS_M: f32 = 3.0; // meters
 /// membership and filter to collide with the ground *only*.
 pub const GROUND_LAYER: u32 = 1;
 
-fn spawn_map(mut commands: Commands) {
-    // Create a bowl with a cosine cross-section
+/// Build the ground bowl's trimesh collider (a cosine cross-section bowl with a flat
+/// lip). `pub` so the joint-thinning tuning tests weld against the EXACT trimesh the
+/// live ground uses, rather than a duplicated approximation that could silently drift.
+pub fn bowl_collider() -> Collider {
     let mut vertices: Vec<Vec3> = Vec::new();
     let mut indices: Vec<[u32; 3]> = Vec::new();
     let segments = 16;
@@ -54,18 +56,20 @@ fn spawn_map(mut commands: Commands) {
             indices.push([row1 + iz + 0, row0 + iz + 1, row1 + iz + 1]);
         }
     }
+    // Avian's fallible trimesh constructor is `try_trimesh`; the bowl mesh is always
+    // valid (non-empty, matching index count), so unwrap it.
+    Collider::try_trimesh(vertices, indices).expect("valid bowl trimesh")
+}
 
+fn spawn_map(mut commands: Commands) {
     commands
         .spawn_empty()
         // Avian renamed rapier's `RigidBody::Fixed` to `Static`.
         .insert(RigidBody::Static)
         // Bevy 0.15: `Transform` now requires `GlobalTransform`, so inserting the
-        // bare component replaces the old `TransformBundle`.
+        // bare component replaces the old `TransformBundle`. (Avian collides all
+        // collider pairs by default, so rapier's `ActiveCollisionTypes` opt-in is gone.)
         .insert(Transform::from_xyz(0.0, 0.0, 0.0))
-        // Avian's fallible trimesh constructor is `try_trimesh`; the bowl mesh is
-        // always valid (non-empty, matching index count), so unwrap it. (Avian
-        // collides all collider pairs by default, so rapier's `ActiveCollisionTypes`
-        // opt-in is no longer needed.)
-        .insert(Collider::try_trimesh(vertices, indices).expect("valid bowl trimesh"))
+        .insert(bowl_collider())
         .insert(Grass);
 }
