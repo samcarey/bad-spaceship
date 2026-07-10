@@ -332,37 +332,23 @@ pub struct NetJoint {
 /// and `u64::MAX` is not a valid entity encoding.
 pub const GROUND_JOINT_ID: u64 = u64::MAX;
 
-/// Replicated center of mass of a room's **largest assembly** — the biggest set of
-/// parts joined together (directly or transitively) through joints. One of these
-/// rides on a per-room server-owned entity (`spawn_room_world`); the server
-/// recomputes it whenever a joint is created or deleted (and streams the position as
-/// the assembly moves), and each client draws a floating white orb at `position`
-/// while `count >= 2` (an assembly exists). The whole determination is
-/// server-authoritative — the client only renders what it's told. Parts jointed only
-/// *through the ground* never count, because the server never joints a part to the
-/// ground (`server_attach` attaches to other `NetPart`s only), so the assembly graph
-/// is purely part-to-part.
-#[derive(Component, Serialize, Deserialize, Clone, Copy, PartialEq, Debug, Default)]
-pub struct NetCenterOfMass {
-    /// World position of the largest assembly's (mass-weighted) center of mass.
-    pub position: [f32; 3],
-    /// How many parts are in the largest assembly. `0` (never `1` — a lone part isn't
-    /// an assembly) means no assembly exists this room, so the client hides the orb.
-    pub count: u32,
-}
-
-/// Marks a replicated part as a member of its room's largest assembly (see
-/// [`NetCenterOfMass`]). The server adds/removes it as the assembly's membership
-/// changes on joint create/delete, and it replicates to every client in the room —
-/// the "tell the clients which parts are in it" half of the feature. The orb itself
-/// is driven by [`NetCenterOfMass`]; this marker is the per-part membership the
-/// client can key future assembly visuals off.
+/// Marks a replicated part as a member of its room's **largest assembly** — the biggest
+/// set of parts joined together (directly or transitively) through joints. The server
+/// recomputes the assembly whenever a joint is created or deleted and adds/removes this
+/// marker as membership changes; it replicates to every client in the room. This is the
+/// authoritative "which parts form the assembly" signal — clients derive the
+/// centre-of-mass orb and combined thrust arrow from it locally, over the *predicted*
+/// parts, so those visuals track the client's own simulation with no network-rate lag
+/// (rather than the server streaming a COM position). Parts jointed only *through the
+/// ground* never count, because the server never joints a part to the ground
+/// (`server_attach` attaches to other `NetPart`s only), so the assembly graph is purely
+/// part-to-part.
 #[derive(Component, Serialize, Deserialize, Clone, Copy, PartialEq, Debug, Default)]
 pub struct InLargestAssembly;
 
 /// Replicated launch state for a room, authored by the server onto that room's
-/// center-of-mass orb entity (the same room-scoped entity that carries
-/// [`NetCenterOfMass`]) so every client in the room sees the same countdown. A player
+/// state entity (the same room-scoped entity that carries the room's [`NetRoomFrame`])
+/// so every client in the room sees the same countdown. A player
 /// touching the room's largest assembly can start a launch ([`RequestLaunch`]); the
 /// server runs the countdown here and, at blastoff, cuts the assembly's ground joints
 /// and fires its rockets. Clients read this to draw the `3 → 2 → 1 → Blastoff!` banner
@@ -378,7 +364,7 @@ pub struct NetLaunch {
 }
 
 /// Replicated **floating-origin frame** of a room, authored by the server onto the
-/// room's orb entity (alongside [`NetCenterOfMass`]/[`NetLaunch`]). Rooms whose
+/// room's state entity (alongside [`NetLaunch`]). Rooms whose
 /// assembly climbs far from the origin are periodically **rebased**: the server
 /// subtracts the assembly's position AND mean velocity from every room entity (a
 /// Galilean boost into a co-moving frame — physics is invariant under it), so the
@@ -761,14 +747,11 @@ impl Plugin for ProtocolPlugin {
         // The part shape is constant, so it only needs replicating (no interp).
         app.component::<NetPart>().replicate();
         app.component::<NetJoint>().replicate();
-        // Largest-assembly center of mass (see `NetCenterOfMass`): one per room,
-        // recomputed on joint create/delete and streamed as the assembly moves, so
-        // clients can draw the floating orb. The per-part membership marker
-        // (`InLargestAssembly`) replicates which parts form that assembly. Both just
-        // need replicating — the orb position is authored by the server each frame
-        // (no interpolation; it updates at the replication rate, smooth enough for a
-        // marker), and the marker is discrete.
-        app.component::<NetCenterOfMass>().replicate();
+        // The per-part membership marker (`InLargestAssembly`) replicates which parts
+        // form each room's largest assembly, recomputed on joint create/delete. Clients
+        // derive the centre-of-mass orb + combined thrust arrow from it locally over the
+        // predicted parts — so the assembly COM is predicted client-side, not streamed.
+        // Discrete, so it just needs replicating.
         app.component::<InLargestAssembly>().replicate();
         // Per-room launch/countdown state (see `NetLaunch`), authored on the room's orb
         // entity so every client in the room sees the same countdown and the same

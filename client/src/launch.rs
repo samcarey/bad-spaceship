@@ -37,7 +37,7 @@ use lightyear::prelude::{Connected, MessageSender, Predicted};
 use std::collections::HashSet;
 
 use crate::render_main_pass::flame_material::FlameThrottle;
-use crate::render_secondary_pass::main_assembly;
+use crate::render_secondary_pass::{assembly_members, main_assembly};
 use crate::ui::EguiDrawSystems;
 
 pub struct LaunchPlugin;
@@ -421,20 +421,6 @@ fn show_launch_ui(
     Ok(())
 }
 
-/// The main-assembly member entities, from the mode's authoritative source: single-player
-/// [`main_assembly`], or the replicated multiplayer `InLargestAssembly` markers.
-fn assembly_members(
-    multiplayer: bool,
-    sp_parts: &Query<(Entity, &GlobalTransform, &ComputedMass), With<Holdable>>,
-    sp_joints: &Query<&SphericalJoint>,
-    mp_members: &Query<Entity, (With<InLargestAssembly>, With<Predicted>)>,
-) -> HashSet<Entity> {
-    if multiplayer {
-        mp_members.iter().collect()
-    } else {
-        main_assembly(sp_parts, sp_joints).map(|(members, _)| members).unwrap_or_default()
-    }
-}
 
 /// Whether the character's body is in contact with any part of the assembly.
 fn character_touches_assembly(

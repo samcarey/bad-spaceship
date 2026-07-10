@@ -28,7 +28,7 @@ use bad_spaceship_shared::character::{
 use bad_spaceship_shared::net::{
     apply_hold_spring, apply_net_input, focused_part, room_code_bytes, ClientPanicReport,
     ControlChannel,
-    NetCenterOfMass, NetFacing, NetHold, NetInput, NetJoint, NetPart, PartShape, take_rollback_diag,
+    NetFacing, NetHold, NetInput, NetJoint, NetPart, PartShape, take_rollback_diag,
     NetPlayer, NetRoomFrame, ProtocolPlugin, RollbackReport, TelemetryChannel, GROUND_JOINT_ID,
     TICK,
 };
@@ -295,7 +295,6 @@ impl Plugin for NetClientPlugin {
                 redress_replicated_players,
                 face_replicated_players,
                 draw_replicated_parts,
-                draw_center_of_mass_orb,
                 bind_replicated_joints,
                 // Recolor each joint's own persistent gizmo sphere red while it's in the
                 // delete zone. Runs after the shared detector fills `PredeleteJoints`.
@@ -1146,99 +1145,6 @@ fn sync_visual_room_frame(
                 mat.set_frame(offset);
             }
         }
-    }
-}
-
-/// Draw the floating white orb at each room's largest-assembly center of mass.
-///
-/// The server owns the calculation (which parts form the largest assembly and where
-/// its COM is) and replicates the result on a per-room [`NetCenterOfMass`] entity;
-/// this system just renders it. On first sighting of that entity it attaches the orb
-/// mesh + material (built once the character config's size is known); every frame it
-/// tracks the entity's `Transform` to the replicated position and shows the orb only
-/// while an assembly exists (`count >= 2`).
-///
-/// The orb is a plain unlit white sphere half a character wide: the character body is
-/// `(2/3) * size` across, so half that width is a `size / 3` diameter — a `size / 6`
-/// radius.
-fn draw_center_of_mass_orb(
-    mut commands: Commands,
-    time: Res<Time>,
-    // The orb's shared mesh + material, built lazily once the config size is loaded
-    // (an asset, so not available at plugin build). One orb per room reuses them.
-    mut appearance: Local<Option<(Handle<Mesh>, Handle<StandardMaterial>)>>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    configs: Res<Assets<CharacterConfig>>,
-    new: Query<(Entity, &NetCenterOfMass), Without<Mesh3d>>,
-    mut existing: Query<(&NetCenterOfMass, &mut Transform, &mut Visibility), With<Mesh3d>>,
-) {
-    // The COM replicates at the network rate, so snapping the orb straight to it steps
-    // visibly. Ease toward the target with a frame-rate-independent exponential smooth
-    // (~`1/ORB_SMOOTH_RATE`s time constant) so the marker glides. Snap (no ease) when
-    // it's hidden or reappearing so it never slides in from a stale pose, and snap the
-    // final sub-`ORB_SNAP_EPS` gap so a settled assembly stops dirtying `Transform`.
-    const ORB_SMOOTH_RATE: f32 = 12.0;
-    const ORB_SNAP_EPS: f32 = 1e-4;
-    // A jump this large isn't the assembly moving — it's the room's floating-origin
-    // frame rebasing (every room entity teleported by the same delta). Easing across
-    // it would streak the orb kilometers through the scene; snap with everything else.
-    const ORB_SNAP_JUMP_M: f32 = 50.0;
-    let alpha = 1.0 - (-ORB_SMOOTH_RATE * time.delta_secs()).exp();
-    for (com, mut transform, mut visibility) in &mut existing {
-        let target = Vec3::from_array(com.position);
-        let want_visible = com.count >= 2;
-        // Smooth only while it's staying visible (and not mid-rebase); otherwise
-        // jump straight to the target.
-        let next = if want_visible
-            && *visibility == Visibility::Visible
-            && transform.translation.distance_squared(target) < ORB_SNAP_JUMP_M * ORB_SNAP_JUMP_M
-        {
-            let eased = transform.translation.lerp(target, alpha);
-            if eased.distance_squared(target) < ORB_SNAP_EPS * ORB_SNAP_EPS {
-                target
-            } else {
-                eased
-            }
-        } else {
-            target
-        };
-        if transform.translation != next {
-            transform.translation = next;
-        }
-        let want = if want_visible { Visibility::Visible } else { Visibility::Hidden };
-        if *visibility != want {
-            *visibility = want;
-        }
-    }
-
-    if new.is_empty() {
-        return;
-    }
-    // Build the orb appearance the first time one is needed (needs the config size).
-    if appearance.is_none() {
-        let Some((_, config)) = configs.iter().next() else {
-            return; // config not loaded yet — retry next frame
-        };
-        let radius = config.size() / 6.0;
-        let mesh = meshes.add(Sphere::new(radius).mesh().ico(5).unwrap());
-        let material = materials.add(StandardMaterial {
-            base_color: Color::WHITE,
-            // Emissive so it reads as a glowing indicator rather than a shaded ball.
-            emissive: LinearRgba::WHITE,
-            unlit: true,
-            ..default()
-        });
-        *appearance = Some((mesh, material));
-    }
-    let (mesh, material) = appearance.as_ref().unwrap();
-    for (entity, com) in &new {
-        commands.entity(entity).insert((
-            Mesh3d(mesh.clone()),
-            MeshMaterial3d(material.clone()),
-            Transform::from_translation(Vec3::from_array(com.position)),
-            if com.count >= 2 { Visibility::Visible } else { Visibility::Hidden },
-        ));
     }
 }
 
