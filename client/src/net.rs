@@ -447,12 +447,33 @@ fn report_stored_panic(
 /// self-heals; identifying "our" avatar needs no id lookup — only the owner's
 /// avatar is `Predicted` + `Character` (remote avatars are Interpolated-only,
 /// parts carry `NetPart`, and single-player has no `Interpolated` at all).
+///
+/// Also undo the leak's other visible symptom: the leaked marker made
+/// `draw_replicated_players` dress our avatar a SECOND time (its remote-path
+/// pivot faced only by `NetFacing` — a superimposed monster that doesn't turn
+/// with the camera). That path now excludes us by netcode id, but if a stale
+/// `AvatarVisual` got in first (command-application ordering), despawn its
+/// pivot here — same self-heal cadence as the marker.
 fn strip_own_interpolated(
     mut commands: Commands,
-    leaked: Query<Entity, (With<Character>, With<Predicted>, With<Interpolated>)>,
+    leaked: Query<
+        (Entity, Has<Interpolated>, Option<&AvatarVisual>),
+        (
+            With<Character>,
+            With<Predicted>,
+            Or<(With<Interpolated>, With<AvatarVisual>)>,
+        ),
+    >,
 ) {
-    for entity in &leaked {
-        commands.entity(entity).remove::<Interpolated>();
+    for (entity, interpolated, remote_visual) in &leaked {
+        let mut e = commands.entity(entity);
+        if interpolated {
+            e.remove::<Interpolated>();
+        }
+        if let Some(visual) = remote_visual {
+            commands.entity(visual.0).despawn();
+            commands.entity(entity).remove::<AvatarVisual>();
+        }
     }
 }
 
@@ -820,15 +841,25 @@ struct AvatarVisual(Entity);
 
 /// Give each *other* player's `Interpolated` copy a visible body, mounted on a yaw
 /// pivot so `face_replicated_players` can turn it to the player's look direction.
-/// Our own avatar is `Predicted`, not `Interpolated`, and renders via the
-/// single-player character path (`monster::dress_characters`), so it's excluded here. The
-/// raw `Confirmed` entities stay invisible.
+/// Our own avatar renders via the single-player character path
+/// (`monster::dress_characters`), so exclude it **by netcode id**, not by marker:
+/// it arrives carrying a leaked `Interpolated` alongside `Predicted` (see
+/// `strip_own_interpolated`), so a marker-based "own avatars aren't Interpolated"
+/// assumption dressed it TWICE — the own-path pivot turning with the local yaw
+/// plus this remote-path pivot faced only by replicated `NetFacing`, visible as
+/// two superimposed monsters, one of which doesn't turn. The raw `Confirmed`
+/// entities stay invisible.
 fn draw_replicated_players(
     mut commands: Commands,
     new_players: Query<(Entity, &NetPlayer), (With<Interpolated>, Without<AvatarVisual>)>,
+    local: Query<&LocalId, With<Connected>>,
     asset_server: Res<AssetServer>,
 ) {
+    let my_id = my_netcode_id(&local);
     for (entity, player) in &new_players {
+        if Some(player.client_id) == my_id {
+            continue;
+        }
         // The player's assigned monster (server-replicated, so everyone sees
         // the same one); its face shows the yaw the pivot is rotated to.
         // `spawn_monster_visual` parents the pivot under the avatar itself.
