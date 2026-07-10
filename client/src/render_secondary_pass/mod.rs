@@ -3,7 +3,7 @@ use bad_spaceship_shared::assembly::largest_assembly_per_room;
 use bad_spaceship_shared::launch::{full_rocket_thrust, rocket_world_thrust};
 use bad_spaceship_shared::{
     character,
-    net::InLargestAssembly,
+    net::{InLargestAssembly, NetLaunch},
     part::{
         Holdable, RocketEngine, SuppressLocalParts, TargetOrientation, TargetPosition,
         DELETE_RADIUS,
@@ -12,6 +12,7 @@ use bad_spaceship_shared::{
     PotentialJoints, PredeleteJoint, PredeleteJoints, UpdateJointsLabel,
 };
 // Bevy 0.17 moved `NotShadowCaster` from `bevy_pbr` to `bevy_light` (`bevy::light`).
+use crate::launch::{launch_armed, LaunchLocal};
 use bevy::{asset::load_internal_asset, light::NotShadowCaster, prelude::*};
 use lightyear::prelude::Predicted;
 use normalization::*;
@@ -37,32 +38,35 @@ impl Plugin for RenderSecondaryPassPlugin {
             Shader::from_wgsl
         );
 
-        app.add_plugins((Ui3dNormalization, MaterialPlugin::<GizmoMaterial>::default()))
-            .add_systems(
-                Startup,
-                (build_gizmo, initialize_joint_appearance, build_thrust_arrow),
-            )
-            .init_resource::<JointAppearance>()
-            .add_systems(
-                Update,
+        app.add_plugins((
+            Ui3dNormalization,
+            MaterialPlugin::<GizmoMaterial>::default(),
+        ))
+        .add_systems(
+            Startup,
+            (build_gizmo, initialize_joint_appearance, build_thrust_arrow),
+        )
+        .init_resource::<JointAppearance>()
+        .add_systems(
+            Update,
+            (
+                position_gizmo,
+                update_thrust_arrow,
+                update_center_of_mass_orb,
+                // The hold-point delete-zone sphere shows in multiplayer too:
+                // the predicted avatar carries the same `HoldPoint` child +
+                // `Holding`/`Modifying`, and joint deletion is now server-
+                // authoritative (`server_delete`), so the zone is meaningful.
+                add_hold_point_delete_zone_visualization,
                 (
-                    position_gizmo,
-                    update_thrust_arrow,
-                    update_center_of_mass_orb,
-                    // The hold-point delete-zone sphere shows in multiplayer too:
-                    // the predicted avatar carries the same `HoldPoint` child +
-                    // `Holding`/`Modifying`, and joint deletion is now server-
-                    // authoritative (`server_delete`), so the zone is meaningful.
-                    add_hold_point_delete_zone_visualization,
-                    (
-                        display_potential_joints,
-                        display_existing_joints,
-                        display_predelete_joints,
-                        delete_zone_visibility,
-                    )
-                        .after(UpdateJointsLabel),
-                ),
-            );
+                    display_potential_joints,
+                    display_existing_joints,
+                    display_predelete_joints,
+                    delete_zone_visibility,
+                )
+                    .after(UpdateJointsLabel),
+            ),
+        );
     }
 }
 
@@ -510,6 +514,9 @@ fn update_thrust_arrow(
     // (local joints) is used instead.
     mp_members: Query<Entity, (With<InLargestAssembly>, With<Predicted>)>,
     multiplayer: Option<Res<SuppressLocalParts>>,
+    // The arrow guides pre-launch aiming; it hides once the launch is armed.
+    launch_local: Res<LaunchLocal>,
+    net_launch: Query<&NetLaunch>,
 ) {
     let (Ok((mut shaft_transform, mut shaft_vis)), Ok((mut head_transform, mut head_vis))) =
         (shaft.single_mut(), head.single_mut())
@@ -517,7 +524,9 @@ fn update_thrust_arrow(
         return;
     };
 
-    let arrow = visualized_assembly(multiplayer.is_some(), &parts, &joints, &mp_members)
+    let arrow = (!launch_armed(&launch_local, &net_launch))
+        .then(|| visualized_assembly(multiplayer.is_some(), &parts, &joints, &mp_members))
+        .flatten()
         .and_then(|(members, _com)| thrust_arrow(&rockets, &members, &configs, gravity.0));
 
     let Some((origin, dir, length)) = arrow else {
@@ -599,7 +608,9 @@ pub(crate) fn assembly_members(
     if multiplayer {
         mp_members.iter().collect()
     } else {
-        main_assembly(parts, joints).map(|(members, _)| members).unwrap_or_default()
+        main_assembly(parts, joints)
+            .map(|(members, _)| members)
+            .unwrap_or_default()
     }
 }
 
@@ -696,10 +707,15 @@ fn update_center_of_mass_orb(
     mut materials: ResMut<Assets<GizmoMaterial>>,
     mut spawned: Local<bool>,
     multiplayer: Option<Res<SuppressLocalParts>>,
+    // The orb marks where to balance the stack pre-launch; it hides once launch is armed.
+    launch_local: Res<LaunchLocal>,
+    net_launch: Query<&NetLaunch>,
 ) {
     // Mass-weighted centre of mass of the main assembly (≥ 2 members), predicted locally
-    // in both modes.
-    let com = visualized_assembly(multiplayer.is_some(), &parts, &joints, &mp_members)
+    // in both modes — hidden once the launch is armed.
+    let com = (!launch_armed(&launch_local, &net_launch))
+        .then(|| visualized_assembly(multiplayer.is_some(), &parts, &joints, &mp_members))
+        .flatten()
         .map(|(_members, com)| com);
 
     // Lazily spawn the orb once the character config (its size) is loaded.

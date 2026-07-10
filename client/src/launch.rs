@@ -2,16 +2,16 @@
 //! multiplayer.
 //!
 //! When the character is touching its room's **main assembly** (the largest group of
-//! parts jointed together — the thrust arrow / COM-orb set), a "slide to launch" control
-//! appears at the top-centre. Completing the swipe starts a `3 → 2 → 1 → Blastoff!`
-//! countdown; at blastoff every joint pinning the assembly to the ground is cut and the
-//! assembly's rockets fire with balanced, anti-spin thrust (see
-//! [`bad_spaceship_shared::launch`]).
+//! parts jointed together — the thrust arrow / COM-orb set), a "Launch" button appears at
+//! the top-centre. Pressing it starts a `3 → 2 → 1 → Blastoff!` countdown; at blastoff
+//! every joint pinning the assembly to the ground is cut and the assembly's rockets fire
+//! with balanced, anti-spin thrust (see [`bad_spaceship_shared::launch`]). The COM orb and
+//! combined thrust arrow hide once the launch is armed (see [`launch_armed`]).
 //!
 //! **Two modes, one feel:**
 //! - *Single-player* is client-authoritative: this file owns the countdown, cuts the
 //!   ground joints, and applies thrust to the local sim.
-//! - *Multiplayer* is server-authoritative: the swipe sends a [`RequestLaunch`], the
+//! - *Multiplayer* is server-authoritative: the button sends a [`RequestLaunch`], the
 //!   server runs the countdown + cuts ground joints, and replicates the state on the
 //!   room's orb ([`NetLaunch`]). The countdown banner is drawn from that replicated
 //!   state, and the same balanced thrust is applied here to the **predicted** rockets so
@@ -25,7 +25,9 @@ use avian3d::prelude::{
 use bad_spaceship_shared::launch::{
     assembly_burn, measure_assembly_spin, AssemblySpin, LAUNCH_COUNTDOWN_SECS,
 };
-use bad_spaceship_shared::net::{ControlChannel, InLargestAssembly, NetLaunch, NetPart, RequestLaunch};
+use bad_spaceship_shared::net::{
+    ControlChannel, InLargestAssembly, NetLaunch, NetPart, RequestLaunch,
+};
 use bad_spaceship_shared::part::{Gimbal, Holdable, RocketEngine, SuppressLocalParts};
 use bad_spaceship_shared::Character;
 use bevy::prelude::*;
@@ -84,10 +86,7 @@ enum SpPhase {
 }
 
 #[derive(Resource, Default)]
-struct LaunchLocal {
-    /// Slide-to-launch progress `[0, 1]` while arming; springs back to 0 if released
-    /// before the end (so launching takes one deliberate full swipe).
-    slider: f32,
+pub(crate) struct LaunchLocal {
     /// "Blastoff!" banner timer (both modes).
     banner: f32,
     /// Single-player countdown/launch phase.
@@ -95,6 +94,26 @@ struct LaunchLocal {
     /// Multiplayer: whether we've already fired the banner for the current launch (so the
     /// replicated `launched` edge triggers the banner exactly once).
     mp_banner_fired: bool,
+}
+
+impl LaunchLocal {
+    /// Single-player: a launch is armed (counting down or lifted off) — the assembly
+    /// visuals (COM orb + thrust arrow) hide once it is. Multiplayer launch state lives
+    /// on the replicated [`NetLaunch`], not here, so [`launch_armed`] combines both.
+    fn launching(&self) -> bool {
+        self.sp != SpPhase::Idle
+    }
+}
+
+/// Whether the room's assembly is mid-launch (counting down or lifted off), across both
+/// modes: single-player state on [`LaunchLocal`], multiplayer on the replicated
+/// [`NetLaunch`]. The COM orb and combined thrust arrow hide once a launch is armed.
+pub(crate) fn launch_armed(local: &LaunchLocal, net_launch: &Query<&NetLaunch>) -> bool {
+    local.launching()
+        || net_launch
+            .iter()
+            .next()
+            .is_some_and(|l| l.launched || l.remaining > 0.0)
 }
 
 /// Advance the single-player countdown + the blastoff banner, and detect the multiplayer
@@ -185,15 +204,16 @@ fn apply_sp_thrust(
     let Some((com, spin)) = ({
         let velocities = set.p0();
         let samples = || {
-            parts.iter().filter(|(entity, ..)| members.contains(entity)).map(
-                |(entity, transform, part_mass)| {
+            parts
+                .iter()
+                .filter(|(entity, ..)| members.contains(entity))
+                .map(|(entity, transform, part_mass)| {
                     let (linear, angular) = velocities
                         .get(entity)
                         .map(|(l, a)| (l.0, a.0))
                         .unwrap_or_default();
                     (transform.translation(), linear, angular, part_mass.value())
-                },
-            )
+                })
         };
         measure_assembly_spin(samples)
     }) else {
@@ -208,7 +228,15 @@ fn apply_sp_thrust(
             (entity, translation, rotation, gimbal.0)
         })
         .collect();
-    apply_thrust(com, gravity.0, &geometry, &spin, time.delta_secs(), &mut integral, &mut set.p2());
+    apply_thrust(
+        com,
+        gravity.0,
+        &geometry,
+        &spin,
+        time.delta_secs(),
+        &mut integral,
+        &mut set.p2(),
+    );
 }
 
 /// Apply balanced thrust to the multiplayer assembly's **predicted** rockets each physics
@@ -269,7 +297,15 @@ fn apply_mp_thrust(
     let Some((com, spin)) = measured else {
         return;
     };
-    apply_thrust(com, gravity.0, &geometry, &spin, time.delta_secs(), &mut integral, &mut set.p1());
+    apply_thrust(
+        com,
+        gravity.0,
+        &geometry,
+        &spin,
+        time.delta_secs(),
+        &mut integral,
+        &mut set.p1(),
+    );
 }
 
 /// Per-tick flame reset — see the registration comment and
@@ -313,8 +349,8 @@ fn apply_thrust(
     }
 }
 
-/// Draw the slide-to-launch control and the countdown / blastoff banner (top-centre), and
-/// — on a completed swipe — start the launch (single-player: locally; multiplayer: send a
+/// Draw the launch button and the countdown / blastoff banner (top-centre), and — on a
+/// button press — start the launch (single-player: locally; multiplayer: send a
 /// `RequestLaunch`).
 fn show_launch_ui(
     mut contexts: EguiContexts,
@@ -370,57 +406,50 @@ fn show_launch_ui(
             });
     }
 
-    // The slider only shows while idle and the character is touching the assembly.
-    let available = idle && character_touches_assembly(
-        &character,
-        &collisions,
-        &assembly_members(multiplayer.is_some(), &sp_parts, &sp_joints, &mp_members),
-    );
+    // The launch button only shows while idle and the character is touching the assembly.
+    let available = idle
+        && character_touches_assembly(
+            &character,
+            &collisions,
+            &assembly_members(multiplayer.is_some(), &sp_parts, &sp_joints, &mp_members),
+        );
     if !available {
-        // Keep the slider reset whenever it isn't shown.
-        local.slider = 0.0;
         return Ok(());
     }
 
-    let mut progress = local.slider;
     let mut arm = false;
-    egui::Area::new(egui::Id::new("bs_launch_slider"))
+    egui::Area::new(egui::Id::new("bs_launch_button"))
         .anchor(Align2::CENTER_TOP, egui::vec2(0.0, 24.0))
         .show(ctx, |ui| {
             Frame::default()
                 .fill(Color32::from_black_alpha(160))
                 .inner_margin(egui::Margin::same(8))
                 .show(ui, |ui| {
-                    ui.vertical_centered(|ui| {
-                        ui.colored_label(Color32::from_rgb(255, 220, 80), "Slide to launch →");
-                        let response =
-                            ui.add(egui::Slider::new(&mut progress, 0.0..=1.0).show_value(false));
-                        if progress >= 0.999 {
-                            arm = true;
-                        } else if !response.dragged() {
-                            // Released before the end — spring back so arming needs one
-                            // uninterrupted swipe.
-                            progress = 0.0;
-                        }
-                    });
+                    let button = egui::Button::new(
+                        egui::RichText::new("Launch")
+                            .size(22.0)
+                            .strong()
+                            .color(Color32::from_rgb(255, 220, 80)),
+                    );
+                    if ui.add(button).clicked() {
+                        arm = true;
+                    }
                 });
         });
 
     if arm {
-        local.slider = 0.0;
         if multiplayer.is_some() {
             if let Ok(mut sender) = launch_sender.single_mut() {
                 sender.send::<ControlChannel>(RequestLaunch);
             }
         } else {
-            local.sp = SpPhase::Countdown { remaining: LAUNCH_COUNTDOWN_SECS };
+            local.sp = SpPhase::Countdown {
+                remaining: LAUNCH_COUNTDOWN_SECS,
+            };
         }
-    } else {
-        local.slider = progress;
     }
     Ok(())
 }
-
 
 /// Whether the character's body is in contact with any part of the assembly.
 fn character_touches_assembly(
