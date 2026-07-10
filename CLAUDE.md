@@ -1090,35 +1090,40 @@ game's own systems engage instead of being re-implemented:
   `HeldRotation` (the target orientation), shown only while holding — so the RGB
   axes indicate the orientation the part is being rotated toward, like single-player.
 
-**Largest-assembly center-of-mass orb (server-authoritative).** A floating white orb
-marks the center of mass of each room's **largest assembly** — the biggest set of parts
-joined together (directly or transitively) through joints. The whole calculation is
-server-side: `update_assembly_center_of_mass` (`server/src/net.rs`, every frame, which
-covers "on joint create/delete" *and* keeps the orb tracking the moving assembly) runs a
-tiny union-find over the parts, unions them by their `SphericalJoint` edges, and per room
-picks the largest connected component of ≥ 2 parts, then mass-weights its center of mass
-(density is uniform, so the cuboid volume is the weight). The graph is purely part-to-part
-— the server never joints a part to the *ground* (`server_attach` attaches only to other
-`NetPart`s) and cross-room parts can't collide (collision layers) — so "blocks connected
-through the ground" and cross-room assemblies simply can't arise, satisfying the "not
-counting the ground" rule for free. The result is published two ways: each member part
-gets a replicated `InLargestAssembly` marker (the "tell the clients which parts are in it"
-half — added/removed only when membership actually flips, so it re-replicates on joint
-change, not per frame), and a **per-room orb entity** (spawned in `spawn_room_world`,
-`Rooms`-scoped, no physics body — a pure data holder) carries a replicated
-`NetCenterOfMass { position, count }` the server rewrites each frame (`set_if_neq`, so a
-settled assembly goes quiet). The client's `draw_center_of_mass_orb` (`client/src/net.rs`)
-renders a plain unlit white sphere on that entity — **half a character wide** (the body is
-`(2/3)·size` across, so the orb is a `size/3` diameter, `size/6` radius) — tracking the
-replicated position and shown only while `count >= 2`. The COM replicates at the network
-rate, so `draw_center_of_mass_orb` eases the orb toward it with a frame-rate-independent
-exponential smooth (`ORB_SMOOTH_RATE`, ~83 ms time constant) instead of snapping — it
-would otherwise step visibly between replicated positions. It snaps (no ease) when hidden
-or reappearing so it never slides in from a stale pose, and snaps the final sub-`ORB_SNAP_EPS`
-gap so a settled assembly stops dirtying `Transform`. The union-find /
-largest-component / weighted-COM math is factored into the pure `largest_assembly_per_room`
-helper with unit tests (`cargo test -p bad-spaceship-server`), since a live two-client
-joint-building session is the only other way to exercise it.
+**Largest-assembly center-of-mass orb + combined thrust arrow (COM predicted
+client-side).** A floating white orb marks the center of mass of each room's **largest
+assembly** — the biggest set of parts joined together (directly or transitively) through
+joints — and a yellow arrow shows the assembly's combined rocket-thrust vector. **The
+server determines only *membership*; clients derive both visuals locally.**
+`mark_largest_assembly` (`server/src/net.rs`, every frame) runs a tiny union-find over
+the parts, unions them by their `SphericalJoint` edges, per room picks the largest
+connected component of ≥ 2 parts, and marks each member with a replicated
+`InLargestAssembly`. The graph is purely part-to-part — the server never joints a part to
+the *ground* (`server_attach` attaches only to other `NetPart`s) and cross-room parts
+can't collide (collision layers) — so "blocks connected through the ground" and cross-room
+assemblies can't arise, satisfying the "not counting the ground" rule for free. Because
+the parts are `PredictionTarget::All` (predicted on every client), the client already has
+the assembly's poses locally, so it computes the COM **client-side** from the predicted
+parts + the `InLargestAssembly` markers — no server-streamed COM position, no
+network-rate lag. `visualized_assembly` (`client/src/render_secondary_pass/mod.rs`) is
+the one seam for both visuals in both modes: single-player membership comes from the local
+joint graph (`main_assembly`), multiplayer from the `InLargestAssembly` markers on the
+`Predicted` parts (shared with the launch systems via `assembly_members`), and it
+mass-weights the members' rendered `GlobalTransform`s into the COM. `update_center_of_mass_orb`
+draws the orb (a `GizmoMaterial` sphere half a character wide — `size/6` radius — on the
+always-on-top gizmo pass, hidden when < 2 members); `update_thrust_arrow` draws the arrow
+(the per-rocket point/force come from the same `rocket_world_thrust` / `full_rocket_thrust`
+helpers the launch physics uses, so the arrow can't drift from the real thrust). Both work
+identically in SP and MP — the arrow had previously been hard-gated off in MP on a stale
+"clients have no rockets" assumption (predicted rocket parts *do* carry `RocketEngine` via
+`insert_rocket_physics`). The union-find / largest-component / weighted-COM math is
+factored into the pure `largest_assembly_per_room` helper with unit tests (`cargo test -p
+bad-spaceship-server`). (History: this used to stream a server-authoritative
+`NetCenterOfMass { position, count }` on a per-room entity, eased on the client with an
+`ORB_SMOOTH_RATE` exponential smooth to hide the network-rate stepping; that component +
+its server write + the client `draw_center_of_mass_orb` renderer were removed once the
+client derived the COM from the predicted parts. The per-room entity persists — now
+`RoomStateOf`, spawned by `spawn_room_state` — carrying only `NetLaunch` + `NetRoomFrame`.)
 
 **Rocket launch (slide-to-launch, countdown, balanced thrust; SP + MP).** A player
 touching its room's largest assembly gets a top-centre "slide to launch" control; a full
@@ -1138,8 +1143,8 @@ fps-dependent). Key facts that shaped the design:
   rollback-jitter the whole flight (parts are `PredictionTarget::All` — predicted on every
   client), so the client applies the **identical** balanced thrust to its *predicted*
   rockets and prediction converges. The single replicated launch state is a per-room
-  `NetLaunch { remaining, launched }` on the existing orb entity — everyone in the room sees
-  the same countdown, no per-rocket/per-tick replication.
+  `NetLaunch { remaining, launched }` on the per-room state entity (`RoomStateOf`) — everyone
+  in the room sees the same countdown, no per-rocket/per-tick replication.
 - **Ground joints exist in MP too** (contrary to a stale comment in
   `update_assembly_center_of_mass`): `server_attach` *can* joint a part to the ground
   (`Grass`), named by the `GROUND_JOINT_ID` sentinel. "Cut ground joints at blastoff" =

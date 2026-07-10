@@ -3,6 +3,7 @@ use bad_spaceship_shared::assembly::largest_assembly_per_room;
 use bad_spaceship_shared::launch::{full_rocket_thrust, rocket_world_thrust};
 use bad_spaceship_shared::{
     character,
+    net::InLargestAssembly,
     part::{
         Holdable, RocketEngine, SuppressLocalParts, TargetOrientation, TargetPosition,
         DELETE_RADIUS,
@@ -12,6 +13,7 @@ use bad_spaceship_shared::{
 };
 // Bevy 0.17 moved `NotShadowCaster` from `bevy_pbr` to `bevy_light` (`bevy::light`).
 use bevy::{asset::load_internal_asset, light::NotShadowCaster, prelude::*};
+use lightyear::prelude::Predicted;
 use normalization::*;
 use std::collections::{HashMap, HashSet};
 
@@ -503,9 +505,10 @@ fn update_thrust_arrow(
         (&mut Transform, &mut Visibility),
         (With<ThrustArrowHead>, Without<ThrustArrowShaft>),
     >,
-    // Rockets are never created in multiplayer (server-owned world, no local
-    // `RocketEngine`/`SphericalJoint`), so this would no-op there anyway — the gate
-    // just makes that explicit and skips the work.
+    // Multiplayer assembly membership (see `visualized_assembly`): the replicated
+    // markers on the predicted parts. Empty in single-player, where `main_assembly`
+    // (local joints) is used instead.
+    mp_members: Query<Entity, (With<InLargestAssembly>, With<Predicted>)>,
     multiplayer: Option<Res<SuppressLocalParts>>,
 ) {
     let (Ok((mut shaft_transform, mut shaft_vis)), Ok((mut head_transform, mut head_vis))) =
@@ -514,12 +517,8 @@ fn update_thrust_arrow(
         return;
     };
 
-    let arrow = if multiplayer.is_some() {
-        None
-    } else {
-        main_assembly(&parts, &joints)
-            .and_then(|(members, _com)| thrust_arrow(&rockets, &members, &configs, gravity.0))
-    };
+    let arrow = visualized_assembly(multiplayer.is_some(), &parts, &joints, &mp_members)
+        .and_then(|(members, _com)| thrust_arrow(&rockets, &members, &configs, gravity.0));
 
     let Some((origin, dir, length)) = arrow else {
         *shaft_vis = Visibility::Hidden;
@@ -585,6 +584,54 @@ fn thrust_arrow(
     Some((origin, dir, length))
 }
 
+/// The assembly's member entities, from whichever source is authoritative this mode:
+/// single-player's local joint graph ([`main_assembly`]), or the replicated
+/// `InLargestAssembly` markers on the **predicted** parts (multiplayer — so membership
+/// is predicted client-side alongside the parts). Shared by the launch systems
+/// (`launch.rs`) and the assembly visuals below so every consumer agrees on "what's in
+/// the assembly".
+pub(crate) fn assembly_members(
+    multiplayer: bool,
+    parts: &Query<(Entity, &GlobalTransform, &ComputedMass), With<Holdable>>,
+    joints: &Query<&SphericalJoint>,
+    mp_members: &Query<Entity, (With<InLargestAssembly>, With<Predicted>)>,
+) -> HashSet<Entity> {
+    if multiplayer {
+        mp_members.iter().collect()
+    } else {
+        main_assembly(parts, joints).map(|(members, _)| members).unwrap_or_default()
+    }
+}
+
+/// Member entities + mass-weighted centre of mass of the assembly to *visualise* (the
+/// COM orb and the combined thrust arrow) — [`assembly_members`] plus the mass-weighted
+/// centroid of those members' rendered poses. Because the members come from the
+/// predicted parts in multiplayer, the orb and arrow track the locally simulated parts
+/// with no network-rate lag (the COM is *predicted client-side*, like the parts
+/// themselves, instead of streamed from the server). `None` when no assembly exists
+/// (< 2 members) or its mass is degenerate.
+fn visualized_assembly(
+    multiplayer: bool,
+    parts: &Query<(Entity, &GlobalTransform, &ComputedMass), With<Holdable>>,
+    joints: &Query<&SphericalJoint>,
+    mp_members: &Query<Entity, (With<InLargestAssembly>, With<Predicted>)>,
+) -> Option<(HashSet<Entity>, Vec3)> {
+    let members = assembly_members(multiplayer, parts, joints, mp_members);
+    if members.len() < 2 {
+        return None;
+    }
+    let mut weighted = Vec3::ZERO;
+    let mut total = 0.0;
+    for (entity, transform, mass) in parts {
+        if members.contains(&entity) {
+            let m = mass.value();
+            weighted += transform.translation() * m;
+            total += m;
+        }
+    }
+    (total > 0.0).then(|| (members, weighted / total))
+}
+
 /// The single-player **main assembly** — the largest group of parts jointed *directly*
 /// together (≥ 2 parts) — as its member entities plus mass-weighted centre of mass.
 /// Joints to the ground (or any non-part body) contribute no edge, so a part pinned to
@@ -622,12 +669,13 @@ pub(crate) fn main_assembly(
 // ---- Single-player assembly centre-of-mass orb -------------------------------
 //
 // A floating unlit-white orb marks the mass-weighted centre of mass of the main
-// assembly (the largest group of parts jointed directly together). In multiplayer
-// this is server-authoritative (`server::update_assembly_center_of_mass` +
-// `net::draw_center_of_mass_orb`); single-player has no server, so it's computed
-// locally here. The orb is half a character wide — the body is `(2/3)·size` across, so
-// half that is a `size/3` diameter (`size/6` radius) — and hidden when no assembly
-// exists.
+// assembly (the largest group of parts jointed directly together). Both modes compute
+// it here from the local parts (see `visualized_assembly`): single-player from its
+// joints, multiplayer from the replicated `InLargestAssembly` markers on the predicted
+// parts — so in multiplayer the COM is predicted client-side alongside the parts (no
+// server-streamed orb). The orb is half a character wide — the body is `(2/3)·size`
+// across, so half that is a `size/3` diameter (`size/6` radius) — and hidden when no
+// assembly exists.
 
 #[derive(Component)]
 struct CenterOfMassOrb;
@@ -636,6 +684,9 @@ fn update_center_of_mass_orb(
     mut commands: Commands,
     joints: Query<&SphericalJoint>,
     parts: Query<(Entity, &GlobalTransform, &ComputedMass), With<Holdable>>,
+    // Multiplayer assembly membership: the replicated markers on the predicted parts
+    // (empty in single-player, where local joints drive `main_assembly` instead).
+    mp_members: Query<Entity, (With<InLargestAssembly>, With<Predicted>)>,
     configs: Res<Assets<character::Config>>,
     mut orb: Query<(&mut Transform, &mut Visibility), With<CenterOfMassOrb>>,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -644,16 +695,12 @@ fn update_center_of_mass_orb(
     // with the arrow (which can occlude it).
     mut materials: ResMut<Assets<GizmoMaterial>>,
     mut spawned: Local<bool>,
-    // Multiplayer has the server-authoritative orb (replicated `NetCenterOfMass`);
-    // don't compute or draw a second one here.
     multiplayer: Option<Res<SuppressLocalParts>>,
 ) {
-    if multiplayer.is_some() {
-        return;
-    }
-
-    // Mass-weighted centre of mass of the main assembly (≥ 2 parts, jointed directly).
-    let com = main_assembly(&parts, &joints).map(|(_members, com)| com);
+    // Mass-weighted centre of mass of the main assembly (≥ 2 members), predicted locally
+    // in both modes.
+    let com = visualized_assembly(multiplayer.is_some(), &parts, &joints, &mp_members)
+        .map(|(_members, com)| com);
 
     // Lazily spawn the orb once the character config (its size) is loaded.
     if !*spawned {

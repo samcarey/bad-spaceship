@@ -3,7 +3,7 @@
 //! centre of mass.
 //!
 //! Pure index math — no ECS or lightyear types — so the multiplayer **server**
-//! (`update_assembly_center_of_mass`, per room) and the single-player **client**
+//! (`mark_largest_assembly`, per room) and the single-player **client**
 //! (the thrust-vector + centre-of-mass orb, one room) share **one** implementation,
 //! and one unit-tested definition of "what counts as an assembly". Callers control
 //! which joints become edges, so excluding ground joints (the client filters them;

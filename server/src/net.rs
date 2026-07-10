@@ -30,7 +30,7 @@ use bad_spaceship_shared::launch::{assembly_burn, measure_assembly_spin, LAUNCH_
 use bad_spaceship_shared::character::{spawn_position, CharacterMovement, InitialPose, ServerAvatar};
 use bad_spaceship_shared::net::{
     apply_hold_spring, apply_net_input, focused_part, monster_index, sanitize_name,
-    ClientPanicReport, InLargestAssembly, NetCenterOfMass, NetFacing, NetHold, NetInput, NetJoint,
+    ClientPanicReport, InLargestAssembly, NetFacing, NetHold, NetInput, NetJoint,
     NetLaunch, NetName, NetPart, NetPlayer, NetRoomFrame, PartShape, ProtocolPlugin, RequestLaunch,
     ResetPosition, RollbackReport, SaveGame, SetAvatar, SetName, GROUND_JOINT_ID, MONSTER_COUNT,
     TICK,
@@ -348,7 +348,7 @@ impl Plugin for NetServerPlugin {
         // to stream per-frame.
         app.add_systems(
             Update,
-            (sync_avatar_facing, sync_net_hold, update_assembly_center_of_mass),
+            (sync_avatar_facing, sync_net_hold, mark_largest_assembly),
         );
         // Part recycling runs in `FixedUpdate`, NOT `Update`: it also catches parts
         // whose state went non-finite / absurd (a diverging constraint solve), and
@@ -505,11 +505,12 @@ struct PartRoom {
     bit: u32,
 }
 
-/// Tags the per-room center-of-mass orb entity with the room it reports for, so
-/// `update_assembly_center_of_mass` can write that room's largest-assembly COM into
-/// its replicated [`NetCenterOfMass`].
+/// Tags the per-room state entity with the room it reports for, so the systems that
+/// author that room's replicated state onto it — its floating-origin [`NetRoomFrame`]
+/// (`rebase_room_frames`) and its launch/countdown [`NetLaunch`] (`publish_room_launch`)
+/// — can find the right one.
 #[derive(Component, Clone, Copy)]
-struct OrbRoom(RoomId);
+struct RoomStateOf(RoomId);
 
 // ---- Floating-origin rebase (per room) ----------------------------------------
 //
@@ -604,7 +605,7 @@ fn rebase_room_frames(
     mut commands: Commands,
     mut frames: ResMut<RoomFrames>,
     joints: Query<(Entity, &SphericalJoint, Option<&RoomMember>)>,
-    mut orbs: Query<(&OrbRoom, &mut NetRoomFrame)>,
+    mut orbs: Query<(&RoomStateOf, &mut NetRoomFrame)>,
     mut parts: Query<(Entity, &NetPart, &PartRoom, &mut Position, &mut LinearVelocity)>,
     mut avatars: Query<
         (Entity, &RoomMember, &mut Position, &mut LinearVelocity),
@@ -1137,25 +1138,23 @@ fn spawn_room_world(commands: &mut Commands, room: Room, frames: &RoomFrames) {
         let entity = spawn_random_rocket(commands);
         tag_room_part(commands, entity, PartShape::RocketEngine, 0, room, frames);
     }
-    spawn_room_orb(commands, room, NetRoomFrame::default());
+    spawn_room_state(commands, room, NetRoomFrame::default());
 }
 
-/// One center-of-mass orb per room: a server-owned, replicated marker whose
-/// `NetCenterOfMass` the server rewrites as the room's largest assembly changes /
-/// moves (`update_assembly_center_of_mass`). It carries no physics body — it's a
-/// pure data holder the client renders a floating orb from. Scoped to the room so
-/// only that room's clients receive it. The same entity carries the room's
-/// launch/countdown state (`NetLaunch`) and floating-origin frame (`NetRoomFrame`),
-/// so a single replicated entity per room tells clients where the COM is, where the
-/// launch sequence is, and where the room is in true coordinates.
-fn spawn_room_orb(commands: &mut Commands, room: Room, frame: NetRoomFrame) {
+/// One replicated per-room state entity: a server-owned, physics-less data holder that
+/// carries the room's replicated state — its launch/countdown (`NetLaunch`) and its
+/// floating-origin frame (`NetRoomFrame`). Scoped to the room so only that room's
+/// clients receive it, so a single replicated entity per room tells clients where the
+/// launch sequence is and where the room is in true coordinates. (The assembly's
+/// centre-of-mass orb is no longer streamed from here — clients derive it locally from
+/// the replicated `InLargestAssembly` membership; see `mark_largest_assembly`.)
+fn spawn_room_state(commands: &mut Commands, room: Room, frame: NetRoomFrame) {
     commands.spawn((
-        NetCenterOfMass::default(),
         NetLaunch::default(),
         frame,
         Replicate::to_clients(NetworkTarget::All),
         Rooms::single(room.id),
-        OrbRoom(room.id),
+        RoomStateOf(room.id),
     ));
 }
 
@@ -1250,7 +1249,7 @@ fn spawn_room_world_from_save(
     if world.launched {
         launches.by_room.insert(room.id, RoomLaunch::Launched);
     }
-    spawn_room_orb(commands, room, frame.net());
+    spawn_room_state(commands, room, frame.net());
 }
 
 /// Tag a freshly-spawned part for room-scoped replication: its shape + stable id
@@ -1687,26 +1686,25 @@ fn replace_fallen_room_parts(
 }
 
 /// Recompute each room's **largest assembly** — the biggest connected component of
-/// parts joined together through joints — and publish it: mark the member parts with
-/// a replicated [`InLargestAssembly`] and write the assembly's (mass-weighted) center
-/// of mass into the room's orb [`NetCenterOfMass`], so every client can draw a
-/// floating white orb there.
+/// parts joined together through joints — and publish which parts belong to it by
+/// marking them with a replicated [`InLargestAssembly`]. Clients derive the
+/// centre-of-mass orb and the combined thrust arrow from this membership locally, over
+/// their *predicted* parts, so those visuals are predicted client-side (no streamed COM
+/// position).
 ///
 /// Runs every frame, which covers "whenever a joint is created or deleted" (the only
-/// time membership can change) *and* keeps the orb tracking the assembly as it moves.
-/// The per-part marker only re-replicates when membership actually flips (guarded by
-/// `Has<InLargestAssembly>`), and the orb position only re-replicates when it changes
-/// (`set_if_neq`), so a settled world generates no traffic.
+/// time membership can change). The per-part marker only re-replicates when membership
+/// actually flips (guarded by `Has<InLargestAssembly>`), so a settled world generates
+/// no traffic.
 ///
 /// Parts never joint to the ground (`server_attach` attaches only to other `NetPart`s)
 /// and cross-room parts can't collide (collision layers), so the graph is purely
 /// part-to-part within one room — "blocks connected through the ground" simply can't
 /// arise here. A lone part is not an assembly, so only components of ≥ 2 parts count.
-fn update_assembly_center_of_mass(
+fn mark_largest_assembly(
     mut commands: Commands,
     parts: Query<(Entity, &Position, &NetPart, &PartRoom, Has<InLargestAssembly>)>,
     joints: Query<&SphericalJoint>,
-    mut orbs: Query<(&OrbRoom, &mut NetCenterOfMass)>,
 ) {
     // Index every part so joints can reference them by position. Each entry carries
     // the part's world position, its mass weight (density is uniform across parts, so
@@ -1744,16 +1742,6 @@ fn update_assembly_center_of_mass(
         } else if !is_member && is_marked {
             commands.entity(entity).remove::<InLargestAssembly>();
         }
-    }
-
-    // Publish each room's COM into its orb. When a room has no assembly, keep the last
-    // position (the orb is hidden on `count == 0` anyway) and just zero the count.
-    for (orb_room, mut com) in &mut orbs {
-        let next = match assemblies.get(&orb_room.0) {
-            Some(a) => NetCenterOfMass { position: a.com.to_array(), count: a.members.len() as u32 },
-            None => NetCenterOfMass { position: com.position, count: 0 },
-        };
-        com.set_if_neq(next);
     }
 }
 
@@ -1867,7 +1855,7 @@ fn tick_room_launches(
 /// Mirror each room's launch state onto its orb `NetLaunch` so it replicates to every
 /// client in the room (countdown banner + predicted thrust). Rooms with no launch entry
 /// report the idle default. `set_if_neq` keeps a settled/idle room quiet.
-fn publish_room_launch(registry: Res<LaunchRegistry>, mut orbs: Query<(&OrbRoom, &mut NetLaunch)>) {
+fn publish_room_launch(registry: Res<LaunchRegistry>, mut orbs: Query<(&RoomStateOf, &mut NetLaunch)>) {
     for (orb_room, mut launch) in &mut orbs {
         let next = match registry.by_room.get(&orb_room.0) {
             Some(RoomLaunch::Counting { remaining }) => {
@@ -2557,7 +2545,7 @@ mod tests {
                 CollisionLayers::from_bits(bit, bit | GROUND_LAYER),
             ))
             .id();
-        let orb = app.world_mut().spawn((OrbRoom(room), NetRoomFrame::default())).id();
+        let orb = app.world_mut().spawn((RoomStateOf(room), NetRoomFrame::default())).id();
 
         app.update();
 
@@ -2609,7 +2597,7 @@ mod tests {
             .spawn(test_part(room, bit, false, Vec3::new(0.0, 101.0, 0.0), sink))
             .id();
         app.world_mut().spawn(SphericalJoint::new(a, b));
-        let orb = app.world_mut().spawn((OrbRoom(room), NetRoomFrame::default())).id();
+        let orb = app.world_mut().spawn((RoomStateOf(room), NetRoomFrame::default())).id();
 
         app.update();
 
