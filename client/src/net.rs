@@ -225,6 +225,9 @@ impl Plugin for NetClientPlugin {
         // here (after `ClientPlugins` created the prediction registry), not in
         // `CharacterPlugin` (see the fn doc).
         bad_spaceship_shared::character::register_ground_state_rollback(app);
+        // Fix the MP jump hang: strip the leaked `Interpolated` marker off our own
+        // predicted avatar (see the fn doc).
+        app.add_systems(Update, strip_own_interpolated);
         // Render-interpolate predicted bodies between fixed (60 Hz) sim ticks.
         // Prediction/rollback advance Position/Rotation only in `FixedUpdate`; without
         // this the rendered pose is held constant between ticks and the camera (a
@@ -419,6 +422,40 @@ fn report_stored_panic(
 /// of the `RemoteId` the server reads in `client_identity` to stamp `NetPlayer`, so the
 /// ids match across the wire and exactly one avatar — ours — is adopted.
 ///
+/// Fix for the MP jump hang (press jump → rise two ticks → hang mid-air ~250 ms
+/// until the server's jump arrives): our own avatar arrives carrying BOTH
+/// `Predicted` AND a leaked `Interpolated` marker (measured `interp=1 pred=1`;
+/// the server sends `InterpolationTarget::to_clients(AllExceptSingle(owner))`,
+/// but the owner exclusion does not hold — the netcode plan had flagged
+/// `AllExceptSingle` in 0.28 as unverified). lightyear's
+/// `lightyear_interpolation::interpolate::<C>` (Update) writes the CONFIRMED
+/// value onto every `Interpolated` entity each frame and has no
+/// `Without<Predicted>` guard, so on the doubly-tagged avatar every
+/// interpolation-registered component gets pinned back to the server's
+/// (RTT-old) state once per frame — silently, with no rollback (both markers'
+/// receive fns tie at priority 100, and interpolation's does no mismatch
+/// check). `Position`/`Rotation` were invisibly rescued every tick by
+/// `FrameInterpolate`'s restore-before-FixedMain; `LinearVelocity` has no
+/// `FrameInterpolate`, so the predicted jump velocity was stomped to the
+/// confirmed grounded vy≈0 at every tick boundary — measured as: walk fine
+/// (movement rewrites horizontal velocity from input every tick, masking the
+/// stomp), jump applied then erased (vy 7.34 → 0.00 at the next tick start,
+/// `rb=0`), avatar hanging mid-air ~12 ticks until the confirmed jump landed.
+///
+/// Strip the marker. Runs every frame (trivial query, normally empty) rather
+/// than once, so a later replication message re-inserting `Interpolated`
+/// self-heals; identifying "our" avatar needs no id lookup — only the owner's
+/// avatar is `Predicted` + `Character` (remote avatars are Interpolated-only,
+/// parts carry `NetPart`, and single-player has no `Interpolated` at all).
+fn strip_own_interpolated(
+    mut commands: Commands,
+    leaked: Query<Entity, (With<Character>, With<Predicted>, With<Interpolated>)>,
+) {
+    for entity in &leaked {
+        commands.entity(entity).remove::<Interpolated>();
+    }
+}
+
 /// Gated on `Position` so we assemble the body only once the avatar's real spawn
 /// pose has arrived (rather than briefly at the origin). The loose blocks are also
 /// `Predicted` now, so exclude `NetPart` — the avatar is the predicted entity that
