@@ -1,5 +1,6 @@
 use avian3d::prelude::{
-    Collider, CollisionLayers, Collisions, LinearVelocity, LockedAxes, Mass, Position, RigidBody,
+    AngularVelocity, Collider, CollisionLayers, Collisions, LinearVelocity, LockedAxes, Mass,
+    Position, RigidBody,
 };
 use bevy::prelude::*;
 use bevy::reflect::TypePath;
@@ -309,6 +310,29 @@ pub fn insert_character_body(entity: &mut EntityCommands, size: f32) {
         Mass(1.0),
         CharacterBundle::default(),
         DirectionalInput::default(),
+    ));
+}
+
+/// Insert a *remote* player's avatar body on a client: the same rider capsule
+/// (`RigidBody::Dynamic` + rotation-locked capsule + unit mass) as
+/// [`insert_character_body`], but deliberately WITHOUT the `Character` marker or the
+/// movement-input/ground-contact bundle. The client predicts every avatar
+/// (`PredictionTarget::All`), so an *other* player's avatar must be a real dynamic body
+/// that rests on the predicted deck via contact — that's what makes it ride a climbing
+/// rocket on the same timeline as the deck instead of interpolating a frame behind and
+/// sinking through it. It carries no `Character`, so the single-player movement systems
+/// and the `Character`-keyed monster dresser leave it alone (it's driven only by physics
+/// + rollback against the server, and dressed/faced by the remote-avatar path). Its
+/// replicated `LinearVelocity` lets the input-less body coast at the player's real
+/// velocity between snapshots, so walking stays smooth.
+pub fn insert_remote_avatar_body(entity: &mut EntityCommands, size: f32) {
+    entity.insert((
+        RigidBody::Dynamic,
+        LockedAxes::ROTATION_LOCKED,
+        Collider::capsule(size / 3.0, size / 3.0),
+        Mass(1.0),
+        LinearVelocity::default(),
+        AngularVelocity::default(),
     ));
 }
 

@@ -2383,9 +2383,6 @@ fn spawn_player_for_client(
     mut resume: ResMut<ResumeRegistry>,
 ) {
     let client = trigger.entity;
-    // The owning client's peer id: it predicts its own avatar; everyone else
-    // interpolates it. (Predicting a remote player is impossible without its input.)
-    let owner = remote.get(client).map(|r| r.0).unwrap_or(PeerId::Server);
     let client_id = client_identity(client, &remote);
     // The persistent resume id rides in the connect token's `user_data` (see the client's
     // `build_netcode_client`). Resolve the remembered position NOW, at connect — before
@@ -2416,9 +2413,21 @@ fn spawn_player_for_client(
         // (`build_server_avatar` gives it a real body next frame, and the server
         // simulates it from the client's input intent).
         Replicate::to_clients(NetworkTarget::All),
-        // Predict on the owner (zero input delay, rolled back), interpolate on others.
-        PredictionTarget::to_clients(NetworkTarget::Single(owner)),
-        InterpolationTarget::to_clients(NetworkTarget::AllExceptSingle(owner)),
+        // Predict every avatar on EVERY client (not just the owner). Other players'
+        // avatars used to be interpolated, which renders them a fixed delay behind the
+        // server; the deck they ride is `PredictionTarget::All` (rendered at the
+        // predicted tick, ahead). During a rocket ride the assembly's local vertical
+        // velocity climbs to ~100 m/s between rebases, so that interpolation-vs-prediction
+        // time gap put a remote rider several metres below the deck — they looked like
+        // they were constantly falling through the platform. Predicting all avatars puts
+        // every rider on the *same* timeline as the deck (each client simulates the
+        // remote body locally as a dynamic capsule that rests on the predicted deck via
+        // contact, reconciled by rollback against the server), so they ride together.
+        // Replicated `LinearVelocity` makes the input-less remote body coast at its real
+        // velocity between snapshots, so walking stays smooth too. No `InterpolationTarget`
+        // — with no interpolated avatars, the leaked-`Interpolated`-on-own-avatar bug
+        // class (the old jump-lag/twin-avatar hazards) simply can't arise.
+        PredictionTarget::to_clients(NetworkTarget::All),
         // Bind this player to the connecting client so that client's networked
         // input drives it. The server auto-adds the `InputBuffer`/`ActionState`
         // when input arrives; seeding `ActionState` here lets `apply_net_input`

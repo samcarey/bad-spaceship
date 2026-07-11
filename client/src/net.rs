@@ -23,7 +23,7 @@ use lightyear::prediction::rollback::RollbackSystems;
 
 use crate::render_main_pass::AshMaterial;
 use bad_spaceship_shared::character::{
-    insert_character_body, CharacterMovement, Config as CharacterConfig,
+    insert_character_body, insert_remote_avatar_body, CharacterMovement, Config as CharacterConfig,
 };
 use bad_spaceship_shared::net::{
     apply_hold_spring, apply_net_input, focused_part, room_code_bytes, ClientPanicReport,
@@ -50,8 +50,8 @@ use lightyear::prelude::client::*;
 use lightyear::prelude::input::native::{ActionState, InputMarker};
 use lightyear::netcode::ConnectToken;
 use lightyear::prelude::{
-    Authentication, Connected, Interpolated, LocalId, MessageSender, PeerId, Predicted,
-    PredictionManager, PredictionMetrics,
+    Authentication, Connected, LocalId, MessageSender, PeerId, Predicted, PredictionManager,
+    PredictionMetrics,
 };
 use lightyear::frame_interpolation::{FrameInterpolate, FrameInterpolationPlugin};
 use std::net::SocketAddr;
@@ -225,9 +225,6 @@ impl Plugin for NetClientPlugin {
         // here (after `ClientPlugins` created the prediction registry), not in
         // `CharacterPlugin` (see the fn doc).
         bad_spaceship_shared::character::register_ground_state_rollback(app);
-        // Fix the MP jump hang: strip the leaked `Interpolated` marker off our own
-        // predicted avatar (see the fn doc).
-        app.add_systems(Update, strip_own_interpolated);
         // Render-interpolate predicted bodies between fixed (60 Hz) sim ticks.
         // Prediction/rollback advance Position/Rotation only in `FixedUpdate`; without
         // this the rendered pose is held constant between ticks and the camera (a
@@ -240,10 +237,10 @@ impl Plugin for NetClientPlugin {
         // rendered `Transform` (`FrameInterpolate`'s change-detection trigger makes the
         // sync pick it up). `lightyear_avian` orders its sync around the
         // `FrameInterpolationSystems` sets but does NOT add these plugins or the
-        // per-entity components — we must. Each predicted entity opts in via
-        // `FrameInterpolate<Position/Rotation>` (`setup_predicted_avatar`,
-        // `draw_replicated_parts`). Interpolated remote avatars are already
-        // frame-smooth via lightyear's interpolation, so they don't need it.
+        // per-entity components — we must. EVERY predicted entity opts in via
+        // `FrameInterpolate<Position/Rotation>` — the own avatar (`setup_predicted_avatar`),
+        // the loose parts (`draw_replicated_parts`), and now every *other* player's avatar
+        // (`setup_remote_avatar`), which is predicted too (`PredictionTarget::All`).
         app.add_plugins((
             FrameInterpolationPlugin::<Position>::default(),
             FrameInterpolationPlugin::<Rotation>::default(),
@@ -291,6 +288,7 @@ impl Plugin for NetClientPlugin {
             Update,
             (
                 setup_predicted_avatar,
+                setup_remote_avatar,
                 draw_replicated_players,
                 redress_replicated_players,
                 face_replicated_players,
@@ -419,61 +417,11 @@ fn report_stored_panic(
 /// of the `RemoteId` the server reads in `client_identity` to stamp `NetPlayer`, so the
 /// ids match across the wire and exactly one avatar — ours — is adopted.
 ///
-/// Fix for the MP jump hang (press jump → rise two ticks → hang mid-air ~250 ms
-/// until the server's jump arrives): our own avatar arrives carrying BOTH
-/// `Predicted` AND a leaked `Interpolated` marker (measured `interp=1 pred=1`;
-/// the server sends `InterpolationTarget::to_clients(AllExceptSingle(owner))`,
-/// but the owner exclusion does not hold — the netcode plan had flagged
-/// `AllExceptSingle` in 0.28 as unverified). lightyear's
-/// `lightyear_interpolation::interpolate::<C>` (Update) writes the CONFIRMED
-/// value onto every `Interpolated` entity each frame and has no
-/// `Without<Predicted>` guard, so on the doubly-tagged avatar every
-/// interpolation-registered component gets pinned back to the server's
-/// (RTT-old) state once per frame — silently, with no rollback (both markers'
-/// receive fns tie at priority 100, and interpolation's does no mismatch
-/// check). `Position`/`Rotation` were invisibly rescued every tick by
-/// `FrameInterpolate`'s restore-before-FixedMain; `LinearVelocity` has no
-/// `FrameInterpolate`, so the predicted jump velocity was stomped to the
-/// confirmed grounded vy≈0 at every tick boundary — measured as: walk fine
-/// (movement rewrites horizontal velocity from input every tick, masking the
-/// stomp), jump applied then erased (vy 7.34 → 0.00 at the next tick start,
-/// `rb=0`), avatar hanging mid-air ~12 ticks until the confirmed jump landed.
-///
-/// Strip the marker. Runs every frame (trivial query, normally empty) rather
-/// than once, so a later replication message re-inserting `Interpolated`
-/// self-heals; identifying "our" avatar needs no id lookup — only the owner's
-/// avatar is `Predicted` + `Character` (remote avatars are Interpolated-only,
-/// parts carry `NetPart`, and single-player has no `Interpolated` at all).
-///
-/// Also undo the leak's other visible symptom: the leaked marker made
-/// `draw_replicated_players` dress our avatar a SECOND time (its remote-path
-/// pivot faced only by `NetFacing` — a superimposed monster that doesn't turn
-/// with the camera). That path now excludes us by netcode id, but if a stale
-/// `AvatarVisual` got in first (command-application ordering), despawn its
-/// pivot here — same self-heal cadence as the marker.
-fn strip_own_interpolated(
-    mut commands: Commands,
-    leaked: Query<
-        (Entity, Has<Interpolated>, Option<&AvatarVisual>),
-        (
-            With<Character>,
-            With<Predicted>,
-            Or<(With<Interpolated>, With<AvatarVisual>)>,
-        ),
-    >,
-) {
-    for (entity, interpolated, remote_visual) in &leaked {
-        let mut e = commands.entity(entity);
-        if interpolated {
-            e.remove::<Interpolated>();
-        }
-        if let Some(visual) = remote_visual {
-            commands.entity(visual.0).despawn();
-            commands.entity(entity).remove::<AvatarVisual>();
-        }
-    }
-}
-
+/// (Every avatar is now `PredictionTarget::All` and NONE is interpolated, so the
+/// old leaked-`Interpolated`-on-own-avatar hazards can't arise: the MP jump hang —
+/// a leaked marker pinned the predicted jump `LinearVelocity` back to the confirmed
+/// grounded vy≈0 every tick — and the twin-avatar double-dress are both structurally
+/// gone, and the `strip_own_interpolated` guard that swept the leak is retired.)
 /// Gated on `Position` so we assemble the body only once the avatar's real spawn
 /// pose has arrived (rather than briefly at the origin). The loose blocks are also
 /// `Predicted` now, so exclude `NetPart` — the avatar is the predicted entity that
@@ -797,19 +745,19 @@ fn read_grab_intent(
 #[derive(Component)]
 struct AvatarVisual(Entity);
 
-/// Give each *other* player's `Interpolated` copy a visible body, mounted on a yaw
+/// Give each *other* player's predicted avatar a visible monster, mounted on a yaw
 /// pivot so `face_replicated_players` can turn it to the player's look direction.
-/// Our own avatar renders via the single-player character path
-/// (`monster::dress_characters`), so exclude it **by netcode id**, not by marker:
-/// it arrives carrying a leaked `Interpolated` alongside `Predicted` (see
-/// `strip_own_interpolated`), so a marker-based "own avatars aren't Interpolated"
-/// assumption dressed it TWICE — the own-path pivot turning with the local yaw
-/// plus this remote-path pivot faced only by replicated `NetFacing`, visible as
-/// two superimposed monsters, one of which doesn't turn. The raw `Confirmed`
-/// entities stay invisible.
+/// Every avatar is `Predicted` now (`PredictionTarget::All`), so this can't key off
+/// a marker to tell own from remote — our own avatar is also `Predicted`. Exclude it
+/// **by netcode id**: our own avatar renders via the single-player character path
+/// (`monster::dress_characters`, keyed on its `Character` marker), so dressing it here
+/// too would draw two superimposed monsters (the classic twin-avatar bug). The raw
+/// `Confirmed` entities carry neither `Predicted` nor a visual, so they stay invisible.
+/// The predicted remote body itself (the capsule it rides on) is assembled separately
+/// by `setup_remote_avatar`.
 fn draw_replicated_players(
     mut commands: Commands,
-    new_players: Query<(Entity, &NetPlayer), (With<Interpolated>, Without<AvatarVisual>)>,
+    new_players: Query<(Entity, &NetPlayer), (With<Predicted>, Without<AvatarVisual>)>,
     local: Query<&LocalId, With<Connected>>,
     asset_server: Res<AssetServer>,
 ) {
@@ -833,8 +781,55 @@ fn draw_replicated_players(
     }
 }
 
+/// Assemble the *physics body* for each **other** player's predicted avatar: a
+/// rotation-locked dynamic capsule ([`insert_remote_avatar_body`]) plus frame
+/// interpolation. Every avatar is `PredictionTarget::All`, so an other player's avatar
+/// is a real `Predicted` body the client simulates locally — it rests on the predicted
+/// deck via contact and rides it on the same timeline (the fix for a remote rider
+/// sinking through a climbing rocket). It carries no `Character` marker, so the
+/// single-player movement/dressing systems ignore it (it's dressed by
+/// `draw_replicated_players` and faced by `face_replicated_players`), and it's driven
+/// only by physics + rollback against the server — its replicated `LinearVelocity` lets
+/// the input-less body coast at the player's real velocity between snapshots.
+///
+/// Exclude our OWN avatar (also `Predicted`) — `setup_predicted_avatar` gives it the
+/// full controllable `Character` body instead. Identify by netcode id (not the
+/// `Character` marker, which our own avatar only gains a tick later via deferred
+/// commands — the id guard closes that race), and gate on `Without<RigidBody>` so the
+/// body is built exactly once. Gated on `Position` (a real spawn pose has arrived) and
+/// `Without<NetPart>` (parts are predicted bodies too, handled by `draw_replicated_parts`).
+fn setup_remote_avatar(
+    mut commands: Commands,
+    new: Query<
+        (Entity, &NetPlayer),
+        (With<Predicted>, With<Position>, Without<NetPart>, Without<RigidBody>),
+    >,
+    local: Query<&LocalId, With<Connected>>,
+    configs: Res<Assets<CharacterConfig>>,
+) {
+    let Some((_, config)) = configs.iter().next() else {
+        return;
+    };
+    // Don't set anyone up until we know our own id, or we'd mis-build our own
+    // avatar (momentarily `Without<Character>` at spawn) as a remote one.
+    let Some(my_id) = my_netcode_id(&local) else {
+        return;
+    };
+    for (entity, net_player) in &new {
+        if net_player.client_id == my_id {
+            continue; // our own avatar → `setup_predicted_avatar`
+        }
+        let mut e = commands.entity(entity);
+        insert_remote_avatar_body(&mut e, config.size());
+        e.insert((
+            FrameInterpolate::<Position>::default(),
+            FrameInterpolate::<Rotation>::default(),
+        ));
+    }
+}
+
 /// Rebuild a remote avatar's visual when that player picks a new one: the server
-/// re-replicates `NetPlayer::monster` onto the `Interpolated` copy, so on a mismatch
+/// re-replicates `NetPlayer::monster` onto the predicted copy, so on a mismatch
 /// with the shown monster, despawn the old visual pivot and drop the dress marker —
 /// `draw_replicated_players` re-dresses it next frame from the new index. Mirrors the
 /// own-avatar `redress_own_monster` (`monster.rs`).
@@ -842,7 +837,7 @@ fn redress_replicated_players(
     mut commands: Commands,
     changed: Query<
         (Entity, &NetPlayer, &crate::monster::DisplayedMonster, &AvatarVisual),
-        (With<Interpolated>, Changed<NetPlayer>),
+        (With<Predicted>, Changed<NetPlayer>),
     >,
 ) {
     for (entity, player, displayed, visual) in &changed {
@@ -863,7 +858,7 @@ fn redress_replicated_players(
 /// points along the avatar's forward. Reads `NetFacing`, not the owner's local-input
 /// `Yaw` (which isn't replicated — replicating it broke the owner's turning).
 fn face_replicated_players(
-    avatars: Query<(&NetFacing, &AvatarVisual), (With<Interpolated>, Changed<NetFacing>)>,
+    avatars: Query<(&NetFacing, &AvatarVisual), (With<Predicted>, Changed<NetFacing>)>,
     mut pivots: Query<&mut Transform>,
 ) {
     for (facing, visual) in &avatars {
