@@ -41,14 +41,16 @@ fn main() {
     let mut app = App::new();
 
     app.insert_resource(GlobalAmbientLight {
-        color: Color::WHITE,
-        // Bevy 0.13's lighting overhaul made ambient brightness a physical
-        // lux value (default 80.0). The old 0.12 fill (~1/6 of full white) was
-        // first remapped to ~600 lux, but with the directional sun that left the
-        // whole scene reading brighter than 0.12; scaled to 360 (~0.6x, in step
-        // with the directional in render_main_pass.rs) to dim back toward the
-        // 0.12 look while keeping shadowed faces off pure black.
-        brightness: 360.0,
+        // Warm, sooty fill to match the ash sky — the whole scene sits in a dull
+        // reddish-orange bounce, as if the light is the volcano's glow scattered
+        // through the haze rather than clean daylight.
+        color: Color::srgb(0.85, 0.42, 0.30),
+        // Bevy 0.13's lighting overhaul made ambient brightness a physical lux
+        // value (default 80.0). With the directional sun now faint and diffuse
+        // (see render_main_pass), the ambient carries more of the scene, so it's
+        // nudged up from the old 360 fill to keep shadowed faces readable under
+        // the tinted, dimmer key light.
+        brightness: 500.0,
         // Bevy 0.16 added a mixed-lighting field to every light; we use no
         // lightmaps, so the default (`true`) is correct.
         ..default()
@@ -88,7 +90,9 @@ fn main() {
             RenderSecondaryPassPlugin,
             CommonPlugins,
         ))
-        .insert_resource(ClearColor(Color::srgb(0.99, 0.99, 0.95)))
+        // Dark, reddish-grey ash sky — the murk of a nearby erupting volcano, the
+        // air thick with soot lit a dull ember-red. Replaces the old near-white sky.
+        .insert_resource(ClearColor(Color::srgb(0.17, 0.125, 0.115)))
         .add_systems(Startup, load_configs)
         .add_systems(Update, add_camera_to_player);
 

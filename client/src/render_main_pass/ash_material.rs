@@ -63,9 +63,10 @@ pub struct AshParams {
 impl Default for AshParams {
     fn default() -> Self {
         AshParams {
-            // Light grey ash, mostly opaque — reads against both the near-white
-            // sky (ClearColor) and the green ground (white vanished against the
-            // near-white sky).
+            // Sooty grey ash, mostly opaque — this tunes the *darker* half of the
+            // two-tone flakes (the shader recolours the brighter half to ember
+            // yellow); reads against the dark reddish-grey ash sky (ClearColor in
+            // main.rs) and the ground.
             color: Color::srgb(0.5, 0.49, 0.48).with_alpha(0.85).to_linear(),
             // A box ~2x the platform width, so flakes surround you out to ~one
             // map-radius (half the box) in every direction.
