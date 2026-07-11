@@ -102,12 +102,13 @@ fn add_lighting(mut commands: Commands) {
     // sibling components in the spawned tuple.
     commands.spawn((
         DirectionalLight {
-            // Scaled down from 10_000 (the value carried over verbatim from the
-            // 0.12 build) because Bevy 0.13+ added a physically-based camera
-            // `Exposure` that 0.12 lacked, making the same illuminance read
-            // brighter. ~0.6x dims the whole scene back toward the 0.12 look;
-            // tune alongside the ambient fill in main.rs.
-            illuminance: 6_000.0,
+            // Faint and diffuse, like the sun straining through a thick ash
+            // overcast: dropped from 6_000 to a weak key (most of the fill now
+            // comes from the warm ambient in main.rs) and tinted a dusty warm
+            // grey so it reads as scattered volcano-light, not clean daylight.
+            // Shadows stay on but the low key-to-ambient ratio washes them soft.
+            illuminance: 1_600.0,
+            color: Color::srgb(1.0, 0.78, 0.62),
             shadow_maps_enabled: true,
             ..Default::default()
         },

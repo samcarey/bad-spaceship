@@ -59,6 +59,16 @@ const NO_GROUND: f32 = 1.0e6;
 const ATTACK_RATE: f32 = 10.0;
 const DECAY_RATE: f32 = 3.5;
 
+/// Peak luminous power (lumens) of a rocket's exhaust light at full throttle,
+/// scaled by displayed strength each frame. Big enough to visibly wash nearby
+/// parts and the pad in ember light against the faint ash-overcast key light.
+const FLAME_LIGHT_INTENSITY: f32 = 6_000_000.0;
+/// How far the exhaust light reaches (metres) — a bit past the full plume so the
+/// ground splash lights the terrain around the pad before it falls off.
+const FLAME_LIGHT_RANGE: f32 = FLAME_LENGTH * 2.5;
+/// Warm ember tint of the exhaust light.
+const FLAME_LIGHT_COLOR: Color = Color::srgb(1.0, 0.55, 0.16);
+
 /// Mirrors `FlameParams` in the WGSL field-for-field.
 #[derive(ShaderType, Debug, Clone)]
 pub struct FlameParams {
@@ -116,6 +126,17 @@ pub struct FlameThrottle {
 #[derive(Component)]
 pub struct FlameOf(pub Entity);
 
+/// Points a rocket at its flame's real `PointLight` child — the one that lights
+/// up the surrounding terrain and parts (`update_flames` slides it down the
+/// exhaust to the plume tip or the ground splash).
+#[derive(Component)]
+pub struct FlameLightOf(pub Entity);
+
+/// Marks the exhaust `PointLight` so `update_flames` can hold two disjoint
+/// `&mut Transform` queries (the flame mesh vs. its light) without aliasing.
+#[derive(Component)]
+pub struct FlameLight;
+
 /// Build the flame child for a rocket: the shared unit cylinder (the shader does
 /// all the shaping) hung at the flare exit, hidden until the rocket actually burns.
 pub fn spawn_flame(entity: &mut EntityCommands, flame_materials: &mut Assets<FlameMaterial>) {
@@ -125,6 +146,7 @@ pub fn spawn_flame(entity: &mut EntityCommands, flame_materials: &mut Assets<Fla
         params: FlameParams { phase, ..Default::default() },
     });
     let mut flame = Entity::PLACEHOLDER;
+    let mut light = Entity::PLACEHOLDER;
     entity.with_children(|parent| {
         flame = parent
             .spawn((
@@ -135,9 +157,32 @@ pub fn spawn_flame(entity: &mut EntityCommands, flame_materials: &mut Assets<Fla
                 Visibility::Hidden,
                 bevy::light::NotShadowCaster,
             ))
+            .with_children(|flame| {
+                // A real point light rides *inside* the plume so the fire actually
+                // illuminates nearby parts and the terrain. It's a child of the
+                // flame, which points down the (gimballed) exhaust axis — so a
+                // local `-Y` offset places it along the real beam, and when the
+                // exhaust hits the ground `update_flames` drops it onto the splash
+                // point (not a fixed source at the nozzle). Hidden with the flame
+                // (inherited visibility) and its intensity zeroed when not burning.
+                light = flame
+                    .spawn((
+                        FlameLight,
+                        bevy::light::PointLight {
+                            color: FLAME_LIGHT_COLOR,
+                            intensity: 0.0,
+                            range: FLAME_LIGHT_RANGE,
+                            radius: 0.4,
+                            shadow_maps_enabled: false,
+                            ..default()
+                        },
+                        Transform::from_xyz(0.0, -FLAME_LENGTH * 0.5, 0.0),
+                    ))
+                    .id();
+            })
             .id();
     });
-    entity.insert((FlameThrottle::default(), FlameOf(flame)));
+    entity.insert((FlameThrottle::default(), FlameOf(flame), FlameLightOf(light)));
 }
 
 /// Animate every rocket's flame from its per-tick throttle: ease the displayed
@@ -150,14 +195,18 @@ pub fn update_flames(
     spatial: SpatialQuery,
     grass: Query<(), With<Grass>>,
     mut rockets: Query<
-        (&GlobalTransform, &Gimbal, &mut FlameThrottle, &FlameOf),
+        (&GlobalTransform, &Gimbal, &mut FlameThrottle, &FlameOf, &FlameLightOf),
         With<RocketEngine>,
     >,
-    mut flames: Query<(&mut Transform, &mut Visibility, &MeshMaterial3d<FlameMaterial>)>,
+    mut flames: Query<
+        (&mut Transform, &mut Visibility, &MeshMaterial3d<FlameMaterial>),
+        Without<FlameLight>,
+    >,
+    mut flame_lights: Query<(&mut Transform, &mut bevy::light::PointLight), With<FlameLight>>,
     mut materials: ResMut<Assets<FlameMaterial>>,
 ) {
     let dt = time.delta_secs();
-    for (global, gimbal, mut throttle, flame_of) in &mut rockets {
+    for (global, gimbal, mut throttle, flame_of, flame_light_of) in &mut rockets {
         let rate = if throttle.target > throttle.eased { ATTACK_RATE } else { DECAY_RATE };
         let target = throttle.target;
         throttle.eased += (target - throttle.eased) * (1.0 - (-rate * dt).exp());
@@ -167,6 +216,14 @@ pub fn update_flames(
         };
         if throttle.eased < 0.02 {
             *visibility = Visibility::Hidden;
+            if let Ok((_, mut light)) = flame_lights.get_mut(flame_light_of.0) {
+                // Guard the write: most rockets are idle most of the time, and an
+                // unconditional store would dirty every idle rocket's PointLight
+                // (→ render-world re-extraction) every frame. 0.0 is exact here.
+                if light.intensity != 0.0 {
+                    light.intensity = 0.0;
+                }
+            }
             continue;
         }
         *visibility = Visibility::Inherited;
@@ -195,6 +252,27 @@ pub fn update_flames(
                 ground_dist = hit.distance;
                 // Into flame-local space (the shader bends in local coords).
                 ground_normal = (rocket_rotation * flame_rotation).inverse() * hit.normal;
+            }
+        }
+
+        // Slide the exhaust light to where the plume actually ends, and drive its
+        // brightness off the displayed strength. If the exhaust hits the ground
+        // within reach, sit the light on the splash point so the fanned-out fire
+        // lights the terrain there; otherwise drop it partway down the free plume.
+        // The light is a child of the flame (which points down the exhaust), so a
+        // local `-Y` offset already tracks the gimballed, ground-bent beam. Writes
+        // are change-gated (same epsilon idea as the material upload below) so a
+        // converged burn stops re-extracting the light every frame; each rocket
+        // owns one clustered PointLight, so keep the count/range modest on WebGL2.
+        if let Ok((mut light_tf, mut light)) = flame_lights.get_mut(flame_light_of.0) {
+            let reach = (FLAME_LENGTH * throttle.eased).max(0.5);
+            let d = if ground_dist < NO_GROUND { ground_dist.min(reach) } else { reach * 0.5 };
+            let intensity = throttle.eased * FLAME_LIGHT_INTENSITY;
+            if (light_tf.translation.y + d).abs() > 1.0e-3 {
+                light_tf.translation.y = -d;
+            }
+            if (light.intensity - intensity).abs() > FLAME_LIGHT_INTENSITY * 2.0e-3 {
+                light.intensity = intensity;
             }
         }
 

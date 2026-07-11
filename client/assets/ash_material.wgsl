@@ -135,9 +135,12 @@ fn vertex(v: Vertex) -> VertexOutput {
     var out: VertexOutput;
     out.clip_position = view.clip_from_world * vec4<f32>(world, 1.0);
     out.uv = v.uv;
-    // Two-tone: half the flakes a darker grey, half a lighter grey (a per-flake
-    // coin flip, scaled off the base colour so the AshParams knob still tunes it).
-    out.tint = ash.color.rgb * select(1.8, 0.6, r2.z < 0.5);
+    // Two-tone ash (a per-flake coin flip off the hashed seed): the darker half
+    // stays sooty grey, scaled off the base colour so the AshParams knob still
+    // tunes it; the brighter half glows a hot ember yellow — flecks still burning
+    // as they drift down through the ashfall.
+    let bright = r2.z >= 0.5;
+    out.tint = select(ash.color.rgb * 0.6, vec3<f32>(1.6, 1.25, 0.15), bright);
     out.alpha = ash.color.a * near * edge * (0.4 + 0.6 * tumble);
     return out;
 }
