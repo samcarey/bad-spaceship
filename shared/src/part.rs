@@ -544,10 +544,16 @@ fn maintain_weld_rigidity(
     for members in pairs.values() {
         let rigid = anchors_are_rigid(members.iter().map(|(_, anchor)| *anchor));
         for &(entity, _) in members {
+            // `try_insert`/`try_remove` (not `insert`/`remove`): a joint queried here can
+            // be despawned before these deferred commands apply — the floating-origin
+            // rebase cuts ground joints, and part churn (a diverged part recycled, an
+            // avatar joining mid-flight jostling the stack) can drop joints — and a plain
+            // `insert`/`remove` on the despawned entity panics the whole app
+            // (`panic=abort`). The despawn-tolerant variants no-op on a dead entity.
             if rigid {
-                commands.entity(entity).insert(JointCollisionDisabled);
+                commands.entity(entity).try_insert(JointCollisionDisabled);
             } else {
-                commands.entity(entity).remove::<JointCollisionDisabled>();
+                commands.entity(entity).try_remove::<JointCollisionDisabled>();
             }
         }
     }
