@@ -364,7 +364,12 @@ impl Plugin for NetServerPlugin {
         app.init_resource::<RoomFrames>();
         app.add_systems(
             FixedUpdate,
-            (rebase_room_frames, replace_fallen_room_parts, respawn_fallen_avatars)
+            (
+                rebase_room_frames,
+                replace_fallen_room_parts,
+                respawn_fallen_avatars,
+                ensure_spare_rocket,
+            )
                 .chain()
                 .before(server_grab)
                 .before(apply_room_rocket_thrust),
@@ -1674,6 +1679,48 @@ fn replace_fallen_room_parts(
                     );
                 }
             }
+        }
+    }
+}
+
+/// Keep at least one **unused** rocket engine available in every grounded room: once a
+/// builder has jointed all of a room's rockets into assemblies, drop a fresh one from the
+/// sky (the same spawn-zone free-fall as the initial pool) so they're never stranded
+/// without a spare to add to the stack.
+///
+/// "Unused" = not referenced by any joint — a rocket welded into a stack (or pinned to the
+/// ground) counts as used. Only **grounded** rooms restock: a room mid-flight has no
+/// ground for a fresh rocket to land on, and its assembly's rockets are all attached by
+/// design, so a sky-drop there would just fall away below the ascending stack. When the
+/// stack lands (the floating-origin frame resets to zero) the room is grounded again and a
+/// spare drops if all its rockets are still attached.
+///
+/// Runs in `FixedUpdate` like the other pool maintenance. The spawn is deferred, so the
+/// fresh rocket first appears (as an unused rocket) next tick — one restock per shortfall,
+/// no double-spawn.
+fn ensure_spare_rocket(
+    mut commands: Commands,
+    frames: Res<RoomFrames>,
+    rockets: Query<(Entity, &PartRoom), With<RocketEngine>>,
+    joints: Query<&SphericalJoint>,
+) {
+    // Every rocket entity that participates in a joint is "in use".
+    let jointed: HashSet<Entity> = joints.iter().flat_map(|j| [j.body1, j.body2]).collect();
+    // Per grounded room: its descriptor + whether it already has an unused rocket.
+    let mut rooms: HashMap<RoomId, (Room, bool)> = HashMap::new();
+    for (entity, part_room) in &rockets {
+        if frames.get(part_room.id).is_active() {
+            continue; // in flight — no ground to restock onto
+        }
+        let entry = rooms
+            .entry(part_room.id)
+            .or_insert((Room { id: part_room.id, bit: part_room.bit }, false));
+        entry.1 |= !jointed.contains(&entity);
+    }
+    for (room, has_spare) in rooms.into_values() {
+        if !has_spare {
+            let entity = spawn_random_rocket(&mut commands);
+            tag_room_part(&mut commands, entity, PartShape::RocketEngine, 0, room, &frames);
         }
     }
 }

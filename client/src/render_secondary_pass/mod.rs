@@ -441,10 +441,12 @@ fn delete_zone_visibility(
 // average parts against gravity) directed down its cylinder axis toward the flared
 // end, applied at the flare's base. For the rockets that belong to the *main
 // assembly* (the largest joint-connected group of parts), we sum the thrust vectors,
-// average their application points, and draw a single yellow arrow from that point.
-// The arrow's world length encodes the combined force: one rocket's worth of thrust
-// is about one character-height long. Nothing is applied to the sim — this is purely
-// a visualisation.
+// average their application points, and **subtract the assembly's weight** to get the
+// net lift-off force, then draw a single arrow from that point. When thrust wins the
+// arrow is yellow and points up (net = thrust − weight); when the stack is too heavy
+// to lift, it flips to a red arrow pointing down whose length is (weight − thrust).
+// The arrow's world length encodes that net force: one rocket's worth of thrust is
+// about one character-height long. Nothing is applied to the sim — pure visualisation.
 
 #[derive(Component)]
 struct ThrustArrowShaft;
@@ -457,6 +459,9 @@ struct ThrustArrowHead;
 const THRUST_ARROW_RADIUS: f32 = 0.1;
 const THRUST_ARROW_HEAD_HEIGHT: f32 = 0.5;
 const THRUST_ARROW_HEAD_RADIUS: f32 = 0.25;
+// Net thrust wins (rises) → yellow up-arrow; weight wins (can't lift) → red down-arrow.
+const THRUST_ARROW_UP_COLOR: Color = Color::srgb(1.0, 0.85, 0.1);
+const THRUST_ARROW_DOWN_COLOR: Color = Color::srgb(0.95, 0.12, 0.08);
 
 /// Spawn the (initially hidden) shaft + head of the thrust arrow. The unit-height
 /// cylinder is scaled/placed each frame by `update_thrust_arrow`; the cone head is a
@@ -466,7 +471,7 @@ fn build_thrust_arrow(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<GizmoMaterial>>,
 ) {
-    let material = materials.add(GizmoMaterial::from(Color::srgb(1.0, 0.85, 0.1)));
+    let material = materials.add(GizmoMaterial::from(THRUST_ARROW_UP_COLOR));
     // Unit-height cylinder centred at the origin (y ∈ [-0.5, 0.5]); scaled along Y and
     // translated so its base sits at the application point.
     let shaft = meshes.add(Cylinder::new(THRUST_ARROW_RADIUS, 1.0));
@@ -501,8 +506,14 @@ fn update_thrust_arrow(
     parts: Query<(Entity, &GlobalTransform, &ComputedMass), With<Holdable>>,
     configs: Res<Assets<character::Config>>,
     gravity: Res<Gravity>,
+    // The arrow's shared material — recoloured yellow (rising) / red (too heavy) below.
+    mut materials: ResMut<Assets<GizmoMaterial>>,
     mut shaft: Query<
-        (&mut Transform, &mut Visibility),
+        (
+            &mut Transform,
+            &mut Visibility,
+            &MeshMaterial3d<GizmoMaterial>,
+        ),
         (With<ThrustArrowShaft>, Without<ThrustArrowHead>),
     >,
     mut head: Query<
@@ -518,8 +529,10 @@ fn update_thrust_arrow(
     launch_local: Res<LaunchLocal>,
     net_launch: Query<&NetLaunch>,
 ) {
-    let (Ok((mut shaft_transform, mut shaft_vis)), Ok((mut head_transform, mut head_vis))) =
-        (shaft.single_mut(), head.single_mut())
+    let (
+        Ok((mut shaft_transform, mut shaft_vis, shaft_material)),
+        Ok((mut head_transform, mut head_vis)),
+    ) = (shaft.single_mut(), head.single_mut())
     else {
         return;
     };
@@ -527,13 +540,38 @@ fn update_thrust_arrow(
     let arrow = (!launch_armed(&launch_local, &net_launch))
         .then(|| visualized_assembly(multiplayer.is_some(), &parts, &joints, &mp_members))
         .flatten()
-        .and_then(|(members, _com)| thrust_arrow(&rockets, &members, &configs, gravity.0));
+        .and_then(|(members, _com)| {
+            // Assembly weight = Σ member mass · g, subtracted from the summed thrust so the
+            // arrow shows *net* lift-off force (see `thrust_arrow`).
+            let total_mass: f32 = parts
+                .iter()
+                .filter(|(entity, _, _)| members.contains(entity))
+                .map(|(_, _, mass)| mass.value())
+                .sum();
+            thrust_arrow(&rockets, &members, &configs, gravity.0, total_mass)
+        });
 
-    let Some((origin, dir, length)) = arrow else {
+    let Some((origin, dir, length, heavy)) = arrow else {
         *shaft_vis = Visibility::Hidden;
         *head_vis = Visibility::Hidden;
         return;
     };
+
+    // Recolour only on a flip (mutating the asset flags a GPU re-upload).
+    let target = if heavy {
+        THRUST_ARROW_DOWN_COLOR
+    } else {
+        THRUST_ARROW_UP_COLOR
+    }
+    .to_linear();
+    if materials
+        .get(shaft_material.id())
+        .is_some_and(|mat| mat.color != target)
+    {
+        if let Some(mut mat) = materials.get_mut(shaft_material.id()) {
+            mat.color = target;
+        }
+    }
 
     let rotation = Quat::from_rotation_arc(Vec3::Y, dir);
     // Reserve the tip for the cone head so shaft + head together span `length`.
@@ -552,15 +590,20 @@ fn update_thrust_arrow(
     *head_vis = Visibility::Visible;
 }
 
-/// Combined thrust arrow for the rockets in the given assembly `members`: `(average
-/// application point, unit direction, world length)`. `None` when no rocket belongs to
-/// the assembly or the summed force cancels out.
+/// Combined **net** lift-off arrow for the rockets in the given assembly `members`:
+/// `(average application point, unit direction, world length, heavy)`. The summed rocket
+/// thrust has the assembly's weight (`total_mass · g`, straight down) subtracted from it,
+/// so the arrow shows the net force that actually moves the stack: up (`heavy = false`)
+/// while thrust wins, flipping down (`heavy = true`, length = weight − thrust) once the
+/// assembly is too heavy to lift. `None` when no rocket belongs to the assembly or the
+/// net force cancels to zero (thrust exactly balances weight → nothing to draw).
 fn thrust_arrow(
     rockets: &Query<(Entity, &GlobalTransform), With<RocketEngine>>,
     members: &HashSet<Entity>,
     configs: &Assets<character::Config>,
     gravity: Vec3,
-) -> Option<(Vec3, Vec3, f32)> {
+    total_mass: f32,
+) -> Option<(Vec3, Vec3, f32, bool)> {
     // One rocket's thrust: enough to lift N average parts against gravity. The per-rocket
     // application point + force come from the same shared helper the launch physics uses,
     // so the arrow and the real thrust can't drift apart.
@@ -583,14 +626,20 @@ fn thrust_arrow(
     }
 
     let origin = sum_point / count as f32;
-    let dir = sum_force.normalize_or_zero();
+    // Net lift-off force: summed thrust minus the assembly's weight (`m·g`, along gravity,
+    // i.e. straight down). `gravity` already points down, so `mass · gravity` *is* the
+    // weight vector and adding it subtracts the weight from the (upward) thrust.
+    let net_force = sum_force + gravity * total_mass;
+    let dir = net_force.normalize_or_zero();
     if dir == Vec3::ZERO {
         return None;
     }
-    // One rocket's force → one character height of arrow: length = |ΣF| · (h / F₁).
+    // Heavy = net force points *with* gravity (downward) → the stack can't lift; draw red.
+    let heavy = net_force.dot(gravity) > 0.0;
+    // One rocket's force → one character height of arrow: length = |net| · (h / F₁).
     let character_height = configs.iter().next().map_or(1.5, |(_, c)| c.size());
-    let length = sum_force.length() * character_height / thrust;
-    Some((origin, dir, length))
+    let length = net_force.length() * character_height / thrust;
+    Some((origin, dir, length, heavy))
 }
 
 /// The assembly's member entities, from whichever source is authoritative this mode:
