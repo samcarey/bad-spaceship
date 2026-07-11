@@ -5,7 +5,7 @@ use bevy::{
     prelude::*,
 };
 use bevy_egui::{
-    egui::{self, Align, Align2, Color32, Frame, Layout},
+    egui::{self, Align2, Color32, Frame},
     EguiContexts, EguiPlugin, EguiPrimaryContextPass, EguiTextureHandle,
 };
 use avian3d::prelude::{LinearVelocity, Position};
@@ -61,7 +61,6 @@ impl Plugin for UiPlugin {
                     // Touches an egui context (zoom factor), so it must run in the
                     // egui pass alongside the panel-drawing systems, not in `Update`.
                     update_ui_scale_factor,
-                    show_menu.run_if(in_state(AppState::InGameMenu)),
                     // Top-left controls (rename + help toggle), the rename modal, and
                     // the top-right player roster; billboard names over each avatar.
                     show_name_hud,
@@ -240,40 +239,6 @@ fn update_ui_scale_factor(
     let ctx = contexts.ctx_mut()?;
     ctx.options_mut(|o| o.zoom_with_keyboard = false);
     ctx.set_zoom_factor(custom_scale_factor.0 as f32);
-    Ok(())
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn align_menu(window: egui::Window) -> egui::Window {
-    window.anchor(Align2::CENTER_TOP, [0., 150.])
-}
-
-#[cfg(target_arch = "wasm32")]
-fn align_menu(window: egui::Window) -> egui::Window {
-    window.anchor(Align2::CENTER_CENTER, [0., -70.])
-}
-
-fn show_menu(
-    mut contexts: EguiContexts,
-    mut next_state: ResMut<NextState<AppState>>,
-) -> Result {
-    align_menu(egui::Window::new("Bad Spaceship"))
-        .collapsible(false)
-        .resizable(false)
-        .show(contexts.ctx_mut()?, |ui| {
-            ui.with_layout(Layout::top_down_justified(Align::Center), |ui| {
-                if ui.button("Options").clicked() {
-                    bevy::log::info!("Options selected");
-                }
-                if ui.button("Multiplayer").clicked() {
-                    bevy::log::info!("Multiplayer selected");
-                }
-                if ui.button("Resume").clicked() {
-                    bevy::log::info!("Resume selected");
-                    next_state.set(AppState::InGame);
-                }
-            });
-        });
     Ok(())
 }
 
