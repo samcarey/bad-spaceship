@@ -19,7 +19,7 @@
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Mutex;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use avian3d::prelude::{
     AngularVelocity, Collider, CollisionLayers, ComputedMass, Forces, Gravity, LinearVelocity,
@@ -364,7 +364,15 @@ impl Plugin for NetServerPlugin {
         app.init_resource::<RoomFrames>();
         app.add_systems(
             FixedUpdate,
-            (rebase_room_frames, replace_fallen_room_parts, respawn_fallen_avatars)
+            (
+                rebase_room_frames,
+                replace_fallen_room_parts,
+                respawn_fallen_avatars,
+                // Restocking within a second of a shortfall is plenty (see the fn doc);
+                // scanning every joint each tick is not.
+                ensure_spare_rocket
+                    .run_if(bevy::time::common_conditions::on_timer(Duration::from_secs(1))),
+            )
                 .chain()
                 .before(server_grab)
                 .before(apply_room_rocket_thrust),
@@ -503,6 +511,13 @@ struct RoomMember(RoomId);
 struct PartRoom {
     id: RoomId,
     bit: u32,
+}
+
+impl PartRoom {
+    /// The [`Room`] descriptor this part's room tags fresh spawns with.
+    fn room(&self) -> Room {
+        Room { id: self.id, bit: self.bit }
+    }
 }
 
 /// Tags the per-room state entity with the room it reports for, so the systems that
@@ -1648,7 +1663,7 @@ fn replace_fallen_room_parts(
         let grounded = !frames.get(part_room.id).is_active();
         if (grounded && position.0.y < PART_FALL_Y) || diverged {
             commands.entity(entity).despawn();
-            let room = Room { id: part_room.id, bit: part_room.bit };
+            let room = part_room.room();
             // Respawn the same kind that fell so the pool's composition is stable.
             match part.shape {
                 PartShape::Cuboid { .. } => {
@@ -1674,6 +1689,48 @@ fn replace_fallen_room_parts(
                     );
                 }
             }
+        }
+    }
+}
+
+/// Keep at least one **unused** rocket engine available in every grounded room: once a
+/// builder has jointed all of a room's rockets into assemblies, drop a fresh one from the
+/// sky (the same spawn-zone free-fall as the initial pool) so they're never stranded
+/// without a spare to add to the stack.
+///
+/// "Unused" = not referenced by any joint — a rocket welded into a stack (or pinned to the
+/// ground) counts as used. Only **grounded** rooms restock: a room mid-flight has no
+/// ground for a fresh rocket to land on, and its assembly's rockets are all attached by
+/// design, so a sky-drop there would just fall away below the ascending stack. When the
+/// stack lands (the floating-origin frame resets to zero) the room is grounded again and a
+/// spare drops if all its rockets are still attached.
+///
+/// Runs on a 1 s timer (`run_if` at registration): the shortfall it repairs only
+/// arises on joint/rocket churn, so scanning every joint at the 60 Hz tick rate was
+/// pure waste, and a restock appearing within a second is indistinguishable from
+/// immediate. The spawn is deferred, so the fresh rocket first appears (as an unused
+/// rocket) next run — one restock per shortfall, no double-spawn.
+fn ensure_spare_rocket(
+    mut commands: Commands,
+    frames: Res<RoomFrames>,
+    rockets: Query<(Entity, &PartRoom), With<RocketEngine>>,
+    joints: Query<&SphericalJoint>,
+) {
+    // Every rocket entity that participates in a joint is "in use".
+    let jointed: HashSet<Entity> = joints.iter().flat_map(|j| [j.body1, j.body2]).collect();
+    // Per grounded room: its descriptor + whether it already has an unused rocket.
+    let mut rooms: HashMap<RoomId, (Room, bool)> = HashMap::new();
+    for (entity, part_room) in &rockets {
+        if frames.get(part_room.id).is_active() {
+            continue; // in flight — no ground to restock onto
+        }
+        let entry = rooms.entry(part_room.id).or_insert((part_room.room(), false));
+        entry.1 |= !jointed.contains(&entity);
+    }
+    for (room, has_spare) in rooms.into_values() {
+        if !has_spare {
+            let entity = spawn_random_rocket(&mut commands);
+            tag_room_part(&mut commands, entity, PartShape::RocketEngine, 0, room, &frames);
         }
     }
 }
@@ -2336,9 +2393,6 @@ fn spawn_player_for_client(
     mut resume: ResMut<ResumeRegistry>,
 ) {
     let client = trigger.entity;
-    // The owning client's peer id: it predicts its own avatar; everyone else
-    // interpolates it. (Predicting a remote player is impossible without its input.)
-    let owner = remote.get(client).map(|r| r.0).unwrap_or(PeerId::Server);
     let client_id = client_identity(client, &remote);
     // The persistent resume id rides in the connect token's `user_data` (see the client's
     // `build_netcode_client`). Resolve the remembered position NOW, at connect — before
@@ -2369,9 +2423,21 @@ fn spawn_player_for_client(
         // (`build_server_avatar` gives it a real body next frame, and the server
         // simulates it from the client's input intent).
         Replicate::to_clients(NetworkTarget::All),
-        // Predict on the owner (zero input delay, rolled back), interpolate on others.
-        PredictionTarget::to_clients(NetworkTarget::Single(owner)),
-        InterpolationTarget::to_clients(NetworkTarget::AllExceptSingle(owner)),
+        // Predict every avatar on EVERY client (not just the owner). Other players'
+        // avatars used to be interpolated, which renders them a fixed delay behind the
+        // server; the deck they ride is `PredictionTarget::All` (rendered at the
+        // predicted tick, ahead). During a rocket ride the assembly's local vertical
+        // velocity climbs to ~100 m/s between rebases, so that interpolation-vs-prediction
+        // time gap put a remote rider several metres below the deck — they looked like
+        // they were constantly falling through the platform. Predicting all avatars puts
+        // every rider on the *same* timeline as the deck (each client simulates the
+        // remote body locally as a dynamic capsule that rests on the predicted deck via
+        // contact, reconciled by rollback against the server), so they ride together.
+        // Replicated `LinearVelocity` makes the input-less remote body coast at its real
+        // velocity between snapshots, so walking stays smooth too. No `InterpolationTarget`
+        // — with no interpolated avatars, the leaked-`Interpolated`-on-own-avatar bug
+        // class (the old jump-lag/twin-avatar hazards) simply can't arise.
+        PredictionTarget::to_clients(NetworkTarget::All),
         // Bind this player to the connecting client so that client's networked
         // input drives it. The server auto-adds the `InputBuffer`/`ActionState`
         // when input arrives; seeding `ActionState` here lets `apply_net_input`

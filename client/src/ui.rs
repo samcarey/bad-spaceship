@@ -5,7 +5,7 @@ use bevy::{
     prelude::*,
 };
 use bevy_egui::{
-    egui::{self, Align, Align2, Color32, Frame, Layout},
+    egui::{self, Align2, Color32, Frame},
     EguiContexts, EguiPlugin, EguiPrimaryContextPass, EguiTextureHandle,
 };
 use avian3d::prelude::{LinearVelocity, Position};
@@ -18,7 +18,7 @@ use bad_spaceship_shared::Character;
 use chrono::{DateTime, FixedOffset, Utc};
 use lightyear::prelude::client::Connected;
 use lightyear::prelude::{
-    Interpolated, LocalId, MessageSender, PingManager, Predicted, PredictionMetrics,
+    LocalId, MessageSender, PingManager, Predicted, PredictionMetrics,
 };
 use std::collections::BTreeMap;
 use once_cell::sync::Lazy;
@@ -61,7 +61,6 @@ impl Plugin for UiPlugin {
                     // Touches an egui context (zoom factor), so it must run in the
                     // egui pass alongside the panel-drawing systems, not in `Update`.
                     update_ui_scale_factor,
-                    show_menu.run_if(in_state(AppState::InGameMenu)),
                     // Top-left controls (rename + help toggle), the rename modal, and
                     // the top-right player roster; billboard names over each avatar.
                     show_name_hud,
@@ -240,40 +239,6 @@ fn update_ui_scale_factor(
     let ctx = contexts.ctx_mut()?;
     ctx.options_mut(|o| o.zoom_with_keyboard = false);
     ctx.set_zoom_factor(custom_scale_factor.0 as f32);
-    Ok(())
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn align_menu(window: egui::Window) -> egui::Window {
-    window.anchor(Align2::CENTER_TOP, [0., 150.])
-}
-
-#[cfg(target_arch = "wasm32")]
-fn align_menu(window: egui::Window) -> egui::Window {
-    window.anchor(Align2::CENTER_CENTER, [0., -70.])
-}
-
-fn show_menu(
-    mut contexts: EguiContexts,
-    mut next_state: ResMut<NextState<AppState>>,
-) -> Result {
-    align_menu(egui::Window::new("Bad Spaceship"))
-        .collapsible(false)
-        .resizable(false)
-        .show(contexts.ctx_mut()?, |ui| {
-            ui.with_layout(Layout::top_down_justified(Align::Center), |ui| {
-                if ui.button("Options").clicked() {
-                    bevy::log::info!("Options selected");
-                }
-                if ui.button("Multiplayer").clicked() {
-                    bevy::log::info!("Multiplayer selected");
-                }
-                if ui.button("Resume").clicked() {
-                    bevy::log::info!("Resume selected");
-                    next_state.set(AppState::InGame);
-                }
-            });
-        });
     Ok(())
 }
 
@@ -633,11 +598,11 @@ fn text_prompt_modal(
     (save, save || close)
 }
 
-/// The one representative entity per player carrying its name: the owner's own
-/// avatar is `Predicted`, every remote avatar is `Interpolated`. This excludes the
+/// The one representative entity per player carrying its name: every avatar (own and
+/// remote alike) is now `Predicted` (`PredictionTarget::All`). This excludes the
 /// invisible `Confirmed` copies so each player appears exactly once (in the roster
 /// and as a single billboard).
-type RenderedAvatar = Or<(With<Predicted>, With<Interpolated>)>;
+type RenderedAvatar = With<Predicted>;
 
 /// Draw the top-left controls (a hamburger menu with Change Name + Reset Position,
 /// plus a "?" help toggle), the native rename modal, and the top-right player roster.
@@ -895,8 +860,8 @@ fn show_name_hud(
 /// point-space `screen_rect`, which is resolution- and zoom-independent), and the
 /// name is painted there. Skips avatars behind/outside the frustum (`ndc.z`) and
 /// empty names (an avatar not yet assigned one). A drop shadow keeps it legible over
-/// the bright scene. Restricted to the rendered copies (own `Predicted` + remote
-/// `Interpolated`), so it uses each avatar's live rendered pose and draws once.
+/// the bright scene. Restricted to the rendered copies (every avatar is `Predicted`),
+/// so it uses each avatar's live rendered pose and draws once.
 fn show_name_labels(
     mut contexts: EguiContexts,
     camera: Query<(&Camera, &GlobalTransform), With<Camera3d>>,

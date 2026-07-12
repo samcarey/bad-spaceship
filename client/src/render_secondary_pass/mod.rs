@@ -441,10 +441,12 @@ fn delete_zone_visibility(
 // average parts against gravity) directed down its cylinder axis toward the flared
 // end, applied at the flare's base. For the rockets that belong to the *main
 // assembly* (the largest joint-connected group of parts), we sum the thrust vectors,
-// average their application points, and draw a single yellow arrow from that point.
-// The arrow's world length encodes the combined force: one rocket's worth of thrust
-// is about one character-height long. Nothing is applied to the sim — this is purely
-// a visualisation.
+// average their application points, and **subtract the assembly's weight** to get the
+// net lift-off force, then draw a single arrow from that point. When thrust wins the
+// arrow is yellow and points up (net = thrust − weight); when the stack is too heavy
+// to lift, it flips to a red arrow pointing down whose length is (weight − thrust).
+// The arrow's world length encodes that net force: one rocket's worth of thrust is
+// about one character-height long. Nothing is applied to the sim — pure visualisation.
 
 #[derive(Component)]
 struct ThrustArrowShaft;
@@ -457,6 +459,9 @@ struct ThrustArrowHead;
 const THRUST_ARROW_RADIUS: f32 = 0.1;
 const THRUST_ARROW_HEAD_HEIGHT: f32 = 0.5;
 const THRUST_ARROW_HEAD_RADIUS: f32 = 0.25;
+// Net thrust wins (rises) → yellow up-arrow; weight wins (can't lift) → red down-arrow.
+const THRUST_ARROW_UP_COLOR: Color = Color::srgb(1.0, 0.85, 0.1);
+const THRUST_ARROW_DOWN_COLOR: Color = Color::srgb(0.95, 0.12, 0.08);
 
 /// Spawn the (initially hidden) shaft + head of the thrust arrow. The unit-height
 /// cylinder is scaled/placed each frame by `update_thrust_arrow`; the cone head is a
@@ -466,7 +471,13 @@ fn build_thrust_arrow(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<GizmoMaterial>>,
 ) {
-    let material = materials.add(GizmoMaterial::from(Color::srgb(1.0, 0.85, 0.1)));
+    // One material per color, built once; the update system swaps `MeshMaterial3d`
+    // handles on a flip instead of mutating the asset (which would re-upload it) —
+    // the same two-material pattern as the joint spheres (`JointAppearance`).
+    let arrow_materials = ThrustArrowMaterials {
+        up: materials.add(GizmoMaterial::from(THRUST_ARROW_UP_COLOR)),
+        down: materials.add(GizmoMaterial::from(THRUST_ARROW_DOWN_COLOR)),
+    };
     // Unit-height cylinder centred at the origin (y ∈ [-0.5, 0.5]); scaled along Y and
     // translated so its base sits at the application point.
     let shaft = meshes.add(Cylinder::new(THRUST_ARROW_RADIUS, 1.0));
@@ -477,7 +488,7 @@ fn build_thrust_arrow(
     }));
     commands.spawn((
         Mesh3d(shaft),
-        MeshMaterial3d(material.clone()),
+        MeshMaterial3d(arrow_materials.up.clone()),
         Transform::default(),
         Visibility::Hidden,
         NotShadowCaster,
@@ -485,12 +496,21 @@ fn build_thrust_arrow(
     ));
     commands.spawn((
         Mesh3d(head),
-        MeshMaterial3d(material),
+        MeshMaterial3d(arrow_materials.up.clone()),
         Transform::default(),
         Visibility::Hidden,
         NotShadowCaster,
         ThrustArrowHead,
     ));
+    commands.insert_resource(arrow_materials);
+}
+
+/// The thrust arrow's two prebuilt materials: yellow up-arrow (thrust wins) and red
+/// down-arrow (too heavy to lift). Swapped by handle in `update_thrust_arrow`.
+#[derive(Resource)]
+struct ThrustArrowMaterials {
+    up: Handle<GizmoMaterial>,
+    down: Handle<GizmoMaterial>,
 }
 
 fn update_thrust_arrow(
@@ -501,12 +521,14 @@ fn update_thrust_arrow(
     parts: Query<(Entity, &GlobalTransform, &ComputedMass), With<Holdable>>,
     configs: Res<Assets<character::Config>>,
     gravity: Res<Gravity>,
+    // The prebuilt yellow/red materials — swapped by handle on a rising↔too-heavy flip.
+    arrow_materials: Res<ThrustArrowMaterials>,
     mut shaft: Query<
-        (&mut Transform, &mut Visibility),
+        (&mut Transform, &mut Visibility, &mut MeshMaterial3d<GizmoMaterial>),
         (With<ThrustArrowShaft>, Without<ThrustArrowHead>),
     >,
     mut head: Query<
-        (&mut Transform, &mut Visibility),
+        (&mut Transform, &mut Visibility, &mut MeshMaterial3d<GizmoMaterial>),
         (With<ThrustArrowHead>, Without<ThrustArrowShaft>),
     >,
     // Multiplayer assembly membership (see `visualized_assembly`): the replicated
@@ -518,8 +540,10 @@ fn update_thrust_arrow(
     launch_local: Res<LaunchLocal>,
     net_launch: Query<&NetLaunch>,
 ) {
-    let (Ok((mut shaft_transform, mut shaft_vis)), Ok((mut head_transform, mut head_vis))) =
-        (shaft.single_mut(), head.single_mut())
+    let (
+        Ok((mut shaft_transform, mut shaft_vis, mut shaft_material)),
+        Ok((mut head_transform, mut head_vis, mut head_material)),
+    ) = (shaft.single_mut(), head.single_mut())
     else {
         return;
     };
@@ -527,13 +551,26 @@ fn update_thrust_arrow(
     let arrow = (!launch_armed(&launch_local, &net_launch))
         .then(|| visualized_assembly(multiplayer.is_some(), &parts, &joints, &mp_members))
         .flatten()
-        .and_then(|(members, _com)| thrust_arrow(&rockets, &members, &configs, gravity.0));
+        .and_then(|(members, _com, total_mass)| {
+            thrust_arrow(&rockets, &members, &configs, gravity.0, total_mass)
+        });
 
     let Some((origin, dir, length)) = arrow else {
         *shaft_vis = Visibility::Hidden;
         *head_vis = Visibility::Hidden;
         return;
     };
+
+    // Heavy = net force points *with* gravity (downward) → the stack can't lift; the
+    // arrow flips to the red material. Handle swap only on change (a `Mut` write would
+    // re-evaluate material bindings every frame).
+    let target =
+        if dir.dot(gravity.0) > 0.0 { &arrow_materials.down } else { &arrow_materials.up };
+    for material in [&mut shaft_material, &mut head_material] {
+        if material.0 != *target {
+            material.0 = target.clone();
+        }
+    }
 
     let rotation = Quat::from_rotation_arc(Vec3::Y, dir);
     // Reserve the tip for the cone head so shaft + head together span `length`.
@@ -552,14 +589,20 @@ fn update_thrust_arrow(
     *head_vis = Visibility::Visible;
 }
 
-/// Combined thrust arrow for the rockets in the given assembly `members`: `(average
-/// application point, unit direction, world length)`. `None` when no rocket belongs to
-/// the assembly or the summed force cancels out.
+/// Combined **net** lift-off arrow for the rockets in the given assembly `members`:
+/// `(average application point, unit direction, world length)`. The summed rocket
+/// thrust has the assembly's weight (`total_mass · g`, straight down) subtracted from
+/// it, so the arrow shows the net force that actually moves the stack: up while thrust
+/// wins, flipping down (length = weight − thrust) once the assembly is too heavy to
+/// lift — the caller reads which from `dir · gravity`. `None` when no rocket belongs to
+/// the assembly or the net force cancels to zero (thrust exactly balances weight →
+/// nothing to draw).
 fn thrust_arrow(
     rockets: &Query<(Entity, &GlobalTransform), With<RocketEngine>>,
     members: &HashSet<Entity>,
     configs: &Assets<character::Config>,
     gravity: Vec3,
+    total_mass: f32,
 ) -> Option<(Vec3, Vec3, f32)> {
     // One rocket's thrust: enough to lift N average parts against gravity. The per-rocket
     // application point + force come from the same shared helper the launch physics uses,
@@ -583,13 +626,17 @@ fn thrust_arrow(
     }
 
     let origin = sum_point / count as f32;
-    let dir = sum_force.normalize_or_zero();
+    // Net lift-off force: summed thrust minus the assembly's weight (`m·g`, along gravity,
+    // i.e. straight down). `gravity` already points down, so `mass · gravity` *is* the
+    // weight vector and adding it subtracts the weight from the (upward) thrust.
+    let net_force = sum_force + gravity * total_mass;
+    let dir = net_force.normalize_or_zero();
     if dir == Vec3::ZERO {
         return None;
     }
-    // One rocket's force → one character height of arrow: length = |ΣF| · (h / F₁).
+    // One rocket's force → one character height of arrow: length = |net| · (h / F₁).
     let character_height = configs.iter().next().map_or(1.5, |(_, c)| c.size());
-    let length = sum_force.length() * character_height / thrust;
+    let length = net_force.length() * character_height / thrust;
     Some((origin, dir, length))
 }
 
@@ -619,14 +666,16 @@ pub(crate) fn assembly_members(
 /// centroid of those members' rendered poses. Because the members come from the
 /// predicted parts in multiplayer, the orb and arrow track the locally simulated parts
 /// with no network-rate lag (the COM is *predicted client-side*, like the parts
-/// themselves, instead of streamed from the server). `None` when no assembly exists
-/// (< 2 members) or its mass is degenerate.
+/// themselves, instead of streamed from the server). Returns `(members, com, total
+/// mass)` — the mass falls out of the COM weighting and the thrust arrow subtracts the
+/// weight it implies, so both come from one pass over one member set. `None` when no
+/// assembly exists (< 2 members) or its mass is degenerate.
 fn visualized_assembly(
     multiplayer: bool,
     parts: &Query<(Entity, &GlobalTransform, &ComputedMass), With<Holdable>>,
     joints: &Query<&SphericalJoint>,
     mp_members: &Query<Entity, (With<InLargestAssembly>, With<Predicted>)>,
-) -> Option<(HashSet<Entity>, Vec3)> {
+) -> Option<(HashSet<Entity>, Vec3, f32)> {
     let members = assembly_members(multiplayer, parts, joints, mp_members);
     if members.len() < 2 {
         return None;
@@ -640,7 +689,7 @@ fn visualized_assembly(
             total += m;
         }
     }
-    (total > 0.0).then(|| (members, weighted / total))
+    (total > 0.0).then(|| (members, weighted / total, total))
 }
 
 /// The single-player **main assembly** — the largest group of parts jointed *directly*
@@ -716,7 +765,7 @@ fn update_center_of_mass_orb(
     let com = (!launch_armed(&launch_local, &net_launch))
         .then(|| visualized_assembly(multiplayer.is_some(), &parts, &joints, &mp_members))
         .flatten()
-        .map(|(_members, com)| com);
+        .map(|(_members, com, _mass)| com);
 
     // Lazily spawn the orb once the character config (its size) is loaded.
     if !*spawned {

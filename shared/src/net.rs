@@ -548,6 +548,15 @@ fn linear_velocity_should_rollback(confirmed: &LinearVelocity, predicted: &Linea
     over_tolerance(confirmed.0, predicted.0, LINEAR_VELOCITY_ROLLBACK_TOLERANCE)
 }
 
+/// `NetFacing` must NEVER trigger a rollback: it's server-authored and cosmetic (not
+/// part of the local physics sim), so a confirmed≠predicted difference should just
+/// update the value, not re-simulate the world — and a remote player turning their
+/// head changes it every tick. (It's predict-synced at all only so it reaches the
+/// predicted remote avatar.)
+fn facing_should_rollback(_confirmed: &NetFacing, _predicted: &NetFacing) -> bool {
+    false
+}
+
 fn angular_velocity_should_rollback(
     confirmed: &AngularVelocity,
     predicted: &AngularVelocity,
@@ -771,8 +780,15 @@ impl Plugin for ProtocolPlugin {
         // from the owner's local-input `Yaw` on purpose — replicating `Yaw` itself
         // overwrote the owner's locally-driven look with the round-trip-stale copy
         // and made turning jitter. Interpolated on remotes; the owner never reads it.
+        // Predict-synced (not just interpolated) so it reaches the *predicted* remote
+        // avatar — every avatar is now `PredictionTarget::All` (see
+        // `spawn_player_for_client`); `facing_should_rollback` (see its doc) keeps the
+        // every-tick facing change from triggering physics rollbacks. The interpolation
+        // fn stays registered as a harmless fallback (nothing is `Interpolated` today).
         app.component::<NetFacing>()
             .replicate()
+            .predict()
+            .with_rollback_condition(facing_should_rollback)
             .add_interpolation_with(lerp_facing);
         // Each player's display name (see `NetName`): replicated so every client can
         // draw it over the avatar and list it in the roster. Changes rarely (only on

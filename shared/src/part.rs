@@ -109,6 +109,22 @@ pub const ORIENTING_STIFFNESS: f32 = 5.0;
 const MIN_JOINT_SPACING: f32 = MIN_PART_SIZE / 2.0;
 pub const DELETE_RADIUS: f32 = 1.0;
 
+/// Whether a joint anchor is **interior** — at (≈) its body's local origin rather than
+/// on a touching face — so its green marker would float inside the opaque body (e.g.
+/// old hand-built stacks whose deck↔rocket welds are anchored at the rocket's center,
+/// which read as "a green dot in the middle of the cylinder"). Interior welds are
+/// load-bearing (they give a connection its lever arm; a stack falls apart without
+/// them — ride-verified), so only their *markers* are suppressed, never the joints:
+/// the persistent multiplayer sphere (`bind_replicated_joints`) and the held-part
+/// green list (`update_active_joints`). The red predelete marker is deliberately NOT
+/// filtered — it warns about an imminent deletion, and in single-player the deletion
+/// acts on exactly that list. Surface anchors sit ≥ the part's half-extent (≥ 0.4 m
+/// here) from the origin, well clear of this threshold.
+pub fn is_interior_anchor(anchor: Vec3) -> bool {
+    const INTERIOR_JOINT_EPS: f32 = 0.1;
+    anchor.length_squared() < INTERIOR_JOINT_EPS * INTERIOR_JOINT_EPS
+}
+
 // Rocket-engine part geometry (a tall cylinder body with a flared nozzle at the
 // base). `pub` so the client renderer builds the matching mesh from the same
 // numbers the collider is built from here. The entity origin is the *body*
@@ -498,10 +514,23 @@ fn replace_fallen_rocket_engines(
     }
 }
 
-/// Maintain [`JointCollisionDisabled`] per **welded pair**: collision between two
-/// jointed bodies is turned off exactly when their joints already make the pair
-/// **rotationally rigid** (3+ non-collinear anchor points — a real weld), and kept
-/// on otherwise.
+/// Maintain [`JointCollisionDisabled`] per welded pair: collision between two jointed
+/// bodies is turned off exactly when the joint graph already makes their relative pose
+/// **rotationally rigid**, and kept on otherwise.
+///
+/// Rigidity is a property of the **rigid cluster**, not just the pair. Two levels:
+/// - A pair with 3+ non-collinear anchors is a rigid weld (as before).
+/// - A body whose joints INTO one rigid cluster total 3+ non-collinear anchors — even
+///   spread across several single-joint pairs — is pinned to that cluster just as hard:
+///   each anchor point is fixed in the cluster's frame. The census unions rigid pairs
+///   into clusters, then absorbs such bodies (to a fixpoint), and disables collision on
+///   every jointed pair that ends up inside one cluster. The per-pair-only census missed
+///   this: a rocket bolted by one joint each to the deck and to two base rockets (all
+///   mutually rigid) formed a *rigid loop of hinges* — every pair kept its contact, and
+///   the joint and contact solvers fought around the loop. Recorder-verified on the
+///   "6 rocks" save: the loop rattled the base rockets to |ω| ≈ 9.6 rad/s at blastoff
+///   (5 cm/tick relative jitter) and kicked the whole stack over before the autopilot
+///   could settle.
 ///
 /// Why both halves matter (both recorder-verified):
 /// - A rigid weld that also *touches* (player-built joints form exactly where parts
@@ -516,7 +545,8 @@ fn replace_fallen_rocket_engines(
 ///   welded by two points along an edge is braced flat by the face it touches (it
 ///   may swing *away*, never *through*). Disabling contact there turns builds
 ///   floppy — and un-footed ground clamps let a whole launch pad pendulum over the
-///   moment a rider stepped aboard.
+///   moment a rider stepped aboard. A *dangling* hinge (1-2 anchors into its cluster)
+///   still keeps its contact — only hinges the cluster proves rigid lose it.
 ///
 /// The census reruns whenever joints change (attach, delete-zone, blastoff clamp
 /// cut), so deleting joints off a rigid weld automatically re-arms its contact.
@@ -529,25 +559,87 @@ fn maintain_weld_rigidity(
     if changed.is_empty() && removed.read().next().is_none() {
         return;
     }
-    // Group each pair's joints, with anchors expressed in the pair's first body's
-    // frame (joints between the same two bodies may disagree on body1/body2 order).
-    let mut pairs: std::collections::HashMap<(Entity, Entity), Vec<(Entity, Vec3)>> =
+    // Group each pair's joints, keeping each joint's anchor in BOTH bodies' own frames
+    // (joints between the same two bodies may disagree on body1/body2 order; normalize
+    // to the pair's smaller-entity-first key).
+    type PairJoints = Vec<(Entity, Vec3, Vec3)>; // (joint, anchor in key.0, anchor in key.1)
+    let mut pairs: std::collections::HashMap<(Entity, Entity), PairJoints> =
         std::collections::HashMap::new();
     for (entity, joint) in &joints {
-        let (key, anchor) = if joint.body1 <= joint.body2 {
-            ((joint.body1, joint.body2), joint.local_anchor1())
+        let (key, a_anchor, b_anchor) = if joint.body1 <= joint.body2 {
+            ((joint.body1, joint.body2), joint.local_anchor1(), joint.local_anchor2())
         } else {
-            ((joint.body2, joint.body1), joint.local_anchor2())
+            ((joint.body2, joint.body1), joint.local_anchor2(), joint.local_anchor1())
         };
-        pairs.entry(key).or_default().push((entity, anchor.unwrap_or_default()));
+        pairs.entry(key).or_default().push((
+            entity,
+            a_anchor.unwrap_or_default(),
+            b_anchor.unwrap_or_default(),
+        ));
     }
-    for members in pairs.values() {
-        let rigid = anchors_are_rigid(members.iter().map(|(_, anchor)| *anchor));
-        for &(entity, _) in members {
+
+    // Union-find over the jointed bodies (the same `DisjointSet` the assembly grouping
+    // uses). Clusters form purely by absorption below: a per-pair rigid weld is just
+    // the two-body case (a's 3+ anchors into b's singleton cluster), so it needs no
+    // separate seeding pass.
+    let mut index: std::collections::HashMap<Entity, usize> = std::collections::HashMap::new();
+    for &(a, b) in pairs.keys() {
+        for body in [a, b] {
+            let next = index.len();
+            index.entry(body).or_insert(next);
+        }
+    }
+    let mut clusters = crate::assembly::DisjointSet::new(index.len());
+
+    // Absorb, to a fixpoint: a body whose joints into ONE cluster pin 3+ non-collinear
+    // of its own points is rigid to that cluster — merge it in. (Each merge can make
+    // further bodies absorbable; the joint graphs here are tiny, so the loop is cheap.)
+    loop {
+        // body index → (other cluster root → this body's anchors into that cluster).
+        let mut into_cluster: std::collections::HashMap<
+            usize,
+            std::collections::HashMap<usize, Vec<Vec3>>,
+        > = std::collections::HashMap::new();
+        for (&(a, b), members) in &pairs {
+            let (ia, ib) = (index[&a], index[&b]);
+            let (ra, rb) = (clusters.find(ia), clusters.find(ib));
+            if ra == rb {
+                continue;
+            }
+            for &(_, a_anchor, b_anchor) in members {
+                into_cluster.entry(ia).or_default().entry(rb).or_default().push(a_anchor);
+                into_cluster.entry(ib).or_default().entry(ra).or_default().push(b_anchor);
+            }
+        }
+        let mut merged = false;
+        for (&body, roots) in &into_cluster {
+            for (&root, anchors) in roots {
+                if anchors_are_rigid(anchors.iter().copied())
+                    && clusters.find(body) != clusters.find(root)
+                {
+                    clusters.union(body, root);
+                    merged = true;
+                }
+            }
+        }
+        if !merged {
+            break;
+        }
+    }
+
+    for (&(a, b), members) in &pairs {
+        let rigid = clusters.find(index[&a]) == clusters.find(index[&b]);
+        for &(entity, _, _) in members {
+            // `try_insert`/`try_remove` (not `insert`/`remove`): a joint queried here can
+            // be despawned before these deferred commands apply — the floating-origin
+            // rebase cuts ground joints, and part churn (a diverged part recycled, an
+            // avatar joining mid-flight jostling the stack) can drop joints — and a plain
+            // `insert`/`remove` on the despawned entity panics the whole app
+            // (`panic=abort`). The despawn-tolerant variants no-op on a dead entity.
             if rigid {
-                commands.entity(entity).insert(JointCollisionDisabled);
+                commands.entity(entity).try_insert(JointCollisionDisabled);
             } else {
-                commands.entity(entity).remove::<JointCollisionDisabled>();
+                commands.entity(entity).try_remove::<JointCollisionDisabled>();
             }
         }
     }
@@ -872,6 +964,11 @@ fn update_active_joints(
                     else {
                         continue;
                     };
+                    // Interior welds keep working but their marker would float inside
+                    // the body — skip drawing it (see `is_interior_anchor`).
+                    if is_interior_anchor(a1) || is_interior_anchor(a2) {
+                        continue;
+                    }
                     if joint.body2 == held_entity {
                         existing_joints.0.push(DisplayableJoint {
                             entities: (held_entity, joint.body1),
@@ -1241,5 +1338,68 @@ mod weld_tests {
             [p(-0.5, 0.0, -0.5), p(0.5, 0.0, -0.5), p(0.5, 0.0, 0.5), p(-0.5, 0.0, 0.5)]
                 .into_iter()
         ));
+    }
+
+    /// The census is cluster-aware: a body bolted by SINGLE joints to several members
+    /// of one rigid cluster — whose anchors on the body span a triangle — is rigid to
+    /// the cluster, so all of those hinge joints drop their contact (the "6 rocks"
+    /// rigid-loop-of-hinges case). A genuinely dangling hinge keeps its contact.
+    #[test]
+    fn rigid_loop_of_hinges_disables_contact() {
+        let mut app = App::new();
+        // `JointCollisionDisabled`'s component hooks write into avian's `JointGraph`
+        // resource (normally added by `PhysicsPlugins`); the census only needs it to exist.
+        app.init_resource::<avian3d::dynamics::solver::joint_graph::JointGraph>();
+        app.add_systems(Update, maintain_weld_rigidity);
+        let world = app.world_mut();
+        let p = |x: f32, y: f32, z: f32| Vec3::new(x, y, z);
+        let deck = world.spawn_empty().id();
+        let r1 = world.spawn_empty().id();
+        let r2 = world.spawn_empty().id();
+        let bolt = world.spawn_empty().id();
+        let dangler = world.spawn_empty().id();
+        let weld = |world: &mut World, a: Entity, b: Entity, anchors: [Vec3; 3]| {
+            for anchor in anchors {
+                world.spawn(
+                    SphericalJoint::new(a, b)
+                        .with_local_anchor1(anchor)
+                        .with_local_anchor2(anchor + Vec3::X),
+                );
+            }
+        };
+        // Rigid cluster: deck↔r1 and deck↔r2 (3 non-collinear anchors each).
+        let tri = [p(0.0, 0.0, 0.0), p(1.0, 0.0, 0.0), p(0.0, 0.0, 1.0)];
+        weld(world, deck, r1, tri);
+        weld(world, deck, r2, tri);
+        // The bolt-on: ONE joint to each of deck/r1/r2; its own-side (body1) anchors
+        // span a triangle only in aggregate — every pair alone is a hinge.
+        let loop_joints: Vec<Entity> = [(deck, p(0.0, 0.0, 0.0)), (r1, p(1.0, 0.0, 0.0)), (r2, p(0.0, 0.0, 1.0))]
+            .into_iter()
+            .map(|(other, anchor)| {
+                world
+                    .spawn(
+                        SphericalJoint::new(bolt, other)
+                            .with_local_anchor1(anchor)
+                            .with_local_anchor2(anchor + Vec3::Y),
+                    )
+                    .id()
+            })
+            .collect();
+        // A dangling hinge: one joint to the deck, nothing else.
+        let hinge = world
+            .spawn(SphericalJoint::new(dangler, deck).with_local_anchor1(Vec3::ZERO))
+            .id();
+        app.update();
+        let world = app.world();
+        for joint in &loop_joints {
+            assert!(
+                world.get::<JointCollisionDisabled>(*joint).is_some(),
+                "loop hinge joint should drop contact (rigid via the cluster)"
+            );
+        }
+        assert!(
+            world.get::<JointCollisionDisabled>(hinge).is_none(),
+            "dangling hinge must keep its contact (it braces the part)"
+        );
     }
 }
