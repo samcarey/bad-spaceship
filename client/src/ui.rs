@@ -11,8 +11,8 @@ use bevy_egui::{
 use avian3d::prelude::{LinearVelocity, Position};
 use bad_spaceship_shared::character::{MovementModel, MovementTuning};
 use bad_spaceship_shared::net::{
-    sanitize_name, ControlChannel, NetName, NetPlayer, ResetPosition, SaveGame, SetAvatar,
-    SetName, MAX_NAME_LEN, MONSTER_COUNT,
+    sanitize_name, ControlChannel, NetName, NetPlayer, ResetPosition, ResetRoom, SaveGame,
+    SetAvatar, SetName, MAX_NAME_LEN, MONSTER_COUNT,
 };
 use bad_spaceship_shared::Character;
 use chrono::{DateTime, FixedOffset, Utc};
@@ -499,6 +499,8 @@ struct HudState {
     show_save_modal: bool,
     /// The avatar-picker modal is open.
     show_avatar_modal: bool,
+    /// The "Reset Room?" confirmation dialog is open.
+    show_reset_room_confirm: bool,
     /// The instructions overlay is revealed (toggled by the "?" button).
     show_help: bool,
     /// Live contents of the rename text field.
@@ -623,6 +625,7 @@ fn show_name_hud(
     players: Query<(&NetPlayer, &NetName), RenderedAvatar>,
     mut name_sender: Query<&mut MessageSender<SetName>, With<Connected>>,
     mut reset_sender: Query<&mut MessageSender<ResetPosition>, With<Connected>>,
+    mut reset_room_sender: Query<&mut MessageSender<ResetRoom>, With<Connected>>,
     mut save_sender: Query<&mut MessageSender<SaveGame>, With<Connected>>,
 ) -> Result {
     let ctx = contexts.ctx_mut()?;
@@ -658,6 +661,7 @@ fn show_name_hud(
     let mut open_save = false;
     let mut open_avatar = false;
     let mut do_reset = false;
+    let mut open_reset_room = false;
 
     // Top-left: hamburger menu (connected only) + help toggle, both drawn large.
     egui::Area::new(egui::Id::new("bs_top_left"))
@@ -688,6 +692,9 @@ fn show_name_hud(
                         }
                         if ui.button("Reset Position").clicked() {
                             do_reset = true;
+                        }
+                        if ui.button("Reset Room").clicked() {
+                            open_reset_room = true;
                         }
                     });
                 // A click anywhere outside the open menu collapses it.
@@ -761,6 +768,42 @@ fn show_name_hud(
         #[cfg(not(target_arch = "wasm32"))]
         if let Ok(mut sender) = reset_sender.single_mut() {
             sender.send::<ControlChannel>(ResetPosition);
+        }
+    }
+    if open_reset_room {
+        hud.show_menu = false;
+        hud.show_reset_room_confirm = true;
+    }
+
+    // The "Reset Room?" confirmation dialog: a destructive, room-wide action, so it
+    // never fires straight off the menu. Buttons only (no text entry), so the same
+    // egui modal works on web and native — like the avatar picker.
+    if hud.show_reset_room_confirm {
+        let mut confirm = false;
+        let mut cancel = false;
+        egui::Window::new("Reset Room?")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label(
+                    "Put the room back to how it started: parts and rockets return to \
+                     their initial positions, the blastoff is undone, and everyone in \
+                     the room respawns at the pad.",
+                );
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    confirm = ui.button("Reset Room").clicked();
+                    cancel = ui.button("Cancel").clicked();
+                });
+            });
+        if confirm {
+            if let Ok(mut sender) = reset_room_sender.single_mut() {
+                sender.send::<ControlChannel>(ResetRoom);
+            }
+        }
+        if confirm || cancel {
+            hud.show_reset_room_confirm = false;
         }
     }
 
