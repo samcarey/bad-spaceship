@@ -162,6 +162,9 @@ pub struct AssemblySpin {
     /// It ignores each part's own inertia, which only makes the assist slightly
     /// softer than critical on compact assemblies — safe in the stable direction.
     pub inertia: f32,
+    /// Total member mass (kg) — the assembly's weight is `mass · |g|`, which gates
+    /// whether misaligned engines can be cut (see [`balanced_assembly_thrust`]).
+    pub mass: f32,
 }
 
 /// Measure an assembly's mass-weighted COM + motion state from `(position,
@@ -199,6 +202,7 @@ pub fn measure_assembly_spin<I: Iterator<Item = (Vec3, Vec3, Vec3, f32)>>(
             linear_velocity: weighted_lin / mass,
             angular_velocity: weighted_ang / mass,
             inertia,
+            mass,
         },
     ))
 }
@@ -258,6 +262,13 @@ const ATTITUDE_INTEGRAL_MAX: f32 = 4.0;
 /// so a rideable stack stays upright — within throttle authority: scales stay clamped
 /// to `[0, 1]` and the lift guard still keeps the average at [`LIFT_FLOOR`].
 ///
+/// Engines welded on more crookedly than the gimbal cone (± [`GIMBAL_MAX_RAD`]) are
+/// **shut down entirely** whenever the aligned engines alone can out-lift the assembly:
+/// they can never aim along the command, so their thrust is pure untrimmable disturbance
+/// (see the `aligned`/`cut` block in the body). The lift floor then applies to the
+/// survivors only — this is what lets a stack with badly-tilted bolt-on engines still
+/// fly straight on its good ones.
+///
 /// `rockets` is `(entity, world translation, world rotation, current gimbal)` for the
 /// assembly's rockets; `com` is the assembly's centre of mass (mass-weighted over all
 /// its parts); `spin` is the assembly's measured motion state (see [`AssemblySpin`]);
@@ -289,13 +300,66 @@ pub fn balanced_assembly_thrust(
     let lateral = Vec3::new(spin.linear_velocity.x, 0.0, spin.linear_velocity.z);
     let up_command =
         (Vec3::Y - (lateral * STABILITY_KV).clamp_length_max(STABILITY_MAX_LEAN)).normalize();
-    let thrust_dir = forces.iter().copied().sum::<Vec3>().normalize_or_zero();
+    // Write off engines that CANNOT help: a nozzle swings at most `GIMBAL_MAX_RAD` off
+    // its body axis, so an engine welded on more crookedly than that can never aim its
+    // thrust with the rest — every newton it makes carries an untrimmable sideways
+    // component that feeds the tip-over (verified on a 6-rocket stack with two engines
+    // at 19°/25°: ω ran away 0.3 → 80 rad/s and it tumbled into the pad). Cut them to
+    // zero and fly on the aligned engines — but only when those survivors still out-lift
+    // the assembly's weight (otherwise lift wins, as ever, and the stack rises tumbling
+    // rather than sitting dead on the pad). Without the cut, the solver DOES throttle
+    // crooked engines down, but the lift-floor boost drags every engine back toward full
+    // — including the harmful ones. `live` masks the solve, the lift floor, the net
+    // thrust direction, and the gimbal shares to the surviving engines.
+    //
+    // Crookedness is measured against the FLEET's mean thrust axis (with one
+    // outlier-rejection pass so the crooked engines don't drag the reference toward
+    // themselves), NOT against the commanded direction: the assembly is rigid, so
+    // engine-to-fleet angles are invariant under any transient body tilt and the mask
+    // cannot chatter mid-flight. (The first cut of this measured against `up_command` —
+    // which the velocity hold leans by up to ~14.5°, right at the 15° cone edge — so as
+    // drift built, the UPRIGHT engines started failing the test, the mask collapsed,
+    // and the crooked engines relit: recorder showed the same tumble, just later.)
+    let cos_cone = libm::cosf(GIMBAL_MAX_RAD);
+    let axes: Vec<Vec3> = rockets
+        .iter()
+        .map(|&(_, _, rotation, _)| (rotation * ROCKET_THRUST_DIR_LOCAL).normalize_or_zero())
+        .collect();
+    let mean_axis = axes.iter().copied().sum::<Vec3>().normalize_or_zero();
+    let inliers = axes
+        .iter()
+        .filter(|a| a.dot(mean_axis) >= cos_cone)
+        .copied()
+        .sum::<Vec3>()
+        .normalize_or_zero();
+    let reference = if inliers == Vec3::ZERO { mean_axis } else { inliers };
+    let aligned: Vec<bool> = axes.iter().map(|a| a.dot(reference) >= cos_cone).collect();
+    let aligned_thrust = full * aligned.iter().filter(|a| **a).count() as f32;
+    let cut = aligned.iter().any(|a| !a) && aligned_thrust >= spin.mass * gravity.length();
+    let live = |i: usize| !cut || aligned[i];
+    let live_count = (0..rockets.len()).filter(|&i| live(i)).count().max(1);
+
+    let thrust_dir = forces
+        .iter()
+        .enumerate()
+        .filter(|&(i, _)| live(i))
+        .map(|(_, f)| *f)
+        .sum::<Vec3>()
+        .normalize_or_zero();
     let error = thrust_dir.cross(up_command);
     *integral = (*integral + error * dt).clamp_length_max(ATTITUDE_INTEGRAL_MAX);
     let target = spin.inertia
         * (STABILITY_KP * error + STABILITY_KI * *integral
             - STABILITY_KD * spin.angular_velocity);
-    let scales = balanced_thrust_scales_toward(&torques, target);
+    // Solve throttles over the live engines only, so the lift floor keeps *them* near
+    // full instead of boosting the cut engines back on; dead engines hold zero.
+    let live_torques: Vec<Vec3> =
+        (0..rockets.len()).filter(|&i| live(i)).map(|i| torques[i]).collect();
+    let live_scales = balanced_thrust_scales_toward(&live_torques, target);
+    let mut live_iter = live_scales.into_iter();
+    let scales: Vec<f32> = (0..rockets.len())
+        .map(|i| if live(i) { live_iter.next().unwrap_or(0.0) } else { 0.0 })
+        .collect();
     // The nozzles cover whatever torque the throttles can't (they only reduce thrust,
     // the lift guard bounds how much, and 1–2 rockets barely span any torque at all).
     // The gimbal command is **incremental** — current deflection + the correction for
@@ -318,7 +382,9 @@ pub fn balanced_assembly_thrust(
             (point - com).cross(force)
         })
         .sum();
-    let share = (target - net) / rockets.len() as f32;
+    // Spread the torque still missing across the LIVE nozzles (a cut engine makes no
+    // thrust, so its nozzle can't make torque — `gimbal_correction` returns zero for it).
+    let share = (target - net) / live_count as f32;
     rockets
         .iter()
         .enumerate()
@@ -534,7 +600,7 @@ mod tests {
         let com = Vec3::new(0.0, -(crate::part::ROCKET_BODY_HEIGHT / 2.0), 0.0);
         // Spinning about +Z: the assist must torque about -Z, i.e. throttle the
         // rocket whose full-thrust torque is +Z (the -x one) relative to the other.
-        let spin = AssemblySpin { linear_velocity: Vec3::ZERO, angular_velocity: Vec3::new(0.0, 0.0, 1.0), inertia: 10.0 };
+        let spin = AssemblySpin { linear_velocity: Vec3::ZERO, angular_velocity: Vec3::new(0.0, 0.0, 1.0), inertia: 10.0, mass: 10.0 };
         let thrusts = balanced_assembly_thrust(com, gravity, 1.0 / 60.0, &rockets, &spin, &mut Vec3::ZERO);
         let net_torque: Vec3 = world_thrusts(&rockets, gravity, &thrusts)
             .iter()
@@ -542,12 +608,55 @@ mod tests {
             .sum();
         assert!(net_torque.z < -1.0, "expected counter-spin torque, got {net_torque:?}");
         // And a still, upright assembly keeps the symmetric full-throttle solution.
-        let still = AssemblySpin { linear_velocity: Vec3::ZERO, angular_velocity: Vec3::ZERO, inertia: 10.0 };
+        let still = AssemblySpin { linear_velocity: Vec3::ZERO, angular_velocity: Vec3::ZERO, inertia: 10.0, mass: 10.0 };
         let thrusts = balanced_assembly_thrust(com, gravity, 1.0 / 60.0, &rockets, &still, &mut Vec3::ZERO);
         assert!(
             thrusts.iter().all(|t| t.throttle > 0.99),
             "still assembly should fire (near) full"
         );
+    }
+
+    /// An engine welded on more crookedly than the gimbal cone is shut down entirely
+    /// (its thrust is untrimmable disturbance) — as long as the aligned engines alone
+    /// out-lift the assembly. The survivors stay at (near) full throttle: the lift
+    /// floor must not drag the cut engine back on.
+    #[test]
+    fn crooked_engine_is_cut_when_lift_allows() {
+        let e = |i| Entity::from_raw_u32(i).unwrap();
+        // Four upright rockets in a square + one welded 25° over (past the 15° cone).
+        let tilt = Quat::from_rotation_z(25.0_f32.to_radians());
+        let rockets = [
+            (e(1), Vec3::new(-1.0, 0.0, -1.0), Quat::IDENTITY, Vec2::ZERO),
+            (e(2), Vec3::new(1.0, 0.0, -1.0), Quat::IDENTITY, Vec2::ZERO),
+            (e(3), Vec3::new(-1.0, 0.0, 1.0), Quat::IDENTITY, Vec2::ZERO),
+            (e(4), Vec3::new(1.0, 0.0, 1.0), Quat::IDENTITY, Vec2::ZERO),
+            (e(5), Vec3::new(0.0, 1.0, 0.0), tilt, Vec2::ZERO),
+        ];
+        let gravity = Vec3::new(0.0, -9.81, 0.0);
+        let com = Vec3::new(0.0, 0.0, 0.0);
+        // Mass the four aligned engines can lift on their own (each lifts
+        // ROCKET_THRUST_PART_WEIGHTS·NOMINAL_PART_MASS).
+        let liftable = 4.0 * ROCKET_THRUST_PART_WEIGHTS * NOMINAL_PART_MASS * 0.8;
+        let still = AssemblySpin {
+            linear_velocity: Vec3::ZERO,
+            angular_velocity: Vec3::ZERO,
+            inertia: 10.0,
+            mass: liftable,
+        };
+        let thrusts =
+            balanced_assembly_thrust(com, gravity, 1.0 / 60.0, &rockets, &still, &mut Vec3::ZERO);
+        assert!(thrusts[4].throttle == 0.0, "crooked engine must be cut, got {}", thrusts[4].throttle);
+        assert!(
+            thrusts[..4].iter().all(|t| t.throttle > 0.9),
+            "aligned engines must stay near full: {:?}",
+            thrusts.iter().map(|t| t.throttle).collect::<Vec<_>>()
+        );
+
+        // Too heavy for the aligned engines alone → lift wins, nothing is cut.
+        let heavy = AssemblySpin { mass: liftable * 2.0, ..still };
+        let thrusts =
+            balanced_assembly_thrust(com, gravity, 1.0 / 60.0, &rockets, &heavy, &mut Vec3::ZERO);
+        assert!(thrusts[4].throttle > 0.0, "lift must win when survivors can't carry it");
     }
 
     /// The nozzle actuator honors both its limits: it never moves faster than
@@ -577,7 +686,7 @@ mod tests {
         let rockets = [(Entity::from_raw_u32(1).unwrap(), Vec3::ZERO, Quat::IDENTITY, Vec2::ZERO)];
         let gravity = Vec3::new(0.0, -9.81, 0.0);
         let com = Vec3::new(0.0, 0.3, 0.0); // payload above: COM sits above the nozzle
-        let spin = AssemblySpin { linear_velocity: Vec3::ZERO, angular_velocity: Vec3::new(0.0, 0.0, 1.0), inertia: 2.0 };
+        let spin = AssemblySpin { linear_velocity: Vec3::ZERO, angular_velocity: Vec3::new(0.0, 0.0, 1.0), inertia: 2.0, mass: 2.0 };
         let thrusts = balanced_assembly_thrust(com, gravity, 1.0 / 60.0, &rockets, &spin, &mut Vec3::ZERO);
         let desired = thrusts[0].desired_gimbal;
         assert!(desired.length() > 1e-4, "expected a gimbal command, got {desired:?}");
@@ -600,7 +709,7 @@ mod tests {
         ];
         let gravity = Vec3::new(0.0, -9.81, 0.0);
         let com = Vec3::new(0.0, 0.0, 0.0);
-        let spin = AssemblySpin { linear_velocity: Vec3::ZERO, angular_velocity: Vec3::new(1.0, 0.0, 0.0), inertia: 4.0 };
+        let spin = AssemblySpin { linear_velocity: Vec3::ZERO, angular_velocity: Vec3::new(1.0, 0.0, 0.0), inertia: 4.0, mass: 4.0 };
         let thrusts = balanced_assembly_thrust(com, gravity, 1.0 / 60.0, &rockets, &spin, &mut Vec3::ZERO);
         let net_torque: Vec3 = world_thrusts(&rockets, gravity, &thrusts)
             .iter()
