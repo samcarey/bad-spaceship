@@ -1148,17 +1148,33 @@ fn bind_replicated_joints(
         let (Some(body1), Some(body2)) = (find(joint.body1), find(joint.body2)) else {
             continue;
         };
-        commands.entity(joint_entity).insert((
+        let mut entity = commands.entity(joint_entity);
+        entity.insert((
             SphericalJoint::new(body1, body2)
                 .with_local_anchor1(Vec3::from_array(joint.anchor1))
                 .with_local_anchor2(Vec3::from_array(joint.anchor2)),
             JointAnchorBody(body1),
-            Mesh3d(mesh.clone()),
-            MeshMaterial3d(material.clone()),
             Transform::default(),
         ));
+        // Draw the green marker only for *surface* welds. An anchor at (≈) a body's local
+        // origin is an INTERIOR weld — its marker floats inside the opaque body (e.g. old
+        // hand-built stacks whose deck↔rocket welds are anchored at the rocket's center,
+        // which read as a green dot in the middle of the cylinder). Those welds are
+        // load-bearing (they give the connection its vertical lever arm — a stack falls
+        // apart without them), so we keep the constraint and only suppress the visual.
+        // Surface anchors sit ≥ the part's half-extent from origin (≥ 0.4 m here), well
+        // clear of this threshold.
+        let interior = Vec3::from_array(joint.anchor1).length() < INTERIOR_JOINT_EPS
+            || Vec3::from_array(joint.anchor2).length() < INTERIOR_JOINT_EPS;
+        if !interior {
+            entity.insert((Mesh3d(mesh.clone()), MeshMaterial3d(material.clone())));
+        }
     }
 }
+
+/// An anchor within this distance of a body's local origin marks an **interior** weld
+/// (buried inside the body), whose gizmo marker is suppressed — see `bind_replicated_joints`.
+const INTERIOR_JOINT_EPS: f32 = 0.1;
 
 /// Track each bound joint's gizmo to its assembly: place it at body1's world-space
 /// anchor (`body1.transform · anchor1`), the same point the constraint pins, so the
