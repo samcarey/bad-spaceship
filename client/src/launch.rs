@@ -488,6 +488,9 @@ fn show_launch_ui(
         egui::Area::new(egui::Id::new("bs_lock_button"))
             .anchor(Align2::CENTER_TOP, egui::vec2(0.0, 72.0))
             .show(ctx, |ui| {
+                // The anchored (width-less) area remembers its previous size, so the
+                // label change (Lock ↔ Unlock) would wrap onto two lines without this.
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
                 Frame::default()
                     .fill(Color32::from_black_alpha(160))
                     .inner_margin(egui::Margin::same(8))
