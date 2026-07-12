@@ -14,6 +14,9 @@
 //! - `BS_ROOM`      lobby room code to join (default: the shared default room)
 //! - `BS_BOT_LAUNCH_SECS`  seconds after start to send one `RequestLaunch`
 //!                         (unset / negative ⇒ never launch)
+//! - `BS_BOT_RESET_SECS`   seconds after start to send one `ResetRoom` — the
+//!                         headless twin of the menu's confirmed "Reset Room"
+//!                         (unset / negative ⇒ never reset)
 //! - `BS_BOT_SECS`  seconds to run before exiting (unset / 0 ⇒ run forever)
 //! - `BS_BOT_RIDE`  autopilot: walk the avatar onto the rocket platform (via the
 //!                  step block) and only then allow the launch — a real
@@ -34,7 +37,7 @@ use avian3d::prelude::Position;
 use bad_spaceship_shared::time_scale;
 use bad_spaceship_shared::net::{
     resume_user_data, room_code_bytes, ControlChannel, NetInput, NetPart, NetPlayer, PartShape,
-    ProtocolPlugin, RequestLaunch, BS_PROTOCOL_ID, TICK,
+    ProtocolPlugin, RequestLaunch, ResetRoom, BS_PROTOCOL_ID, TICK,
 };
 use bevy::{app::ScheduleRunnerPlugin, prelude::*};
 use lightyear::netcode::ConnectToken;
@@ -53,6 +56,7 @@ struct BotConfig {
     server: String,
     room: [u8; 6],
     launch_after: Option<f32>,
+    reset_after: Option<f32>,
     run_secs: Option<f32>,
     ride: bool,
     wander: bool,
@@ -78,6 +82,7 @@ impl BotConfig {
             server: std::env::var("BS_CONNECT").unwrap_or_else(|_| "127.0.0.1:5001".into()),
             room: room_code_bytes(std::env::var("BS_ROOM").ok().as_deref().unwrap_or("")),
             launch_after: secs_var("BS_BOT_LAUNCH_SECS").filter(|s| *s >= 0.0),
+            reset_after: secs_var("BS_BOT_RESET_SECS").filter(|s| *s >= 0.0),
             run_secs: secs_var("BS_BOT_SECS").filter(|s| *s > 0.0),
             ride: std::env::var("BS_BOT_RIDE").is_ok(),
             wander: std::env::var("BS_BOT_WANDER").is_ok(),
@@ -108,7 +113,7 @@ fn main() {
     app.init_resource::<Boarded>();
     app.add_systems(Startup, connect);
     app.add_systems(First, apply_time_scale.before(bevy::time::TimeSystems));
-    app.add_systems(Update, (adopt_avatar, send_launch, exit_when_done));
+    app.add_systems(Update, (adopt_avatar, send_launch, send_reset, exit_when_done));
     app.add_systems(
         FixedPreUpdate,
         write_input.in_set(ClientInputSystems::WriteClientInputs),
@@ -315,6 +320,28 @@ fn send_launch(
         sender.send::<ControlChannel>(RequestLaunch);
         *sent = true;
         println!("[bot] sent RequestLaunch at t={:.1}s (boarded {} ticks)", time.elapsed_secs(), boarded.0);
+    }
+}
+
+/// One-shot `ResetRoom` once the scripted delay elapses — the headless twin of
+/// the menu's confirmed "Reset Room" dialog (the server resets the whole room to
+/// its initial conditions).
+fn send_reset(
+    time: Res<Time>,
+    config: Res<BotConfig>,
+    mut sent: Local<bool>,
+    mut senders: Query<&mut MessageSender<ResetRoom>, With<Connected>>,
+) {
+    let Some(after) = config.reset_after else {
+        return;
+    };
+    if *sent || time.elapsed_secs() < after {
+        return;
+    }
+    for mut sender in &mut senders {
+        sender.send::<ControlChannel>(ResetRoom);
+        *sent = true;
+        println!("[bot] sent ResetRoom at t={:.1}s", time.elapsed_secs());
     }
 }
 

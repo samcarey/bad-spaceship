@@ -32,7 +32,7 @@ use bad_spaceship_shared::net::{
     apply_hold_spring, apply_net_input, focused_part, monster_index, sanitize_name,
     ClientPanicReport, InLargestAssembly, NetFacing, NetHold, NetInput, NetJoint,
     NetLaunch, NetName, NetPart, NetPlayer, NetRoomFrame, PartShape, ProtocolPlugin, RequestLaunch,
-    ResetPosition, RollbackReport, SaveGame, SetAvatar, SetName, GROUND_JOINT_ID, MONSTER_COUNT,
+    ResetPosition, ResetRoom, RollbackReport, SaveGame, SetAvatar, SetName, GROUND_JOINT_ID, MONSTER_COUNT,
     TICK,
 };
 use bad_spaceship_shared::map::GROUND_LAYER;
@@ -379,11 +379,23 @@ impl Plugin for NetServerPlugin {
         );
         // Assign each client (and its avatar) to its reported room on the first
         // input, lazily creating the room's world, and apply client rename +
-        // avatar-pick + reset-position requests.
+        // avatar-pick + reset-position + reset-room requests.
+        app.init_resource::<InitialWorlds>();
         app.add_systems(
             Update,
-            (assign_rooms, apply_name_changes, apply_avatar_changes, apply_position_resets),
+            (
+                assign_rooms,
+                apply_name_changes,
+                apply_avatar_changes,
+                apply_position_resets,
+                apply_room_resets,
+            ),
         );
+        // Remember each fresh room's initial world for `ResetRoom`. `PostUpdate`:
+        // the parts `assign_rooms` spawned are queryable (its commands flushed at
+        // the end of `Update`) and still at their exact spawn poses (this frame's
+        // physics already ran) — with no mid-`Update` sync point.
+        app.add_systems(PostUpdate, capture_initial_worlds);
         // Rocket launch: accept a client's launch request for its room, run that room's
         // countdown, and at blastoff cut the assembly's ground joints. Publishing the
         // countdown into each room's orb `NetLaunch` lets every client draw the banner.
@@ -792,6 +804,7 @@ fn assign_rooms(
     grounds: Query<Entity, With<Grass>>,
     mut launches: ResMut<LaunchRegistry>,
     mut frames: ResMut<RoomFrames>,
+    mut initial: ResMut<InitialWorlds>,
     players: Query<
         (Entity, &ActionState<NetInput>, &ControlledBy, &NetName, Option<&ResumeRoom>),
         Without<RoomMember>,
@@ -851,15 +864,21 @@ fn assign_rooms(
             // A room created by the matchmaker's "load saved game" flow has a pending
             // save staged under its code — rebuild that world; otherwise spawn the
             // normal random one.
+            // A loaded save doubles as the room's *initial* world for `ResetRoom`;
+            // a fresh random room's is snapshotted by `capture_initial_worlds`
+            // once this system's commands apply.
             match save::take_pending(&save::code_string(state.0.room)) {
-                Some(world) => spawn_room_world_from_save(
-                    &mut commands,
-                    room,
-                    &world,
-                    grounds.iter().next(),
-                    &mut launches,
-                    &mut frames,
-                ),
+                Some(world) => {
+                    spawn_room_world_from_save(
+                        &mut commands,
+                        room,
+                        &world,
+                        grounds.iter().next(),
+                        &mut launches,
+                        &mut frames,
+                    );
+                    initial.by_room.insert(room.id, world);
+                }
                 None => spawn_room_world(&mut commands, room, &frames),
             }
         }
@@ -1001,6 +1020,169 @@ fn apply_position_resets(
                 angular.0 = Vec3::ZERO;
             }
         }
+    }
+}
+
+/// Each room's world exactly as it was created, kept so a [`ResetRoom`] request can
+/// restore it: a room loaded from a save keeps that save's world (stored by
+/// `assign_rooms`); a fresh random room is snapshotted by
+/// [`capture_initial_worlds`]. Entries live for the server's lifetime — rooms are
+/// few and a world is a couple of KB.
+#[derive(Resource, Default)]
+struct InitialWorlds {
+    by_room: HashMap<RoomId, SaveWorld>,
+}
+
+/// Minimum spacing between two resets of the same room (see [`apply_room_resets`]).
+const RESET_DEBOUNCE_SECS: f32 = 1.0;
+
+/// Snapshot each freshly-created random room's world into [`InitialWorlds`]. A
+/// room needing a snapshot is derived, not tracked: it's in `RoomRegistry` (which
+/// `assign_rooms` mutates synchronously) but has no initial world yet. Runs in
+/// `PostUpdate` — after `assign_rooms`' commands flushed at the end of `Update`
+/// (so the room's parts are queryable at their exact spawn poses) and before the
+/// next frame's fixed-schedule physics moves them — without the mid-`Update` sync
+/// point an `.after(assign_rooms)` ordering edge would insert on every frame.
+fn capture_initial_worlds(
+    registry: Res<RoomRegistry>,
+    mut initial: ResMut<InitialWorlds>,
+    launches: Res<LaunchRegistry>,
+    frames: Res<RoomFrames>,
+    avatars: SnapshotAvatars,
+    parts: SnapshotParts,
+    joints: SnapshotJoints,
+) {
+    // Steady state: every known room already has its initial world (save-loaded
+    // rooms get theirs the moment they're registered).
+    if initial.by_room.len() == registry.by_code.len() {
+        return;
+    }
+    for room in registry.by_code.values() {
+        if initial.by_room.contains_key(&room.id) {
+            continue;
+        }
+        let world = snapshot_room(
+            room.id,
+            launches.is_launched(room.id),
+            frames.get(room.id).save(),
+            &avatars,
+            &parts,
+            &joints,
+        );
+        initial.by_room.insert(room.id, world);
+    }
+}
+
+/// Reset a room to its initial conditions on a client's [`ResetRoom`] request (the
+/// menu's confirmed "Reset Room" action). Room-wide by design, like a launch: tear
+/// down the live world (every part, joint, and the room state orb — all
+/// server-owned, so the despawns replicate), clear the launch/countdown and
+/// attitude-integral state, respawn the world the room was created with
+/// ([`InitialWorlds`] — `spawn_room_world_from_save` also restores the initial
+/// floating-origin frame and launched flag), and teleport every player in the room
+/// to a fresh spawn, empty-handed (their held parts no longer exist). The avatars'
+/// collision layers are re-derived from the restored frame, since a mid-flight
+/// room had dropped its ground bit.
+///
+/// Requests are debounced per room ([`RESET_DEBOUNCE_SECS`]): unlike every other
+/// control message, a reset is not idempotent (each one tears down and respawns
+/// the world), and the reliable channel can deliver one send several times in
+/// quick succession (observed on loopback, where the ~0 RTT makes the resend
+/// timer fire before the first ack lands). The debounce also coalesces two
+/// players confirming the dialog near-simultaneously.
+fn apply_room_resets(
+    time: Res<Time>,
+    mut recent: Local<HashMap<RoomId, f32>>,
+    mut commands: Commands,
+    mut links: Query<(Entity, &mut MessageReceiver<ResetRoom>), (With<ClientOf>, With<Connected>)>,
+    members: Query<(&ControlledBy, &RoomMember)>,
+    initial: Res<InitialWorlds>,
+    registry: Res<RoomRegistry>,
+    grounds: Query<Entity, With<Grass>>,
+    mut launches: ResMut<LaunchRegistry>,
+    mut integrals: ResMut<RoomAttitudeIntegrals>,
+    mut frames: ResMut<RoomFrames>,
+    parts: Query<(Entity, &PartRoom)>,
+    joints: Query<(Entity, &RoomMember), With<NetJoint>>,
+    orbs: Query<(Entity, &RoomStateOf)>,
+    mut avatars: Query<
+        (
+            Entity,
+            &RoomMember,
+            &mut Position,
+            &mut LinearVelocity,
+            &mut AngularVelocity,
+            &mut HeldPart,
+        ),
+        (With<ServerAvatar>, Without<NetPart>),
+    >,
+) {
+    for (link, mut receiver) in &mut links {
+        // Drain the window; act at most once per link (repeats coalesce).
+        if receiver.receive().count() == 0 {
+            continue;
+        }
+        let Some((_, member)) = members.iter().find(|(c, _)| c.owner == link) else {
+            continue;
+        };
+        let room_id = member.0;
+        // The debounce (see the doc comment) also coalesces several players
+        // confirming the same room this frame: the first sets the timestamp,
+        // the rest land inside the window.
+        let now = time.elapsed_secs();
+        if recent.get(&room_id).is_some_and(|at| now - at < RESET_DEBOUNCE_SECS) {
+            continue;
+        }
+        recent.retain(|_, at| now - *at < RESET_DEBOUNCE_SECS);
+        recent.insert(room_id, now);
+        let Some(world) = initial.by_room.get(&room_id) else {
+            // Unreachable in practice (the snapshot lands the frame the room is
+            // created, a reset arrives much later) — refuse rather than guess.
+            println!("[reset] no initial world recorded for room {room_id:?} — ignoring");
+            continue;
+        };
+        let Some(room) = registry.by_code.values().find(|r| r.id == room_id).copied() else {
+            continue;
+        };
+        for (entity, part_room) in &parts {
+            if part_room.id == room_id {
+                commands.entity(entity).despawn();
+            }
+        }
+        for (entity, member) in &joints {
+            if member.0 == room_id {
+                commands.entity(entity).despawn();
+            }
+        }
+        for (entity, orb) in &orbs {
+            if orb.0 == room_id {
+                commands.entity(entity).despawn();
+            }
+        }
+        launches.by_room.remove(&room_id);
+        integrals.0.remove(&room_id);
+        spawn_room_world_from_save(
+            &mut commands,
+            room,
+            world,
+            grounds.iter().next(),
+            &mut launches,
+            &mut frames,
+        );
+        // `spawn_room_world_from_save` restored the initial frame, so the layers
+        // read the post-reset grounded state (almost always: grounded again).
+        let grounded = !frames.get(room_id).is_active();
+        for (entity, member, mut position, mut linear, mut angular, mut held) in &mut avatars {
+            if member.0 != room_id {
+                continue;
+            }
+            position.0 = spawn_position();
+            linear.0 = Vec3::ZERO;
+            angular.0 = Vec3::ZERO;
+            held.0 = None;
+            commands.entity(entity).insert(room_layers(room.bit, grounded));
+        }
+        println!("[reset] room {room_id:?} reset to initial conditions");
     }
 }
 
@@ -1616,14 +1798,17 @@ fn sync_net_hold(
                 hold.set_if_neq(new);
             }
             None => {
-                commands.entity(entity).remove::<NetHold>();
+                // `try_remove` for the same reason as the `try_insert` below — and
+                // this arm is reachable in one move: `apply_room_resets` (same
+                // unordered Update tuple) releases the holder AND despawns the part.
+                commands.entity(entity).try_remove::<NetHold>();
             }
         }
     }
     // Insert tags for parts newly held this tick (those still left in the map).
     // `try_insert`, not `insert`: a held part can't fall, but if one is ever despawned
-    // the same frame (e.g. `replace_fallen_room_parts`) the deferred insert would hit a
-    // missing entity — `try_insert` no-ops instead of erroring.
+    // the same frame (e.g. `replace_fallen_room_parts` or a room reset) the deferred
+    // insert would hit a missing entity — `try_insert` no-ops instead of erroring.
     for (entity, hold) in held_now {
         commands.entity(entity).try_insert(hold);
     }
@@ -1785,12 +1970,15 @@ fn mark_largest_assembly(
 
     // Add/remove the membership marker only where it actually changed, so it
     // re-replicates on joint create/delete rather than every frame.
+    // `try_insert`/`try_remove`: a part queried this frame can be despawned before
+    // this system's commands apply (`apply_room_resets` tears down a whole room's
+    // parts mid-`Update`), and the plain commands panic on a dead entity.
     for (entity, _, _, _, is_marked) in &parts {
         let is_member = index.get(&entity).is_some_and(|i| member_indices.contains(i));
         if is_member && !is_marked {
-            commands.entity(entity).insert(InLargestAssembly);
+            commands.entity(entity).try_insert(InLargestAssembly);
         } else if !is_member && is_marked {
-            commands.entity(entity).remove::<InLargestAssembly>();
+            commands.entity(entity).try_remove::<InLargestAssembly>();
         }
     }
 }
