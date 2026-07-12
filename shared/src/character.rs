@@ -1,5 +1,6 @@
 use avian3d::prelude::{
     Collider, CollisionLayers, Collisions, LinearVelocity, LockedAxes, Mass, Position, RigidBody,
+    SphericalJoint,
 };
 use bevy::prelude::*;
 use bevy::reflect::TypePath;
@@ -537,16 +538,31 @@ fn touching_ground(
 
 fn walk_based_on_input(
     time: Res<Time>,
-    mut query: Query<(&DirectionalInput, &Yaw, &mut LinearVelocity, &TouchingGround, &GroundVelocity)>,
+    mut query: Query<(
+        Entity,
+        &DirectionalInput,
+        &Yaw,
+        &mut LinearVelocity,
+        &TouchingGround,
+        &GroundVelocity,
+    )>,
+    lock_joints: Query<&SphericalJoint, With<crate::part::LockJoint>>,
     tuning: Res<MovementTuning>,
 ) {
     let dt = time.delta_secs();
     if dt <= 0.0 {
         return;
     }
-    for (directional_input, yaw, mut velocity, touching_ground, ground_velocity) in
+    for (entity, directional_input, yaw, mut velocity, touching_ground, ground_velocity) in
         query.iter_mut()
     {
+        // A body pinned by a player-lock weld is frozen to its support: the joint owns
+        // its motion, and the walk model's every-tick velocity write (even at zero
+        // input it drives horizontal velocity toward the support's) would fight the
+        // constraint.
+        if crate::part::is_locked(&lock_joints, entity) {
+            continue;
+        }
         let grounded = touching_ground.0;
         // The body is ROTATION_LOCKED (its rotation is owned by physics), so the move
         // basis comes from the look `Yaw`, not the body transform: `back()` = +Z ("W"),
@@ -635,18 +651,25 @@ fn walk_based_on_input(
 fn jump_based_on_input(
     time: Res<Time>,
     mut query: Query<(
+        Entity,
         &DirectionalInput,
         &mut LinearVelocity,
         &TouchingGround,
         &GroundVelocity,
         &LastSupport,
     )>,
+    lock_joints: Query<&SphericalJoint, With<crate::part::LockJoint>>,
     tuning: Res<MovementTuning>,
 ) {
     let dt = time.delta_secs();
-    for (directional_input, mut velocity, touching_ground, ground_velocity, last_support) in
+    for (entity, directional_input, mut velocity, touching_ground, ground_velocity, last_support) in
         query.iter_mut()
     {
+        // Locked riders are welded in place — jumps and the separation clamps are the
+        // weld's business now (see `walk_based_on_input`).
+        if crate::part::is_locked(&lock_joints, entity) {
+            continue;
+        }
         // Separation clamp (see `LastSupport`): freshly airborne and moving
         // faster *relative to the support* than the player could have earned
         // (jump vertically, sprint horizontally) ⇒ a contact-solver kick — a

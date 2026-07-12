@@ -30,16 +30,17 @@ use bad_spaceship_shared::launch::{assembly_burn, measure_assembly_spin, LAUNCH_
 use bad_spaceship_shared::character::{spawn_position, CharacterMovement, InitialPose, ServerAvatar};
 use bad_spaceship_shared::net::{
     apply_hold_spring, apply_net_input, focused_part, monster_index, sanitize_name,
-    ClientPanicReport, InLargestAssembly, NetFacing, NetHold, NetInput, NetJoint,
+    ClientPanicReport, InLargestAssembly, NetFacing, NetHold, NetInput, NetJoint, NetLockJoint,
     NetLaunch, NetName, NetPart, NetPlayer, NetRoomFrame, PartShape, ProtocolPlugin, RequestLaunch,
-    ResetPosition, ResetRoom, RollbackReport, SaveGame, SetAvatar, SetName, GROUND_JOINT_ID, MONSTER_COUNT,
-    TICK,
+    ResetPosition, ResetRoom, RollbackReport, SaveGame, SetAvatar, SetLocked, SetName,
+    GROUND_JOINT_ID, MONSTER_COUNT, TICK,
 };
 use bad_spaceship_shared::map::GROUND_LAYER;
 use bad_spaceship_shared::part::{
-    part_gap_contacts, part_state_diverged, spawn_random_part,
-    spawn_random_rocket, spawn_rocket_engine, spawn_saved_cuboid, Gimbal, RocketEngine, SuppressLocalParts, DELETE_RADIUS,
-    NUM_PARTS, NUM_ROCKET_ENGINES, PART_FALL_Y, ROCKET_VOLUME,
+    avatar_lock_contacts, despawn_player_lock_welds, part_gap_contacts, part_state_diverged,
+    spawn_random_part, spawn_random_rocket, spawn_rocket_engine, spawn_saved_cuboid, Gimbal,
+    LockJoint, RocketEngine, SuppressLocalParts, DELETE_RADIUS, NUM_PARTS, NUM_ROCKET_ENGINES,
+    PART_FALL_Y, ROCKET_VOLUME,
 };
 use bad_spaceship_shared::{Grass, SuppressLocalPlayer, Yaw};
 use bevy::math::DVec3;
@@ -389,6 +390,10 @@ impl Plugin for NetServerPlugin {
                 apply_avatar_changes,
                 apply_position_resets,
                 apply_room_resets,
+                // Lock/Unlock rider welds, plus the shared sweep that drops welds
+                // whose avatar (disconnect) or part (recycle/reset) is gone.
+                apply_lock_changes,
+                bad_spaceship_shared::part::cleanup_lock_joints,
             ),
         );
         // Remember each fresh room's initial world for `ResetRoom`. `PostUpdate`:
@@ -820,6 +825,7 @@ fn assign_rooms(
         (&mut Position, &mut LinearVelocity, &mut AngularVelocity),
         With<ServerAvatar>,
     >,
+    lock_joints: Query<(Entity, &SphericalJoint), With<LockJoint>>,
 ) {
     // The `players` query is `Without<RoomMember>`, so on the vast majority of ticks
     // nobody is joining — skip the whole name-bookkeeping scan then.
@@ -851,9 +857,15 @@ fn assign_rooms(
             if *recorded != state.0.room {
                 commands.entity(entity).remove::<InitialPose>();
                 if let Ok((mut position, mut linear, mut angular)) = bodies.get_mut(entity) {
-                    position.0 = spawn_position();
-                    linear.0 = Vec3::ZERO;
-                    angular.0 = Vec3::ZERO;
+                    teleport_avatar(
+                        &mut commands,
+                        &lock_joints,
+                        entity,
+                        spawn_position(),
+                        &mut position,
+                        &mut linear,
+                        &mut angular,
+                    );
                 }
                 println!("[resume] revoked cross-room resume (recorded room != joined room)");
             }
@@ -978,14 +990,17 @@ fn apply_avatar_changes(
 /// whose floating-origin frame is active, where the pad disc is mid-air: there a reset
 /// puts the player back aboard the assembly deck (the only place to stand).
 fn apply_position_resets(
+    mut commands: Commands,
     frames: Res<RoomFrames>,
     deck_parts: DeckParts,
+    lock_joints: Query<(Entity, &SphericalJoint), With<LockJoint>>,
     mut links: Query<
         (Entity, &mut MessageReceiver<ResetPosition>),
         (With<ClientOf>, With<Connected>),
     >,
     mut avatars: Query<
         (
+            Entity,
             &ControlledBy,
             Option<&RoomMember>,
             &mut Position,
@@ -1002,7 +1017,7 @@ fn apply_position_resets(
         if receiver.receive().count() == 0 {
             continue;
         }
-        for (controlled, member, mut position, mut linear, mut angular) in &mut avatars {
+        for (avatar, controlled, member, mut position, mut linear, mut angular) in &mut avatars {
             if controlled.owner == link {
                 let deck = member
                     .filter(|member| frames.get(member.0).is_active())
@@ -1015,9 +1030,15 @@ fn apply_position_resets(
                             })
                             .get(&member.0)
                     });
-                position.0 = deck.copied().unwrap_or_else(spawn_position);
-                linear.0 = Vec3::ZERO;
-                angular.0 = Vec3::ZERO;
+                teleport_avatar(
+                    &mut commands,
+                    &lock_joints,
+                    avatar,
+                    deck.copied().unwrap_or_else(spawn_position),
+                    &mut position,
+                    &mut linear,
+                    &mut angular,
+                );
             }
         }
     }
@@ -1103,7 +1124,11 @@ fn apply_room_resets(
     mut integrals: ResMut<RoomAttitudeIntegrals>,
     mut frames: ResMut<RoomFrames>,
     parts: Query<(Entity, &PartRoom)>,
-    joints: Query<(Entity, &RoomMember), With<NetJoint>>,
+    // Every joint in the room — part joints, ground clamps, AND player-lock welds
+    // (the reset teleports every avatar to spawn, and a surviving weld would yank
+    // the freshly-restored parts across the room). Positive "any joint" phrasing so
+    // a future joint class is torn down by default rather than silently surviving.
+    joints: Query<(Entity, &RoomMember), With<SphericalJoint>>,
     orbs: Query<(Entity, &RoomStateOf)>,
     mut avatars: Query<
         (
@@ -1244,10 +1269,12 @@ type DeckParts<'w, 's> = Query<
 /// active frame is mid-air near the assembly): they free-fall briefly, then land
 /// on the deck.
 fn respawn_fallen_avatars(
+    mut commands: Commands,
     frames: Res<RoomFrames>,
     deck_parts: DeckParts,
+    lock_joints: Query<(Entity, &SphericalJoint), With<LockJoint>>,
     mut avatars: Query<
-        (&RoomMember, &mut Position, &mut LinearVelocity, &mut AngularVelocity),
+        (Entity, &RoomMember, &mut Position, &mut LinearVelocity, &mut AngularVelocity),
         (With<ServerAvatar>, Without<NetPart>),
     >,
 ) {
@@ -1255,7 +1282,7 @@ fn respawn_fallen_avatars(
     // Deck points are only needed for avatars in active-frame rooms — computed
     // lazily so the (common) all-grounded case never builds them.
     let mut decks: Option<HashMap<RoomId, Vec3>> = None;
-    for (member, mut position, mut linear, mut angular) in &mut avatars {
+    for (avatar, member, mut position, mut linear, mut angular) in &mut avatars {
         let deck = frames
             .get(member.0)
             .is_active()
@@ -1274,9 +1301,15 @@ fn respawn_fallen_avatars(
             None => position.0.y < AVATAR_FALL_Y,
         };
         if fallen || part_state_diverged(position.0, linear.0, angular.0) {
-            position.0 = deck.copied().unwrap_or_else(spawn_position);
-            linear.0 = Vec3::ZERO;
-            angular.0 = Vec3::ZERO;
+            teleport_avatar(
+                &mut commands,
+                &lock_joints,
+                avatar,
+                deck.copied().unwrap_or_else(spawn_position),
+                &mut position,
+                &mut linear,
+                &mut angular,
+            );
         }
     }
 }
@@ -1719,7 +1752,10 @@ struct DeleteState {
 fn server_delete(
     mut commands: Commands,
     bodies: Query<(&Position, &Rotation)>,
-    joints: Query<(Entity, &SphericalJoint, &RoomMember)>,
+    // `With<NetJoint>` — the player-built part joints, positively. Player-lock welds
+    // (dissolved by "Unlock", never the delete gesture) don't carry it, and neither
+    // would any future non-part joint class, so they're exempt by default.
+    joints: Query<(Entity, &SphericalJoint, &RoomMember), With<NetJoint>>,
     mut players: Query<(&ActionState<NetInput>, &RoomMember, &mut DeleteState)>,
 ) {
     for (state, member, mut del) in &mut players {
@@ -1745,6 +1781,116 @@ fn server_delete(
                 commands.entity(joint_entity).despawn();
             }
         }
+    }
+}
+
+/// Teleport an avatar: dissolve its lock welds first (a teleport while welded would
+/// drag the welded parts along — the deferred despawns apply before this tick's
+/// physics step, so the weld never solves across the jump), then set the pose and
+/// zero the velocities. THE way to move an avatar server-side; every teleport site
+/// (reset-position, fall respawn, room reset, resume revoke) goes through it so the
+/// "teleport implies unlock" invariant can't be forgotten at a future site.
+fn teleport_avatar(
+    commands: &mut Commands,
+    lock_joints: &Query<(Entity, &SphericalJoint), With<LockJoint>>,
+    avatar: Entity,
+    to: Vec3,
+    position: &mut Position,
+    linear: &mut LinearVelocity,
+    angular: &mut AngularVelocity,
+) {
+    despawn_player_lock_welds(commands, lock_joints, avatar);
+    position.0 = to;
+    linear.0 = Vec3::ZERO;
+    angular.0 = Vec3::ZERO;
+}
+
+/// Apply a client's "Lock"/"Unlock" request ([`SetLocked`]). Locking welds the
+/// sender's avatar to every same-room part currently within the weld gap — the same
+/// gap-tolerant, freeze-in-place contact manifold `server_attach` welds parts with
+/// (`part_gap_contacts`), so the rider is pinned exactly where they stand with zero
+/// rest error. Each weld is a `SphericalJoint` (avatar = `body1`) plus its replicated
+/// [`NetLockJoint`] mirror, so every client rebuilds it between its *predicted*
+/// avatar/part copies. Never welds to the ground (an avatar↔ground weld would pin the
+/// rider to the pad at blastoff) or to the sender's own held part. Unlocking despawns
+/// all of the sender's welds; the despawn replicates and every client drops them.
+///
+/// Idempotent (unlike `ResetRoom`, no debounce needed): locking while already locked
+/// or unlocking while free is a no-op, so the reliable channel's duplicate delivery
+/// is harmless. Rapid toggles in one drain window coalesce to the last value.
+fn apply_lock_changes(
+    mut commands: Commands,
+    mut links: Query<(Entity, &mut MessageReceiver<SetLocked>), (With<ClientOf>, With<Connected>)>,
+    avatars: Query<
+        (
+            Entity,
+            &ControlledBy,
+            &RoomMember,
+            &NetPlayer,
+            &Collider,
+            &Position,
+            &Rotation,
+            &HeldPart,
+        ),
+        With<ServerAvatar>,
+    >,
+    parts: Query<(Entity, &NetPart, &Collider, &Position, &Rotation, &PartRoom)>,
+    lock_joints: Query<(Entity, &SphericalJoint), With<LockJoint>>,
+) {
+    for (link, mut receiver) in &mut links {
+        let Some(want) = receiver.receive().last() else {
+            continue;
+        };
+        let Some((avatar, _, member, player, collider, position, rotation, held)) =
+            avatars.iter().find(|(_, controlled, ..)| controlled.owner == link)
+        else {
+            continue;
+        };
+        let already_locked = lock_joints.iter().any(|(_, joint)| joint.body1 == avatar);
+        if !want.0 {
+            despawn_player_lock_welds(&mut commands, &lock_joints, avatar);
+            println!("[lock] client_id={} unlocked", player.client_id);
+            continue;
+        }
+        if already_locked {
+            continue; // A duplicate delivery or a stale press.
+        }
+        // Candidate parts: same room, not the sender's own held part. The weld
+        // geometry itself (gap manifold, freeze-in-place anchors) is the shared
+        // `avatar_lock_contacts`, so it can't drift from single-player.
+        let mut welds = 0usize;
+        let candidates = parts
+            .iter()
+            .filter(|(part, _, _, _, _, part_room)| {
+                part_room.id == member.0 && held.0 != Some(*part)
+            })
+            .map(|(part, _, c, p, r, _)| (part, c, p.0, r.0));
+        avatar_lock_contacts(
+            (collider, position.0, rotation.0),
+            candidates,
+            |part, avatar_local, part_local| {
+                // Shared-borrow re-read of the same query the candidates iterate —
+                // just to name the part's stable replicated id on the weld.
+                let net_id = parts.get(part).map(|(_, net_part, ..)| net_part.id).unwrap_or(0);
+                commands.spawn((
+                    SphericalJoint::new(avatar, part)
+                        .with_local_anchor1(avatar_local)
+                        .with_local_anchor2(part_local),
+                    LockJoint,
+                    NetLockJoint {
+                        player: player.client_id,
+                        part: net_id,
+                        anchor_player: avatar_local.to_array(),
+                        anchor_part: part_local.to_array(),
+                    },
+                    Replicate::to_clients(NetworkTarget::All),
+                    Rooms::single(member.0),
+                    RoomMember(member.0),
+                ));
+                welds += 1;
+            },
+        );
+        println!("[lock] client_id={} locked with {} welds", player.client_id, welds);
     }
 }
 
@@ -2037,12 +2183,20 @@ impl LaunchRegistry {
 /// client link → its avatar (`ControlledBy`) → its `RoomMember`, and arms the countdown if
 /// the room isn't already counting down or launched (re-requests are ignored — launch is a
 /// one-way room event).
+///
+/// A launch is only granted when **every player in the room is locked to the
+/// assembly** (has at least one lock weld into an `InLargestAssembly` part) — the
+/// server-side twin of the client's launch-button gate, so a mid-flight-unattached
+/// rider can't be stranded by a peer's stale/hacked request.
 fn handle_launch_requests(
     mut links: Query<
         (Entity, &mut MessageReceiver<RequestLaunch>),
         (With<ClientOf>, With<Connected>),
     >,
     avatars: Query<(&ControlledBy, &RoomMember)>,
+    room_avatars: Query<(Entity, &RoomMember), With<ServerAvatar>>,
+    lock_joints: Query<&SphericalJoint, With<LockJoint>>,
+    assembly: Query<(), With<InLargestAssembly>>,
     mut registry: ResMut<LaunchRegistry>,
 ) {
     for (link, mut receiver) in &mut links {
@@ -2051,9 +2205,25 @@ fn handle_launch_requests(
         }
         for (controlled, member) in &avatars {
             if controlled.owner == link {
+                let room = member.0;
+                let locked_to_assembly = |avatar: Entity| {
+                    lock_joints
+                        .iter()
+                        .any(|joint| joint.body1 == avatar && assembly.get(joint.body2).is_ok())
+                };
+                let all_aboard = room_avatars
+                    .iter()
+                    .filter(|(_, m)| m.0 == room)
+                    .all(|(avatar, _)| locked_to_assembly(avatar));
+                if !all_aboard {
+                    println!(
+                        "[launch] room {room:?} request refused — not every player is locked to the assembly"
+                    );
+                    continue;
+                }
                 registry
                     .by_room
-                    .entry(member.0)
+                    .entry(room)
                     .or_insert(RoomLaunch::Counting { remaining: LAUNCH_COUNTDOWN_SECS });
             }
         }
@@ -2061,14 +2231,17 @@ fn handle_launch_requests(
 }
 
 /// Advance each room's countdown; at blastoff flip it to `Launched` and cut every joint
-/// pinning that room's assembly to the ground (a part↔ground joint has one endpoint that
-/// isn't a `NetPart`). Part-to-part joints stay intact so the assembly holds together.
+/// pinning that room's assembly to the ground. Ground joints are identified
+/// **positively** by the `GROUND_JOINT_ID` sentinel their replicated `NetJoint`
+/// carries (every server joint goes through `spawn_room_joint`) — not by "endpoint
+/// isn't a part", which would silently sever every future non-part joint class at
+/// blastoff (it already would have cut player-lock welds, severing riders at the
+/// exact moment of liftoff). Part-to-part joints and lock welds stay intact.
 fn tick_room_launches(
     time: Res<Time>,
     mut commands: Commands,
     mut registry: ResMut<LaunchRegistry>,
-    joints: Query<(Entity, &SphericalJoint, &RoomMember)>,
-    net_parts: Query<(), With<NetPart>>,
+    joints: Query<(Entity, &NetJoint, &RoomMember)>,
 ) {
     let dt = time.delta_secs();
     for (&room, launch) in registry.by_room.iter_mut() {
@@ -2082,7 +2255,7 @@ fn tick_room_launches(
         *launch = RoomLaunch::Launched;
         for (entity, joint, member) in &joints {
             if member.0 == room
-                && (net_parts.get(joint.body1).is_err() || net_parts.get(joint.body2).is_err())
+                && (joint.body1 == GROUND_JOINT_ID || joint.body2 == GROUND_JOINT_ID)
             {
                 commands.entity(entity).despawn();
             }

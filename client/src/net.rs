@@ -28,12 +28,13 @@ use bad_spaceship_shared::character::{
 use bad_spaceship_shared::net::{
     apply_hold_spring, apply_net_input, focused_part, room_code_bytes, ClientPanicReport,
     ControlChannel,
-    NetFacing, NetHold, NetInput, NetJoint, NetPart, PartShape, take_rollback_diag,
+    NetFacing, NetHold, NetInput, NetJoint, NetLockJoint, NetPart, PartShape, take_rollback_diag,
     NetPlayer, NetRoomFrame, ProtocolPlugin, RollbackReport, TelemetryChannel, GROUND_JOINT_ID,
     TICK,
 };
 use bad_spaceship_shared::part::{
-    insert_part_physics, insert_rocket_physics, is_interior_anchor, Holdable, SuppressLocalParts,
+    insert_part_physics, insert_rocket_physics, is_interior_anchor, Holdable, LockJoint,
+    SuppressLocalParts,
 };
 use bad_spaceship_shared::player::make_local_player;
 use crate::render_main_pass::flame_material::FlameMaterial;
@@ -295,6 +296,7 @@ impl Plugin for NetClientPlugin {
                 face_replicated_players,
                 draw_replicated_parts,
                 bind_replicated_joints,
+                bind_replicated_lock_joints,
                 // Recolor each joint's own persistent gizmo sphere red while it's in the
                 // delete zone. Runs after the shared detector fills `PredeleteJoints`.
                 recolor_replicated_joints.after(UpdateJointsLabel),
@@ -1122,6 +1124,46 @@ fn bind_replicated_joints(
         if !is_interior_anchor(anchor1) && !is_interior_anchor(anchor2) {
             entity.insert((Mesh3d(mesh.clone()), MeshMaterial3d(material.clone())));
         }
+    }
+}
+
+/// Reconstruct each replicated **player-lock weld** (`NetLockJoint`) as real predicted
+/// physics — the avatar-endpoint twin of [`bind_replicated_joints`]: resolve the
+/// avatar by its `NetPlayer::client_id` and the part by its `NetPart::id` among the
+/// local *predicted* entities, and insert the same Avian `SphericalJoint` (avatar =
+/// `body1`) the server solves, so a locked rider is pinned to the deck by the
+/// client's own simulation (and stays pinned through rollback replays). Tagged
+/// `LockJoint` so the shared movement freeze and every lock-weld exemption behave
+/// identically here. No gizmo mesh — the weld is invisible; the Lock/Unlock button
+/// carries the state. When the server unlocks (or sweeps a dangling weld), the
+/// replicated entity despawns and the local constraint dies with it.
+///
+/// Retries (gated on `Without<SphericalJoint>`) until both predicted bodies exist,
+/// since the `NetLockJoint` can replicate before they finish spawning.
+fn bind_replicated_lock_joints(
+    mut commands: Commands,
+    new_welds: Query<(Entity, &NetLockJoint), Without<SphericalJoint>>,
+    avatars: Query<(Entity, &NetPlayer), (With<Predicted>, With<RigidBody>)>,
+    parts: Query<(Entity, &NetPart), (With<Predicted>, With<RigidBody>)>,
+) {
+    for (weld_entity, weld) in &new_welds {
+        let avatar = avatars
+            .iter()
+            .find(|(_, player)| player.client_id == weld.player)
+            .map(|(entity, _)| entity);
+        let part = parts
+            .iter()
+            .find(|(_, part)| part.id == weld.part)
+            .map(|(entity, _)| entity);
+        let (Some(avatar), Some(part)) = (avatar, part) else {
+            continue;
+        };
+        commands.entity(weld_entity).insert((
+            SphericalJoint::new(avatar, part)
+                .with_local_anchor1(Vec3::from_array(weld.anchor_player))
+                .with_local_anchor2(Vec3::from_array(weld.anchor_part)),
+            LockJoint,
+        ));
     }
 }
 
