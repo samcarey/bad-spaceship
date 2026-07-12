@@ -826,15 +826,71 @@ fn orient_held_part(mut parts: Query<(&Transform, &TargetOrientation, Forces)>) 
 #[derive(Component, Default)]
 pub struct LockJoint;
 
-/// The set of bodies currently pinned by a player-lock weld (each weld's `body1` is
-/// the avatar). Movement systems skip these bodies entirely — the weld owns their
+/// Whether `body` is currently pinned by a player-lock weld (each weld's `body1` is
+/// the avatar). Movement systems skip locked bodies entirely — the weld owns their
 /// velocity — and they consult the live joint set (not a cached marker) so the skip
 /// appears/disappears on exactly the tick the joint does, identically on the server
-/// and the predicting client (rollback replays included).
-pub fn locked_bodies(
-    lock_joints: &Query<&SphericalJoint, With<LockJoint>>,
-) -> std::collections::HashSet<Entity> {
-    lock_joints.iter().map(|joint| joint.body1).collect()
+/// and the predicting client (rollback replays included). A linear `any` over the
+/// handful of welds: allocation-free, which matters in the per-tick movement systems
+/// that re-run for every replayed tick during a rollback.
+pub fn is_locked(lock_joints: &Query<&SphericalJoint, With<LockJoint>>, body: Entity) -> bool {
+    lock_joints.iter().any(|joint| joint.body1 == body)
+}
+
+/// Despawn every lock weld pinning `avatar` — the "unlock" / teleport-teardown
+/// primitive, shared by the server (unlock requests, teleports) and the
+/// single-player client (the Unlock button, respawn cleanup).
+pub fn despawn_player_lock_welds(
+    commands: &mut Commands,
+    lock_joints: &Query<(Entity, &SphericalJoint), With<LockJoint>>,
+    avatar: Entity,
+) {
+    for (weld, joint) in lock_joints {
+        if joint.body1 == avatar {
+            commands.entity(weld).despawn();
+        }
+    }
+}
+
+/// Gap-weld contacts between an avatar body and each candidate part: the one
+/// definition of *what a lock welds to* — the same gap-tolerant, freeze-in-place
+/// contact manifold parts attach with ([`part_gap_contacts`]) — shared by the
+/// server's authoritative lock and the single-player client so the two can't drift.
+/// `parts` yields each candidate (the caller applies its own room/held-part
+/// filtering); `weld` is called once per contact with `(part, avatar-local anchor,
+/// part-local anchor)` and spawns whatever joint bundle its world needs.
+pub fn avatar_lock_contacts<'a>(
+    avatar: (&Collider, Vec3, Quat),
+    parts: impl Iterator<Item = (Entity, &'a Collider, Vec3, Quat)>,
+    mut weld: impl FnMut(Entity, Vec3, Vec3),
+) {
+    let mut contacts = Vec::new();
+    for (part, collider, position, rotation) in parts {
+        contacts.clear();
+        part_gap_contacts(avatar.0, avatar.1, avatar.2, collider, position, rotation, &mut contacts);
+        for (avatar_local, part_local) in contacts.iter().copied() {
+            weld(part, avatar_local, part_local);
+        }
+    }
+}
+
+/// Drop lock welds whose endpoints no longer exist: the avatar despawned
+/// (disconnect, single-player fall respawn) or the welded part got recycled/reset
+/// away. Registered by the server unconditionally and by the client only in
+/// single-player (`not(resource_exists::<SuppressLocalParts>)`) — a multiplayer
+/// client must never locally despawn the replicated welds the server owns. A
+/// vanished weld is also what flips the derived "locked" state back to false
+/// everywhere, so a gone player never gates a room's launch.
+pub fn cleanup_lock_joints(
+    mut commands: Commands,
+    lock_joints: Query<(Entity, &SphericalJoint), With<LockJoint>>,
+    bodies: Query<(), With<Position>>,
+) {
+    for (entity, joint) in &lock_joints {
+        if bodies.get(joint.body1).is_err() || bodies.get(joint.body2).is_err() {
+            commands.entity(entity).despawn();
+        }
+    }
 }
 
 /// Maximum face separation (metres) at which two parts can still weld together.

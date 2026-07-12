@@ -553,14 +553,14 @@ fn walk_based_on_input(
     if dt <= 0.0 {
         return;
     }
-    // A body pinned by a player-lock weld is frozen to its support: the joint owns its
-    // motion, and the walk model's every-tick velocity write (even at zero input it
-    // drives horizontal velocity toward the support's) would fight the constraint.
-    let locked = crate::part::locked_bodies(&lock_joints);
     for (entity, directional_input, yaw, mut velocity, touching_ground, ground_velocity) in
         query.iter_mut()
     {
-        if locked.contains(&entity) {
+        // A body pinned by a player-lock weld is frozen to its support: the joint owns
+        // its motion, and the walk model's every-tick velocity write (even at zero
+        // input it drives horizontal velocity toward the support's) would fight the
+        // constraint.
+        if crate::part::is_locked(&lock_joints, entity) {
             continue;
         }
         let grounded = touching_ground.0;
@@ -662,13 +662,12 @@ fn jump_based_on_input(
     tuning: Res<MovementTuning>,
 ) {
     let dt = time.delta_secs();
-    // Locked riders are welded in place — jumps and the separation clamps are the
-    // weld's business now (see `walk_based_on_input`).
-    let locked = crate::part::locked_bodies(&lock_joints);
     for (entity, directional_input, mut velocity, touching_ground, ground_velocity, last_support) in
         query.iter_mut()
     {
-        if locked.contains(&entity) {
+        // Locked riders are welded in place — jumps and the separation clamps are the
+        // weld's business now (see `walk_based_on_input`).
+        if crate::part::is_locked(&lock_joints, entity) {
             continue;
         }
         // Separation clamp (see `LastSupport`): freshly airborne and moving

@@ -30,8 +30,8 @@ use bad_spaceship_shared::net::{
     SetLocked,
 };
 use bad_spaceship_shared::part::{
-    part_gap_contacts, Gimbal, Holdable, LockJoint, RocketEngine, SuppressLocalParts,
-    TargetPosition,
+    avatar_lock_contacts, cleanup_lock_joints, despawn_player_lock_welds, Gimbal, Holdable,
+    LockJoint, RocketEngine, SuppressLocalParts, TargetPosition,
 };
 use bad_spaceship_shared::Character;
 use bevy::prelude::*;
@@ -54,13 +54,14 @@ impl Plugin for LaunchPlugin {
             .add_message::<SpSetLock>()
             .add_systems(Update, tick_launch)
             // Single-player half of the Lock button: weld/unweld the local character
-            // to the parts it touches. Gated off in multiplayer, where the lock welds
-            // are server-owned replicated entities the client must never despawn
-            // locally (`bind_replicated_lock_joints` rebuilds them as predicted
-            // physics instead).
+            // to the parts it touches, plus the shared dangling-weld sweep. Gated off
+            // in multiplayer, where the lock welds are server-owned replicated
+            // entities the client must never despawn locally
+            // (`bind_replicated_lock_joints` rebuilds them as predicted physics
+            // instead; the server registers the same sweep for its own welds).
             .add_systems(
                 Update,
-                (sp_apply_lock, sp_cleanup_lock_joints)
+                (sp_apply_lock, cleanup_lock_joints)
                     .run_if(not(resource_exists::<SuppressLocalParts>)),
             )
             .add_systems(
@@ -446,37 +447,45 @@ fn show_launch_ui(
             });
     }
 
-    // Assembly membership + whether we're standing on it (shared by both buttons).
-    let members = assembly_members(multiplayer.is_some(), &sp_parts, &sp_joints, &mp_members);
-    let touching = character_touches_assembly(&character, &collisions, &members);
-
-    // Lock state. `my_locked` = pinned by ≥ 1 lock weld (any part — drives the
-    // button label and the unlock action); "aboard" = welded into the *largest
-    // assembly* specifically, which is what the launch gate counts, for every
-    // player in the room. Multiplayer derives both from the replicated
-    // `NetLockJoint`s (the server's welds are the truth — the button flips when
-    // the weld actually exists); single-player from the local welds.
-    let (my_locked, all_aboard) = if multiplayer.is_some() {
-        let my_id = crate::net::my_netcode_id(&lock_ui.local_id);
-        let assembly_ids: HashSet<u64> =
-            lock_ui.mp_assembly_ids.iter().map(|part| part.id).collect();
-        let aboard: HashSet<u64> = lock_ui
-            .net_lock_welds
-            .iter()
-            .filter(|weld| assembly_ids.contains(&weld.part))
-            .map(|weld| weld.player)
-            .collect();
-        let my_locked =
-            my_id.is_some_and(|id| lock_ui.net_lock_welds.iter().any(|weld| weld.player == id));
-        let players: HashSet<u64> =
-            lock_ui.mp_players.iter().map(|player| player.client_id).collect();
-        let all_aboard = !players.is_empty() && players.iter().all(|id| aboard.contains(id));
-        (my_locked, all_aboard)
+    // My lock state — needed every frame for the button label, and cheap (a linear
+    // scan over the handful of welds). Multiplayer derives it from the replicated
+    // `NetLockJoint`s (the server's welds are the truth — the button flips when the
+    // weld actually exists); single-player from the local welds.
+    let my_locked = if multiplayer.is_some() {
+        crate::net::my_netcode_id(&lock_ui.local_id)
+            .is_some_and(|id| lock_ui.net_lock_welds.iter().any(|weld| weld.player == id))
     } else {
-        let my_locked = !lock_ui.sp_lock_joints.is_empty();
-        let aboard =
-            lock_ui.sp_lock_joints.iter().any(|joint| members.contains(&joint.body2));
-        (my_locked, aboard)
+        !lock_ui.sp_lock_joints.is_empty()
+    };
+
+    // Assembly membership + contact only *gate the buttons in*: the Lock button
+    // while not yet locked, and the launch gate while idle. A locked rider
+    // mid-countdown / mid-flight — the steady state of a ride — needs neither, so
+    // skip the union-find and contact scan entirely then.
+    let (touching, all_aboard) = if !my_locked || idle {
+        let members = assembly_members(multiplayer.is_some(), &sp_parts, &sp_joints, &mp_members);
+        let touching = character_touches_assembly(&character, &collisions, &members);
+        // "Aboard" = welded into the *largest assembly* specifically — what the
+        // launch gate counts, for EVERY player in the room. Only meaningful while
+        // idle (it feeds nothing but the launch button's availability).
+        let all_aboard = idle
+            && if multiplayer.is_some() {
+                let assembly_ids: HashSet<u64> =
+                    lock_ui.mp_assembly_ids.iter().map(|part| part.id).collect();
+                let aboard: HashSet<u64> = lock_ui
+                    .net_lock_welds
+                    .iter()
+                    .filter(|weld| assembly_ids.contains(&weld.part))
+                    .map(|weld| weld.player)
+                    .collect();
+                !lock_ui.mp_players.is_empty()
+                    && lock_ui.mp_players.iter().all(|p| aboard.contains(&p.client_id))
+            } else {
+                lock_ui.sp_lock_joints.iter().any(|joint| members.contains(&joint.body2))
+            };
+        (touching, all_aboard)
+    } else {
+        (false, false)
     };
 
     // The Lock/Unlock button, just below the launch button's slot: shown while
@@ -590,57 +599,25 @@ fn sp_apply_lock(
     let Ok((character, collider, position, rotation)) = characters.single() else {
         return;
     };
-    let existing: Vec<Entity> = lock_joints
-        .iter()
-        .filter(|(_, joint)| joint.body1 == character)
-        .map(|(entity, _)| entity)
-        .collect();
     if !want {
-        for weld in existing {
-            commands.entity(weld).despawn();
-        }
+        despawn_player_lock_welds(&mut commands, &lock_joints, character);
         return;
     }
-    if !existing.is_empty() {
+    if lock_joints.iter().any(|(_, joint)| joint.body1 == character) {
         return; // Already locked.
     }
-    let mut contacts = Vec::new();
-    for (part, part_collider, part_pos, part_rot) in &parts {
-        contacts.clear();
-        part_gap_contacts(
-            collider,
-            position.0,
-            rotation.0,
-            part_collider,
-            part_pos.0,
-            part_rot.0,
-            &mut contacts,
-        );
-        for (character_local, part_local) in contacts.iter().copied() {
+    avatar_lock_contacts(
+        (collider, position.0, rotation.0),
+        parts.iter().map(|(part, c, p, r)| (part, c, p.0, r.0)),
+        |part, character_local, part_local| {
             commands.spawn((
                 SphericalJoint::new(character, part)
                     .with_local_anchor1(character_local)
                     .with_local_anchor2(part_local),
                 LockJoint,
             ));
-        }
-    }
-}
-
-/// Drop single-player lock welds whose endpoints no longer exist (the character
-/// respawned after a fall, a welded part got recycled) — the SP twin of the server's
-/// sweep. Never runs in multiplayer (the welds there are replicated entities the
-/// server owns).
-fn sp_cleanup_lock_joints(
-    mut commands: Commands,
-    lock_joints: Query<(Entity, &SphericalJoint), With<LockJoint>>,
-    bodies: Query<(), With<Position>>,
-) {
-    for (entity, joint) in &lock_joints {
-        if bodies.get(joint.body1).is_err() || bodies.get(joint.body2).is_err() {
-            commands.entity(entity).despawn();
-        }
-    }
+        },
+    );
 }
 
 /// Whether the character's body is in contact with any part of the assembly.
