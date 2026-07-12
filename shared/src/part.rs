@@ -105,7 +105,7 @@ pub const NOMINAL_PART_MASS: f32 = PART_DENSITY * (MIN_PART_VOLUME + MAX_PART_VO
 // `net.rs` (the server runs the same critically-damped springs), so they're
 // `pub` to keep a single definition rather than duplicated magic numbers.
 pub const POSITIONING_STIFFNESS: f32 = 30.0;
-pub const ORIENTING_STIFFNESS: f32 = 10.0;
+pub const ORIENTING_STIFFNESS: f32 = 20.0;
 const MIN_JOINT_SPACING: f32 = MIN_PART_SIZE / 2.0;
 pub const DELETE_RADIUS: f32 = 1.0;
 
