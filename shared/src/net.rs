@@ -325,6 +325,28 @@ pub struct NetJoint {
     pub anchor2: [f32; 3],
 }
 
+/// A replicated **player-lock weld**: a joint pinning a player's avatar to a part it
+/// was touching when the player pressed "Lock" (one per weld contact). Carries enough
+/// for each client to rebuild the constraint as *real predicted physics* — the exact
+/// counterpart of [`NetJoint`], but the first body is an **avatar** (resolved by its
+/// [`NetPlayer::client_id`], since avatars have no `NetPart::id`) and the second a part
+/// (by [`NetPart::id`]). Anchors are body-local (origin-relative), frozen at the
+/// contact so the weld has zero rest error. Clients also *derive* each player's locked
+/// state from these (a player is locked iff any `NetLockJoint` names them), which is
+/// what gates the launch button on "everyone is attached to the assembly".
+#[derive(Component, Serialize, Deserialize, Clone, Copy, PartialEq, Debug, Default)]
+pub struct NetLockJoint {
+    /// The locked player's [`NetPlayer::client_id`].
+    pub player: u64,
+    /// The welded part's [`NetPart::id`].
+    pub part: u64,
+    /// Anchor in the avatar's local frame (identity rotation — the body is
+    /// rotation-locked — so this is just `contact − avatar position` at weld time).
+    pub anchor_player: [f32; 3],
+    /// Anchor in the part's local frame.
+    pub anchor_part: [f32; 3],
+}
+
 /// Sentinel [`NetJoint`] endpoint id meaning "the ground" (the `Grass` bowl). The
 /// ground is spawned locally on every peer by `MapPlugin` rather than replicated,
 /// so it has no `NetPart::id`; each client resolves this sentinel to its own local
@@ -457,6 +479,16 @@ pub struct SetAvatar(pub u8);
 /// message on the reliable [`ControlChannel`].
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 pub struct ResetPosition;
+
+/// Client → server request to set the sender's **lock** state (the top-of-screen
+/// "Lock"/"Unlock" button, shown while standing on the assembly). `true` welds the
+/// sender's avatar to every part it is currently touching (one [`NetLockJoint`] weld
+/// per contact, frozen in place); `false` dissolves all of the sender's lock welds.
+/// Idempotent — locking while already locked (or unlocking while free) is a no-op, so
+/// the reliable channel's occasional duplicate delivery is harmless. On the reliable
+/// [`ControlChannel`] so a one-shot press isn't dropped.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug)]
+pub struct SetLocked(pub bool);
 
 /// Client → server request to start a rocket launch for the sender's room. The server
 /// resolves the sender's room (via `ControlledBy` → the avatar's `RoomMember`) and, if
@@ -765,6 +797,9 @@ impl Plugin for ProtocolPlugin {
         // The part shape is constant, so it only needs replicating (no interp).
         app.component::<NetPart>().replicate();
         app.component::<NetJoint>().replicate();
+        // Player-lock welds (see `NetLockJoint`): discrete constraint data each client
+        // rebuilds as real predicted physics (like `NetJoint`) — just replicate.
+        app.component::<NetLockJoint>().replicate();
         // The per-part membership marker (`InLargestAssembly`) replicates which parts
         // form each room's largest assembly, recomputed on joint create/delete. Clients
         // derive the centre-of-mass orb + combined thrust arrow from it locally over the
@@ -840,6 +875,8 @@ impl Plugin for ProtocolPlugin {
         app.register_message::<ResetPosition>()
             .add_direction(NetworkDirection::ClientToServer);
         app.register_message::<ResetRoom>()
+            .add_direction(NetworkDirection::ClientToServer);
+        app.register_message::<SetLocked>()
             .add_direction(NetworkDirection::ClientToServer);
         app.register_message::<RequestLaunch>()
             .add_direction(NetworkDirection::ClientToServer);

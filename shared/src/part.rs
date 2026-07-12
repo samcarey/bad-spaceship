@@ -813,6 +813,30 @@ fn orient_held_part(mut parts: Query<(&Transform, &TargetOrientation, Forces)>) 
     }
 }
 
+/// Marks a joint as a **player-lock weld** — a `SphericalJoint` pinning a player's
+/// avatar (`body1`) to a part (`body2`) it was touching when the player pressed
+/// "Lock". Exists in every world that simulates the constraint: the server spawns it
+/// (with its replicated `NetLockJoint` mirror), each multiplayer client re-tags the
+/// joint it rebuilds between its *predicted* avatar/part, and single-player spawns it
+/// directly. The marker is what exempts these welds from every part-joint sweep that
+/// must not touch them — the blastoff ground-joint cut (an avatar endpoint isn't a
+/// part, so the cut would otherwise sever riders at liftoff) and the delete-zone
+/// gesture — and what the movement systems consult to freeze a locked rider's
+/// walk/jump (a velocity write would fight the weld every tick).
+#[derive(Component, Default)]
+pub struct LockJoint;
+
+/// The set of bodies currently pinned by a player-lock weld (each weld's `body1` is
+/// the avatar). Movement systems skip these bodies entirely — the weld owns their
+/// velocity — and they consult the live joint set (not a cached marker) so the skip
+/// appears/disappears on exactly the tick the joint does, identically on the server
+/// and the predicting client (rollback replays included).
+pub fn locked_bodies(
+    lock_joints: &Query<&SphericalJoint, With<LockJoint>>,
+) -> std::collections::HashSet<Entity> {
+    lock_joints.iter().map(|joint| joint.body1).collect()
+}
+
 /// Maximum face separation (metres) at which two parts can still weld together.
 /// Lets you join a part that's merely *close* to another without a pixel-perfect
 /// touch — the common cause of a rocket stack forming too few joints to stay
@@ -1031,7 +1055,8 @@ fn update_predelete_joints(
     holdables: Query<&GlobalTransform, With<Holdable>>,
     mut predelete_joints: ResMut<PredeleteJoints>,
     players: Query<(&Holding, &Modifying, &PlayerHoldPoint)>,
-    joints: Query<(Entity, &SphericalJoint)>,
+    // Player-lock welds are dissolved by "Unlock", never the delete gesture.
+    joints: Query<(Entity, &SphericalJoint), Without<LockJoint>>,
     hold_points: Query<&GlobalTransform, With<HoldPoint>>,
 ) {
     predelete_joints.0.clear();

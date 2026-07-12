@@ -19,23 +19,27 @@
 //!   force, so prediction converges).
 
 use avian3d::prelude::{
-    AngularVelocity, ComputedMass, Forces, Gravity, LinearVelocity, Position, Rotation,
+    AngularVelocity, Collider, ComputedMass, Forces, Gravity, LinearVelocity, Position, Rotation,
     SphericalJoint, WriteRigidBodyForces,
 };
 use bad_spaceship_shared::launch::{
     assembly_burn, measure_assembly_spin, AssemblySpin, LAUNCH_COUNTDOWN_SECS,
 };
 use bad_spaceship_shared::net::{
-    ControlChannel, InLargestAssembly, NetLaunch, NetPart, RequestLaunch,
+    ControlChannel, InLargestAssembly, NetLaunch, NetLockJoint, NetPart, NetPlayer, RequestLaunch,
+    SetLocked,
 };
-use bad_spaceship_shared::part::{Gimbal, Holdable, RocketEngine, SuppressLocalParts};
+use bad_spaceship_shared::part::{
+    part_gap_contacts, Gimbal, Holdable, LockJoint, RocketEngine, SuppressLocalParts,
+    TargetPosition,
+};
 use bad_spaceship_shared::Character;
 use bevy::prelude::*;
 use bevy_egui::{
     egui::{self, Align2, Color32, Frame},
     EguiContexts,
 };
-use lightyear::prelude::{Connected, MessageSender, Predicted};
+use lightyear::prelude::{Connected, LocalId, MessageSender, Predicted};
 use std::collections::HashSet;
 
 use crate::render_main_pass::flame_material::FlameThrottle;
@@ -47,7 +51,18 @@ pub struct LaunchPlugin;
 impl Plugin for LaunchPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<LaunchLocal>()
+            .add_message::<SpSetLock>()
             .add_systems(Update, tick_launch)
+            // Single-player half of the Lock button: weld/unweld the local character
+            // to the parts it touches. Gated off in multiplayer, where the lock welds
+            // are server-owned replicated entities the client must never despawn
+            // locally (`bind_replicated_lock_joints` rebuilds them as predicted
+            // physics instead).
+            .add_systems(
+                Update,
+                (sp_apply_lock, sp_cleanup_lock_joints)
+                    .run_if(not(resource_exists::<SuppressLocalParts>)),
+            )
             .add_systems(
                 bevy_egui::EguiPrimaryContextPass,
                 show_launch_ui.in_set(EguiDrawSystems),
@@ -124,8 +139,10 @@ fn tick_launch(
     mut local: ResMut<LaunchLocal>,
     mut commands: Commands,
     multiplayer: Option<Res<SuppressLocalParts>>,
-    // Single-player ground-joint cut at blastoff.
-    joints: Query<(Entity, &SphericalJoint)>,
+    // Single-player ground-joint cut at blastoff. `Without<LockJoint>`: a player-lock
+    // weld's avatar endpoint isn't `Holdable` either, so the cut would otherwise
+    // sever a locked rider at the exact moment of blastoff.
+    joints: Query<(Entity, &SphericalJoint), Without<LockJoint>>,
     holdables: Query<Entity, With<Holdable>>,
     // Multiplayer launch state (replicated on the room's orb).
     orb: Query<&NetLaunch>,
@@ -164,7 +181,7 @@ fn tick_launch(
 /// `Holdable`). Part-to-part joints stay intact so the assembly holds together as it lifts.
 fn cut_ground_joints(
     commands: &mut Commands,
-    joints: &Query<(Entity, &SphericalJoint)>,
+    joints: &Query<(Entity, &SphericalJoint), Without<LockJoint>>,
     holdables: &Query<Entity, With<Holdable>>,
 ) {
     let parts: HashSet<Entity> = holdables.iter().collect();
@@ -349,21 +366,43 @@ fn apply_thrust(
     }
 }
 
-/// Draw the launch button and the countdown / blastoff banner (top-centre), and — on a
-/// button press — start the launch (single-player: locally; multiplayer: send a
-/// `RequestLaunch`).
+/// The lock-state inputs of [`show_launch_ui`], bundled into one `SystemParam`
+/// (the function was over Bevy's 16-parameter system limit): the replicated lock
+/// welds + every player's id (multiplayer, where "everyone aboard" spans the room),
+/// or the local lock welds (single-player), plus the two toggle sinks.
+#[derive(bevy::ecs::system::SystemParam)]
+struct LockUi<'w, 's> {
+    mp_assembly_ids: Query<'w, 's, &'static NetPart, (With<InLargestAssembly>, With<Predicted>)>,
+    mp_players: Query<'w, 's, &'static NetPlayer, With<Predicted>>,
+    net_lock_welds: Query<'w, 's, &'static NetLockJoint>,
+    sp_lock_joints: Query<'w, 's, &'static SphericalJoint, With<LockJoint>>,
+    local_id: Query<'w, 's, &'static LocalId, With<Connected>>,
+    lock_sender: Query<'w, 's, &'static mut MessageSender<SetLocked>, With<Connected>>,
+    sp_lock_toggle: MessageWriter<'w, SpSetLock>,
+}
+
+/// Draw the launch button, the Lock/Unlock button just below its spot, and the
+/// countdown / blastoff banner (top-centre). A launch press starts the launch
+/// (single-player: locally; multiplayer: send a `RequestLaunch`); a lock press welds
+/// the character to the parts it's touching (single-player: locally via
+/// [`SpSetLock`]; multiplayer: send [`SetLocked`], the server welds and the welds
+/// replicate back). The launch button only appears once **every player in the room
+/// is locked to the assembly** (single-player: the one local player).
 fn show_launch_ui(
     mut contexts: EguiContexts,
     mut local: ResMut<LaunchLocal>,
     multiplayer: Option<Res<SuppressLocalParts>>,
     // Membership sources: single-player assembly, or the replicated multiplayer markers.
     sp_parts: Query<(Entity, &GlobalTransform, &ComputedMass), With<Holdable>>,
+    // Lock welds land in this query too — harmless: their avatar endpoint isn't an
+    // indexed part, so they contribute no assembly edge (see `main_assembly`).
     sp_joints: Query<&SphericalJoint>,
     mp_members: Query<Entity, (With<InLargestAssembly>, With<Predicted>)>,
     orb: Query<&NetLaunch>,
     character: Query<Entity, With<Character>>,
     collisions: avian3d::prelude::Collisions,
     mut launch_sender: Query<&mut MessageSender<RequestLaunch>, With<Connected>>,
+    mut lock_ui: LockUi,
 ) -> Result {
     // Current countdown/launched state and whether we can still start a launch.
     let (counting, launched) = if multiplayer.is_some() {
@@ -392,7 +431,8 @@ fn show_launch_ui(
     };
     if let Some(text) = banner {
         egui::Area::new(egui::Id::new("bs_launch_banner"))
-            .anchor(Align2::CENTER_TOP, egui::vec2(0.0, 84.0))
+            // Below the Lock button's slot (72), which stays visible mid-countdown.
+            .anchor(Align2::CENTER_TOP, egui::vec2(0.0, 132.0))
             .show(ctx, |ui| {
                 // Let the big word size to its natural width instead of wrapping "Blastoff!"
                 // onto several lines inside the anchored (width-less) area.
@@ -406,13 +446,79 @@ fn show_launch_ui(
             });
     }
 
-    // The launch button only shows while idle and the character is touching the assembly.
-    let available = idle
-        && character_touches_assembly(
-            &character,
-            &collisions,
-            &assembly_members(multiplayer.is_some(), &sp_parts, &sp_joints, &mp_members),
-        );
+    // Assembly membership + whether we're standing on it (shared by both buttons).
+    let members = assembly_members(multiplayer.is_some(), &sp_parts, &sp_joints, &mp_members);
+    let touching = character_touches_assembly(&character, &collisions, &members);
+
+    // Lock state. `my_locked` = pinned by ≥ 1 lock weld (any part — drives the
+    // button label and the unlock action); "aboard" = welded into the *largest
+    // assembly* specifically, which is what the launch gate counts, for every
+    // player in the room. Multiplayer derives both from the replicated
+    // `NetLockJoint`s (the server's welds are the truth — the button flips when
+    // the weld actually exists); single-player from the local welds.
+    let (my_locked, all_aboard) = if multiplayer.is_some() {
+        let my_id = crate::net::my_netcode_id(&lock_ui.local_id);
+        let assembly_ids: HashSet<u64> =
+            lock_ui.mp_assembly_ids.iter().map(|part| part.id).collect();
+        let aboard: HashSet<u64> = lock_ui
+            .net_lock_welds
+            .iter()
+            .filter(|weld| assembly_ids.contains(&weld.part))
+            .map(|weld| weld.player)
+            .collect();
+        let my_locked =
+            my_id.is_some_and(|id| lock_ui.net_lock_welds.iter().any(|weld| weld.player == id));
+        let players: HashSet<u64> =
+            lock_ui.mp_players.iter().map(|player| player.client_id).collect();
+        let all_aboard = !players.is_empty() && players.iter().all(|id| aboard.contains(id));
+        (my_locked, all_aboard)
+    } else {
+        let my_locked = !lock_ui.sp_lock_joints.is_empty();
+        let aboard =
+            lock_ui.sp_lock_joints.iter().any(|joint| members.contains(&joint.body2));
+        (my_locked, aboard)
+    };
+
+    // The Lock/Unlock button, just below the launch button's slot: shown while
+    // standing on the assembly, and always while locked (so you can always unlock —
+    // a rigid weld can disable the avatar↔deck *contact*, which would hide a
+    // touch-gated button).
+    if my_locked || touching {
+        let mut toggle = false;
+        egui::Area::new(egui::Id::new("bs_lock_button"))
+            .anchor(Align2::CENTER_TOP, egui::vec2(0.0, 72.0))
+            .show(ctx, |ui| {
+                Frame::default()
+                    .fill(Color32::from_black_alpha(160))
+                    .inner_margin(egui::Margin::same(8))
+                    .show(ui, |ui| {
+                        let label = if my_locked { "Unlock" } else { "Lock" };
+                        let button = egui::Button::new(
+                            egui::RichText::new(label)
+                                .size(22.0)
+                                .strong()
+                                .color(Color32::from_rgb(160, 220, 255)),
+                        );
+                        if ui.add(button).clicked() {
+                            toggle = true;
+                        }
+                    });
+            });
+        if toggle {
+            if multiplayer.is_some() {
+                if let Ok(mut sender) = lock_ui.lock_sender.single_mut() {
+                    sender.send::<ControlChannel>(SetLocked(!my_locked));
+                }
+            } else {
+                lock_ui.sp_lock_toggle.write(SpSetLock(!my_locked));
+            }
+        }
+    }
+
+    // The launch button only shows while idle, the character is on the assembly
+    // (touching it, or locked to it — a rigid lock weld can disable the contact),
+    // and EVERY player in the room is locked to the assembly.
+    let available = idle && all_aboard && (touching || my_locked);
     if !available {
         return Ok(());
     }
@@ -449,6 +555,89 @@ fn show_launch_ui(
         }
     }
     Ok(())
+}
+
+/// The single-player half of the Lock button: a buffered toggle written by
+/// [`show_launch_ui`] (`true` = lock, `false` = unlock) and applied by
+/// [`sp_apply_lock`] — a message so the egui pass stays out of the physics queries.
+/// The multiplayer path sends [`SetLocked`] to the server instead.
+#[derive(Message)]
+struct SpSetLock(bool);
+
+/// Apply the single-player Lock toggle: weld the character to every part currently
+/// within the weld gap (the same freeze-in-place `part_gap_contacts` manifold the
+/// server and the part-attach path weld with — one `SphericalJoint` + [`LockJoint`]
+/// per contact, character = `body1`), or dissolve all of its welds. Never welds the
+/// held part (`Without<TargetPosition>`) — locking is for what you stand on, not
+/// what you carry. The ground is deliberately not a candidate either: an
+/// avatar↔ground weld would pin the rider to the pad at blastoff.
+fn sp_apply_lock(
+    mut commands: Commands,
+    mut toggles: MessageReader<SpSetLock>,
+    characters: Query<(Entity, &Collider, &Position, &Rotation), With<Character>>,
+    parts: Query<
+        (Entity, &Collider, &Position, &Rotation),
+        (With<Holdable>, Without<TargetPosition>, Without<Character>),
+    >,
+    lock_joints: Query<(Entity, &SphericalJoint), With<LockJoint>>,
+) {
+    let Some(&SpSetLock(want)) = toggles.read().last() else {
+        return;
+    };
+    let Ok((character, collider, position, rotation)) = characters.single() else {
+        return;
+    };
+    let existing: Vec<Entity> = lock_joints
+        .iter()
+        .filter(|(_, joint)| joint.body1 == character)
+        .map(|(entity, _)| entity)
+        .collect();
+    if !want {
+        for weld in existing {
+            commands.entity(weld).despawn();
+        }
+        return;
+    }
+    if !existing.is_empty() {
+        return; // Already locked.
+    }
+    let mut contacts = Vec::new();
+    for (part, part_collider, part_pos, part_rot) in &parts {
+        contacts.clear();
+        part_gap_contacts(
+            collider,
+            position.0,
+            rotation.0,
+            part_collider,
+            part_pos.0,
+            part_rot.0,
+            &mut contacts,
+        );
+        for (character_local, part_local) in contacts.iter().copied() {
+            commands.spawn((
+                SphericalJoint::new(character, part)
+                    .with_local_anchor1(character_local)
+                    .with_local_anchor2(part_local),
+                LockJoint,
+            ));
+        }
+    }
+}
+
+/// Drop single-player lock welds whose endpoints no longer exist (the character
+/// respawned after a fall, a welded part got recycled) — the SP twin of the server's
+/// sweep. Never runs in multiplayer (the welds there are replicated entities the
+/// server owns).
+fn sp_cleanup_lock_joints(
+    mut commands: Commands,
+    lock_joints: Query<(Entity, &SphericalJoint), With<LockJoint>>,
+    bodies: Query<(), With<Position>>,
+) {
+    for (entity, joint) in &lock_joints {
+        if bodies.get(joint.body1).is_err() || bodies.get(joint.body2).is_err() {
+            commands.entity(entity).despawn();
+        }
+    }
 }
 
 /// Whether the character's body is in contact with any part of the assembly.
