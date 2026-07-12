@@ -1,6 +1,5 @@
 use avian3d::prelude::{
-    AngularVelocity, Collider, CollisionLayers, Collisions, LinearVelocity, LockedAxes, Mass,
-    Position, RigidBody,
+    Collider, CollisionLayers, Collisions, LinearVelocity, LockedAxes, Mass, Position, RigidBody,
 };
 use bevy::prelude::*;
 use bevy::reflect::TypePath;
@@ -284,55 +283,51 @@ struct CharacterBundle {
 /// movement-input component (`DirectionalInput`) plus `Character`/velocity/
 /// ground-contact (`CharacterBundle`) match what every controllable character needs.
 pub fn insert_character_body(entity: &mut EntityCommands, size: f32) {
-    entity.insert((
-        RigidBody::Dynamic,
-        LockedAxes::ROTATION_LOCKED,
-        // Pill body: a vertical capsule (round top and bottom) with the same
-        // TOTAL height as the old `size`-diameter sphere — radius size/3 plus a
-        // size/3 cylindrical middle = size tall, so the collider centre sits at
-        // the same height above ground contact and the camera/hold-point
-        // geometry tuned for the sphere carries over; the body just slims from
-        // `size` wide to (2/3)·size. Rotation stays locked, so it never tips.
-        // (Avian's `capsule` takes the radius and the cylindrical mid-section
-        // length, not the total height.)
-        Collider::capsule(size / 3.0, size / 3.0),
-        // NO `SweptCcd` here, deliberately (the parts carry it; the character must
-        // not): sweeping a body in *persistent contact* with a fast co-moving
-        // platform (riding a rocket at 100+ m/s) occasionally clamps it to a stale
-        // TOI while the platform advances a full ~2 m tick-step, manufacturing a
-        // huge synthetic overlap — measured as a +234 m/s ejection one tick after
-        // a perfectly soft landing. Without CCD, jump landings can penetrate a few
-        // cm and very rarely buck the rider (~+20 m/s once per many hops); with
-        // it, even standing riders get launched. The lesser evil, verified both
-        // ways with the recorder.
-        // Pin mass to 1.0; movement sets velocity directly so this only scales how
-        // the character shoves parts on contact.
-        Mass(1.0),
-        CharacterBundle::default(),
-        DirectionalInput::default(),
-    ));
+    insert_remote_avatar_body(entity, size);
+    entity.insert((CharacterBundle::default(), DirectionalInput::default()));
 }
 
-/// Insert a *remote* player's avatar body on a client: the same rider capsule
-/// (`RigidBody::Dynamic` + rotation-locked capsule + unit mass) as
-/// [`insert_character_body`], but deliberately WITHOUT the `Character` marker or the
-/// movement-input/ground-contact bundle. The client predicts every avatar
-/// (`PredictionTarget::All`), so an *other* player's avatar must be a real dynamic body
-/// that rests on the predicted deck via contact — that's what makes it ride a climbing
-/// rocket on the same timeline as the deck instead of interpolating a frame behind and
-/// sinking through it. It carries no `Character`, so the single-player movement systems
-/// and the `Character`-keyed monster dresser leave it alone (it's driven only by physics
-/// + rollback against the server, and dressed/faced by the remote-avatar path). Its
-/// replicated `LinearVelocity` lets the input-less body coast at the player's real
-/// velocity between snapshots, so walking stays smooth.
+/// The rider capsule every avatar body is built from — the OWNER's controllable
+/// character ([`insert_character_body`] layers the movement-input/ground-contact
+/// bundle on top) and, on a client, every *remote* player's predicted avatar, which
+/// gets exactly this and nothing more. One definition so the client-predicted remote
+/// body can never drift from the body the server simulates (a collider/mass mismatch
+/// would surface as permanent rollback churn on every remote avatar).
+///
+/// The client predicts every avatar (`PredictionTarget::All`), so an *other* player's
+/// avatar must be a real dynamic body that rests on the predicted deck via contact —
+/// that's what makes it ride a climbing rocket on the same timeline as the deck
+/// instead of interpolating a frame behind and sinking through it. It carries no
+/// `Character`, so the single-player movement systems and the `Character`-keyed
+/// monster dresser leave it alone (it's driven only by physics + rollback against the
+/// server — its replicated `LinearVelocity` lets the input-less body coast at the
+/// player's real velocity between snapshots — and dressed/faced by the remote-avatar
+/// path).
+///
+/// Body details:
+/// - Pill body: a vertical capsule (round top and bottom) with the same TOTAL height
+///   as the old `size`-diameter sphere — radius size/3 plus a size/3 cylindrical
+///   middle = size tall, so the collider centre sits at the same height above ground
+///   contact and the camera/hold-point geometry tuned for the sphere carries over;
+///   the body just slims from `size` wide to (2/3)·size. Rotation stays locked, so
+///   it never tips. (Avian's `capsule` takes the radius and the cylindrical
+///   mid-section length, not the total height.)
+/// - NO `SweptCcd`, deliberately (the parts carry it; the character must not):
+///   sweeping a body in *persistent contact* with a fast co-moving platform (riding a
+///   rocket at 100+ m/s) occasionally clamps it to a stale TOI while the platform
+///   advances a full ~2 m tick-step, manufacturing a huge synthetic overlap —
+///   measured as a +234 m/s ejection one tick after a perfectly soft landing. Without
+///   CCD, jump landings can penetrate a few cm and very rarely buck the rider
+///   (~+20 m/s once per many hops); with it, even standing riders get launched. The
+///   lesser evil, verified both ways with the recorder.
+/// - Mass pinned to 1.0; movement sets velocity directly so this only scales how the
+///   avatar shoves parts on contact.
 pub fn insert_remote_avatar_body(entity: &mut EntityCommands, size: f32) {
     entity.insert((
         RigidBody::Dynamic,
         LockedAxes::ROTATION_LOCKED,
         Collider::capsule(size / 3.0, size / 3.0),
         Mass(1.0),
-        LinearVelocity::default(),
-        AngularVelocity::default(),
     ));
 }
 

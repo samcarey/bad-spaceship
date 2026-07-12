@@ -548,12 +548,12 @@ fn linear_velocity_should_rollback(confirmed: &LinearVelocity, predicted: &Linea
     over_tolerance(confirmed.0, predicted.0, LINEAR_VELOCITY_ROLLBACK_TOLERANCE)
 }
 
-/// A rollback condition for a predict-synced component that must NEVER trigger a
-/// rollback: it's server-authored and cosmetic (not part of the local physics sim),
-/// so a confirmed≠predicted difference should just update the value, not re-simulate
-/// the world. Used for `NetFacing` (predicted only so it reaches the predicted remote
-/// avatar; a remote player turning their head changes it every tick).
-fn never_rollback<C>(_confirmed: &C, _predicted: &C) -> bool {
+/// `NetFacing` must NEVER trigger a rollback: it's server-authored and cosmetic (not
+/// part of the local physics sim), so a confirmed≠predicted difference should just
+/// update the value, not re-simulate the world — and a remote player turning their
+/// head changes it every tick. (It's predict-synced at all only so it reaches the
+/// predicted remote avatar.)
+fn facing_should_rollback(_confirmed: &NetFacing, _predicted: &NetFacing) -> bool {
     false
 }
 
@@ -782,15 +782,13 @@ impl Plugin for ProtocolPlugin {
         // and made turning jitter. Interpolated on remotes; the owner never reads it.
         // Predict-synced (not just interpolated) so it reaches the *predicted* remote
         // avatar — every avatar is now `PredictionTarget::All` (see
-        // `spawn_player_for_client`). `never_rollback` keeps a facing change (a remote
-        // player turning their head, every tick) from triggering a physics rollback:
-        // facing is cosmetic, authored by the server, never locally simulated, so a
-        // confirmed≠predicted difference must not re-sim the world. The interpolation fn
-        // stays registered as a harmless fallback.
+        // `spawn_player_for_client`); `facing_should_rollback` (see its doc) keeps the
+        // every-tick facing change from triggering physics rollbacks. The interpolation
+        // fn stays registered as a harmless fallback (nothing is `Interpolated` today).
         app.component::<NetFacing>()
             .replicate()
             .predict()
-            .with_rollback_condition(never_rollback::<NetFacing>)
+            .with_rollback_condition(facing_should_rollback)
             .add_interpolation_with(lerp_facing);
         // Each player's display name (see `NetName`): replicated so every client can
         // draw it over the avatar and list it in the roster. Changes rarely (only on

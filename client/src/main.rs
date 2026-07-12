@@ -116,6 +116,11 @@ pub enum AppState {
     #[default]
     Initial,
     InGame,
+    /// The cursor-free state: mouse-look released so the on-screen controls (the
+    /// top-left hamburger etc.) are clickable. Toggled by Escape (desktop), the
+    /// browser pointer-lock exit (web), and the gamepad Start button. The center
+    /// pause-menu window this state used to draw was deliberately removed — its
+    /// remaining job is cursor/input management; the name is historical.
     InGameMenu,
 }
 

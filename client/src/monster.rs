@@ -241,7 +241,7 @@ fn dress_characters(
     asset_server: Res<AssetServer>,
 ) {
     // Ordering note: in multiplayer, `Character` is only ever inserted by
-    // `setup_predicted_avatar`, whose query requires `NetPlayer` — so the
+    // `setup_avatar_bodies`, whose query requires `NetPlayer` — so the
     // `unwrap_or(local)` fallback can only fire in genuine single-player.
     for (entity, net) in &undressed {
         let monster = net.map(|n| n.monster).unwrap_or(local.0);

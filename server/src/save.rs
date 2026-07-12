@@ -342,7 +342,6 @@ pub fn open_recording(code: &str) -> Result<std::fs::File, String> {
 mod tests {
     use super::*;
 
-
     /// A **frozen** v1 save file, byte-for-byte as v1 wrote it. This fixture must
     /// NEVER be edited to track schema changes — that's the point: when the schema
     /// moves, bump `SAVE_VERSION`, add the migration step, and this test proves the

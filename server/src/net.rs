@@ -19,7 +19,7 @@
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Mutex;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use avian3d::prelude::{
     AngularVelocity, Collider, CollisionLayers, ComputedMass, Forces, Gravity, LinearVelocity,
@@ -368,7 +368,10 @@ impl Plugin for NetServerPlugin {
                 rebase_room_frames,
                 replace_fallen_room_parts,
                 respawn_fallen_avatars,
-                ensure_spare_rocket,
+                // Restocking within a second of a shortfall is plenty (see the fn doc);
+                // scanning every joint each tick is not.
+                ensure_spare_rocket
+                    .run_if(bevy::time::common_conditions::on_timer(Duration::from_secs(1))),
             )
                 .chain()
                 .before(server_grab)
@@ -508,6 +511,13 @@ struct RoomMember(RoomId);
 struct PartRoom {
     id: RoomId,
     bit: u32,
+}
+
+impl PartRoom {
+    /// The [`Room`] descriptor this part's room tags fresh spawns with.
+    fn room(&self) -> Room {
+        Room { id: self.id, bit: self.bit }
+    }
 }
 
 /// Tags the per-room state entity with the room it reports for, so the systems that
@@ -1653,7 +1663,7 @@ fn replace_fallen_room_parts(
         let grounded = !frames.get(part_room.id).is_active();
         if (grounded && position.0.y < PART_FALL_Y) || diverged {
             commands.entity(entity).despawn();
-            let room = Room { id: part_room.id, bit: part_room.bit };
+            let room = part_room.room();
             // Respawn the same kind that fell so the pool's composition is stable.
             match part.shape {
                 PartShape::Cuboid { .. } => {
@@ -1695,9 +1705,11 @@ fn replace_fallen_room_parts(
 /// stack lands (the floating-origin frame resets to zero) the room is grounded again and a
 /// spare drops if all its rockets are still attached.
 ///
-/// Runs in `FixedUpdate` like the other pool maintenance. The spawn is deferred, so the
-/// fresh rocket first appears (as an unused rocket) next tick — one restock per shortfall,
-/// no double-spawn.
+/// Runs on a 1 s timer (`run_if` at registration): the shortfall it repairs only
+/// arises on joint/rocket churn, so scanning every joint at the 60 Hz tick rate was
+/// pure waste, and a restock appearing within a second is indistinguishable from
+/// immediate. The spawn is deferred, so the fresh rocket first appears (as an unused
+/// rocket) next run — one restock per shortfall, no double-spawn.
 fn ensure_spare_rocket(
     mut commands: Commands,
     frames: Res<RoomFrames>,
@@ -1712,9 +1724,7 @@ fn ensure_spare_rocket(
         if frames.get(part_room.id).is_active() {
             continue; // in flight — no ground to restock onto
         }
-        let entry = rooms
-            .entry(part_room.id)
-            .or_insert((Room { id: part_room.id, bit: part_room.bit }, false));
+        let entry = rooms.entry(part_room.id).or_insert((part_room.room(), false));
         entry.1 |= !jointed.contains(&entity);
     }
     for (room, has_spare) in rooms.into_values() {

@@ -109,6 +109,22 @@ pub const ORIENTING_STIFFNESS: f32 = 5.0;
 const MIN_JOINT_SPACING: f32 = MIN_PART_SIZE / 2.0;
 pub const DELETE_RADIUS: f32 = 1.0;
 
+/// Whether a joint anchor is **interior** — at (≈) its body's local origin rather than
+/// on a touching face — so its green marker would float inside the opaque body (e.g.
+/// old hand-built stacks whose deck↔rocket welds are anchored at the rocket's center,
+/// which read as "a green dot in the middle of the cylinder"). Interior welds are
+/// load-bearing (they give a connection its lever arm; a stack falls apart without
+/// them — ride-verified), so only their *markers* are suppressed, never the joints:
+/// the persistent multiplayer sphere (`bind_replicated_joints`) and the held-part
+/// green list (`update_active_joints`). The red predelete marker is deliberately NOT
+/// filtered — it warns about an imminent deletion, and in single-player the deletion
+/// acts on exactly that list. Surface anchors sit ≥ the part's half-extent (≥ 0.4 m
+/// here) from the origin, well clear of this threshold.
+pub fn is_interior_anchor(anchor: Vec3) -> bool {
+    const INTERIOR_JOINT_EPS: f32 = 0.1;
+    anchor.length_squared() < INTERIOR_JOINT_EPS * INTERIOR_JOINT_EPS
+}
+
 // Rocket-engine part geometry (a tall cylinder body with a flared nozzle at the
 // base). `pub` so the client renderer builds the matching mesh from the same
 // numbers the collider is built from here. The entity origin is the *body*
@@ -562,7 +578,10 @@ fn maintain_weld_rigidity(
         ));
     }
 
-    // Union-find over the jointed bodies. Seed clusters from per-pair rigid welds.
+    // Union-find over the jointed bodies (the same `DisjointSet` the assembly grouping
+    // uses). Clusters form purely by absorption below: a per-pair rigid weld is just
+    // the two-body case (a's 3+ anchors into b's singleton cluster), so it needs no
+    // separate seeding pass.
     let mut index: std::collections::HashMap<Entity, usize> = std::collections::HashMap::new();
     for &(a, b) in pairs.keys() {
         for body in [a, b] {
@@ -570,20 +589,7 @@ fn maintain_weld_rigidity(
             index.entry(body).or_insert(next);
         }
     }
-    let mut parent: Vec<usize> = (0..index.len()).collect();
-    fn find(parent: &mut Vec<usize>, mut i: usize) -> usize {
-        while parent[i] != i {
-            parent[i] = parent[parent[i]]; // path halving
-            i = parent[i];
-        }
-        i
-    }
-    for (&(a, b), members) in &pairs {
-        if anchors_are_rigid(members.iter().map(|&(_, anchor, _)| anchor)) {
-            let (ra, rb) = (find(&mut parent, index[&a]), find(&mut parent, index[&b]));
-            parent[ra] = rb;
-        }
-    }
+    let mut clusters = crate::assembly::DisjointSet::new(index.len());
 
     // Absorb, to a fixpoint: a body whose joints into ONE cluster pin 3+ non-collinear
     // of its own points is rigid to that cluster — merge it in. (Each merge can make
@@ -596,7 +602,7 @@ fn maintain_weld_rigidity(
         > = std::collections::HashMap::new();
         for (&(a, b), members) in &pairs {
             let (ia, ib) = (index[&a], index[&b]);
-            let (ra, rb) = (find(&mut parent, ia), find(&mut parent, ib));
+            let (ra, rb) = (clusters.find(ia), clusters.find(ib));
             if ra == rb {
                 continue;
             }
@@ -606,14 +612,13 @@ fn maintain_weld_rigidity(
             }
         }
         let mut merged = false;
-        for (&body, clusters) in &into_cluster {
-            for (&root, anchors) in clusters {
-                if anchors_are_rigid(anchors.iter().copied()) {
-                    let (rb, rc) = (find(&mut parent, body), find(&mut parent, root));
-                    if rb != rc {
-                        parent[rb] = rc;
-                        merged = true;
-                    }
+        for (&body, roots) in &into_cluster {
+            for (&root, anchors) in roots {
+                if anchors_are_rigid(anchors.iter().copied())
+                    && clusters.find(body) != clusters.find(root)
+                {
+                    clusters.union(body, root);
+                    merged = true;
                 }
             }
         }
@@ -623,7 +628,7 @@ fn maintain_weld_rigidity(
     }
 
     for (&(a, b), members) in &pairs {
-        let rigid = find(&mut parent, index[&a]) == find(&mut parent, index[&b]);
+        let rigid = clusters.find(index[&a]) == clusters.find(index[&b]);
         for &(entity, _, _) in members {
             // `try_insert`/`try_remove` (not `insert`/`remove`): a joint queried here can
             // be despawned before these deferred commands apply — the floating-origin
@@ -959,6 +964,11 @@ fn update_active_joints(
                     else {
                         continue;
                     };
+                    // Interior welds keep working but their marker would float inside
+                    // the body — skip drawing it (see `is_interior_anchor`).
+                    if is_interior_anchor(a1) || is_interior_anchor(a2) {
+                        continue;
+                    }
                     if joint.body2 == held_entity {
                         existing_joints.0.push(DisplayableJoint {
                             entities: (held_entity, joint.body1),

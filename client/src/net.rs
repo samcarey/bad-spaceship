@@ -32,7 +32,9 @@ use bad_spaceship_shared::net::{
     NetPlayer, NetRoomFrame, ProtocolPlugin, RollbackReport, TelemetryChannel, GROUND_JOINT_ID,
     TICK,
 };
-use bad_spaceship_shared::part::{insert_part_physics, insert_rocket_physics, Holdable, SuppressLocalParts};
+use bad_spaceship_shared::part::{
+    insert_part_physics, insert_rocket_physics, is_interior_anchor, Holdable, SuppressLocalParts,
+};
 use bad_spaceship_shared::player::make_local_player;
 use crate::render_main_pass::flame_material::FlameMaterial;
 use crate::render_main_pass::insert_rocket_visual;
@@ -173,7 +175,7 @@ pub fn multiplayer_target() -> Option<String> {
 /// `NetPlayer::client_id`. Read from `LocalId` (set the instant the connection
 /// reaches `Connected`, before any avatar replicates). `None` until connected, or if
 /// the peer isn't a netcode id. This is the client-side "who am I" used to adopt only
-/// our own avatar and to flag our own roster row — see `setup_predicted_avatar`.
+/// our own avatar and to flag our own roster row — see `setup_avatar_bodies`.
 pub(crate) fn my_netcode_id(local: &Query<&LocalId, With<Connected>>) -> Option<u64> {
     match local.iter().next().map(|l| l.0) {
         Some(PeerId::Netcode(id)) => Some(id),
@@ -238,9 +240,9 @@ impl Plugin for NetClientPlugin {
         // sync pick it up). `lightyear_avian` orders its sync around the
         // `FrameInterpolationSystems` sets but does NOT add these plugins or the
         // per-entity components — we must. EVERY predicted entity opts in via
-        // `FrameInterpolate<Position/Rotation>` — the own avatar (`setup_predicted_avatar`),
+        // `FrameInterpolate<Position/Rotation>` — the own avatar (`setup_avatar_bodies`),
         // the loose parts (`draw_replicated_parts`), and now every *other* player's avatar
-        // (`setup_remote_avatar`), which is predicted too (`PredictionTarget::All`).
+        // (`setup_avatar_bodies`), which is predicted too (`PredictionTarget::All`).
         app.add_plugins((
             FrameInterpolationPlugin::<Position>::default(),
             FrameInterpolationPlugin::<Rotation>::default(),
@@ -249,7 +251,7 @@ impl Plugin for NetClientPlugin {
         // part sim and render the server's replicated parts instead.
         app.insert_resource(SuppressLocalParts);
         // The local character is the *predicted networked avatar* (assembled by
-        // `setup_predicted_avatar` on the lightyear `Predicted` entity), not a
+        // `setup_avatar_bodies` on the lightyear `Predicted` entity), not a
         // separate single-player character — suppress the latter so there's exactly
         // one character on the client.
         app.insert_resource(SuppressLocalPlayer);
@@ -287,8 +289,7 @@ impl Plugin for NetClientPlugin {
         app.add_systems(
             Update,
             (
-                setup_predicted_avatar,
-                setup_remote_avatar,
+                setup_avatar_bodies,
                 draw_replicated_players,
                 redress_replicated_players,
                 face_replicated_players,
@@ -399,75 +400,80 @@ fn report_stored_panic(
     }
 }
 
-/// Turn **our own** predicted networked avatar into the controllable local
-/// character. lightyear rolls back the Avian `Position`/`Rotation` of every
-/// `Predicted` entity it gives us; we give *ours* the real character body
-/// (`insert_character_body`) so Avian simulates it locally with zero input delay,
-/// plus the player/input state (`make_local_player`) and the networked-input marker
-/// so `write_input` fills its `ActionState` and lightyear sends it. From there it's
-/// an ordinary `Character`: `monster::dress_characters` renders it and `attach_camera_orbit`
-/// mounts the camera — the same path single-player uses.
+/// Assemble the physics body for every predicted networked avatar, split by whose it
+/// is. Every avatar is `PredictionTarget::All`, so lightyear rolls back the Avian
+/// `Position`/`Rotation` of each `Predicted` avatar it gives us:
 ///
-/// Identify our avatar by `NetPlayer::client_id == our LocalId`, NOT by the bare
-/// `Predicted` marker: lightyear can hand an already-connected client a *predicted
-/// copy of a late joiner's avatar* (verified at runtime), so adopting "any predicted
-/// avatar" makes the first player build a second character and the camera follows the
-/// joiner. `LocalId` is our own netcode `PeerId`, set on the connection the moment it
-/// reaches `Connected` (strictly before any avatar replicates) — the client-side mirror
-/// of the `RemoteId` the server reads in `client_identity` to stamp `NetPlayer`, so the
-/// ids match across the wire and exactly one avatar — ours — is adopted.
+/// - **Ours** becomes the controllable local character: the real character body
+///   (`insert_character_body`) so Avian simulates it locally with zero input delay,
+///   plus the player/input state (`make_local_player`) and the networked-input marker
+///   so `write_input` fills its `ActionState` and lightyear sends it. From there it's
+///   an ordinary `Character`: `monster::dress_characters` renders it and
+///   `attach_camera_orbit` mounts the camera — the same path single-player uses.
+/// - **Every other player's** gets just the rider capsule
+///   (`insert_remote_avatar_body`, no `Character`): a real predicted body the client
+///   simulates locally, resting on the predicted deck via contact so it rides a
+///   climbing rocket on the same timeline as the deck (the fix for a remote rider
+///   sinking through the platform), reconciled by rollback and dressed/faced by
+///   `draw_replicated_players`/`face_replicated_players`.
 ///
-/// (Every avatar is now `PredictionTarget::All` and NONE is interpolated, so the
-/// old leaked-`Interpolated`-on-own-avatar hazards can't arise: the MP jump hang —
-/// a leaked marker pinned the predicted jump `LinearVelocity` back to the confirmed
-/// grounded vy≈0 every tick — and the twin-avatar double-dress are both structurally
-/// gone, and the `strip_own_interpolated` guard that swept the leak is retired.)
-/// Gated on `Position` so we assemble the body only once the avatar's real spawn
-/// pose has arrived (rather than briefly at the origin). The loose blocks are also
-/// `Predicted` now, so exclude `NetPart` — the avatar is the predicted entity that
-/// is NOT a part (it carries no `NetPart`; `draw_replicated_parts` handles those).
-fn setup_predicted_avatar(
+/// Which is which comes from `NetPlayer::client_id == our LocalId`, NOT from a marker:
+/// lightyear hands an already-connected client the predicted copies of late joiners'
+/// avatars too (verified at runtime), so adopting "any predicted avatar" as our own
+/// made the first player build a second character and the camera follow the joiner.
+/// `LocalId` is our own netcode `PeerId`, set the moment the connection reaches
+/// `Connected` (strictly before any avatar replicates) — the client-side mirror of the
+/// `RemoteId` the server reads to stamp `NetPlayer` — so the ids match across the
+/// wire; until it's readable we build nobody (one system, one id gate, no race).
+///
+/// (No avatar is `Interpolated` anymore, so the old leaked-`Interpolated` hazards —
+/// the MP jump hang, the twin-avatar double-dress — are structurally gone, and the
+/// `strip_own_interpolated` guard that swept them is retired.)
+///
+/// Gated on `Position` (assemble only once the real spawn pose has arrived, not at the
+/// origin), `Without<NetPart>` (loose blocks are predicted too —
+/// `draw_replicated_parts` handles those), and `Without<RigidBody>` (both body helpers
+/// insert one, so each avatar is built exactly once).
+fn setup_avatar_bodies(
     mut commands: Commands,
     new: Query<
         (Entity, &NetPlayer),
-        (With<Predicted>, With<Position>, Without<Character>, Without<NetPart>),
+        (With<Predicted>, With<Position>, Without<NetPart>, Without<RigidBody>),
     >,
     local: Query<&LocalId, With<Connected>>,
     configs: Res<Assets<CharacterConfig>>,
     resume_look: Res<ResumeLook>,
     mut look_applied: Local<bool>,
 ) {
+    if new.is_empty() {
+        return; // steady state — skip the config/id lookups
+    }
     let Some((_, config)) = configs.iter().next() else {
         return;
     };
-    // Our own netcode id (the value the server stamps onto our avatar's `NetPlayer`).
     let Some(my_id) = my_netcode_id(&local) else {
         return;
     };
     for (entity, net_player) in &new {
-        // Only our own avatar — skip predicted copies of other players' avatars
-        // (lightyear leaks them onto already-connected clients).
-        if net_player.client_id != my_id {
-            continue;
-        }
         let mut e = commands.entity(entity);
-        insert_character_body(&mut e, config.size());
-        make_local_player(&mut e);
-        e.insert((
-            InputMarker::<NetInput>::default(),
-            ActionState::<NetInput>::default(),
-            // Render-interpolate this predicted body between fixed ticks, so the camera
-            // mounted on it moves smoothly instead of stepping at 60 Hz.
-            FrameInterpolate::<Position>::default(),
-            FrameInterpolate::<Rotation>::default(),
-        ));
-        // Session resume: restore the camera look saved before an iOS reload, once,
-        // on the first avatar after boot (overrides `make_local_player`'s defaults).
-        // The avatar's *position* is restored by the server; the look is client-owned.
-        if resume_look.has && !*look_applied {
-            e.insert((Yaw(resume_look.yaw), LookPitch(resume_look.pitch)));
-            *look_applied = true;
+        if net_player.client_id == my_id {
+            insert_character_body(&mut e, config.size());
+            make_local_player(&mut e);
+            e.insert((InputMarker::<NetInput>::default(), ActionState::<NetInput>::default()));
+            // Session resume: restore the camera look saved before an iOS reload, once,
+            // on the first avatar after boot (overrides `make_local_player`'s defaults).
+            // The avatar's *position* is restored by the server; the look is client-owned.
+            if resume_look.has && !*look_applied {
+                e.insert((Yaw(resume_look.yaw), LookPitch(resume_look.pitch)));
+                *look_applied = true;
+            }
+        } else {
+            insert_remote_avatar_body(&mut e, config.size());
         }
+        // Render-interpolate every predicted body between fixed (60 Hz) sim ticks, so
+        // the camera mounted on ours — and remote riders on a moving deck — move
+        // smoothly instead of stepping at the tick rate.
+        e.insert((FrameInterpolate::<Position>::default(), FrameInterpolate::<Rotation>::default()));
     }
 }
 
@@ -754,7 +760,7 @@ struct AvatarVisual(Entity);
 /// too would draw two superimposed monsters (the classic twin-avatar bug). The raw
 /// `Confirmed` entities carry neither `Predicted` nor a visual, so they stay invisible.
 /// The predicted remote body itself (the capsule it rides on) is assembled separately
-/// by `setup_remote_avatar`.
+/// by `setup_avatar_bodies`.
 fn draw_replicated_players(
     mut commands: Commands,
     new_players: Query<(Entity, &NetPlayer), (With<Predicted>, Without<AvatarVisual>)>,
@@ -778,53 +784,6 @@ fn draw_replicated_players(
         commands
             .entity(entity)
             .insert((AvatarVisual(pivot), Visibility::default()));
-    }
-}
-
-/// Assemble the *physics body* for each **other** player's predicted avatar: a
-/// rotation-locked dynamic capsule ([`insert_remote_avatar_body`]) plus frame
-/// interpolation. Every avatar is `PredictionTarget::All`, so an other player's avatar
-/// is a real `Predicted` body the client simulates locally — it rests on the predicted
-/// deck via contact and rides it on the same timeline (the fix for a remote rider
-/// sinking through a climbing rocket). It carries no `Character` marker, so the
-/// single-player movement/dressing systems ignore it (it's dressed by
-/// `draw_replicated_players` and faced by `face_replicated_players`), and it's driven
-/// only by physics + rollback against the server — its replicated `LinearVelocity` lets
-/// the input-less body coast at the player's real velocity between snapshots.
-///
-/// Exclude our OWN avatar (also `Predicted`) — `setup_predicted_avatar` gives it the
-/// full controllable `Character` body instead. Identify by netcode id (not the
-/// `Character` marker, which our own avatar only gains a tick later via deferred
-/// commands — the id guard closes that race), and gate on `Without<RigidBody>` so the
-/// body is built exactly once. Gated on `Position` (a real spawn pose has arrived) and
-/// `Without<NetPart>` (parts are predicted bodies too, handled by `draw_replicated_parts`).
-fn setup_remote_avatar(
-    mut commands: Commands,
-    new: Query<
-        (Entity, &NetPlayer),
-        (With<Predicted>, With<Position>, Without<NetPart>, Without<RigidBody>),
-    >,
-    local: Query<&LocalId, With<Connected>>,
-    configs: Res<Assets<CharacterConfig>>,
-) {
-    let Some((_, config)) = configs.iter().next() else {
-        return;
-    };
-    // Don't set anyone up until we know our own id, or we'd mis-build our own
-    // avatar (momentarily `Without<Character>` at spawn) as a remote one.
-    let Some(my_id) = my_netcode_id(&local) else {
-        return;
-    };
-    for (entity, net_player) in &new {
-        if net_player.client_id == my_id {
-            continue; // our own avatar → `setup_predicted_avatar`
-        }
-        let mut e = commands.entity(entity);
-        insert_remote_avatar_body(&mut e, config.size());
-        e.insert((
-            FrameInterpolate::<Position>::default(),
-            FrameInterpolate::<Rotation>::default(),
-        ));
     }
 }
 
@@ -1148,33 +1107,23 @@ fn bind_replicated_joints(
         let (Some(body1), Some(body2)) = (find(joint.body1), find(joint.body2)) else {
             continue;
         };
+        let (anchor1, anchor2) = (Vec3::from_array(joint.anchor1), Vec3::from_array(joint.anchor2));
         let mut entity = commands.entity(joint_entity);
         entity.insert((
             SphericalJoint::new(body1, body2)
-                .with_local_anchor1(Vec3::from_array(joint.anchor1))
-                .with_local_anchor2(Vec3::from_array(joint.anchor2)),
+                .with_local_anchor1(anchor1)
+                .with_local_anchor2(anchor2),
             JointAnchorBody(body1),
             Transform::default(),
         ));
-        // Draw the green marker only for *surface* welds. An anchor at (≈) a body's local
-        // origin is an INTERIOR weld — its marker floats inside the opaque body (e.g. old
-        // hand-built stacks whose deck↔rocket welds are anchored at the rocket's center,
-        // which read as a green dot in the middle of the cylinder). Those welds are
-        // load-bearing (they give the connection its vertical lever arm — a stack falls
-        // apart without them), so we keep the constraint and only suppress the visual.
-        // Surface anchors sit ≥ the part's half-extent from origin (≥ 0.4 m here), well
-        // clear of this threshold.
-        let interior = Vec3::from_array(joint.anchor1).length() < INTERIOR_JOINT_EPS
-            || Vec3::from_array(joint.anchor2).length() < INTERIOR_JOINT_EPS;
-        if !interior {
+        // Draw the green marker only for *surface* welds — an interior weld's marker
+        // would float inside the opaque body; the joint itself is load-bearing and
+        // always kept (see `is_interior_anchor`).
+        if !is_interior_anchor(anchor1) && !is_interior_anchor(anchor2) {
             entity.insert((Mesh3d(mesh.clone()), MeshMaterial3d(material.clone())));
         }
     }
 }
-
-/// An anchor within this distance of a body's local origin marks an **interior** weld
-/// (buried inside the body), whose gizmo marker is suppressed — see `bind_replicated_joints`.
-const INTERIOR_JOINT_EPS: f32 = 0.1;
 
 /// Track each bound joint's gizmo to its assembly: place it at body1's world-space
 /// anchor (`body1.transform · anchor1`), the same point the constraint pins, so the
@@ -1231,7 +1180,7 @@ fn recolor_replicated_joints(
 /// default()`; production would issue a real ConnectToken from the matchmaker
 /// instead of `Manual`. The random netcode `client_id` is the handshake identity (a
 /// fresh one per connect avoids duplicate-connection rejection); lightyear exposes it
-/// back to us as `LocalId` once connected, which `setup_predicted_avatar` matches
+/// back to us as `LocalId` once connected, which `setup_avatar_bodies` matches
 /// against each avatar's replicated `NetPlayer::client_id` to find our own.
 fn build_netcode_client(server_addr: SocketAddr) -> Option<NetcodeClient> {
     // Carry the persistent resume id in the connect token's `user_data` so the server
