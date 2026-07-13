@@ -111,6 +111,11 @@ pub struct HoldPointBundle {
 
 const BEVY_YAW_PITCH_ROLL_ANGLES: EulerRot = EulerRot::YXZ;
 
+/// The camera's rest distance behind the orbit centre (metres). The scroll-zoom
+/// (`client::input::zoom_camera`) moves it within the config's min/max; the launch
+/// zoom-out multiplies it. The default the camera spawns at.
+pub const DEFAULT_CAMERA_DISTANCE: f32 = 20.0;
+
 /// Spawn the app-lifetime camera when none exists. Runs at startup *and* every
 /// frame as a self-heal: in multiplayer the camera is mounted under the predicted
 /// avatar's orbit hierarchy, and lightyear despawns that avatar recursively —
@@ -129,7 +134,7 @@ fn spawn_camera(mut commands: Commands, cameras: Query<(), With<Camera>>) {
         0.0,
         0.0,
     ));
-    camera_transform.translation = -Vec3::Z * 20.0;
+    camera_transform.translation = -Vec3::Z * DEFAULT_CAMERA_DISTANCE;
     // Bevy 0.15 replaced `Camera3dBundle` with the `Camera3d` required-components
     // marker (it pulls in `Camera`, `Transform`, `Tonemapping`, etc.); spawn the
     // marker plus the components we want to override.

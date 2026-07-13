@@ -637,7 +637,12 @@ fn rebase_room_frames(
     time: Res<Time>,
     mut commands: Commands,
     mut frames: ResMut<RoomFrames>,
-    joints: Query<(Entity, &SphericalJoint, Option<&RoomMember>)>,
+    // `Has<LockJoint>`: a lock weld's `body1` is an avatar, not a part, so it looks
+    // like a "stray ground joint" to the index test below — but the avatar rides the
+    // frame (it's shifted with everything else), so the weld is fine and must NOT be
+    // cut. Without this exemption every locked rider is unlocked at the first rebase
+    // (~2 km).
+    joints: Query<(Entity, &SphericalJoint, Option<&RoomMember>, Has<LockJoint>)>,
     mut orbs: Query<(&RoomStateOf, &mut NetRoomFrame)>,
     mut parts: Query<(Entity, &NetPart, &PartRoom, &mut Position, &mut LinearVelocity)>,
     mut avatars: Query<
@@ -677,7 +682,7 @@ fn rebase_room_frames(
         velocities.push(linear.0);
     }
     let mut edges: Vec<(usize, usize)> = Vec::new();
-    for (_, joint, _) in &joints {
+    for (_, joint, _, _) in &joints {
         if let (Some(&a), Some(&b)) = (index.get(&joint.body1), index.get(&joint.body2)) {
             edges.push((a, b));
         }
@@ -733,8 +738,11 @@ fn rebase_room_frames(
                 // constraint violation violent enough to explode the assembly.
                 // Real flights cut them at blastoff; cut any stragglers here.
                 if !grounded {
-                    for (joint_entity, joint, member) in &joints {
-                        if member.is_some_and(|m| m.0 == room)
+                    for (joint_entity, joint, member, is_lock) in &joints {
+                        // Lock welds have a non-part (avatar) endpoint but legitimately
+                        // ride the frame — skip them, or the rebase unlocks every rider.
+                        if !is_lock
+                            && member.is_some_and(|m| m.0 == room)
                             && (!index.contains_key(&joint.body1)
                                 || !index.contains_key(&joint.body2))
                         {
