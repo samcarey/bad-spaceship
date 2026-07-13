@@ -25,6 +25,7 @@ use avian3d::prelude::{
 use bad_spaceship_shared::launch::{
     assembly_burn, measure_assembly_spin, AssemblySpin, LAUNCH_COUNTDOWN_SECS,
 };
+use bad_spaceship_shared::map::apply_gravity_correction;
 use bad_spaceship_shared::net::{
     ControlChannel, InLargestAssembly, NetLaunch, NetLockJoint, NetPart, NetPlayer, RequestLaunch,
     SetLocked,
@@ -42,6 +43,7 @@ use bevy_egui::{
 use lightyear::prelude::{Connected, LocalId, MessageSender, Predicted};
 use std::collections::HashSet;
 
+use crate::net::ClientRoomFrame;
 use crate::render_main_pass::flame_material::FlameThrottle;
 use crate::render_secondary_pass::{assembly_members, main_assembly};
 use crate::ui::EguiDrawSystems;
@@ -69,9 +71,10 @@ impl Plugin for LaunchPlugin {
                 bevy_egui::EguiPrimaryContextPass,
                 show_launch_ui.in_set(EguiDrawSystems),
             )
-            // Thrust is a continuous force → apply once per physics tick (an Update-rate
-            // force would make the lift frame-rate-dependent). One path per mode: the
-            // single-player sim vs. the predicted multiplayer parts.
+            // Planet gravity + thrust are continuous forces → apply once per physics tick
+            // (an Update-rate force would make them frame-rate-dependent). One path per
+            // mode: the single-player sim vs. the predicted multiplayer bodies. Gravity
+            // precedes thrust so the two `Forces` writers on the rockets are ordered.
             .add_systems(
                 FixedUpdate,
                 (
@@ -79,6 +82,8 @@ impl Plugin for LaunchPlugin {
                     // below actually fires this tick read back non-zero (a rocket
                     // that breaks off the assembly goes dark).
                     reset_flame_targets,
+                    apply_sp_gravity.run_if(not(resource_exists::<SuppressLocalParts>)),
+                    apply_mp_gravity.run_if(resource_exists::<SuppressLocalParts>),
                     apply_sp_thrust.run_if(not(resource_exists::<SuppressLocalParts>)),
                     apply_mp_thrust.run_if(resource_exists::<SuppressLocalParts>),
                 )
@@ -248,6 +253,40 @@ fn cut_ground_joints(
         if !parts.contains(&joint.body1) || !parts.contains(&joint.body2) {
             commands.entity(entity).despawn();
         }
+    }
+}
+
+/// Planet gravity for the single-player sim: a per-tick radial correction on every
+/// dynamic body (avatar + parts) so gravity points at the planet centre and weakens
+/// with altitude. The correction rides on top of Avian's unchanged uniform `Gravity`
+/// (~zero at the pad, so building is untouched — see [`gravity_at`]). Single-player has
+/// no floating-origin frame, so a body's local `Position` *is* its true world position.
+fn apply_sp_gravity(
+    gravity: Res<Gravity>,
+    mut bodies: Query<(&Position, Forces), Or<(With<Holdable>, With<Character>)>>,
+) {
+    for (position, mut forces) in &mut bodies {
+        apply_gravity_correction(&mut forces, position.0, gravity.0);
+    }
+}
+
+/// Planet gravity for the predicted multiplayer bodies — the same radial correction as
+/// [`apply_sp_gravity`], but true position folds in the room's floating-origin offset
+/// ([`ClientRoomFrame`]) so `r` is the real distance from the centre while the co-moving
+/// frame keeps the body near the local origin. Only `Predicted` bodies are locally
+/// simulated (interpolated remotes are replication-driven), so only they get the force;
+/// the server applies the identical field, so prediction converges.
+fn apply_mp_gravity(
+    gravity: Res<Gravity>,
+    frame: Res<ClientRoomFrame>,
+    mut bodies: Query<
+        (&Position, Forces),
+        (With<Predicted>, Or<(With<NetPart>, With<Character>)>),
+    >,
+) {
+    let offset = frame.offset.as_vec3();
+    for (position, mut forces) in &mut bodies {
+        apply_gravity_correction(&mut forces, position.0 + offset, gravity.0);
     }
 }
 
