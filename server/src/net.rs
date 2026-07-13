@@ -30,7 +30,9 @@ use bad_spaceship_shared::guidance::{program_guidance, PitchProgram, DEFAULT_PIT
 use bad_spaceship_shared::launch::{
     assembly_burn, burn_impulse, measure_assembly_spin, LAUNCH_COUNTDOWN_SECS,
 };
-use bad_spaceship_shared::character::{spawn_position, CharacterMovement, InitialPose, ServerAvatar};
+use bad_spaceship_shared::character::{
+    spawn_position, CharacterMovement, FeltUp, InitialPose, ServerAvatar,
+};
 use bad_spaceship_shared::net::{
     apply_hold_spring, apply_net_input, focused_part, monster_index, sanitize_name,
     ClientPanicReport, InLargestAssembly, NetFacing, NetHold, NetInput, NetJoint, NetLockJoint,
@@ -467,6 +469,10 @@ impl Plugin for NetServerPlugin {
                 // Balanced rocket thrust for launched rooms — a continuous force, so it
                 // runs per physics tick like the hold spring.
                 apply_room_rocket_thrust,
+                // Feed each rider's felt-up window (camera + movement basis) from the
+                // assembly attitude the burn just flew — the server twin of the client's
+                // `sample_sp/mp_felt_up`, over the same replicated state.
+                sample_felt_up.after(apply_room_rocket_thrust),
             ),
         );
     }
@@ -2593,6 +2599,34 @@ fn apply_room_rocket_thrust(
         if let Ok((_, mut forces, mut gimbal)) = rockets.get_mut(burn.entity) {
             gimbal.0 = burn.gimbal;
             forces.apply_force_at_point(burn.force, burn.point);
+        }
+    }
+}
+
+/// Feed every avatar's [`FeltUp`] window one sample of this tick's felt-acceleration
+/// direction: its room's launched-assembly mean engine axis (the thrust pressing the
+/// deck into the rider's feet), world +Y otherwise. The server half of the felt-up
+/// basis — the client samplers compute the same thing from the same replicated
+/// rotations, so camera/movement bases agree without replicating anything.
+fn sample_felt_up(
+    mut commands: Commands,
+    registry: Res<LaunchRegistry>,
+    rockets: Query<(&Rotation, &PartRoom), (With<InLargestAssembly>, With<RocketEngine>)>,
+    mut avatars: Query<(Entity, &RoomMember, Option<&mut FeltUp>), With<ServerAvatar>>,
+) {
+    let mut per_room: HashMap<RoomId, Vec3> = HashMap::new();
+    for (rotation, room) in &rockets {
+        if registry.is_launched(room.id) {
+            *per_room.entry(room.id).or_default() += rotation.0 * Vec3::Y;
+        }
+    }
+    for (entity, member, felt) in &mut avatars {
+        let axis = per_room.get(&member.0).map(|sum| sum.normalize_or(Vec3::Y)).unwrap_or(Vec3::Y);
+        match felt {
+            Some(mut felt) => felt.sample(axis),
+            None => {
+                commands.entity(entity).try_insert(FeltUp::default());
+            }
         }
     }
 }

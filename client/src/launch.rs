@@ -35,6 +35,7 @@ use bad_spaceship_shared::part::{
     avatar_lock_contacts, cleanup_lock_joints, despawn_player_lock_welds, Gimbal, Holdable,
     LockJoint, RocketEngine, SuppressLocalParts, TargetPosition,
 };
+use bad_spaceship_shared::character::FeltUp;
 use bad_spaceship_shared::Character;
 use bevy::prelude::*;
 use bevy_egui::{
@@ -88,6 +89,10 @@ impl Plugin for LaunchPlugin {
                     apply_mp_gravity.run_if(resource_exists::<SuppressLocalParts>),
                     apply_sp_thrust.run_if(not(resource_exists::<SuppressLocalParts>)),
                     apply_mp_thrust.run_if(resource_exists::<SuppressLocalParts>),
+                    // Feed each rider's felt-up window (camera + movement basis) from
+                    // the assembly attitude the burn above just flew.
+                    sample_sp_felt_up.run_if(not(resource_exists::<SuppressLocalParts>)),
+                    sample_mp_felt_up.run_if(resource_exists::<SuppressLocalParts>),
                 )
                     .chain(),
             );
@@ -513,6 +518,70 @@ fn apply_mp_thrust(
 fn reset_flame_targets(mut throttles: Query<&mut FlameThrottle>) {
     for mut throttle in &mut throttles {
         throttle.target = 0.0;
+    }
+}
+
+/// Feed every character's [`FeltUp`] window one sample of this tick's felt-acceleration
+/// direction: the launched assembly's mean engine axis (the thrust that presses the deck
+/// into the rider's feet), world +Y otherwise. Single-player flavour — membership from
+/// the local joint graph, pose from `GlobalTransform` (same reads as `apply_sp_thrust`).
+fn sample_sp_felt_up(
+    mut commands: Commands,
+    local: Res<LaunchLocal>,
+    parts: Query<(Entity, &GlobalTransform, &ComputedMass), With<Holdable>>,
+    joints: Query<&SphericalJoint>,
+    rockets: Query<(Entity, &GlobalTransform), With<RocketEngine>>,
+    mut characters: Query<(Entity, Option<&mut FeltUp>), With<Character>>,
+) {
+    let axis = if local.sp_launched() {
+        main_assembly(&parts, &joints)
+            .map(|(members, _)| {
+                rockets
+                    .iter()
+                    .filter(|(entity, _)| members.contains(entity))
+                    .map(|(_, transform)| transform.to_scale_rotation_translation().1 * Vec3::Y)
+                    .sum::<Vec3>()
+                    .normalize_or(Vec3::Y)
+            })
+            .unwrap_or(Vec3::Y)
+    } else {
+        Vec3::Y
+    };
+    for (entity, felt) in &mut characters {
+        match felt {
+            Some(mut felt) => felt.sample(axis),
+            None => {
+                commands.entity(entity).try_insert(FeltUp::default());
+            }
+        }
+    }
+}
+
+/// The multiplayer flavour of [`sample_sp_felt_up`]: membership from the replicated
+/// `InLargestAssembly` markers, pose from the predicted Avian `Rotation` (same reads as
+/// `apply_mp_thrust`), on every predicted avatar — the same per-avatar sampling the
+/// server runs, over the same replicated state, so the bases agree without replication.
+fn sample_mp_felt_up(
+    mut commands: Commands,
+    orb: Query<&NetLaunch>,
+    rockets: Query<
+        &Rotation,
+        (With<NetPart>, With<Predicted>, With<InLargestAssembly>, With<RocketEngine>),
+    >,
+    mut characters: Query<(Entity, Option<&mut FeltUp>), (With<Character>, With<Predicted>)>,
+) {
+    let axis = if orb.iter().next().is_some_and(|l| l.launched) {
+        rockets.iter().map(|rotation| rotation.0 * Vec3::Y).sum::<Vec3>().normalize_or(Vec3::Y)
+    } else {
+        Vec3::Y
+    };
+    for (entity, felt) in &mut characters {
+        match felt {
+            Some(mut felt) => felt.sample(axis),
+            None => {
+                commands.entity(entity).try_insert(FeltUp::default());
+            }
+        }
     }
 }
 
