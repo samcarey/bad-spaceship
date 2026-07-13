@@ -13,6 +13,7 @@ use player::PlayerPlugin;
 pub mod assembly;
 pub mod character;
 pub mod config;
+pub mod guidance;
 pub mod launch;
 pub mod map;
 pub mod net;
