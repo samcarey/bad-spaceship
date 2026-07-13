@@ -321,6 +321,7 @@ impl Plugin for NetServerPlugin {
         // Per-room rocket-launch countdown state (see `LaunchRegistry`).
         app.init_resource::<LaunchRegistry>();
         app.init_resource::<RoomAttitudeIntegrals>();
+        app.init_resource::<RoomFuel>();
         // Server-authoritative session resume: remember each player's last position
         // (keyed by its persistent `resume_id`) so a reconnect after an iOS reload
         // lands back in place rather than at the origin.
@@ -2264,6 +2265,14 @@ struct LaunchRegistry {
 #[derive(Resource, Default)]
 struct RoomAttitudeIntegrals(HashMap<RoomId, Vec3>);
 
+/// Per-room cumulative launch fuel, as thrust **impulse** (N·s = ∫ Σ|engine force| dt) —
+/// the authoritative propellant tally the flight recorder logs so a bot's fuel-to-escape
+/// can be measured exactly. Accumulated by [`apply_room_rocket_thrust`], cleared when the
+/// room resets so a re-launch starts from zero. (The client keeps its own approximate
+/// copy for the HUD; this is the exact one.)
+#[derive(Resource, Default)]
+struct RoomFuel(HashMap<RoomId, f32>);
+
 impl LaunchRegistry {
     /// Whether a room has blasted off — the state the rocket thrust keys on and
     /// the save snapshot persists.
@@ -2291,6 +2300,7 @@ fn handle_launch_requests(
     lock_joints: Query<&SphericalJoint, With<LockJoint>>,
     assembly: Query<(), With<InLargestAssembly>>,
     mut registry: ResMut<LaunchRegistry>,
+    mut fuel: ResMut<RoomFuel>,
 ) {
     for (link, mut receiver) in &mut links {
         if receiver.receive().count() == 0 {
@@ -2313,6 +2323,11 @@ fn handle_launch_requests(
                         "[launch] room {room:?} request refused — not every player is locked to the assembly"
                     );
                     continue;
+                }
+                if !registry.by_room.contains_key(&room) {
+                    // Fresh countdown armed → start this flight's fuel tally from zero
+                    // (a room can be reset and re-launched; the old tally must not carry).
+                    fuel.0.insert(room, 0.0);
                 }
                 registry
                     .by_room
@@ -2404,6 +2419,7 @@ fn apply_room_rocket_thrust(
     time: Res<Time>,
     registry: Res<LaunchRegistry>,
     mut integrals: ResMut<RoomAttitudeIntegrals>,
+    mut fuel: ResMut<RoomFuel>,
     gravity: Res<Gravity>,
     // `Forces` takes `AngularVelocity` mutably inside (and writes each rocket's
     // `Gimbal` the geometry pass reads), so the member/geometry reads and the force
@@ -2454,6 +2470,10 @@ fn apply_room_rocket_thrust(
             };
             let integral = integrals.0.entry(*room).or_default();
             let burn = assembly_burn(com, gravity.0, dt, rockets, &spin, integral);
+            // Tally propellant burned this tick = thrust impulse Σ|force|·dt (see
+            // `RoomFuel`; |force| = full·throttle, gimbal only rotates it).
+            *fuel.0.entry(*room).or_default() +=
+                burn.iter().map(|b| b.force.length()).sum::<f32>() * dt;
             // Diagnostics (BS_DEBUG_GIMBAL): once a second, the controller state the
             // flight recorder can't see - body axis vs velocity vs nozzle deflections.
             static DEBUG_GIMBAL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -2739,6 +2759,9 @@ struct RecordingRegistry {
 struct RecordedFrame<'a> {
     tick: u64,
     unix_ms: u64,
+    /// Cumulative launch fuel for this room, thrust impulse in N·s (see [`RoomFuel`]) —
+    /// so a flight's fuel-to-escape is read straight off the recording.
+    fuel_impulse: f32,
     inputs: Vec<RecordedInput<'a>>,
     world: &'a SaveWorld,
 }
@@ -2769,6 +2792,7 @@ fn record_room_frames(
     mut recordings: ResMut<RecordingRegistry>,
     registry: Res<RoomRegistry>,
     launches: Res<LaunchRegistry>,
+    fuel: Res<RoomFuel>,
     frames: Res<RoomFrames>,
     avatars: SnapshotAvatars,
     inputs: Query<(&NetPlayer, &RoomMember, &ActionState<NetInput>)>,
@@ -2805,6 +2829,7 @@ fn record_room_frames(
         let frame = RecordedFrame {
             tick: *tick,
             unix_ms: save::now_unix_ms(),
+            fuel_impulse: fuel.0.get(&room.id).copied().unwrap_or(0.0),
             inputs: inputs
                 .iter()
                 .filter(|(_, member, _)| member.0 == room.id)

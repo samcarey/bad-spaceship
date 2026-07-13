@@ -428,6 +428,7 @@ fn show_flight_hud(
     mut contexts: EguiContexts,
     character: Query<(&Position, &LinearVelocity), With<Character>>,
     frame: Option<Res<crate::net::ClientRoomFrame>>,
+    fuel: Option<Res<crate::launch::FuelUsed>>,
     mut smoothed_speed: Local<f32>,
 ) -> Result {
     /// Below this true altitude the readout is clutter (the pad, block towers,
@@ -463,6 +464,14 @@ fn show_flight_hud(
     } else {
         format!("{:.2} km/s", speed / 1000.0)
     };
+    // Fuel spent this launch, as thrust impulse in kN·s (see `FuelUsed`). Only shown
+    // once a launch has actually burned something, so a plain tall-tower climb (no
+    // rockets fired) doesn't carry a "Fuel 0" clutter line.
+    let fuel_text = fuel
+        .map(|f| f.0)
+        .filter(|&j| j > 1.0)
+        .map(|j| format!(" · Fuel {:.1} kN·s", j / 1000.0))
+        .unwrap_or_default();
     let ctx = contexts.ctx_mut()?;
     egui::Area::new(egui::Id::new("bs_flight_hud"))
         .anchor(Align2::CENTER_TOP, egui::vec2(0.0, 44.0))
@@ -476,9 +485,11 @@ fn show_flight_hud(
                     // never wrapped (the Area would fold "m/s" onto a second line).
                     ui.add(
                         egui::Label::new(
-                            egui::RichText::new(format!("Alt {altitude_text} · {speed_text}"))
-                                .size(18.0)
-                                .color(Color32::WHITE),
+                            egui::RichText::new(format!(
+                                "Alt {altitude_text} · {speed_text}{fuel_text}"
+                            ))
+                            .size(18.0)
+                            .color(Color32::WHITE),
                         )
                         .wrap_mode(egui::TextWrapMode::Extend),
                     );

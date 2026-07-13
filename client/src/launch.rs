@@ -54,6 +54,7 @@ impl Plugin for LaunchPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<LaunchLocal>()
             .init_resource::<LaunchCameraZoom>()
+            .init_resource::<FuelUsed>()
             .add_message::<SpSetLock>()
             .add_systems(Update, (tick_launch, ease_launch_zoom))
             // Single-player half of the Lock button: weld/unweld the local character
@@ -132,6 +133,18 @@ impl LaunchLocal {
         self.sp == SpPhase::Launched
     }
 }
+
+/// Cumulative launch fuel spent by the local player's assembly, as thrust **impulse**
+/// (N·s = ∫ Σ|engine force| dt). Burning fuel doesn't reduce mass in this sim, so total
+/// impulse — not a rocket-equation Δv — is the honest propellant cost, and it is exactly
+/// the quantity the fuel-optimal autopilot minimizes. Shown on the flight HUD in kN·s.
+/// The thrust systems accumulate it while the local assembly is under power and zero it
+/// while idle, so each launch starts from zero. In multiplayer this counts the *predicted*
+/// burn, so an occasional rollback replay can nudge it a hair above the server's exact
+/// figure — fine for a glanceable readout; the flight recorder carries the authoritative
+/// number for analysis.
+#[derive(Resource, Default)]
+pub struct FuelUsed(pub f32);
 
 /// How far the camera zooms out once a launch lifts off — 2× the player's current
 /// distance, eased in/out. Applied on top of the scroll-zoom distance by
@@ -307,8 +320,10 @@ fn apply_sp_thrust(
         Query<(Entity, Forces, &mut Gimbal, Option<&mut FlameThrottle>), With<RocketEngine>>,
     )>,
     gravity: Res<Gravity>,
+    mut fuel: ResMut<FuelUsed>,
 ) {
     if local.sp != SpPhase::Launched {
+        fuel.0 = 0.0; // idle: keep the readout at zero until the next launch fires
         return;
     }
     let Some((members, _)) = main_assembly(&parts, &joints) else {
@@ -350,6 +365,7 @@ fn apply_sp_thrust(
         &spin,
         time.delta_secs(),
         &mut integral,
+        &mut fuel.0,
         &mut set.p2(),
     );
 }
@@ -384,8 +400,10 @@ fn apply_mp_thrust(
         >,
     )>,
     gravity: Res<Gravity>,
+    mut fuel: ResMut<FuelUsed>,
 ) {
     if !orb.iter().next().is_some_and(|l| l.launched) {
+        fuel.0 = 0.0; // idle: keep the readout at zero until the room launches
         return;
     }
     // The assembly's COM + motion state, via the shared measurement (see
@@ -419,6 +437,7 @@ fn apply_mp_thrust(
         &spin,
         time.delta_secs(),
         &mut integral,
+        &mut fuel.0,
         &mut set.p1(),
     );
 }
@@ -442,6 +461,7 @@ fn apply_thrust(
     spin: &AssemblySpin,
     dt: f32,
     integral: &mut Vec3,
+    fuel: &mut f32,
     rocket_forces: &mut Query<
         (Entity, Forces, &mut Gimbal, Option<&mut FlameThrottle>),
         impl bevy::ecs::query::QueryFilter,
@@ -455,6 +475,11 @@ fn apply_thrust(
         if let Ok((_, mut forces, mut gimbal, flame)) = rocket_forces.get_mut(burn.entity) {
             gimbal.0 = burn.gimbal;
             forces.apply_force_at_point(burn.force, burn.point);
+            // Fuel spent this tick = thrust impulse. |force| = full·throttle (the gimbal
+            // only rotates the force, it doesn't change its magnitude), so summing
+            // |force|·dt over the engines is exactly ∫ full·Σθ dt — the propellant burned,
+            // independent of how much thrust the gimbal tilts sideways.
+            *fuel += burn.force.length() * dt;
             // `Option`: the flame rides the render visual, which may lag the
             // physics by a frame — thrust must not depend on it.
             if let Some(mut flame) = flame {
