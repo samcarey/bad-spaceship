@@ -1231,6 +1231,31 @@ fps-dependent). Key facts that shaped the design:
   `Update` guard can be skipped between back-to-back fixed steps) and also recycle on the
   shared `part_state_diverged` predicate (`shared/src/part.rs`: non-finite, |pos| > 1000 km,
   |v| > 100 km/s, |ω| > 1000 rad/s).
+- **Planet gravity (radial, inverse-square).** Gravity points at the mini-planet's centre
+  (`0, PLANET_CENTER_Y, 0`) and weakens with altitude by `g(r) = μ/r²`, tuned so surface
+  gravity is unchanged (`μ = g₀·R²`, `R = PLANET_RADIUS + PLANET_DROP = 15020 m` centre-to-
+  platform; `gravity_at` in `shared/src/map.rs`, unit-tested). It is applied as a per-body
+  **correction on top of** Avian's unchanged uniform `Gravity` (0, −9.81, 0), NOT by
+  replacing it: each dynamic body gets `gravity_at(true_pos) − uniform` via `Forces`
+  (`apply_gravity_correction`, the shared helper the three worlds route through, like
+  `apply_hold_spring`). Keeping the uniform reference is load-bearing, not laziness — the
+  same `Res<Gravity>` is the rocket-thrust **calibration** (`full_rocket_thrust` scales by
+  `gravity.length()`) and the hold-spring / thrust-arrow feed-forward; making gravity a
+  field that replaced it would weaken thrust with altitude and **nullify** the intended
+  behaviour (constant calibrated thrust vs. weight that falls away → the rocket accelerates
+  ever harder as it climbs — a real ascent). The correction is ~zero at the pad (so
+  building, walking, jumping, and the launch autopilot are untouched) and only bites with
+  altitude. Because the planet is only 15 km in radius the falloff is steep and very felt:
+  by ~50 km up you're ~4 radii out and weight is ~1/16th of surface. `true_pos` folds the
+  floating-origin offset back in (`RoomFrames` per-room server-side, `ClientRoomFrame`
+  client-side, zero in single-player — same three-world split as the thrust triple) so `r`
+  is the real distance from the centre while the co-moving frame keeps bodies near the
+  local origin. Three thin mirror systems (`apply_sp_gravity`/`apply_mp_gravity` in
+  `client/src/launch.rs`, `apply_server_gravity` in `server/src/net.rs`), each **ordered
+  before** the other `Forces` writers on the rockets (thrust/hold) — Avian flags an
+  unordered `Forces` double-write. Verified: unit tests (field + a real Avian-step test of
+  the correction: net 9.81 at the pad, a quarter one ref-radius up) plus a live browser
+  ride climbing under the weakened field with no divergence.
 - **Floating-origin rebase (unbounded ascent).** The old hard ceilings — ~33 km with a
   rider / ~524 km unmanned, f32 ULP starving the solver and renderer — are gone: each room
   carries a floating-origin frame (`RoomFrames` server-side; replicated as `NetRoomFrame`

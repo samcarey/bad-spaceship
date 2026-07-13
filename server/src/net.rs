@@ -36,7 +36,7 @@ use bad_spaceship_shared::net::{
     ResetPosition, ResetRoom, RollbackReport, SaveGame, SetAvatar, SetLocked, SetName,
     GROUND_JOINT_ID, MONSTER_COUNT, TICK,
 };
-use bad_spaceship_shared::map::{GROUND_LAYER, PLANET_RESPAWN_Y};
+use bad_spaceship_shared::map::{apply_gravity_correction, GROUND_LAYER, PLANET_RESPAWN_Y};
 use bad_spaceship_shared::part::{
     avatar_lock_contacts, despawn_player_lock_welds, part_gap_contacts, part_state_diverged,
     spawn_random_part, spawn_random_rocket, spawn_rocket_engine, spawn_saved_cuboid, Gimbal,
@@ -388,6 +388,18 @@ impl Plugin for NetServerPlugin {
         // `apply_room_resets` drains the flag alongside client reset requests.
         app.init_resource::<PendingRoomResets>();
         app.add_systems(FixedUpdate, detect_assembly_crash);
+        // Planet gravity: a per-tick radial correction on every dynamic body so gravity
+        // points at the planet centre and weakens with altitude (see `gravity_at`). After
+        // the fall/rebase chain (so it reads post-shift positions + each room's current
+        // offset) and before the `Forces` consumers it shares the rockets with
+        // (`server_hold` in the grab chain, `apply_room_rocket_thrust`).
+        app.add_systems(
+            FixedUpdate,
+            apply_server_gravity
+                .after(respawn_fallen_avatars)
+                .before(server_grab)
+                .before(apply_room_rocket_thrust),
+        );
         app.add_systems(
             Update,
             (
@@ -2357,6 +2369,29 @@ fn publish_room_launch(registry: Res<LaunchRegistry>, mut orbs: Query<(&RoomStat
             None => NetLaunch::default(),
         };
         launch.set_if_neq(next);
+    }
+}
+
+/// Planet gravity for the authoritative server sim: a per-tick radial correction on
+/// every dynamic body (parts + avatars) — gravity points at the planet centre and
+/// weakens with altitude (see [`gravity_at`]). The correction rides on top of Avian's
+/// unchanged uniform `Gravity`, so it is ~zero at the pad and only bites as an assembly
+/// climbs. Each body's TRUE position folds in its room's floating-origin offset
+/// ([`RoomFrames`]) so `r` is the real distance from the centre while the co-moving
+/// frame keeps the body near the local origin. The client predicts the identical field
+/// (`apply_mp_gravity`), so prediction converges.
+fn apply_server_gravity(
+    frames: Res<RoomFrames>,
+    gravity: Res<Gravity>,
+    mut bodies: Query<
+        (&Position, Option<&PartRoom>, Option<&RoomMember>, Forces),
+        Or<(With<NetPart>, With<ServerAvatar>)>,
+    >,
+) {
+    for (position, part_room, member, mut forces) in &mut bodies {
+        let room = part_room.map(|r| r.id).or_else(|| member.map(|m| m.0));
+        let offset = room.map_or(DVec3::ZERO, |r| frames.get(r).offset);
+        apply_gravity_correction(&mut forces, position.0 + offset.as_vec3(), gravity.0);
     }
 }
 
