@@ -19,7 +19,7 @@ use bad_spaceship_shared::{
 };
 use bevy::{asset::RenderAssetUsages, mesh::PrimitiveTopology, prelude::*};
 
-use crate::launch::LaunchLocal;
+use crate::launch::{room_launched, LaunchLocal};
 use crate::outline::{Outlined, PlanetOutline};
 use crate::render_main_pass::magma_material::{magma_material, MagmaMaterial};
 
@@ -81,18 +81,15 @@ fn spawn_planet(
             Transform::from_xyz(0.0, PLANET_CENTER_Y, 0.0),
             PlanetSphere,
         ));
-        parent.spawn((
-            Mesh3d(cliffs),
-            MeshMaterial3d(material),
-            Transform::IDENTITY,
-        ));
+        // No `Transform` needed — `Mesh3d` supplies an identity one; the cliff
+        // vertices are already in the ground's local frame.
+        parent.spawn((Mesh3d(cliffs), MeshMaterial3d(material)));
     });
 }
 
 /// The cliff skirt: the four vertical walls of the square platform footprint,
 /// dropping from the platform lip down to the planet surface. Built non-indexed
-/// with per-face outward normals (flat-shaded rock), each wall wound so its front
-/// face points outward regardless of corner order.
+/// with per-face outward normals (flat-shaded rock).
 fn cliff_mesh() -> Mesh {
     // The platform lip sits at +half the bowl thickness; anchor the cliff top there
     // so it meets the grass edge with no gap, and drop to the planet surface.
@@ -100,7 +97,9 @@ fn cliff_mesh() -> Mesh {
     let hw = PLATFORM_WIDTH_M / 2.0;
     let bot = PLANET_SURFACE_Y;
 
-    // Square corners (x, z), counter-clockwise seen from above.
+    // Square corners (x, z), counter-clockwise seen from above. For this fixed
+    // winding, `(edge.z, 0, -edge.x)` is always the outward normal and the
+    // `(tl, tr, bl)`/`(tr, br, bl)` triangle order always faces outward.
     let corners = [
         Vec2::new(-hw, -hw),
         Vec2::new(hw, -hw),
@@ -114,29 +113,15 @@ fn cliff_mesh() -> Mesh {
     for i in 0..4 {
         let a = corners[i];
         let b = corners[(i + 1) % 4];
-        // Outward normal of this wall = horizontal, perpendicular to the edge,
-        // pointing away from the centre.
         let edge = b - a;
-        let mut out = Vec3::new(edge.y, 0.0, -edge.x).normalize();
-        if out.dot(Vec3::new(a.x, 0.0, a.y)) < 0.0 {
-            out = -out;
-        }
+        let out = Vec3::new(edge.y, 0.0, -edge.x).normalize();
         let tl = Vec3::new(a.x, TOP_Y, a.y);
         let tr = Vec3::new(b.x, TOP_Y, b.y);
         let bl = Vec3::new(a.x, bot, a.y);
         let br = Vec3::new(b.x, bot, b.y);
-        // Two triangles; flip winding if it faces inward, so the outside is drawn.
-        for tri in [[tl, bl, tr], [tr, bl, br]] {
-            let geo = (tri[1] - tri[0]).cross(tri[2] - tri[0]);
-            let (p0, p1, p2) = if geo.dot(out) >= 0.0 {
-                (tri[0], tri[1], tri[2])
-            } else {
-                (tri[0], tri[2], tri[1])
-            };
-            for v in [p0, p1, p2] {
-                positions.push([v.x, v.y, v.z]);
-                normals.push([out.x, out.y, out.z]);
-            }
+        for v in [tl, tr, bl, tr, br, bl] {
+            positions.push([v.x, v.y, v.z]);
+            normals.push([out.x, out.y, out.z]);
         }
     }
 
@@ -157,11 +142,7 @@ fn toggle_planet_outline(
     multiplayer: Option<Res<SuppressLocalParts>>,
     orb: Query<&NetLaunch>,
 ) {
-    let launched = if multiplayer.is_some() {
-        orb.iter().next().is_some_and(|l| l.launched)
-    } else {
-        local.sp_launched()
-    };
+    let launched = room_launched(&local, multiplayer.is_some(), &orb);
     for (entity, has) in &planet {
         if launched && !has {
             commands.entity(entity).insert((Outlined, PlanetOutline));

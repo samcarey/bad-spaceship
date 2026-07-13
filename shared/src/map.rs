@@ -36,6 +36,11 @@ pub const PLANET_SURFACE_Y: f32 = -PLANET_DROP;
 pub const PLANET_RADIUS: f32 = 15_000.0;
 /// World-space y of the sphere's centre (surface minus radius).
 pub const PLANET_CENTER_Y: f32 = PLANET_SURFACE_Y - PLANET_RADIUS;
+/// Height a grounded avatar respawns at once it falls off the cliffs — 2 m above the
+/// planet surface, so it never visibly clips into the magma. Shared by the server
+/// (`respawn_fallen_avatars`) and single-player (`player::despawn`) so the two respawn
+/// heights stay in lockstep.
+pub const PLANET_RESPAWN_Y: f32 = PLANET_SURFACE_Y + 2.0;
 
 /// The Avian collision-layer bit the ground sits on: bit 0 (value 1), Avian's
 /// default membership for a collider with no explicit `CollisionLayers` — like the

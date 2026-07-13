@@ -258,21 +258,21 @@ fn toggle_outline_pass(
     mut commands: Commands,
     outlined: Query<(), With<Outlined>>,
     planet: Query<(), (With<Outlined>, With<PlanetOutline>)>,
-    cam: Query<(Entity, Option<&OutlineSettings>), (With<Camera3d>, Without<MaskCam>)>,
+    cam: Query<(Entity, Has<OutlineSettings>), (With<Camera3d>, Without<MaskCam>)>,
 ) {
     let want = !outlined.is_empty();
-    // Green while the planet is the thing being outlined (post-blastoff), else the
-    // grabbable yellow. Recompute every frame so switching between the two updates.
+    // Green while the planet is being outlined (post-blastoff), else grabbable yellow.
+    // The two never overlap (see `PlanetOutline`), so `want` always passes through
+    // `false` between a yellow and a green episode — inserting on the rising edge picks
+    // the right colour without needing to hot-swap it.
     let color = if planet.is_empty() { OUTLINE_COLOR } else { PLANET_OUTLINE_COLOR };
-    for (entity, current) in cam.iter() {
-        if want {
-            if current.map(|s| s.color) != Some(color) {
-                commands.entity(entity).insert(OutlineSettings {
-                    color,
-                    params: Vec4::new(OUTLINE_WIDTH_PX, 0.0, 0.0, 0.0),
-                });
-            }
-        } else if current.is_some() {
+    for (entity, has) in cam.iter() {
+        if want && !has {
+            commands.entity(entity).insert(OutlineSettings {
+                color,
+                params: Vec4::new(OUTLINE_WIDTH_PX, 0.0, 0.0, 0.0),
+            });
+        } else if !want && has {
             commands.entity(entity).remove::<OutlineSettings>();
         }
     }

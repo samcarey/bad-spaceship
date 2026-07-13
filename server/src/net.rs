@@ -36,7 +36,7 @@ use bad_spaceship_shared::net::{
     ResetPosition, ResetRoom, RollbackReport, SaveGame, SetAvatar, SetLocked, SetName,
     GROUND_JOINT_ID, MONSTER_COUNT, TICK,
 };
-use bad_spaceship_shared::map::{GROUND_LAYER, PLANET_SURFACE_Y};
+use bad_spaceship_shared::map::{GROUND_LAYER, PLANET_RESPAWN_Y};
 use bad_spaceship_shared::part::{
     avatar_lock_contacts, despawn_player_lock_welds, part_gap_contacts, part_state_diverged,
     spawn_random_part, spawn_random_rocket, spawn_rocket_engine, spawn_saved_cuboid, Gimbal,
@@ -1098,7 +1098,11 @@ fn detect_assembly_crash(
 ) {
     for (position, part_room) in &assembly {
         let room = part_room.id;
-        if launches.is_launched(room) || frames.get(room).is_active() {
+        // Skip parts of rooms already flagged this frame, or launched / in-flight rooms.
+        if pending.0.contains(&room)
+            || launches.is_launched(room)
+            || frames.get(room).is_active()
+        {
             continue;
         }
         if position.0.y < ASSEMBLY_CRASH_Y {
@@ -1337,11 +1341,11 @@ fn respawn_fallen_avatars(
     >,
 ) {
     // Grounded rooms: respawn as a player reaches the planet surface below the
-    // cliffs (2 m above it, so they never visibly clip into the magma). This is the
-    // "touch the ground other than the grass platform → respawn" rule — the planet
-    // has no collider, so a fall off the cliff is caught here by height. Still well
-    // below `PART_FALL_Y`, so a rider falls past the part cull line first.
-    const AVATAR_FALL_Y: f32 = PLANET_SURFACE_Y + 2.0;
+    // cliffs. This is the "touch the ground other than the grass platform → respawn"
+    // rule — the planet has no collider, so a fall off the cliff is caught here by
+    // height ([`PLANET_RESPAWN_Y`], well below `PART_FALL_Y` so a rider falls past the
+    // part cull line first).
+    const AVATAR_FALL_Y: f32 = PLANET_RESPAWN_Y;
     // Deck points are only needed for avatars in active-frame rooms — computed
     // lazily so the (common) all-grounded case never builds them.
     let mut decks: Option<HashMap<RoomId, Vec3>> = None;

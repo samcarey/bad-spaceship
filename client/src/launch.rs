@@ -157,15 +157,26 @@ fn ease_launch_zoom(
     multiplayer: Option<Res<SuppressLocalParts>>,
     orb: Query<&NetLaunch>,
 ) {
-    let launched = if multiplayer.is_some() {
-        orb.iter().next().is_some_and(|l| l.launched)
-    } else {
-        local.sp_launched()
-    };
+    let launched = room_launched(&local, multiplayer.is_some(), &orb);
     let target = if launched { LAUNCH_CAMERA_ZOOM } else { 1.0 };
     // ~1.2 s to close most of the gap (rate 2.0), matching the liftoff's own pace.
     let alpha = 1.0 - (-2.0 * time.delta_secs()).exp();
     zoom.0 += (target - zoom.0) * alpha;
+}
+
+/// Whether the room has blasted off (lifted off, not merely counting down), across both
+/// modes: single-player [`LaunchLocal::sp_launched`], multiplayer the replicated
+/// [`NetLaunch::launched`]. Drives the launch camera zoom-out and the planet's green ring.
+pub(crate) fn room_launched(
+    local: &LaunchLocal,
+    multiplayer: bool,
+    orb: &Query<&NetLaunch>,
+) -> bool {
+    if multiplayer {
+        orb.iter().next().is_some_and(|l| l.launched)
+    } else {
+        local.sp_launched()
+    }
 }
 
 /// Whether the room's assembly is mid-launch (counting down or lifted off), across both
