@@ -36,7 +36,7 @@ use bad_spaceship_shared::net::{
     ResetPosition, ResetRoom, RollbackReport, SaveGame, SetAvatar, SetLocked, SetName,
     GROUND_JOINT_ID, MONSTER_COUNT, TICK,
 };
-use bad_spaceship_shared::map::GROUND_LAYER;
+use bad_spaceship_shared::map::{GROUND_LAYER, PLANET_SURFACE_Y};
 use bad_spaceship_shared::part::{
     avatar_lock_contacts, despawn_player_lock_welds, part_gap_contacts, part_state_diverged,
     spawn_random_part, spawn_random_rocket, spawn_rocket_engine, spawn_saved_cuboid, Gimbal,
@@ -383,6 +383,11 @@ impl Plugin for NetServerPlugin {
         // input, lazily creating the room's world, and apply client rename +
         // avatar-pick + reset-position + reset-room requests.
         app.init_resource::<InitialWorlds>();
+        // Reset a room when its assembly crashes into the planet: the detector
+        // (FixedUpdate, reads post-physics positions) flags the room, and
+        // `apply_room_resets` drains the flag alongside client reset requests.
+        app.init_resource::<PendingRoomResets>();
+        app.add_systems(FixedUpdate, detect_assembly_crash);
         app.add_systems(
             Update,
             (
@@ -1066,6 +1071,42 @@ struct InitialWorlds {
 /// Minimum spacing between two resets of the same room (see [`apply_room_resets`]).
 const RESET_DEBOUNCE_SECS: f32 = 1.0;
 
+/// Rooms queued for a reset by the crash detector ([`detect_assembly_crash`]),
+/// drained by [`apply_room_resets`] alongside client `ResetRoom` requests. A set,
+/// so several fixed steps flagging the same crashing room before the next `Update`
+/// coalesce to one reset.
+#[derive(Resource, Default)]
+struct PendingRoomResets(HashSet<RoomId>);
+
+/// A grounded, pre-blastoff assembly whose parts fall below this have toppled off
+/// the platform toward the planet — a crash. Below the platform (parts rest at
+/// `y > 0`) but above `PART_FALL_Y` (`-10`), so the room resets before its parts
+/// individually recycle out from under the crash.
+const ASSEMBLY_CRASH_Y: f32 = -5.0;
+
+/// Flag a room for reset when its largest assembly crashes into the planet: any
+/// member part dropping below [`ASSEMBLY_CRASH_Y`] while the room is grounded and
+/// pre-blastoff. `InLargestAssembly` scopes this to the real rocket stack (≥ 2
+/// jointed parts) — a lone part rolling off the edge just recycles. Skipped once a
+/// room is launched or in an active floating-origin frame (in flight the assembly
+/// legitimately sits anywhere; there's no planet to hit).
+fn detect_assembly_crash(
+    launches: Res<LaunchRegistry>,
+    frames: Res<RoomFrames>,
+    mut pending: ResMut<PendingRoomResets>,
+    assembly: Query<(&Position, &PartRoom), With<InLargestAssembly>>,
+) {
+    for (position, part_room) in &assembly {
+        let room = part_room.id;
+        if launches.is_launched(room) || frames.get(room).is_active() {
+            continue;
+        }
+        if position.0.y < ASSEMBLY_CRASH_Y {
+            pending.0.insert(room);
+        }
+    }
+}
+
 /// Snapshot each freshly-created random room's world into [`InitialWorlds`]. A
 /// room needing a snapshot is derived, not tracked: it's in `RoomRegistry` (which
 /// `assign_rooms` mutates synchronously) but has no initial world yet. Runs in
@@ -1123,6 +1164,7 @@ fn capture_initial_worlds(
 fn apply_room_resets(
     time: Res<Time>,
     mut recent: Local<HashMap<RoomId, f32>>,
+    mut pending: ResMut<PendingRoomResets>,
     mut commands: Commands,
     mut links: Query<(Entity, &mut MessageReceiver<ResetRoom>), (With<ClientOf>, With<Connected>)>,
     members: Query<(&ControlledBy, &RoomMember)>,
@@ -1151,23 +1193,30 @@ fn apply_room_resets(
         (With<ServerAvatar>, Without<NetPart>),
     >,
 ) {
+    // Rooms to reset this frame: client `ResetRoom` requests (menu button) plus
+    // crash-flagged rooms from `detect_assembly_crash`.
+    let mut rooms: Vec<RoomId> = Vec::new();
     for (link, mut receiver) in &mut links {
         // Drain the window; act at most once per link (repeats coalesce).
         if receiver.receive().count() == 0 {
             continue;
         }
-        let Some((_, member)) = members.iter().find(|(c, _)| c.owner == link) else {
-            continue;
-        };
-        let room_id = member.0;
-        // The debounce (see the doc comment) also coalesces several players
-        // confirming the same room this frame: the first sets the timestamp,
-        // the rest land inside the window.
-        let now = time.elapsed_secs();
+        if let Some((_, member)) = members.iter().find(|(c, _)| c.owner == link) {
+            rooms.push(member.0);
+        }
+    }
+    rooms.extend(pending.0.drain());
+    if rooms.is_empty() {
+        return;
+    }
+    let now = time.elapsed_secs();
+    recent.retain(|_, at| now - *at < RESET_DEBOUNCE_SECS);
+    for room_id in rooms {
+        // Debounce (see the doc comment): coalesces reliable-channel resends, two
+        // players confirming near-simultaneously, and a crash racing a manual reset.
         if recent.get(&room_id).is_some_and(|at| now - at < RESET_DEBOUNCE_SECS) {
             continue;
         }
-        recent.retain(|_, at| now - *at < RESET_DEBOUNCE_SECS);
         recent.insert(room_id, now);
         let Some(world) = initial.by_room.get(&room_id) else {
             // Unreachable in practice (the snapshot lands the frame the room is
@@ -1287,7 +1336,12 @@ fn respawn_fallen_avatars(
         (With<ServerAvatar>, Without<NetPart>),
     >,
 ) {
-    const AVATAR_FALL_Y: f32 = -30.0;
+    // Grounded rooms: respawn as a player reaches the planet surface below the
+    // cliffs (2 m above it, so they never visibly clip into the magma). This is the
+    // "touch the ground other than the grass platform → respawn" rule — the planet
+    // has no collider, so a fall off the cliff is caught here by height. Still well
+    // below `PART_FALL_Y`, so a rider falls past the part cull line first.
+    const AVATAR_FALL_Y: f32 = PLANET_SURFACE_Y + 2.0;
     // Deck points are only needed for avatars in active-frame rooms — computed
     // lazily so the (common) all-grounded case never builds them.
     let mut decks: Option<HashMap<RoomId, Vec3>> = None;

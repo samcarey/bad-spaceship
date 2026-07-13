@@ -9,6 +9,7 @@ use bad_spaceship_shared::{
 mod ash_material;
 pub mod flame_material;
 mod grass_material;
+pub mod magma_material;
 pub mod metal_material;
 
 // Bevy 0.17's render-crate split relocated several types out of `bevy_render`:
@@ -28,6 +29,7 @@ use flame_material::{
     register_flame_mesh, spawn_flame, update_flames, FlameMaterial, FLAME_SHADER_HANDLE,
 };
 use grass_material::{GrassExtension, GrassMaterial, GRASS_SHADER_HANDLE};
+use magma_material::{MagmaMaterial, MAGMA_SHADER_HANDLE};
 use metal_material::{part_visual, rocket_body_material, MetalMaterial, METAL_SHADER_HANDLE};
 use avian3d::prelude::Collider;
 
@@ -59,6 +61,12 @@ impl Plugin for RenderMainPassPlugin {
         );
         load_internal_asset!(
             app,
+            MAGMA_SHADER_HANDLE,
+            "../../assets/magma_material.wgsl",
+            Shader::from_wgsl
+        );
+        load_internal_asset!(
+            app,
             ASH_SHADER_HANDLE,
             "../../assets/ash_material.wgsl",
             Shader::from_wgsl
@@ -71,6 +79,7 @@ impl Plugin for RenderMainPassPlugin {
         );
         app.add_plugins((
             MaterialPlugin::<GrassMaterial>::default(),
+            MaterialPlugin::<MagmaMaterial>::default(),
             MaterialPlugin::<MetalMaterial>::default(),
             MaterialPlugin::<AshMaterial>::default(),
             MaterialPlugin::<FlameMaterial>::default(),

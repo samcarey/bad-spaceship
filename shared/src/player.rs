@@ -186,7 +186,11 @@ fn despawn(
     mut commands: Commands,
 ) {
     for (player_transform, player_entity) in players.iter() {
-        if player_transform.translation.y < -30.0 {
+        // Respawn as the player reaches the planet surface below the cliffs (2 m
+        // above it, so they don't clip into the magma) — matching the multiplayer
+        // `AVATAR_FALL_Y`. The planet is a visual with no collider; a fall off the
+        // platform edge is caught here by height.
+        if player_transform.translation.y < crate::map::PLANET_SURFACE_Y + 2.0 {
             // The single, app-lifetime camera is parented under the player's
             // orbit hierarchy. Bevy 0.16 made `despawn()` recursive, so detach
             // the camera first (clear its `ChildOf`) to keep it alive — it gets

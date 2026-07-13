@@ -25,6 +25,7 @@ mod mobile;
 mod monster;
 mod net;
 mod outline;
+mod planet;
 mod platform;
 mod render_main_pass;
 mod render_secondary_pass;
@@ -84,6 +85,7 @@ fn main() {
             GamepadPlugin,
             PlatformPlugin,
             outline::OutlinePlugin,
+            planet::PlanetPlugin,
             LaunchPlugin,
             RenderMainPassPlugin,
             monster::MonsterPlugin,

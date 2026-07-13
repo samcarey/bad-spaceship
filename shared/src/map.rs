@@ -13,6 +13,30 @@ impl Plugin for MapPlugin {
 pub const PLATFORM_WIDTH_M: f32 = 50.0; // meters
 pub const PLATFORM_THICKNESS_M: f32 = 3.0; // meters
 
+// ---------------------------------------------------------------------------
+// Mini planet
+// ---------------------------------------------------------------------------
+//
+// The 50 m grass platform is now the top of a mesa: cliffs drop from its edge
+// down to a giant low-poly magma sphere `PLANET_DROP` metres below. The planet
+// is a *client-side visual* (rendered with the magma material) plus a couple of
+// server-side y-thresholds — it has no 30 km collider. Instead:
+//   * a player who walks off the cliff falls past `PLANET_SURFACE_Y` and is
+//     respawned by the normal fall path (the platform is the only thing you can
+//     stand on before blastoff);
+//   * a built assembly whose parts drop below `ASSEMBLY_CRASH_Y` (well below the
+//     platform but above the loose-part cull line) has toppled off — a crash,
+//     which resets the room.
+
+/// Metres the planet's top surface sits below the platform base (world y = 0).
+pub const PLANET_DROP: f32 = 20.0;
+/// World-space y of the planet's top surface (directly below the platform).
+pub const PLANET_SURFACE_Y: f32 = -PLANET_DROP;
+/// 30 km diameter — a proper little world curving away to a near horizon.
+pub const PLANET_RADIUS: f32 = 15_000.0;
+/// World-space y of the sphere's centre (surface minus radius).
+pub const PLANET_CENTER_Y: f32 = PLANET_SURFACE_Y - PLANET_RADIUS;
+
 /// The Avian collision-layer bit the ground sits on: bit 0 (value 1), Avian's
 /// default membership for a collider with no explicit `CollisionLayers` — like the
 /// bowl spawned below. The multiplayer collision scheme reserves it for the ground
@@ -70,6 +94,12 @@ fn spawn_map(mut commands: Commands) {
         // bare component replaces the old `TransformBundle`. (Avian collides all
         // collider pairs by default, so rapier's `ActiveCollisionTypes` opt-in is gone.)
         .insert(Transform::from_xyz(0.0, 0.0, 0.0))
+        // The client parents the mini-planet's visuals (sphere + cliffs) under this
+        // entity so they ride the floating-origin frame. Give it `Visibility` from
+        // the start so those child meshes never attach to a parent that lacks
+        // `InheritedVisibility` (a first-frame B0004 warning otherwise). Inert on the
+        // headless server.
+        .insert(Visibility::default())
         .insert(bowl_collider())
         .insert(Grass);
 }

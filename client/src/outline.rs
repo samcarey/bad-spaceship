@@ -64,6 +64,9 @@ const MASK_LAYER: usize = 1;
 /// place; feel-test the width (the mask is in physical pixels, so a high-DPR phone
 /// makes a fixed count read thinner).
 const OUTLINE_COLOR: Vec4 = Vec4::new(1.0, 0.95, 0.1, 0.75);
+/// Green outline colour, used when the outlined thing is the planet (the
+/// post-blastoff "there's your world" ring) instead of a grabbable part.
+const PLANET_OUTLINE_COLOR: Vec4 = Vec4::new(0.15, 1.0, 0.25, 0.8);
 const OUTLINE_WIDTH_PX: f32 = 6.0;
 
 pub struct OutlinePlugin;
@@ -111,6 +114,14 @@ impl Plugin for OutlinePlugin {
 /// Marker: put on any entity with a `Mesh3d` to outline it; remove to clear.
 #[derive(Component)]
 pub struct Outlined;
+
+/// Marker on an [`Outlined`] entity that should be ringed in green rather than the
+/// default grabbable yellow — the mini-planet after blastoff. The mask + composite
+/// pass are shared (one colour per frame), so when any planet is outlined the whole
+/// ring goes green; post-blastoff nothing else is being grabbed, so they don't
+/// collide in practice.
+#[derive(Component)]
+pub struct PlanetOutline;
 
 /// Links an outlined part to the mask proxies it spawned (one per non-flame mesh in
 /// its subtree — e.g. a rocket's body + flare), so they can be despawned when
@@ -246,16 +257,22 @@ fn resize_mask_image(
 fn toggle_outline_pass(
     mut commands: Commands,
     outlined: Query<(), With<Outlined>>,
-    cam: Query<(Entity, Has<OutlineSettings>), (With<Camera3d>, Without<MaskCam>)>,
+    planet: Query<(), (With<Outlined>, With<PlanetOutline>)>,
+    cam: Query<(Entity, Option<&OutlineSettings>), (With<Camera3d>, Without<MaskCam>)>,
 ) {
     let want = !outlined.is_empty();
-    for (entity, has) in cam.iter() {
-        if want && !has {
-            commands.entity(entity).insert(OutlineSettings {
-                color: OUTLINE_COLOR,
-                params: Vec4::new(OUTLINE_WIDTH_PX, 0.0, 0.0, 0.0),
-            });
-        } else if !want && has {
+    // Green while the planet is the thing being outlined (post-blastoff), else the
+    // grabbable yellow. Recompute every frame so switching between the two updates.
+    let color = if planet.is_empty() { OUTLINE_COLOR } else { PLANET_OUTLINE_COLOR };
+    for (entity, current) in cam.iter() {
+        if want {
+            if current.map(|s| s.color) != Some(color) {
+                commands.entity(entity).insert(OutlineSettings {
+                    color,
+                    params: Vec4::new(OUTLINE_WIDTH_PX, 0.0, 0.0, 0.0),
+                });
+            }
+        } else if current.is_some() {
             commands.entity(entity).remove::<OutlineSettings>();
         }
     }

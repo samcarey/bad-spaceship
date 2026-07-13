@@ -122,8 +122,8 @@ impl LaunchLocal {
     }
 
     /// Single-player: whether blastoff has happened (lifted off, not merely counting
-    /// down) — the trigger for the launch camera zoom-out.
-    fn sp_launched(&self) -> bool {
+    /// down) — the trigger for the launch camera zoom-out and the planet's green ring.
+    pub(crate) fn sp_launched(&self) -> bool {
         self.sp == SpPhase::Launched
     }
 }
