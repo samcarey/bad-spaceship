@@ -22,11 +22,9 @@ use avian3d::prelude::{
     AngularVelocity, Collider, ComputedMass, Forces, Gravity, LinearVelocity, Position, Rotation,
     SphericalJoint, WriteRigidBodyForces,
 };
-use bad_spaceship_shared::guidance::{
-    ascent_guidance, optimize_pitchover, AscentPolicy, Guidance, DOWNRANGE_AZIMUTH,
-};
+use bad_spaceship_shared::guidance::{ascent_guidance, Guidance, DEFAULT_PITCHOVER};
 use bad_spaceship_shared::launch::{
-    assembly_burn, full_rocket_thrust, measure_assembly_spin, AssemblySpin, LAUNCH_COUNTDOWN_SECS,
+    assembly_burn, measure_assembly_spin, AssemblySpin, LAUNCH_COUNTDOWN_SECS,
 };
 use bad_spaceship_shared::map::apply_gravity_correction;
 use bad_spaceship_shared::net::{
@@ -312,9 +310,6 @@ fn apply_sp_thrust(
     time: Res<Time>,
     // The launch autopilot's per-assembly PID integral state (see `assembly_burn`).
     mut integral: Local<Vec3>,
-    // The fuel-optimal pitchover, computed once at the launch state then frozen (single
-    // player has no floating-origin frame, so true == local here).
-    mut sp_policy: Local<Option<f32>>,
     local: Res<LaunchLocal>,
     parts: Query<(Entity, &GlobalTransform, &ComputedMass), With<Holdable>>,
     joints: Query<&SphericalJoint>,
@@ -331,7 +326,6 @@ fn apply_sp_thrust(
 ) {
     if local.sp != SpPhase::Launched {
         fuel.0 = 0.0; // idle: keep the readout at zero until the next launch fires
-        *sp_policy = None; // re-plan the ascent for the next launch
         return;
     }
     let Some((members, _)) = main_assembly(&parts, &joints) else {
@@ -366,29 +360,10 @@ fn apply_sp_thrust(
             (entity, translation, rotation, gimbal.0)
         })
         .collect();
-    // Fuel-optimal ascent guidance. No floating origin in single player, so the true
-    // planet-frame state is just the local COM + velocity. The pitchover is optimized once
-    // at the launch state (from this stack's thrust-to-weight) and frozen; the prograde
-    // gravity turn + escape cutoff then run off the live state each tick.
-    let pitchover = *sp_policy.get_or_insert_with(|| {
-        let full = full_rocket_thrust(gravity.0);
-        let total_mass: f32 = parts
-            .iter()
-            .filter(|(entity, ..)| members.contains(entity))
-            .map(|(_, _, m)| m.value())
-            .sum();
-        if total_mass <= 0.0 {
-            return 0.0;
-        }
-        let thrust_accel = geometry.len() as f32 * full / total_mass;
-        optimize_pitchover(com, spin.linear_velocity, thrust_accel, DOWNRANGE_AZIMUTH, 0.1, 2000)
-            .pitchover_rad
-    });
-    let guidance = ascent_guidance(
-        com,
-        spin.linear_velocity,
-        AscentPolicy { pitchover_rad: pitchover, azimuth: DOWNRANGE_AZIMUTH },
-    );
+    // Fuel-optimal ascent guidance: straight up (`DEFAULT_PITCHOVER` = 0, the measured
+    // optimum here) with an escape-energy throttle cutoff. No floating origin in single
+    // player, so the true planet-frame state is just the local COM + velocity.
+    let guidance = ascent_guidance(com, spin.linear_velocity, DEFAULT_PITCHOVER);
     apply_thrust(
         com,
         gravity.0,
@@ -435,12 +410,10 @@ fn apply_mp_thrust(
     gravity: Res<Gravity>,
     mut fuel: ResMut<FuelUsed>,
 ) {
-    let Some(launch) = orb.iter().next().filter(|l| l.launched) else {
+    if !orb.iter().next().is_some_and(|l| l.launched) {
         fuel.0 = 0.0; // idle: keep the readout at zero until the room launches
         return;
-    };
-    // The server's chosen ascent pitchover, replicated so the predicted turn matches.
-    let pitchover = launch.pitchover;
+    }
     // The assembly's COM + motion state, via the shared measurement (see
     // `measure_assembly_spin`) so the trim matches the server exactly; collect
     // the member rockets' poses alongside (`Gimbal` marks the rockets — it rides
@@ -469,11 +442,7 @@ fn apply_mp_thrust(
     // co-moving velocity), so the guidance sees real altitude/velocity under a rebase.
     let true_com = com + frame.offset.as_vec3();
     let true_vel = spin.linear_velocity + frame.velocity;
-    let guidance = ascent_guidance(
-        true_com,
-        true_vel,
-        AscentPolicy { pitchover_rad: pitchover, azimuth: DOWNRANGE_AZIMUTH },
-    );
+    let guidance = ascent_guidance(true_com, true_vel, DEFAULT_PITCHOVER);
     apply_thrust(
         com,
         gravity.0,
