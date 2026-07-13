@@ -37,8 +37,9 @@ pub fn rocket_world_thrust(translation: Vec3, rotation: Quat, full_thrust: f32) 
     (point, force)
 }
 
-/// Thrust vectoring: how far a rocket's nozzle can deflect off the body axis (±15°).
-pub const GIMBAL_MAX_RAD: f32 = 15.0 * std::f32::consts::PI / 180.0;
+/// Thrust vectoring: how far a rocket's nozzle can deflect off the body axis
+/// (±18°; was ±15°, +20% by feel).
+pub const GIMBAL_MAX_RAD: f32 = 18.0 * std::f32::consts::PI / 180.0;
 /// Thrust vectoring: how fast the nozzle can slew toward its commanded deflection.
 /// Tested up the ladder (flight-recorder-verified at each step): 20°/s (real-TVC
 /// plausible) puts the full ±15° traverse at 0.75 s — the nozzle always torques about

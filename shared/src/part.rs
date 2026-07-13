@@ -142,9 +142,10 @@ pub const ROCKET_FLARE_Y_OFFSET: f32 = -(ROCKET_BODY_HEIGHT / 2.0 + ROCKET_FLARE
 
 /// Nominal thrust of one rocket engine, expressed as how many *average* parts it can
 /// lift against gravity. Multiply by `NOMINAL_PART_MASS` and gravity's magnitude to
-/// get the force in newtons. The thrust is **not applied to the simulation yet** —
-/// it only drives the thrust-vector visualisation.
-pub const ROCKET_THRUST_PART_WEIGHTS: f32 = 3.0;
+/// get the force in newtons. Feeds `launch::full_rocket_thrust` — the single source
+/// for the real launch thrust AND the thrust-vector visualisation, so the arrow and
+/// the force can't drift. (Was 3.0; +10% by feel.)
+pub const ROCKET_THRUST_PART_WEIGHTS: f32 = 3.3;
 
 /// Local-frame point where a rocket's thrust is applied: inside the rocket at the
 /// base of the body, where the flare begins (the flare's narrow top meets the body's

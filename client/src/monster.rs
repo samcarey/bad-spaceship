@@ -16,8 +16,8 @@
 use std::time::Duration;
 
 use bad_spaceship_shared::{
-    net::{monster_index, MONSTER_COUNT},
-    Character, Yaw,
+    net::{monster_index, NetMoving, MONSTER_COUNT},
+    Character, DirectionalInput, Yaw,
 };
 use bevy::{
     gltf::GltfAssetLabel, prelude::*, world_serialization::WorldAssetRoot,
@@ -73,10 +73,6 @@ const ANIM_WALK: usize = 8;
 /// `size` 1.5 — kept in lockstep with `insert_character_body`).
 const FEET_Y: f32 = -0.75;
 
-/// Walking faster than this plays Walk; slower plays Idle. One threshold (no
-/// hysteresis) is fine because the character's speed is far from it in both
-/// states (0 idle vs ~13 max_speed).
-const WALK_SPEED: f32 = 1.0;
 
 pub struct MonsterPlugin;
 
@@ -169,10 +165,6 @@ struct MonsterAnim {
     current: AnimationNodeIndex,
 }
 
-/// Previous frame's position, for animation speed (works identically for the
-/// locally-simulated own body and interpolated remote avatars).
-#[derive(Component)]
-struct LastPos(Vec3);
 
 /// Hang a monster visual under `body`: pivot → scaled scene. Returns the pivot
 /// (the caller rotates it to the body's facing). Shared by the single-player /
@@ -309,28 +301,29 @@ fn setup_monster_animation(
     }
 }
 
-/// Idle ↔ Walk from the body's horizontal speed, measured as the frame-to-frame
-/// `GlobalTransform` delta — one code path that works for the locally-simulated
-/// own body, the predicted avatar, and interpolated remote avatars alike.
+/// Idle ↔ Walk from the player's **input**, never from world motion: a rider
+/// standing on a laterally-drifting rocket used to "run in place" because the old
+/// implementation measured the body's frame-to-frame world displacement. Walk plays
+/// only while a move or jump input is held (looking around doesn't count):
+/// - the OWN body reads its local `DirectionalInput` directly (zero delay; written
+///   by the single-player input combiner and, in multiplayer, by `apply_net_input`
+///   from the same buffered intent the server simulates);
+/// - REMOTE avatars read the replicated [`NetMoving`] flag the server mirrors from
+///   that player's real input (clients never see other players' inputs).
+/// The own predicted body carries both (its round-trip `NetMoving` copy lands on it
+/// too); the local input wins.
 fn animate_monsters(
-    time: Res<Time>,
-    mut commands: Commands,
-    mut bodies: Query<(Entity, &GlobalTransform, &mut MonsterAnim, Option<&mut LastPos>)>,
+    mut bodies: Query<(&mut MonsterAnim, Option<&DirectionalInput>, Option<&NetMoving>)>,
     mut players: Query<(&mut AnimationPlayer, &mut AnimationTransitions)>,
 ) {
-    let dt = time.delta_secs();
-    if dt <= 0.0 {
-        return;
-    }
-    for (entity, global, mut anim, last) in &mut bodies {
-        let pos = global.translation();
-        let Some(mut last) = last else {
-            commands.entity(entity).insert(LastPos(pos));
-            continue;
+    for (mut anim, input, net_moving) in &mut bodies {
+        let moving = match (input, net_moving) {
+            // x = strafe, z = forward, y = jump intent (see `DirectionalInput`).
+            (Some(dir), _) => dir.0 != Vec3::ZERO,
+            (None, Some(moving)) => moving.0,
+            (None, None) => false,
         };
-        let speed = ((pos - last.0) * Vec3::new(1.0, 0.0, 1.0)).length() / dt;
-        last.0 = pos;
-        let want = if speed > WALK_SPEED { anim.walk } else { anim.idle };
+        let want = if moving { anim.walk } else { anim.idle };
         if want != anim.current {
             if let Ok((mut player, mut transitions)) = players.get_mut(anim.player) {
                 transitions

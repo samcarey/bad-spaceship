@@ -111,6 +111,11 @@ pub struct HoldPointBundle {
 
 const BEVY_YAW_PITCH_ROLL_ANGLES: EulerRot = EulerRot::YXZ;
 
+/// The camera's rest distance behind the orbit centre (metres). The scroll-zoom
+/// (`client::input::zoom_camera`) moves it within the config's min/max; the launch
+/// zoom-out multiplies it. The default the camera spawns at.
+pub const DEFAULT_CAMERA_DISTANCE: f32 = 20.0;
+
 /// Spawn the app-lifetime camera when none exists. Runs at startup *and* every
 /// frame as a self-heal: in multiplayer the camera is mounted under the predicted
 /// avatar's orbit hierarchy, and lightyear despawns that avatar recursively —
@@ -129,7 +134,7 @@ fn spawn_camera(mut commands: Commands, cameras: Query<(), With<Camera>>) {
         0.0,
         0.0,
     ));
-    camera_transform.translation = -Vec3::Z * 20.0;
+    camera_transform.translation = -Vec3::Z * DEFAULT_CAMERA_DISTANCE;
     // Bevy 0.15 replaced `Camera3dBundle` with the `Camera3d` required-components
     // marker (it pulls in `Camera`, `Transform`, `Tonemapping`, etc.); spawn the
     // marker plus the components we want to override.
@@ -181,7 +186,11 @@ fn despawn(
     mut commands: Commands,
 ) {
     for (player_transform, player_entity) in players.iter() {
-        if player_transform.translation.y < -30.0 {
+        // Respawn as the player reaches the planet surface below the cliffs — the
+        // shared [`crate::map::PLANET_RESPAWN_Y`], matching the multiplayer respawn
+        // height. The planet is a visual with no collider; a fall off the platform
+        // edge is caught here by height.
+        if player_transform.translation.y < crate::map::PLANET_RESPAWN_Y {
             // The single, app-lifetime camera is parented under the player's
             // orbit hierarchy. Bevy 0.16 made `despawn()` recursive, so detach
             // the camera first (clear its `ChildOf`) to keep it alive — it gets

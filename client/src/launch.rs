@@ -51,8 +51,9 @@ pub struct LaunchPlugin;
 impl Plugin for LaunchPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<LaunchLocal>()
+            .init_resource::<LaunchCameraZoom>()
             .add_message::<SpSetLock>()
-            .add_systems(Update, tick_launch)
+            .add_systems(Update, (tick_launch, ease_launch_zoom))
             // Single-player half of the Lock button: weld/unweld the local character
             // to the parts it touches, plus the shared dangling-weld sweep. Gated off
             // in multiplayer, where the lock welds are server-owned replicated
@@ -118,6 +119,63 @@ impl LaunchLocal {
     /// on the replicated [`NetLaunch`], not here, so [`launch_armed`] combines both.
     fn launching(&self) -> bool {
         self.sp != SpPhase::Idle
+    }
+
+    /// Single-player: whether blastoff has happened (lifted off, not merely counting
+    /// down) — the trigger for the launch camera zoom-out and the planet's green ring.
+    pub(crate) fn sp_launched(&self) -> bool {
+        self.sp == SpPhase::Launched
+    }
+}
+
+/// How far the camera zooms out once a launch lifts off — 2× the player's current
+/// distance, eased in/out. Applied on top of the scroll-zoom distance by
+/// `client::input::zoom_camera`.
+pub(crate) const LAUNCH_CAMERA_ZOOM: f32 = 2.0;
+
+/// Eased camera zoom-out factor driven by the room's launch state: `1.0` on the pad,
+/// easing toward [`LAUNCH_CAMERA_ZOOM`] after blastoff (and back on reset). Read by
+/// `zoom_camera` so the liftoff pulls the view out to show the climbing rocket
+/// without fighting the player's scroll zoom.
+#[derive(Resource)]
+pub(crate) struct LaunchCameraZoom(pub f32);
+
+impl Default for LaunchCameraZoom {
+    fn default() -> Self {
+        Self(1.0)
+    }
+}
+
+/// Ease [`LaunchCameraZoom`] toward its target each frame: out to [`LAUNCH_CAMERA_ZOOM`]
+/// while the room is lifted off, back to `1.0` otherwise (single-player from
+/// [`LaunchLocal`], multiplayer from the replicated [`NetLaunch`]). Frame-rate-
+/// independent exponential approach, so the same feel at any refresh rate.
+fn ease_launch_zoom(
+    time: Res<Time>,
+    mut zoom: ResMut<LaunchCameraZoom>,
+    local: Res<LaunchLocal>,
+    multiplayer: Option<Res<SuppressLocalParts>>,
+    orb: Query<&NetLaunch>,
+) {
+    let launched = room_launched(&local, multiplayer.is_some(), &orb);
+    let target = if launched { LAUNCH_CAMERA_ZOOM } else { 1.0 };
+    // ~1.2 s to close most of the gap (rate 2.0), matching the liftoff's own pace.
+    let alpha = 1.0 - (-2.0 * time.delta_secs()).exp();
+    zoom.0 += (target - zoom.0) * alpha;
+}
+
+/// Whether the room has blasted off (lifted off, not merely counting down), across both
+/// modes: single-player [`LaunchLocal::sp_launched`], multiplayer the replicated
+/// [`NetLaunch::launched`]. Drives the launch camera zoom-out and the planet's green ring.
+pub(crate) fn room_launched(
+    local: &LaunchLocal,
+    multiplayer: bool,
+    orb: &Query<&NetLaunch>,
+) -> bool {
+    if multiplayer {
+        orb.iter().next().is_some_and(|l| l.launched)
+    } else {
+        local.sp_launched()
     }
 }
 

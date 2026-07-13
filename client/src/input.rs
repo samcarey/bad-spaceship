@@ -1,6 +1,6 @@
 use bad_spaceship_shared::{
-    player, InputEvents, KeyboardDirectionalInput, LeftClicked, Modifying, MouseMotionDelta,
-    MouseWheelDelta, MouseWheelLabel, OrbitingCamera, PlayerClick,
+    player, player::DEFAULT_CAMERA_DISTANCE, InputEvents, KeyboardDirectionalInput, LeftClicked,
+    Modifying, MouseMotionDelta, MouseWheelDelta, MouseWheelLabel, OrbitingCamera, PlayerClick,
 };
 use bevy::{
     input::mouse::MouseMotion,
@@ -160,21 +160,32 @@ pub fn mouse_wheel(
 
 fn zoom_camera(
     time: Res<Time>,
+    // The player's scroll-chosen distance, kept separate from the launch zoom-out so
+    // the two don't fight (the transform alone can't be the source of truth — the
+    // launch factor scales it, and reading it back would compound). Seeded to the
+    // spawn distance on first run.
+    mut user_distance: Local<Option<f32>>,
+    launch_zoom: Res<crate::launch::LaunchCameraZoom>,
     mut players: Query<(&mut OrbitingCamera, &mut MouseWheelDelta, &Modifying)>,
     mut camera_transforms: Query<&mut Transform, With<Camera>>,
     configs: ResMut<Assets<player::Config>>,
 ) {
     if let Some((_, config)) = configs.iter().next() {
         if let Some((orbiting_camera, scroll, modifying)) = players.iter_mut().next() {
+            let Ok(mut camera_transform) = camera_transforms.get_mut(orbiting_camera.0) else {
+                return;
+            };
+            let distance = user_distance.get_or_insert(DEFAULT_CAMERA_DISTANCE);
+            // Scroll adjusts the user distance (not while rotating a held part — the
+            // wheel drives that instead).
             if !modifying.0 {
-                // Set the camera translation relative to the camera orbit center
-                let mut camera_transform = camera_transforms.get_mut(orbiting_camera.0).unwrap();
-                camera_transform.translation = -Vec3::Z
-                    * (-camera_transform.translation.z
-                        - scroll.0 * time.delta_secs() * config.zoom_sensitivity)
-                        .max(config.min_camera_distance)
-                        .min(config.max_camera_distance);
+                *distance = (*distance - scroll.0 * time.delta_secs() * config.zoom_sensitivity)
+                    .max(config.min_camera_distance)
+                    .min(config.max_camera_distance);
             }
+            // The launch zoom-out multiplies the user's distance, so a liftoff pulls
+            // the view out and a reset eases it back, without clobbering their scroll.
+            camera_transform.translation = -Vec3::Z * *distance * launch_zoom.0;
         }
     }
 }
