@@ -26,7 +26,10 @@ use avian3d::prelude::{
     Position, Rotation, SphericalJoint, WriteRigidBodyForces,
 };
 use bad_spaceship_shared::assembly::largest_assembly_per_room;
-use bad_spaceship_shared::launch::{assembly_burn, measure_assembly_spin, LAUNCH_COUNTDOWN_SECS};
+use bad_spaceship_shared::guidance::{program_guidance, PitchProgram, DEFAULT_PITCHOVER};
+use bad_spaceship_shared::launch::{
+    assembly_burn, burn_impulse, measure_assembly_spin, LAUNCH_COUNTDOWN_SECS,
+};
 use bad_spaceship_shared::character::{spawn_position, CharacterMovement, InitialPose, ServerAvatar};
 use bad_spaceship_shared::net::{
     apply_hold_spring, apply_net_input, focused_part, monster_index, sanitize_name,
@@ -321,6 +324,8 @@ impl Plugin for NetServerPlugin {
         // Per-room rocket-launch countdown state (see `LaunchRegistry`).
         app.init_resource::<LaunchRegistry>();
         app.init_resource::<RoomAttitudeIntegrals>();
+        app.init_resource::<RoomFuel>();
+        app.init_resource::<RoomPolicy>();
         // Server-authoritative session resume: remember each player's last position
         // (keyed by its persistent `resume_id`) so a reconnect after an iOS reload
         // lands back in place rather than at the origin.
@@ -2264,6 +2269,23 @@ struct LaunchRegistry {
 #[derive(Resource, Default)]
 struct RoomAttitudeIntegrals(HashMap<RoomId, Vec3>);
 
+/// Per-room cumulative launch fuel, as thrust **impulse** (N·s = ∫ Σ|engine force| dt) —
+/// the authoritative propellant tally the flight recorder logs so a bot's fuel-to-escape
+/// can be measured exactly. Accumulated by [`apply_room_rocket_thrust`], cleared when the
+/// room resets so a re-launch starts from zero. (The client keeps its own approximate
+/// copy for the HUD; this is the exact one.)
+#[derive(Resource, Default)]
+struct RoomFuel(HashMap<RoomId, f32>);
+
+/// Per-room fuel-optimal ascent plan: the [`PitchProgram`] built on the first launched
+/// tick from the assembly's real thrust-to-weight (see `PitchProgram::plan` — what the
+/// autopilot actually flies, and why not closed-loop prograde). Its pitchover angle
+/// replicates via [`NetLaunch::pitchover`] so the predicted twin rebuilds the identical
+/// program. Cleared when a fresh launch arms so a rebuilt/reloaded assembly gets
+/// re-planned (see [`handle_launch_requests`]).
+#[derive(Resource, Default)]
+struct RoomPolicy(HashMap<RoomId, PitchProgram>);
+
 impl LaunchRegistry {
     /// Whether a room has blasted off — the state the rocket thrust keys on and
     /// the save snapshot persists.
@@ -2291,6 +2313,8 @@ fn handle_launch_requests(
     lock_joints: Query<&SphericalJoint, With<LockJoint>>,
     assembly: Query<(), With<InLargestAssembly>>,
     mut registry: ResMut<LaunchRegistry>,
+    mut fuel: ResMut<RoomFuel>,
+    mut policies: ResMut<RoomPolicy>,
 ) {
     for (link, mut receiver) in &mut links {
         if receiver.receive().count() == 0 {
@@ -2304,15 +2328,31 @@ fn handle_launch_requests(
                         .iter()
                         .any(|joint| joint.body1 == avatar && assembly.get(joint.body2).is_ok())
                 };
-                let all_aboard = room_avatars
-                    .iter()
-                    .filter(|(_, m)| m.0 == room)
-                    .all(|(avatar, _)| locked_to_assembly(avatar));
+                // Test hook: BS_ALLOW_UNMANNED waives the everyone-locked launch gate so
+                // headless fuel/guidance A/B flights can fly WITHOUT a rider aboard — a
+                // rider's weld lands somewhere slightly different every boarding, and that
+                // standing trim torque swings a flight's fuel by ±5-10%, drowning the
+                // effects under measurement. Unmanned same-save flights are deterministic.
+                static ALLOW_UNMANNED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+                let all_aboard = *ALLOW_UNMANNED
+                    .get_or_init(|| std::env::var("BS_ALLOW_UNMANNED").is_ok())
+                    || room_avatars
+                        .iter()
+                        .filter(|(_, m)| m.0 == room)
+                        .all(|(avatar, _)| locked_to_assembly(avatar));
                 if !all_aboard {
                     println!(
                         "[launch] room {room:?} request refused — not every player is locked to the assembly"
                     );
                     continue;
+                }
+                if !registry.by_room.contains_key(&room) {
+                    // Fresh countdown armed → start this flight's fuel tally from zero
+                    // (a room can be reset and re-launched; the old tally must not carry)
+                    // and drop any stale ascent plan so the optimizer re-plans for
+                    // whatever the assembly is now.
+                    fuel.0.insert(room, 0.0);
+                    policies.0.remove(&room);
                 }
                 registry
                     .by_room
@@ -2359,13 +2399,23 @@ fn tick_room_launches(
 /// Mirror each room's launch state onto its orb `NetLaunch` so it replicates to every
 /// client in the room (countdown banner + predicted thrust). Rooms with no launch entry
 /// report the idle default. `set_if_neq` keeps a settled/idle room quiet.
-fn publish_room_launch(registry: Res<LaunchRegistry>, mut orbs: Query<(&RoomStateOf, &mut NetLaunch)>) {
+fn publish_room_launch(
+    registry: Res<LaunchRegistry>,
+    policies: Res<RoomPolicy>,
+    mut orbs: Query<(&RoomStateOf, &mut NetLaunch)>,
+) {
     for (orb_room, mut launch) in &mut orbs {
+        // The optimizer's chosen ascent angle rides along (0 until the first launched
+        // tick computes it) so the predicted client rebuilds the same pitch program.
+        let pitchover =
+            policies.0.get(&orb_room.0).map(|plan| plan.pitchover).unwrap_or(DEFAULT_PITCHOVER);
         let next = match registry.by_room.get(&orb_room.0) {
             Some(RoomLaunch::Counting { remaining }) => {
-                NetLaunch { remaining: remaining.max(0.0), launched: false }
+                NetLaunch { remaining: remaining.max(0.0), launched: false, pitchover }
             }
-            Some(RoomLaunch::Launched) => NetLaunch { remaining: 0.0, launched: true },
+            Some(RoomLaunch::Launched) => {
+                NetLaunch { remaining: 0.0, launched: true, pitchover }
+            }
             None => NetLaunch::default(),
         };
         launch.set_if_neq(next);
@@ -2404,7 +2454,16 @@ fn apply_room_rocket_thrust(
     time: Res<Time>,
     registry: Res<LaunchRegistry>,
     mut integrals: ResMut<RoomAttitudeIntegrals>,
+    mut fuel: ResMut<RoomFuel>,
+    mut policies: ResMut<RoomPolicy>,
+    frames: Res<RoomFrames>,
     gravity: Res<Gravity>,
+    // Riders' masses, for the ascent plan: every avatar is locked to the assembly at
+    // launch (the launch gate guarantees it), so their weight flies with the stack — a
+    // plan built from parts-only mass overestimates thrust-to-weight and the real arc
+    // diverges from the planned one (recorder-verified: same program, 886 m vs 16 km
+    // escape altitude with/without a rider in the mass model).
+    riders: Query<(&RoomMember, &ComputedMass), With<ServerAvatar>>,
     // `Forces` takes `AngularVelocity` mutably inside (and writes each rocket's
     // `Gimbal` the geometry pass reads), so the member/geometry reads and the force
     // write cannot coexist as sibling queries (B0001) — sequence them.
@@ -2452,8 +2511,61 @@ fn apply_room_rocket_thrust(
             let Some((com, spin)) = measure_assembly_spin(samples) else {
                 continue;
             };
+            // True (planet-frame) state = local + the room's floating-origin frame, so the
+            // guidance reasons about real altitude/velocity even under a rebase.
+            let frame = frames.get(*room);
+            let true_com = com + frame.offset.as_vec3();
+            let true_vel = spin.linear_velocity + frame.velocity;
+            // Fuel-optimal ascent plan: built once per launch, on the first launched
+            // tick, from this assembly's real thrust-to-weight (`PitchProgram::plan`,
+            // the shared constructor all three thrust sites use — a heavy hauler gets a
+            // gentle lean, an engine-dense stack flies straight up). The chosen angle
+            // replicates via `NetLaunch::pitchover`, so the predicted client rebuilds
+            // the identical program — including under `BS_FORCE_PITCHOVER_DEG`, the
+            // headless A/B hook that forces the angle here at the seam where it's chosen.
+            let plan = policies.0.entry(*room).or_insert_with(|| {
+                let total_mass: f32 = members
+                    .iter()
+                    .filter(|(.., r)| r.id == *room)
+                    .map(|(_, _, _, m, _)| m.value())
+                    .sum::<f32>()
+                    + riders
+                        .iter()
+                        .filter(|(m, _)| m.0 == *room)
+                        .map(|(_, mass)| mass.value())
+                        .sum::<f32>();
+                static FORCE: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new();
+                let forced = FORCE
+                    .get_or_init(|| {
+                        std::env::var("BS_FORCE_PITCHOVER_DEG")
+                            .ok()
+                            .and_then(|s| s.parse::<f32>().ok())
+                    })
+                    .map(|deg| deg.to_radians());
+                PitchProgram::plan(true_com, true_vel, rockets.len(), gravity.0, total_mass, forced)
+            });
+            let pitchover = plan.pitchover;
+            let guidance = program_guidance(true_com, true_vel, plan);
+            static DEBUG_GUIDANCE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            if *DEBUG_GUIDANCE.get_or_init(|| std::env::var("BS_DEBUG_GUIDANCE").is_ok()) {
+                use std::sync::atomic::{AtomicU32, Ordering};
+                static GT: AtomicU32 = AtomicU32::new(0);
+                if GT.fetch_add(1, Ordering::Relaxed) % 30 == 0 {
+                    let alt = (true_com - bad_spaceship_shared::map::PLANET_CENTER).length()
+                        - bad_spaceship_shared::map::GRAVITY_REF_RADIUS;
+                    let e = bad_spaceship_shared::guidance::specific_energy(true_com, true_vel);
+                    let f = fuel.0.get(room).copied().unwrap_or(0.0);
+                    println!(
+                        "[guid] alt={:.0}m tvel={:.0} e={:.0} thr={:.1} fuel={:.0} pitch={:.0}deg comY={:.0} offY={:.0} frameV={:.0}",
+                        alt, true_vel.length(), e, guidance.throttle, f,
+                        pitchover.to_degrees(), com.y, frame.offset.y, frame.velocity.length()
+                    );
+                }
+            }
             let integral = integrals.0.entry(*room).or_default();
-            let burn = assembly_burn(com, gravity.0, dt, rockets, &spin, integral);
+            let burn = assembly_burn(com, gravity.0, dt, rockets, &spin, integral, guidance);
+            // Tally propellant burned this tick (see `RoomFuel` and `burn_impulse`).
+            *fuel.0.entry(*room).or_default() += burn_impulse(&burn, dt);
             // Diagnostics (BS_DEBUG_GIMBAL): once a second, the controller state the
             // flight recorder can't see - body axis vs velocity vs nozzle deflections.
             static DEBUG_GIMBAL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -2739,6 +2851,9 @@ struct RecordingRegistry {
 struct RecordedFrame<'a> {
     tick: u64,
     unix_ms: u64,
+    /// Cumulative launch fuel for this room, thrust impulse in N·s (see [`RoomFuel`]) —
+    /// so a flight's fuel-to-escape is read straight off the recording.
+    fuel_impulse: f32,
     inputs: Vec<RecordedInput<'a>>,
     world: &'a SaveWorld,
 }
@@ -2769,6 +2884,7 @@ fn record_room_frames(
     mut recordings: ResMut<RecordingRegistry>,
     registry: Res<RoomRegistry>,
     launches: Res<LaunchRegistry>,
+    fuel: Res<RoomFuel>,
     frames: Res<RoomFrames>,
     avatars: SnapshotAvatars,
     inputs: Query<(&NetPlayer, &RoomMember, &ActionState<NetInput>)>,
@@ -2805,6 +2921,7 @@ fn record_room_frames(
         let frame = RecordedFrame {
             tick: *tick,
             unix_ms: save::now_unix_ms(),
+            fuel_impulse: fuel.0.get(&room.id).copied().unwrap_or(0.0),
             inputs: inputs
                 .iter()
                 .filter(|(_, member, _)| member.0 == room.id)

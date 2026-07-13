@@ -22,8 +22,9 @@ use avian3d::prelude::{
     AngularVelocity, Collider, ComputedMass, Forces, Gravity, LinearVelocity, Position, Rotation,
     SphericalJoint, WriteRigidBodyForces,
 };
+use bad_spaceship_shared::guidance::{program_guidance, Guidance, PitchProgram};
 use bad_spaceship_shared::launch::{
-    assembly_burn, measure_assembly_spin, AssemblySpin, LAUNCH_COUNTDOWN_SECS,
+    assembly_burn, burn_impulse, measure_assembly_spin, AssemblySpin, LAUNCH_COUNTDOWN_SECS,
 };
 use bad_spaceship_shared::map::apply_gravity_correction;
 use bad_spaceship_shared::net::{
@@ -54,6 +55,7 @@ impl Plugin for LaunchPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<LaunchLocal>()
             .init_resource::<LaunchCameraZoom>()
+            .init_resource::<FuelUsed>()
             .add_message::<SpSetLock>()
             .add_systems(Update, (tick_launch, ease_launch_zoom))
             // Single-player half of the Lock button: weld/unweld the local character
@@ -132,6 +134,18 @@ impl LaunchLocal {
         self.sp == SpPhase::Launched
     }
 }
+
+/// Cumulative launch fuel spent by the local player's assembly, as thrust **impulse**
+/// (N·s = ∫ Σ|engine force| dt). Burning fuel doesn't reduce mass in this sim, so total
+/// impulse — not a rocket-equation Δv — is the honest propellant cost, and it is exactly
+/// the quantity the fuel-optimal autopilot minimizes. Shown on the flight HUD in kN·s.
+/// The thrust systems accumulate it while the local assembly is under power and zero it
+/// while idle, so each launch starts from zero. In multiplayer this counts the *predicted*
+/// burn, so an occasional rollback replay can nudge it a hair above the server's exact
+/// figure — fine for a glanceable readout; the flight recorder carries the authoritative
+/// number for analysis.
+#[derive(Resource, Default)]
+pub struct FuelUsed(pub f32);
 
 /// How far the camera zooms out once a launch lifts off — 2× the player's current
 /// distance, eased in/out. Applied on top of the scroll-zoom distance by
@@ -291,10 +305,16 @@ fn apply_mp_gravity(
 }
 
 /// Apply balanced thrust to the single-player main assembly's rockets each physics tick.
+#[allow(clippy::too_many_arguments)]
 fn apply_sp_thrust(
     time: Res<Time>,
     // The launch autopilot's per-assembly PID integral state (see `assembly_burn`).
     mut integral: Local<Vec3>,
+    // The fuel-optimal ascent plan (pitchover + the pitch program the autopilot flies),
+    // optimized once at launch from this stack's thrust-to-weight, then frozen; cleared
+    // when the launch ends so a rebuilt stack gets re-planned. (Single player owns its
+    // own optimizer — there's no server.)
+    mut sp_plan: Local<Option<PitchProgram>>,
     local: Res<LaunchLocal>,
     parts: Query<(Entity, &GlobalTransform, &ComputedMass), With<Holdable>>,
     joints: Query<&SphericalJoint>,
@@ -307,8 +327,14 @@ fn apply_sp_thrust(
         Query<(Entity, Forces, &mut Gimbal, Option<&mut FlameThrottle>), With<RocketEngine>>,
     )>,
     gravity: Res<Gravity>,
+    mut fuel: ResMut<FuelUsed>,
+    // The rider's mass, for the ascent plan: locked aboard at launch, so their weight
+    // flies with the stack and belongs in the planned thrust-to-weight.
+    rider: Query<&ComputedMass, With<Character>>,
 ) {
     if local.sp != SpPhase::Launched {
+        fuel.0 = 0.0; // idle: keep the readout at zero until the next launch fires
+        *sp_plan = None; // re-plan the ascent for the next launch
         return;
     }
     let Some((members, _)) = main_assembly(&parts, &joints) else {
@@ -343,6 +369,21 @@ fn apply_sp_thrust(
             (entity, translation, rotation, gimbal.0)
         })
         .collect();
+    // Fuel-optimal ascent guidance: a per-assembly pitchover (optimized once at launch
+    // from this stack's thrust-to-weight — heavy haulers lean, engine-dense stacks go
+    // vertical), flown as a pitch program with an escape-energy throttle cutoff. No
+    // floating origin in single player, so the true planet-frame state is just the local
+    // COM + velocity.
+    let program = sp_plan.get_or_insert_with(|| {
+        let total_mass: f32 = parts
+            .iter()
+            .filter(|(entity, ..)| members.contains(entity))
+            .map(|(_, _, m)| m.value())
+            .sum::<f32>()
+            + rider.iter().map(|m| m.value()).sum::<f32>();
+        PitchProgram::plan(com, spin.linear_velocity, geometry.len(), gravity.0, total_mass, None)
+    });
+    let guidance = program_guidance(com, spin.linear_velocity, program);
     apply_thrust(
         com,
         gravity.0,
@@ -350,6 +391,8 @@ fn apply_sp_thrust(
         &spin,
         time.delta_secs(),
         &mut integral,
+        guidance,
+        &mut fuel.0,
         &mut set.p2(),
     );
 }
@@ -362,6 +405,9 @@ fn apply_mp_thrust(
     time: Res<Time>,
     // The launch autopilot's per-assembly PID integral state (see `assembly_burn`).
     mut integral: Local<Vec3>,
+    // The ascent plan mirror: the pitch program rebuilt from the server's replicated
+    // pitchover angle (keyed by that angle so a re-plan on the server rebuilds here too).
+    mut mp_plan: Local<Option<PitchProgram>>,
     orb: Query<&NetLaunch>,
     // `Forces` takes `AngularVelocity` mutably inside, so the member read and the
     // force write cannot coexist as sibling queries (B0001) — sequence them.
@@ -383,16 +429,29 @@ fn apply_mp_thrust(
             (With<RocketEngine>, With<Predicted>),
         >,
     )>,
+    frame: Res<ClientRoomFrame>,
     gravity: Res<Gravity>,
+    mut fuel: ResMut<FuelUsed>,
+    // Riders' masses for the ascent plan (all avatars in the room are locked aboard at
+    // launch, and all are predicted): matches the server's rider-inclusive plan.
+    riders: Query<&ComputedMass, (With<Character>, With<Predicted>)>,
 ) {
-    if !orb.iter().next().is_some_and(|l| l.launched) {
+    let Some(launch) = orb.iter().next().filter(|l| l.launched) else {
+        fuel.0 = 0.0; // idle: keep the readout at zero until the room launches
+        *mp_plan = None; // re-plan on the next launch
         return;
-    }
+    };
+    // The server's optimized ascent angle, replicated so the predicted turn matches
+    // (`DEFAULT_PITCHOVER` = 0 for the tick or two before the first value arrives —
+    // that window is inside the vertical kick phase, where 0 and the real angle agree).
+    let pitchover = launch.pitchover;
+    let need_plan = mp_plan.as_ref().map(|p| p.pitchover) != Some(pitchover);
     // The assembly's COM + motion state, via the shared measurement (see
     // `measure_assembly_spin`) so the trim matches the server exactly; collect
     // the member rockets' poses alongside (`Gimbal` marks the rockets — it rides
-    // `insert_rocket_physics`).
-    let (measured, geometry) = {
+    // `insert_rocket_physics`). The mass sum feeds only a plan rebuild, so it's
+    // gathered only on the (once-per-launch) tick that needs it.
+    let (measured, geometry, part_mass_total) = {
         let members = set.p0();
         let samples = || {
             members
@@ -407,11 +466,35 @@ fn apply_mp_thrust(
                 gimbal.map(|g| (entity, position.0, rotation.0, g.0))
             })
             .collect();
-        (measure_assembly_spin(samples), geometry)
+        let part_mass_total: f32 = if need_plan {
+            members.iter().map(|(_, _, _, _, _, part_mass, _)| part_mass.value()).sum()
+        } else {
+            0.0
+        };
+        (measure_assembly_spin(samples), geometry, part_mass_total)
     };
     let Some((com, spin)) = measured else {
         return;
     };
+    // True planet-frame state folds in the room's floating-origin frame (offset +
+    // co-moving velocity), so the guidance sees real altitude/velocity under a rebase.
+    let true_com = com + frame.offset.as_vec3();
+    let true_vel = spin.linear_velocity + frame.velocity;
+    // Rebuild the pitch program when the replicated angle (re)arrives, through the same
+    // shared constructor the server plans with — locally measured masses are identical
+    // (same parts, same densities), so the rebuilt program matches the one it flies.
+    if need_plan {
+        let total_mass = part_mass_total + riders.iter().map(|m| m.value()).sum::<f32>();
+        *mp_plan = Some(PitchProgram::plan(
+            true_com,
+            true_vel,
+            geometry.len(),
+            gravity.0,
+            total_mass,
+            Some(pitchover),
+        ));
+    }
+    let guidance = program_guidance(true_com, true_vel, mp_plan.as_ref().unwrap());
     apply_thrust(
         com,
         gravity.0,
@@ -419,6 +502,8 @@ fn apply_mp_thrust(
         &spin,
         time.delta_secs(),
         &mut integral,
+        guidance,
+        &mut fuel.0,
         &mut set.p1(),
     );
 }
@@ -435,6 +520,7 @@ fn reset_flame_targets(mut throttles: Query<&mut FlameThrottle>) {
 /// rocket's slewed gimbal + deflected flare-base force (plus its flame's throttle, for
 /// the exhaust visual). Shared by the single-player and multiplayer thrust systems
 /// (which differ only in how they gather membership + pose).
+#[allow(clippy::too_many_arguments)]
 fn apply_thrust(
     com: Vec3,
     gravity: Vec3,
@@ -442,6 +528,8 @@ fn apply_thrust(
     spin: &AssemblySpin,
     dt: f32,
     integral: &mut Vec3,
+    guidance: Guidance,
+    fuel: &mut f32,
     rocket_forces: &mut Query<
         (Entity, Forces, &mut Gimbal, Option<&mut FlameThrottle>),
         impl bevy::ecs::query::QueryFilter,
@@ -451,7 +539,10 @@ fn apply_thrust(
         return;
     }
     let full = bad_spaceship_shared::launch::full_rocket_thrust(gravity);
-    for burn in assembly_burn(com, gravity, dt, geometry, spin, integral) {
+    let burns = assembly_burn(com, gravity, dt, geometry, spin, integral, guidance);
+    // Fuel spent this tick (see `FuelUsed` and the shared `burn_impulse` definition).
+    *fuel += burn_impulse(&burns, dt);
+    for burn in burns {
         if let Ok((_, mut forces, mut gimbal, flame)) = rocket_forces.get_mut(burn.entity) {
             gimbal.0 = burn.gimbal;
             forces.apply_force_at_point(burn.force, burn.point);

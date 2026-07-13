@@ -1256,6 +1256,45 @@ fps-dependent). Key facts that shaped the design:
   unordered `Forces` double-write. Verified: unit tests (field + a real Avian-step test of
   the correction: net 9.81 at the pad, a quarter one ref-radius up) plus a live browser
   ride climbing under the weakened field with no divergence.
+- **Fuel-optimal launch guidance (`shared/src/guidance.rs`).** The autopilot flies the
+  least-fuel escape. Fuel = thrust **impulse** (N·s = ∫Σ|force|dt) — mass never depletes,
+  so impulse IS the propellant cost; the HUD shows it in kN·s (`FuelUsed` client-side,
+  `RoomFuel` authoritative server-side, `fuel_impulse` in the flight recorder). Three
+  pieces, all pure functions of the true (frame-folded) state so the sites can't drift:
+  (1) **escape cutoff** — throttle to zero the instant `E = ½v² − μ/r ≥ 0` (burning past
+  escape energy is pure waste; this alone is ~3× less fuel than burning a whole ride);
+  (2) **per-assembly pitchover optimizer** (`optimize_pitchover`) — point-mass forward-sim
+  sweep from the build's real thrust-to-weight (**riders included** — the launch gate
+  guarantees they fly with the stack, and a parts-only plan diverges visibly), with a
+  ground-crash floor and an execution penalty; the chosen angle replicates via
+  `NetLaunch::pitchover` so predicted clients rebuild the identical plan; (3) the
+  **pitch program** (`PitchProgram`) — the ideal trajectory's command angle sampled vs
+  *speed* at launch, which the live autopilot flies instead of chasing prograde.
+  **The pitch program is the load-bearing insight**: closed-loop prograde steering
+  (thrust tracks the live velocity vector) loses 5–7% of the burn to continuous
+  throttle/gimbal trim against the moving target — more than a gentle turn saves, at ANY
+  angle — which is why turns kept losing A/Bs until guidance went open-loop (the split
+  real launch vehicles use: guidance open-loop, attitude closed-loop). Engine thrust is
+  2.0 part-weights (real first-stage TWR; was 3.3, cartoon-strong, which made every path
+  equally cheap): loaded builds sit at TWR 1.2–1.6 where the measured turn saves 19–31%,
+  engine-dense builds asymptote toward a bare engine's TWR ~2.2 where the optimizer
+  itself picks straight up — engine count and payload now shape the flight. The
+  execution-penalty constant is **tied to how the command is flown** (300 m/s/rad in the
+  prograde-chasing era, 50 with the program — see its doc comment); recalibrate it if the
+  control law changes. Measurement discipline: manned A/Bs are ±5–10% noise (the rider's
+  lock-weld lands differently each boarding → standing trim), so measure with
+  `BS_ALLOW_UNMANNED=1` (waives the all-locked launch gate) + no `BS_BOT_RIDE`, which is
+  deterministic to 0.01% and tolerates `BS_TIME_SCALE=6` (boarding is what breaks ≥2×).
+  `BS_FORCE_PITCHOVER_DEG` forces the angle (headless A/B only — it would diverge MP
+  prediction); `BS_DEBUG_GUIDANCE=1` prints the per-second `[guid]` alt/vel/energy/
+  throttle/fuel/pitch trace — trust it over reconstructing true-state from recordings
+  (floating-origin rebases garble naive analyzers). Known gaps: at very low TWR the real
+  arc sags km below the ideal one and the planet has no collider beyond the pad bowl, so
+  a heavy build's trajectory can dip through the (visual-only) planet sphere downrange;
+  and blastoff is launch-tick contact roulette for marginal stacks — the same save either
+  flies clean or (roughly 1-in-4 for a TWR-1.3 build) gets pinned on the pad by
+  contact-chatter throttle trim, or detonates a weld, depending on the contact state at
+  the tick the countdown ends. Repeat any anomalous flight before believing it.
 - **Floating-origin rebase (unbounded ascent).** The old hard ceilings — ~33 km with a
   rider / ~524 km unmanned, f32 ULP starving the solver and renderer — are gone: each room
   carries a floating-origin frame (`RoomFrames` server-side; replicated as `NetRoomFrame`

@@ -144,8 +144,17 @@ pub const ROCKET_FLARE_Y_OFFSET: f32 = -(ROCKET_BODY_HEIGHT / 2.0 + ROCKET_FLARE
 /// lift against gravity. Multiply by `NOMINAL_PART_MASS` and gravity's magnitude to
 /// get the force in newtons. Feeds `launch::full_rocket_thrust` — the single source
 /// for the real launch thrust AND the thrust-vector visualisation, so the arrow and
-/// the force can't drift. (Was 3.0; +10% by feel.)
-pub const ROCKET_THRUST_PART_WEIGHTS: f32 = 3.3;
+/// the force can't drift.
+///
+/// History: 3.0 at first, +10% by feel (3.3) — which made a bare engine TWR ≈ 5.5, so
+/// cartoon-strong that a vertical burn escaped almost as cheaply as a gravity turn and
+/// the fuel-optimal autopilot had nothing to optimize. Lowered to 2.0 to put typical
+/// cargo-carrying builds at real first-stage thrust-to-weight (Saturn V lifted off at
+/// TWR ~1.2): a loaded hauler now sits at TWR ~1.2–1.5 where a proper gravity turn
+/// saves ~15–20% of its fuel, while an engine-dense low-payload build still reaches
+/// TWR ≳2.5 and can brute-force straight up. Engine count and payload now *matter* to
+/// how the autopilot flies (see `shared::guidance`).
+pub const ROCKET_THRUST_PART_WEIGHTS: f32 = 2.0;
 
 /// Local-frame point where a rocket's thrust is applied: inside the rocket at the
 /// base of the body, where the flare begins (the flare's narrow top meets the body's
