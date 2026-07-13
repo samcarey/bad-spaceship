@@ -37,6 +37,9 @@ pub const PLANET_SURFACE_Y: f32 = -PLANET_DROP;
 pub const PLANET_RADIUS: f32 = 15_000.0;
 /// World-space y of the sphere's centre (surface minus radius).
 pub const PLANET_CENTER_Y: f32 = PLANET_SURFACE_Y - PLANET_RADIUS;
+/// The planet centre in true world coordinates — the single source for every module that
+/// measures radial distance (gravity, guidance, orbital energy).
+pub const PLANET_CENTER: Vec3 = Vec3::new(0.0, PLANET_CENTER_Y, 0.0);
 /// Height a grounded avatar respawns at once it falls off the cliffs — 2 m above the
 /// planet surface, so it never visibly clips into the magma. Shared by the server
 /// (`respawn_fallen_avatars`) and single-player (`player::despawn`) so the two respawn
@@ -78,7 +81,7 @@ pub const GRAVITY_MU: f32 = SURFACE_GRAVITY * GRAVITY_REF_RADIUS * GRAVITY_REF_R
 /// down at the pad and falls off with altitude. Shared by every world (single-player,
 /// server, predicted client) so the field they simulate is identical.
 pub fn gravity_at(true_pos: Vec3) -> Vec3 {
-    let to_center = Vec3::new(0.0, PLANET_CENTER_Y, 0.0) - true_pos;
+    let to_center = PLANET_CENTER - true_pos;
     let r2 = to_center.length_squared();
     // Guard the r→0 singularity: the surface is 15 km out, so a body never nears the
     // centre — this only stops a NaN if one somehow tunnels there.

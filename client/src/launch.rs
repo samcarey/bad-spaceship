@@ -22,12 +22,9 @@ use avian3d::prelude::{
     AngularVelocity, Collider, ComputedMass, Forces, Gravity, LinearVelocity, Position, Rotation,
     SphericalJoint, WriteRigidBodyForces,
 };
-use bad_spaceship_shared::guidance::{
-    optimize_pitchover, program_guidance, Guidance, PitchProgram,
-};
+use bad_spaceship_shared::guidance::{program_guidance, Guidance, PitchProgram};
 use bad_spaceship_shared::launch::{
-    assembly_burn, full_rocket_thrust, measure_assembly_spin, AssemblySpin,
-    LAUNCH_COUNTDOWN_SECS,
+    assembly_burn, burn_impulse, measure_assembly_spin, AssemblySpin, LAUNCH_COUNTDOWN_SECS,
 };
 use bad_spaceship_shared::map::apply_gravity_correction;
 use bad_spaceship_shared::net::{
@@ -384,12 +381,7 @@ fn apply_sp_thrust(
             .map(|(_, _, m)| m.value())
             .sum::<f32>()
             + rider.iter().map(|m| m.value()).sum::<f32>();
-        if total_mass <= 0.0 {
-            return PitchProgram::default();
-        }
-        let thrust_accel = geometry.len() as f32 * full_rocket_thrust(gravity.0) / total_mass;
-        let pitchover = optimize_pitchover(com, spin.linear_velocity, thrust_accel);
-        PitchProgram::build(com, spin.linear_velocity, thrust_accel, pitchover)
+        PitchProgram::plan(com, spin.linear_velocity, geometry.len(), gravity.0, total_mass, None)
     });
     let guidance = program_guidance(com, spin.linear_velocity, program);
     apply_thrust(
@@ -415,7 +407,7 @@ fn apply_mp_thrust(
     mut integral: Local<Vec3>,
     // The ascent plan mirror: the pitch program rebuilt from the server's replicated
     // pitchover angle (keyed by that angle so a re-plan on the server rebuilds here too).
-    mut mp_plan: Local<Option<(f32, PitchProgram)>>,
+    mut mp_plan: Local<Option<PitchProgram>>,
     orb: Query<&NetLaunch>,
     // `Forces` takes `AngularVelocity` mutably inside, so the member read and the
     // force write cannot coexist as sibling queries (B0001) — sequence them.
@@ -453,11 +445,13 @@ fn apply_mp_thrust(
     // (`DEFAULT_PITCHOVER` = 0 for the tick or two before the first value arrives —
     // that window is inside the vertical kick phase, where 0 and the real angle agree).
     let pitchover = launch.pitchover;
+    let need_plan = mp_plan.as_ref().map(|p| p.pitchover) != Some(pitchover);
     // The assembly's COM + motion state, via the shared measurement (see
     // `measure_assembly_spin`) so the trim matches the server exactly; collect
     // the member rockets' poses alongside (`Gimbal` marks the rockets — it rides
-    // `insert_rocket_physics`).
-    let (measured, geometry, total_mass) = {
+    // `insert_rocket_physics`). The mass sum feeds only a plan rebuild, so it's
+    // gathered only on the (once-per-launch) tick that needs it.
+    let (measured, geometry, part_mass_total) = {
         let members = set.p0();
         let samples = || {
             members
@@ -472,9 +466,12 @@ fn apply_mp_thrust(
                 gimbal.map(|g| (entity, position.0, rotation.0, g.0))
             })
             .collect();
-        let total_mass: f32 =
-            members.iter().map(|(_, _, _, _, _, part_mass, _)| part_mass.value()).sum();
-        (measure_assembly_spin(samples), geometry, total_mass)
+        let part_mass_total: f32 = if need_plan {
+            members.iter().map(|(_, _, _, _, _, part_mass, _)| part_mass.value()).sum()
+        } else {
+            0.0
+        };
+        (measure_assembly_spin(samples), geometry, part_mass_total)
     };
     let Some((com, spin)) = measured else {
         return;
@@ -483,20 +480,21 @@ fn apply_mp_thrust(
     // co-moving velocity), so the guidance sees real altitude/velocity under a rebase.
     let true_com = com + frame.offset.as_vec3();
     let true_vel = spin.linear_velocity + frame.velocity;
-    // Rebuild the pitch program when the replicated angle (re)arrives. Thrust accel comes
-    // from the locally measured mass — identical parts and densities to the server's, so
-    // the rebuilt program matches the one the server flies.
-    if mp_plan.as_ref().map(|(p, _)| *p) != Some(pitchover) {
-        let total_mass = total_mass + riders.iter().map(|m| m.value()).sum::<f32>();
-        let thrust_accel = if total_mass > 0.0 {
-            geometry.len() as f32 * full_rocket_thrust(gravity.0) / total_mass
-        } else {
-            0.0
-        };
-        *mp_plan =
-            Some((pitchover, PitchProgram::build(true_com, true_vel, thrust_accel, pitchover)));
+    // Rebuild the pitch program when the replicated angle (re)arrives, through the same
+    // shared constructor the server plans with — locally measured masses are identical
+    // (same parts, same densities), so the rebuilt program matches the one it flies.
+    if need_plan {
+        let total_mass = part_mass_total + riders.iter().map(|m| m.value()).sum::<f32>();
+        *mp_plan = Some(PitchProgram::plan(
+            true_com,
+            true_vel,
+            geometry.len(),
+            gravity.0,
+            total_mass,
+            Some(pitchover),
+        ));
     }
-    let guidance = program_guidance(true_com, true_vel, &mp_plan.as_ref().unwrap().1);
+    let guidance = program_guidance(true_com, true_vel, mp_plan.as_ref().unwrap());
     apply_thrust(
         com,
         gravity.0,
@@ -541,15 +539,13 @@ fn apply_thrust(
         return;
     }
     let full = bad_spaceship_shared::launch::full_rocket_thrust(gravity);
-    for burn in assembly_burn(com, gravity, dt, geometry, spin, integral, guidance) {
+    let burns = assembly_burn(com, gravity, dt, geometry, spin, integral, guidance);
+    // Fuel spent this tick (see `FuelUsed` and the shared `burn_impulse` definition).
+    *fuel += burn_impulse(&burns, dt);
+    for burn in burns {
         if let Ok((_, mut forces, mut gimbal, flame)) = rocket_forces.get_mut(burn.entity) {
             gimbal.0 = burn.gimbal;
             forces.apply_force_at_point(burn.force, burn.point);
-            // Fuel spent this tick = thrust impulse. |force| = full·throttle (the gimbal
-            // only rotates the force, it doesn't change its magnitude), so summing
-            // |force|·dt over the engines is exactly ∫ full·Σθ dt — the propellant burned,
-            // independent of how much thrust the gimbal tilts sideways.
-            *fuel += burn.force.length() * dt;
             // `Option`: the flame rides the render visual, which may lag the
             // physics by a frame — thrust must not depend on it.
             if let Some(mut flame) = flame {

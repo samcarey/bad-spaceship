@@ -118,6 +118,15 @@ pub struct RocketBurn {
     pub force: Vec3,
 }
 
+/// The fuel a tick's burn costs, as thrust impulse `Σ|force|·dt` (N·s). |force| =
+/// full·throttle (the gimbal only rotates it), so this is exactly the propellant burned.
+/// The single definition both the authoritative server tally (`RoomFuel`) and the
+/// client's predicted HUD tally (`FuelUsed`) accumulate, so they can't disagree on what
+/// "fuel" means.
+pub fn burn_impulse(burns: &[RocketBurn], dt: f32) -> f32 {
+    burns.iter().map(|b| b.force.length()).sum::<f32>() * dt
+}
+
 /// One physics tick of an assembly's launch burn, start to finish: balance the
 /// throttles + gimbal commands ([`balanced_assembly_thrust`]), slew each nozzle toward
 /// its command at the actuator's rate limit ([`gimbal_step`]), and resolve the deflected

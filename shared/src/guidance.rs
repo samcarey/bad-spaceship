@@ -33,11 +33,8 @@
 //! (or fly nearly straight); the server replicates the chosen angle so predicted clients
 //! fly the identical turn.
 
-use crate::map::{gravity_at, GRAVITY_MU, GRAVITY_REF_RADIUS, PLANET_CENTER_Y};
+use crate::map::{gravity_at, GRAVITY_MU, GRAVITY_REF_RADIUS, PLANET_CENTER};
 use bevy::math::Vec3;
-
-/// The planet centre in true world coordinates (the fixed frame `gravity_at` uses).
-pub const PLANET_CENTER: Vec3 = Vec3::new(0.0, PLANET_CENTER_Y, 0.0);
 
 /// Radius (m from centre) the forward sim treats as the ground: a trajectory that sinks
 /// back below the launch pad has crashed, not escaped. Without this floor the optimizer
@@ -93,22 +90,21 @@ pub fn ascent_thrust_dir(true_pos: Vec3, true_vel: Vec3, pitchover: f32) -> Vec3
         // this speed) zero-velocity case.
         return true_vel.normalize_or(up);
     }
-    if pitchover.abs() < 1e-4 {
-        return up; // vertical ascent: never chases a sideways disturbance
-    }
     // Pitchover kick: tip from radial toward the downrange azimuth, the tilt growing
     // linearly to `pitchover` as speed approaches TURN_SPEED, so the kick is a ramp the
     // attitude loop can track rather than a step.
-    let horiz = (DOWNRANGE_AZIMUTH - up * up.dot(DOWNRANGE_AZIMUTH)).normalize_or_zero();
-    let angle = pitchover * (speed / TURN_SPEED);
-    (up * angle.cos() + horiz * angle.sin()).normalize_or(up)
+    tilt_downrange(up, pitchover * (speed / TURN_SPEED))
 }
 
-/// The full guidance command for a tick: [`ascent_thrust_dir`] plus a throttle that cuts
-/// to zero once escape energy is reached (burning past `E ≥ 0` only wastes fuel).
-pub fn ascent_guidance(true_pos: Vec3, true_vel: Vec3, pitchover: f32) -> Guidance {
-    let throttle = if escaped(true_pos, true_vel) { 0.0 } else { 1.0 };
-    Guidance { thrust_dir: ascent_thrust_dir(true_pos, true_vel, pitchover), throttle }
+/// Radial-up tipped by `angle` toward [`DOWNRANGE_AZIMUTH`] — the single source of the
+/// "lean the command downrange" construction, shared by the planning law and the flown
+/// program so the two can never disagree about what an angle means.
+fn tilt_downrange(up: Vec3, angle: f32) -> Vec3 {
+    if angle.abs() < 1e-4 {
+        return up; // vertical: never chases a sideways disturbance
+    }
+    let horiz = (DOWNRANGE_AZIMUTH - up * up.dot(DOWNRANGE_AZIMUTH)).normalize_or_zero();
+    (up * angle.cos() + horiz * angle.sin()).normalize_or(up)
 }
 
 /// A **pitch program**: the ascent command precomputed as "flight-path angle vs speed",
@@ -124,14 +120,42 @@ pub fn ascent_guidance(true_pos: Vec3, true_vel: Vec3, pitchover: f32) -> Guidan
 /// slowly (it's indexed by the vehicle's own speed, monotonic during a burn), so holding
 /// it costs the attitude loop no more than holding straight-up — while the trajectory
 /// still bends into the fuel-saving arc.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Debug, Default)]
 pub struct PitchProgram {
+    /// The pitchover angle (rad) this program was planned with — what replicates via
+    /// `NetLaunch::pitchover`, and what a cached plan is keyed by.
+    pub pitchover: f32,
     /// `(speed m/s, command angle from radial-up rad)`, speeds strictly ascending —
     /// the ideal law's own command schedule along its trajectory.
     samples: Vec<(f32, f32)>,
 }
 
 impl PitchProgram {
+    /// The one shared constructor every thrust site plans through (the
+    /// `measure_assembly_spin` discipline): from the assembly's true launch state, its
+    /// engine count and **total mass — riders included** (the launch gate guarantees they
+    /// fly with the stack; a parts-only plan diverges visibly from the real arc), derive
+    /// thrust acceleration, pick the pitchover (`forced` overrides the optimizer — the
+    /// server's `BS_FORCE_PITCHOVER_DEG` hook and the MP client rebuilding from the
+    /// replicated angle both land here), and sample the program. A non-positive mass
+    /// yields the straight-up default rather than a garbage gravity-only plan.
+    pub fn plan(
+        true_pos: Vec3,
+        true_vel: Vec3,
+        engines: usize,
+        gravity: Vec3,
+        total_mass: f32,
+        forced: Option<f32>,
+    ) -> Self {
+        if total_mass <= 0.0 {
+            return Self::default();
+        }
+        let thrust_accel = engines as f32 * crate::launch::full_rocket_thrust(gravity) / total_mass;
+        let pitchover =
+            forced.unwrap_or_else(|| optimize_pitchover(true_pos, true_vel, thrust_accel));
+        Self::build(true_pos, true_vel, thrust_accel, pitchover)
+    }
+
     /// Build the program by flying the ideal ascent law ([`ascent_thrust_dir`]) as a
     /// point mass from the launch state and recording its command angle at each speed.
     /// A zero `pitchover` yields an all-zero program (straight up), so high-TWR stacks
@@ -160,46 +184,36 @@ impl PitchProgram {
                 break;
             }
         }
-        Self { samples }
+        Self { pitchover, samples }
     }
 
     /// The command angle (rad from radial-up) at a given speed — linear interpolation,
-    /// clamped to the table ends. Empty table = straight up.
+    /// clamped to the table ends (binary search; the speeds are strictly ascending).
+    /// Empty table = straight up.
     pub fn angle_at(&self, speed: f32) -> f32 {
-        let Some(&(first_s, first_a)) = self.samples.first() else {
-            return 0.0;
-        };
-        if speed <= first_s {
-            return first_a;
-        }
-        for pair in self.samples.windows(2) {
-            let (s0, a0) = pair[0];
-            let (s1, a1) = pair[1];
-            if speed <= s1 {
-                let t = ((speed - s0) / (s1 - s0)).clamp(0.0, 1.0);
-                return a0 + (a1 - a0) * t;
+        let i = self.samples.partition_point(|&(s, _)| s < speed);
+        match (i.checked_sub(1).and_then(|j| self.samples.get(j)), self.samples.get(i)) {
+            (Some(&(s0, a0)), Some(&(s1, a1))) => {
+                a0 + (a1 - a0) * ((speed - s0) / (s1 - s0)).clamp(0.0, 1.0)
             }
+            (Some(&(_, a)), None) | (None, Some(&(_, a))) => a, // past either table end
+            (None, None) => 0.0,
         }
-        self.samples.last().map(|&(_, a)| a).unwrap_or(0.0)
     }
 
     /// The commanded thrust direction at a true position + speed: radial-up tipped by
     /// [`Self::angle_at`] toward [`DOWNRANGE_AZIMUTH`].
     pub fn thrust_dir(&self, true_pos: Vec3, speed: f32) -> Vec3 {
         let up = (true_pos - PLANET_CENTER).normalize_or(Vec3::Y);
-        let angle = self.angle_at(speed);
-        if angle.abs() < 1e-4 {
-            return up;
-        }
-        let horiz = (DOWNRANGE_AZIMUTH - up * up.dot(DOWNRANGE_AZIMUTH)).normalize_or_zero();
-        (up * angle.cos() + horiz * angle.sin()).normalize_or(up)
+        tilt_downrange(up, self.angle_at(speed))
     }
 }
 
 /// The live autopilot's guidance command: the pitch-program direction at the vehicle's
-/// current speed, plus the escape-energy throttle cutoff. This is what the three thrust
-/// sites fly; [`ascent_guidance`] (the raw closed-loop law) remains the *planning* model
-/// the program is sampled from.
+/// current speed, plus a throttle that cuts to zero once escape energy is reached
+/// (burning past `E ≥ 0` only wastes fuel). This is what the three thrust sites fly;
+/// [`ascent_thrust_dir`] (the raw closed-loop law) remains the *planning* model the
+/// program is sampled from.
 pub fn program_guidance(true_pos: Vec3, true_vel: Vec3, program: &PitchProgram) -> Guidance {
     let throttle = if escaped(true_pos, true_vel) { 0.0 } else { 1.0 };
     Guidance { thrust_dir: program.thrust_dir(true_pos, true_vel.length()), throttle }
@@ -242,9 +256,11 @@ pub fn propagate(
         if step % sample_every.max(1) == 0 {
             path.push(pos);
         }
-        let g = ascent_guidance(pos, vel, pitchover);
-        let accel = g.thrust_dir * (thrust_accel * g.throttle) + gravity_at(pos);
-        burn_dv += thrust_accel * g.throttle * dt;
+        // Full-throttle ideal law: the loop terminates the moment escape energy is
+        // reached, so the escape cutoff never actually modulates the burn here.
+        let dir = ascent_thrust_dir(pos, vel, pitchover);
+        let accel = dir * thrust_accel + gravity_at(pos);
+        burn_dv += thrust_accel * dt;
         vel += accel * dt;
         pos += vel * dt;
         // Sank below the floor before escaping → crashed; fuel-to-escape is undefined.
@@ -390,8 +406,23 @@ mod tests {
     fn throttle_cuts_at_escape() {
         let pos = Vec3::new(0.0, 0.0, 0.0);
         let v_esc = (2.0 * GRAVITY_MU / GRAVITY_REF_RADIUS).sqrt();
-        assert_eq!(ascent_guidance(pos, Vec3::Y * (v_esc + 5.0), 0.0).throttle, 0.0);
-        assert_eq!(ascent_guidance(pos, Vec3::Y * 10.0, 0.0).throttle, 1.0);
+        let program = PitchProgram::default();
+        assert_eq!(program_guidance(pos, Vec3::Y * (v_esc + 5.0), &program).throttle, 0.0);
+        assert_eq!(program_guidance(pos, Vec3::Y * 10.0, &program).throttle, 1.0);
+    }
+
+    /// The shared plan constructor guards a mass-less assembly with the straight-up
+    /// default (a zero-thrust "plan" would sample a garbage gravity-only fall), and
+    /// embeds a forced angle verbatim (the replicated-rebuild and A/B-override path).
+    #[test]
+    fn plan_guards_zero_mass_and_honors_forced_angle() {
+        let g = Vec3::new(0.0, -SURFACE_GRAVITY, 0.0);
+        let empty = PitchProgram::plan(Vec3::ZERO, Vec3::ZERO, 4, g, 0.0, Some(0.3));
+        assert_eq!(empty.pitchover, 0.0);
+        assert_eq!(empty.angle_at(100.0), 0.0);
+        let forced = PitchProgram::plan(Vec3::ZERO, Vec3::ZERO, 4, g, 12.0, Some(0.3));
+        assert_eq!(forced.pitchover, 0.3);
+        assert!(forced.angle_at(TURN_SPEED) > 0.2, "kick should approach the forced angle");
     }
 
     /// The optimizer never picks a crashing angle, and its choice beats or matches

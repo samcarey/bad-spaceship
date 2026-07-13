@@ -26,11 +26,9 @@ use avian3d::prelude::{
     Position, Rotation, SphericalJoint, WriteRigidBodyForces,
 };
 use bad_spaceship_shared::assembly::largest_assembly_per_room;
-use bad_spaceship_shared::guidance::{
-    optimize_pitchover, program_guidance, PitchProgram, DEFAULT_PITCHOVER,
-};
+use bad_spaceship_shared::guidance::{program_guidance, PitchProgram, DEFAULT_PITCHOVER};
 use bad_spaceship_shared::launch::{
-    assembly_burn, full_rocket_thrust, measure_assembly_spin, LAUNCH_COUNTDOWN_SECS,
+    assembly_burn, burn_impulse, measure_assembly_spin, LAUNCH_COUNTDOWN_SECS,
 };
 use bad_spaceship_shared::character::{spawn_position, CharacterMovement, InitialPose, ServerAvatar};
 use bad_spaceship_shared::net::{
@@ -2279,15 +2277,14 @@ struct RoomAttitudeIntegrals(HashMap<RoomId, Vec3>);
 #[derive(Resource, Default)]
 struct RoomFuel(HashMap<RoomId, f32>);
 
-/// Per-room fuel-optimal ascent plan: the pitchover angle (rad) the guidance optimizer
-/// chose on the first launched tick from the assembly's real thrust-to-weight, plus the
-/// [`PitchProgram`] sampled off that ideal trajectory (what the autopilot actually flies —
-/// see the program's docs for why not closed-loop prograde). The angle replicates via
-/// [`NetLaunch::pitchover`] so the predicted twin rebuilds the identical program. Cleared
-/// when a fresh launch arms so a rebuilt/reloaded assembly gets re-planned (see
-/// [`handle_launch_requests`]).
+/// Per-room fuel-optimal ascent plan: the [`PitchProgram`] built on the first launched
+/// tick from the assembly's real thrust-to-weight (see `PitchProgram::plan` — what the
+/// autopilot actually flies, and why not closed-loop prograde). Its pitchover angle
+/// replicates via [`NetLaunch::pitchover`] so the predicted twin rebuilds the identical
+/// program. Cleared when a fresh launch arms so a rebuilt/reloaded assembly gets
+/// re-planned (see [`handle_launch_requests`]).
 #[derive(Resource, Default)]
-struct RoomPolicy(HashMap<RoomId, (f32, PitchProgram)>);
+struct RoomPolicy(HashMap<RoomId, PitchProgram>);
 
 impl LaunchRegistry {
     /// Whether a room has blasted off — the state the rocket thrust keys on and
@@ -2411,7 +2408,7 @@ fn publish_room_launch(
         // The optimizer's chosen ascent angle rides along (0 until the first launched
         // tick computes it) so the predicted client rebuilds the same pitch program.
         let pitchover =
-            policies.0.get(&orb_room.0).map(|plan| plan.0).unwrap_or(DEFAULT_PITCHOVER);
+            policies.0.get(&orb_room.0).map(|plan| plan.pitchover).unwrap_or(DEFAULT_PITCHOVER);
         let next = match registry.by_room.get(&orb_room.0) {
             Some(RoomLaunch::Counting { remaining }) => {
                 NetLaunch { remaining: remaining.max(0.0), launched: false, pitchover }
@@ -2519,15 +2516,13 @@ fn apply_room_rocket_thrust(
             let frame = frames.get(*room);
             let true_com = com + frame.offset.as_vec3();
             let true_vel = spin.linear_velocity + frame.velocity;
-            // Fuel-optimal ascent plan: chosen once per launch, on the first launched
-            // tick, from this assembly's real thrust-to-weight — the optimizer picks the
-            // pitchover (a heavy hauler gets a gentle lean, an engine-dense stack flies
-            // straight up), and the pitch program samples the resulting ideal trajectory
-            // for the autopilot to fly. The angle replicates via `NetLaunch::pitchover`
-            // so the predicted client rebuilds the identical program.
-            // `BS_FORCE_PITCHOVER_DEG` overrides the angle for A/B measurements
-            // (headless/bot flights only — an override would diverge an MP client's
-            // prediction, which flies the replicated angle).
+            // Fuel-optimal ascent plan: built once per launch, on the first launched
+            // tick, from this assembly's real thrust-to-weight (`PitchProgram::plan`,
+            // the shared constructor all three thrust sites use — a heavy hauler gets a
+            // gentle lean, an engine-dense stack flies straight up). The chosen angle
+            // replicates via `NetLaunch::pitchover`, so the predicted client rebuilds
+            // the identical program — including under `BS_FORCE_PITCHOVER_DEG`, the
+            // headless A/B hook that forces the angle here at the seam where it's chosen.
             let plan = policies.0.entry(*room).or_insert_with(|| {
                 let total_mass: f32 = members
                     .iter()
@@ -2539,30 +2534,24 @@ fn apply_room_rocket_thrust(
                         .filter(|(m, _)| m.0 == *room)
                         .map(|(_, mass)| mass.value())
                         .sum::<f32>();
-                if total_mass <= 0.0 {
-                    return (DEFAULT_PITCHOVER, PitchProgram::default());
-                }
-                let thrust_accel =
-                    rockets.len() as f32 * full_rocket_thrust(gravity.0) / total_mass;
                 static FORCE: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new();
-                let pitchover = FORCE
+                let forced = FORCE
                     .get_or_init(|| {
                         std::env::var("BS_FORCE_PITCHOVER_DEG")
                             .ok()
                             .and_then(|s| s.parse::<f32>().ok())
                     })
-                    .map(|deg| deg.to_radians())
-                    .unwrap_or_else(|| optimize_pitchover(true_com, true_vel, thrust_accel));
-                (pitchover, PitchProgram::build(true_com, true_vel, thrust_accel, pitchover))
+                    .map(|deg| deg.to_radians());
+                PitchProgram::plan(true_com, true_vel, rockets.len(), gravity.0, total_mass, forced)
             });
-            let pitchover = plan.0;
-            let guidance = program_guidance(true_com, true_vel, &plan.1);
+            let pitchover = plan.pitchover;
+            let guidance = program_guidance(true_com, true_vel, plan);
             static DEBUG_GUIDANCE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
             if *DEBUG_GUIDANCE.get_or_init(|| std::env::var("BS_DEBUG_GUIDANCE").is_ok()) {
                 use std::sync::atomic::{AtomicU32, Ordering};
                 static GT: AtomicU32 = AtomicU32::new(0);
                 if GT.fetch_add(1, Ordering::Relaxed) % 30 == 0 {
-                    let alt = (true_com - bad_spaceship_shared::guidance::PLANET_CENTER).length()
+                    let alt = (true_com - bad_spaceship_shared::map::PLANET_CENTER).length()
                         - bad_spaceship_shared::map::GRAVITY_REF_RADIUS;
                     let e = bad_spaceship_shared::guidance::specific_energy(true_com, true_vel);
                     let f = fuel.0.get(room).copied().unwrap_or(0.0);
@@ -2575,10 +2564,8 @@ fn apply_room_rocket_thrust(
             }
             let integral = integrals.0.entry(*room).or_default();
             let burn = assembly_burn(com, gravity.0, dt, rockets, &spin, integral, guidance);
-            // Tally propellant burned this tick = thrust impulse Σ|force|·dt (see
-            // `RoomFuel`; |force| = full·throttle, gimbal only rotates it).
-            *fuel.0.entry(*room).or_default() +=
-                burn.iter().map(|b| b.force.length()).sum::<f32>() * dt;
+            // Tally propellant burned this tick (see `RoomFuel` and `burn_impulse`).
+            *fuel.0.entry(*room).or_default() += burn_impulse(&burn, dt);
             // Diagnostics (BS_DEBUG_GIMBAL): once a second, the controller state the
             // flight recorder can't see - body axis vs velocity vs nozzle deflections.
             static DEBUG_GIMBAL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
