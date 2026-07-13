@@ -128,10 +128,10 @@ impl LaunchLocal {
     }
 }
 
-/// How far the camera zooms out once a launch lifts off — 3× the player's current
-/// distance (the requested "zoom out 200%"), eased in/out. Applied on top of the
+/// How far the camera zooms out once a launch lifts off — 2.5× the player's current
+/// distance (the requested "zoom out 150%"), eased in/out. Applied on top of the
 /// scroll-zoom distance by `client::input::zoom_camera`.
-pub(crate) const LAUNCH_CAMERA_ZOOM: f32 = 3.0;
+pub(crate) const LAUNCH_CAMERA_ZOOM: f32 = 2.5;
 
 /// Eased camera zoom-out factor driven by the room's launch state: `1.0` on the pad,
 /// easing toward [`LAUNCH_CAMERA_ZOOM`] after blastoff (and back on reset). Read by
