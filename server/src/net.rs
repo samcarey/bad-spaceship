@@ -31,6 +31,7 @@ use bad_spaceship_shared::character::{spawn_position, CharacterMovement, Initial
 use bad_spaceship_shared::net::{
     apply_hold_spring, apply_net_input, focused_part, monster_index, sanitize_name,
     ClientPanicReport, InLargestAssembly, NetFacing, NetHold, NetInput, NetJoint, NetLockJoint,
+    NetMoving,
     NetLaunch, NetName, NetPart, NetPlayer, NetRoomFrame, PartShape, ProtocolPlugin, RequestLaunch,
     ResetPosition, ResetRoom, RollbackReport, SaveGame, SetAvatar, SetLocked, SetName,
     GROUND_JOINT_ID, MONSTER_COUNT, TICK,
@@ -349,7 +350,7 @@ impl Plugin for NetServerPlugin {
         // to stream per-frame.
         app.add_systems(
             Update,
-            (sync_avatar_facing, sync_net_hold, mark_largest_assembly),
+            (sync_avatar_facing, sync_avatar_moving, sync_net_hold, mark_largest_assembly),
         );
         // Part recycling runs in `FixedUpdate`, NOT `Update`: it also catches parts
         // whose state went non-finite / absurd (a diverging constraint solve), and
@@ -1906,6 +1907,20 @@ fn sync_avatar_facing(mut avatars: Query<(&Yaw, &mut NetFacing)>) {
     }
 }
 
+/// Mirror whether each avatar's player is pressing a move/jump input into its
+/// replicated [`NetMoving`], so remote clients animate it honestly (walk only on
+/// real input — never from world-frame motion, which made riders on a drifting
+/// rocket look like they were running in place). Only writes on change, so an idle
+/// or steadily-walking avatar generates no traffic.
+fn sync_avatar_moving(mut avatars: Query<(&ActionState<NetInput>, &mut NetMoving)>) {
+    for (state, mut moving) in &mut avatars {
+        let now = state.0.move_xz != [0.0, 0.0] || state.0.jump;
+        if moving.0 != now {
+            moving.0 = now;
+        }
+    }
+}
+
 /// Tag each held part with a replicated [`NetHold`] (holder + the hold point/orientation
 /// the server springs it toward) and strip it from parts that were released, so every
 /// client can run the same hold spring on a held part instead of predicting it in
@@ -2817,6 +2832,9 @@ fn spawn_player_for_client(
         // Replicated facing (mirrored from the avatar's `Yaw` by
         // `sync_avatar_facing`) so remote clients can draw it facing its look.
         NetFacing::default(),
+        // Replicated move/jump-input flag (mirrored by `sync_avatar_moving`) so
+        // remote clients animate it from real input, not world-frame motion.
+        NetMoving::default(),
         // Display name — replicated from spawn (empty until `assign_rooms` picks a
         // unique per-room default), so the client never queries a nameless avatar.
         NetName::default(),

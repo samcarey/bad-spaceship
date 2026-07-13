@@ -536,6 +536,21 @@ pub fn sanitize_name(raw: &str) -> String {
     raw.trim().chars().take(MAX_NAME_LEN).collect()
 }
 
+/// Whether an avatar's player is currently pressing a move or jump input, replicated
+/// **server → other clients** purely so remote avatars animate honestly: the walk
+/// animation plays only on real input, never from world-frame motion (a rider on a
+/// laterally-drifting rocket is NOT running). Mirrored from each avatar's buffered
+/// `NetInput` by the server (`sync_avatar_moving`, the `NetFacing` pattern); the
+/// owner never reads it (its own animation keys off the local `DirectionalInput`
+/// with zero delay). Predict-synced so it reaches the *predicted* remote avatars;
+/// never triggers a rollback (cosmetic, not part of the physics sim).
+#[derive(Component, Serialize, Deserialize, Clone, Copy, PartialEq, Debug, Default)]
+pub struct NetMoving(pub bool);
+
+fn moving_should_rollback(_confirmed: &NetMoving, _predicted: &NetMoving) -> bool {
+    false
+}
+
 /// An avatar's look yaw (radians), replicated **server → other clients** purely so
 /// remote avatars can be drawn facing the way they look. Deliberately a *separate*
 /// component from the local-input [`Yaw`]: the owner drives its own `Yaw` locally
@@ -834,6 +849,13 @@ impl Plugin for ProtocolPlugin {
             .predict()
             .with_rollback_condition(facing_should_rollback)
             .add_interpolation_with(lerp_facing);
+        // Whether each avatar's player is pressing move/jump (see `NetMoving`) — the
+        // remote-animation signal. Same shape as `NetFacing`: predict-synced so it
+        // reaches the predicted remote avatars, never rolls back (cosmetic).
+        app.component::<NetMoving>()
+            .replicate()
+            .predict()
+            .with_rollback_condition(moving_should_rollback);
         // Each player's display name (see `NetName`): replicated so every client can
         // draw it over the avatar and list it in the roster. Changes rarely (only on
         // rename), so it just needs replicating — no interpolation.
