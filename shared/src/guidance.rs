@@ -280,19 +280,25 @@ pub const OPTIMIZER_STEPS: usize = 4000;
 pub fn optimize_pitchover(true_pos: Vec3, true_vel: Vec3, thrust_accel: f32) -> f32 {
     const SAFETY: f32 = 0.85;
     /// Attitude-execution cost of a commanded lean, as extra fuel Δv (m/s) per radian of
-    /// pitchover. The point-mass sim assumes thrust snaps to the guidance direction, but
-    /// the real stack must physically rotate — rate-limited nozzles, PD wobble around the
-    /// command, thrust pointing off-prograde all the while — and flight-recorder A/B runs
-    /// measured that cost eating the *entire* predicted savings of aggressive turns
-    /// (33–59° commands lost ~100–160 m/s to execution). Charging the sweep for it makes
-    /// the optimizer prefer the gentle leans real vehicles can actually fly, and pushes
-    /// engine-dense stacks (whose ideal turn is steep but whose gravity-loss prize is
-    /// small) toward the near-vertical ascent that measures cheapest for them.
-    /// 300: at this weight the chosen angle goes to zero for TWR ≳ 2.0. Measured basis:
-    /// a TWR-2.1 8-engine stack commanded 29° (the value a 150 weight allowed) trimmed
-    /// itself down to hover-thrust fighting the kick and broke up — while its straight-up
-    /// flight is clean — so the transition must sit below the aggressive-angle zone.
-    const EXECUTION_PENALTY_PER_RAD: f32 = 300.0;
+    /// pitchover. The point-mass sim assumes thrust snaps to the guidance direction; the
+    /// real stack must physically rotate, and imperfect tracking points some thrust
+    /// off-plan. Charging the sweep for it keeps the optimizer off angles that only pay
+    /// on paper, and gives engine-dense stacks (steep ideal turn, small gravity-loss
+    /// prize) their measured-cheapest near-vertical ascent.
+    ///
+    /// Calibration history — this constant is tied to HOW the command is flown:
+    /// - Prograde-chasing era (thrust tracked the live velocity vector): execution ate
+    ///   5–7% of every burn at ANY angle (allocator trimmed continuously against the
+    ///   moving target), and a TWR-2.1 stack commanded 29° trimmed itself to
+    ///   hover-thrust and broke up → the penalty had to sit at 300 m/s/rad, which
+    ///   capped every build's turn at ~17°.
+    /// - Pitch-program era (current): the command is a smooth angle-vs-speed schedule,
+    ///   as cheap to hold as vertical — measured turn savings now land ON the
+    ///   point-mass prediction (19–22%). 50 covers the residual attitude lag while
+    ///   letting mid-TWR builds fly the real optimum (~25–35°); the straight-up
+    ///   transition moves to TWR ≈ 2.2–2.4, which engine-count asymptotics make
+    ///   genuinely "lots of rockets" territory (a bare engine is TWR ~2.2).
+    const EXECUTION_PENALTY_PER_RAD: f32 = 50.0;
     let cost = |angle: f32| {
         let ideal = propagate(
             true_pos,
