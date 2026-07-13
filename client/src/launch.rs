@@ -22,9 +22,12 @@ use avian3d::prelude::{
     AngularVelocity, Collider, ComputedMass, Forces, Gravity, LinearVelocity, Position, Rotation,
     SphericalJoint, WriteRigidBodyForces,
 };
-use bad_spaceship_shared::guidance::{ascent_guidance, Guidance, DEFAULT_PITCHOVER};
+use bad_spaceship_shared::guidance::{
+    optimize_pitchover, program_guidance, Guidance, PitchProgram,
+};
 use bad_spaceship_shared::launch::{
-    assembly_burn, measure_assembly_spin, AssemblySpin, LAUNCH_COUNTDOWN_SECS,
+    assembly_burn, full_rocket_thrust, measure_assembly_spin, AssemblySpin,
+    LAUNCH_COUNTDOWN_SECS,
 };
 use bad_spaceship_shared::map::apply_gravity_correction;
 use bad_spaceship_shared::net::{
@@ -310,6 +313,11 @@ fn apply_sp_thrust(
     time: Res<Time>,
     // The launch autopilot's per-assembly PID integral state (see `assembly_burn`).
     mut integral: Local<Vec3>,
+    // The fuel-optimal ascent plan (pitchover + the pitch program the autopilot flies),
+    // optimized once at launch from this stack's thrust-to-weight, then frozen; cleared
+    // when the launch ends so a rebuilt stack gets re-planned. (Single player owns its
+    // own optimizer — there's no server.)
+    mut sp_plan: Local<Option<PitchProgram>>,
     local: Res<LaunchLocal>,
     parts: Query<(Entity, &GlobalTransform, &ComputedMass), With<Holdable>>,
     joints: Query<&SphericalJoint>,
@@ -323,9 +331,13 @@ fn apply_sp_thrust(
     )>,
     gravity: Res<Gravity>,
     mut fuel: ResMut<FuelUsed>,
+    // The rider's mass, for the ascent plan: locked aboard at launch, so their weight
+    // flies with the stack and belongs in the planned thrust-to-weight.
+    rider: Query<&ComputedMass, With<Character>>,
 ) {
     if local.sp != SpPhase::Launched {
         fuel.0 = 0.0; // idle: keep the readout at zero until the next launch fires
+        *sp_plan = None; // re-plan the ascent for the next launch
         return;
     }
     let Some((members, _)) = main_assembly(&parts, &joints) else {
@@ -360,10 +372,26 @@ fn apply_sp_thrust(
             (entity, translation, rotation, gimbal.0)
         })
         .collect();
-    // Fuel-optimal ascent guidance: straight up (`DEFAULT_PITCHOVER` = 0, the measured
-    // optimum here) with an escape-energy throttle cutoff. No floating origin in single
-    // player, so the true planet-frame state is just the local COM + velocity.
-    let guidance = ascent_guidance(com, spin.linear_velocity, DEFAULT_PITCHOVER);
+    // Fuel-optimal ascent guidance: a per-assembly pitchover (optimized once at launch
+    // from this stack's thrust-to-weight — heavy haulers lean, engine-dense stacks go
+    // vertical), flown as a pitch program with an escape-energy throttle cutoff. No
+    // floating origin in single player, so the true planet-frame state is just the local
+    // COM + velocity.
+    let program = sp_plan.get_or_insert_with(|| {
+        let total_mass: f32 = parts
+            .iter()
+            .filter(|(entity, ..)| members.contains(entity))
+            .map(|(_, _, m)| m.value())
+            .sum::<f32>()
+            + rider.iter().map(|m| m.value()).sum::<f32>();
+        if total_mass <= 0.0 {
+            return PitchProgram::default();
+        }
+        let thrust_accel = geometry.len() as f32 * full_rocket_thrust(gravity.0) / total_mass;
+        let pitchover = optimize_pitchover(com, spin.linear_velocity, thrust_accel);
+        PitchProgram::build(com, spin.linear_velocity, thrust_accel, pitchover)
+    });
+    let guidance = program_guidance(com, spin.linear_velocity, program);
     apply_thrust(
         com,
         gravity.0,
@@ -385,6 +413,9 @@ fn apply_mp_thrust(
     time: Res<Time>,
     // The launch autopilot's per-assembly PID integral state (see `assembly_burn`).
     mut integral: Local<Vec3>,
+    // The ascent plan mirror: the pitch program rebuilt from the server's replicated
+    // pitchover angle (keyed by that angle so a re-plan on the server rebuilds here too).
+    mut mp_plan: Local<Option<(f32, PitchProgram)>>,
     orb: Query<&NetLaunch>,
     // `Forces` takes `AngularVelocity` mutably inside, so the member read and the
     // force write cannot coexist as sibling queries (B0001) — sequence them.
@@ -409,16 +440,24 @@ fn apply_mp_thrust(
     frame: Res<ClientRoomFrame>,
     gravity: Res<Gravity>,
     mut fuel: ResMut<FuelUsed>,
+    // Riders' masses for the ascent plan (all avatars in the room are locked aboard at
+    // launch, and all are predicted): matches the server's rider-inclusive plan.
+    riders: Query<&ComputedMass, (With<Character>, With<Predicted>)>,
 ) {
-    if !orb.iter().next().is_some_and(|l| l.launched) {
+    let Some(launch) = orb.iter().next().filter(|l| l.launched) else {
         fuel.0 = 0.0; // idle: keep the readout at zero until the room launches
+        *mp_plan = None; // re-plan on the next launch
         return;
-    }
+    };
+    // The server's optimized ascent angle, replicated so the predicted turn matches
+    // (`DEFAULT_PITCHOVER` = 0 for the tick or two before the first value arrives —
+    // that window is inside the vertical kick phase, where 0 and the real angle agree).
+    let pitchover = launch.pitchover;
     // The assembly's COM + motion state, via the shared measurement (see
     // `measure_assembly_spin`) so the trim matches the server exactly; collect
     // the member rockets' poses alongside (`Gimbal` marks the rockets — it rides
     // `insert_rocket_physics`).
-    let (measured, geometry) = {
+    let (measured, geometry, total_mass) = {
         let members = set.p0();
         let samples = || {
             members
@@ -433,7 +472,9 @@ fn apply_mp_thrust(
                 gimbal.map(|g| (entity, position.0, rotation.0, g.0))
             })
             .collect();
-        (measure_assembly_spin(samples), geometry)
+        let total_mass: f32 =
+            members.iter().map(|(_, _, _, _, _, part_mass, _)| part_mass.value()).sum();
+        (measure_assembly_spin(samples), geometry, total_mass)
     };
     let Some((com, spin)) = measured else {
         return;
@@ -442,7 +483,20 @@ fn apply_mp_thrust(
     // co-moving velocity), so the guidance sees real altitude/velocity under a rebase.
     let true_com = com + frame.offset.as_vec3();
     let true_vel = spin.linear_velocity + frame.velocity;
-    let guidance = ascent_guidance(true_com, true_vel, DEFAULT_PITCHOVER);
+    // Rebuild the pitch program when the replicated angle (re)arrives. Thrust accel comes
+    // from the locally measured mass — identical parts and densities to the server's, so
+    // the rebuilt program matches the one the server flies.
+    if mp_plan.as_ref().map(|(p, _)| *p) != Some(pitchover) {
+        let total_mass = total_mass + riders.iter().map(|m| m.value()).sum::<f32>();
+        let thrust_accel = if total_mass > 0.0 {
+            geometry.len() as f32 * full_rocket_thrust(gravity.0) / total_mass
+        } else {
+            0.0
+        };
+        *mp_plan =
+            Some((pitchover, PitchProgram::build(true_com, true_vel, thrust_accel, pitchover)));
+    }
+    let guidance = program_guidance(true_com, true_vel, &mp_plan.as_ref().unwrap().1);
     apply_thrust(
         com,
         gravity.0,

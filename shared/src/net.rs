@@ -383,6 +383,11 @@ pub struct NetLaunch {
     pub remaining: f32,
     /// Whether blastoff has happened and the rockets are firing.
     pub launched: bool,
+    /// The fuel-optimal ascent pitchover angle (rad) the server's guidance optimizer chose
+    /// for this assembly (from its thrust-to-weight at launch), replicated so the predicted
+    /// client flies the *identical* gravity turn — a different angle client-vs-server would
+    /// diverge the prediction. See [`optimize_pitchover`](crate::guidance::optimize_pitchover).
+    pub pitchover: f32,
 }
 
 /// Replicated **floating-origin frame** of a room, authored by the server onto the
