@@ -562,7 +562,7 @@ fn replace_fallen_rocket_engines(
 /// cut), so deleting joints off a rigid weld automatically re-arms its contact.
 fn maintain_weld_rigidity(
     mut commands: Commands,
-    joints: Query<(Entity, &SphericalJoint)>,
+    joints: Query<(Entity, &SphericalJoint, Has<LockJoint>)>,
     changed: Query<(), Changed<SphericalJoint>>,
     mut removed: RemovedComponents<SphericalJoint>,
 ) {
@@ -575,12 +575,21 @@ fn maintain_weld_rigidity(
     type PairJoints = Vec<(Entity, Vec3, Vec3)>; // (joint, anchor in key.0, anchor in key.1)
     let mut pairs: std::collections::HashMap<(Entity, Entity), PairJoints> =
         std::collections::HashMap::new();
-    for (entity, joint) in &joints {
+    let mut lock_pairs: std::collections::HashSet<(Entity, Entity)> =
+        std::collections::HashSet::new();
+    for (entity, joint, is_lock) in &joints {
         let (key, a_anchor, b_anchor) = if joint.body1 <= joint.body2 {
             ((joint.body1, joint.body2), joint.local_anchor1(), joint.local_anchor2())
         } else {
             ((joint.body2, joint.body1), joint.local_anchor2(), joint.local_anchor1())
         };
+        // A rider's lock weld owns its pair's relative pose outright (centre-anchored,
+        // rotation-free by design) — its contact adds nothing but a capsule-vs-deck
+        // fight while the tilting body sweeps through the surface. Always drop it,
+        // regardless of the anchor-count rigidity the census would compute.
+        if is_lock {
+            lock_pairs.insert(key);
+        }
         pairs.entry(key).or_default().push((
             entity,
             a_anchor.unwrap_or_default(),
@@ -638,7 +647,8 @@ fn maintain_weld_rigidity(
     }
 
     for (&(a, b), members) in &pairs {
-        let rigid = clusters.find(index[&a]) == clusters.find(index[&b]);
+        let rigid = lock_pairs.contains(&(a, b))
+            || clusters.find(index[&a]) == clusters.find(index[&b]);
         for &(entity, _, _) in members {
             // `try_insert`/`try_remove` (not `insert`/`remove`): a joint queried here can
             // be despawned before these deferred commands apply — the floating-origin
@@ -878,9 +888,18 @@ pub fn avatar_lock_contacts<'a>(
     for (part, collider, position, rotation) in parts {
         contacts.clear();
         part_gap_contacts(avatar.0, avatar.1, avatar.2, collider, position, rotation, &mut contacts);
-        for (avatar_local, part_local) in contacts.iter().copied() {
-            weld(part, avatar_local, part_local);
+        if contacts.is_empty() {
+            continue;
         }
+        // ONE weld per touched part, anchored at the CAPSULE CENTRE on the avatar side.
+        // The avatar body rotates to the rider's felt up every physics tick (see
+        // `FeltUp`), and a surface-point anchor would be dragged through the constraint
+        // by that kinematic rotation — corrective impulses pumped into the deck at the
+        // exact moment the ascent starts tilting (destabilized a launch). Rotation
+        // about the centre never moves a centre anchor, so the weld is tilt-invariant;
+        // the spherical joint never constrained rotation anyway.
+        let part_anchor = rotation.inverse() * (avatar.1 - position);
+        weld(part, Vec3::ZERO, part_anchor);
     }
 }
 
