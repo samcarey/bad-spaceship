@@ -889,11 +889,13 @@ pub fn avatar_lock_contacts<'a>(
     // deck, like a standing person, rather than hinging at the waist. Computed once —
     // it's a fixed point in the avatar's local frame.
     let foot_local = capsule_bottom_center(avatar.0);
-    // Its world position now (the avatar rotates to the rider's felt up each tick — see
-    // `FeltUp` — but the deck rotates with the assembly, so the two rotate together and
-    // the feet stay planted). The rider's collider is disabled while locked (see
-    // `toggle_locked_rider_collision`), so there is no capsule-vs-deck contact fighting
-    // the weld regardless of where the anchor sits.
+    // Its world position now. The avatar rotates to the rider's felt up each tick (see
+    // `FeltUp`); crucially `drive_felt_up` pivots that rotation about THIS foot point, so a
+    // felt-up rotation holds the foot anchor fixed and never drags it through the weld
+    // constraint (anchoring at the foot while pivoting about the centre pumped a
+    // destabilizing torque into a launched deck — the gravity-turn tumble of 2026-07-14).
+    // The rider's collider is disabled while locked (see `toggle_locked_rider_collision`),
+    // so there is no capsule-vs-deck contact fighting the weld regardless of the anchor.
     let foot_world = avatar.1 + avatar.2 * foot_local;
     let mut contacts = Vec::new();
     for (part, collider, position, rotation) in parts {
@@ -912,7 +914,7 @@ pub fn avatar_lock_contacts<'a>(
 /// lower endpoint of the capsule's inner segment (Avian's capsule runs along local +Y,
 /// centred at the origin). Falls back to the origin (the capsule centre) for any other
 /// shape, so a non-capsule rider still gets a sane centre anchor.
-fn capsule_bottom_center(collider: &Collider) -> Vec3 {
+pub fn capsule_bottom_center(collider: &Collider) -> Vec3 {
     collider.shape().as_capsule().map_or(Vec3::ZERO, |c| {
         let (a, b) = (c.segment.a, c.segment.b);
         let p = if a[1] <= b[1] { a } else { b };

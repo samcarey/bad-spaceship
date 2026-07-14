@@ -179,17 +179,32 @@ pub fn apparent_up(net_thrust_force: Vec3, total_mass: f32, true_com: Vec3) -> V
 /// the new average — or insert a default `FeltUp` if it has none yet. The single owner of
 /// the "sample ⇒ body orientation" contract, called identically by the client and server
 /// felt-up samplers (which differ only in how they source `target`).
+///
+/// The stand-up rotation pivots about `pivot` (the capsule's foot point in body-local
+/// coordinates), not the body origin: the foot's world position is held fixed while the
+/// body re-orients. This is load-bearing for a *locked* rider — its lock weld anchors at
+/// that same foot (`avatar_lock_contacts`), so pivoting about the foot keeps the weld
+/// anchor stationary under a felt-up rotation. Pivoting about the *centre* (the origin)
+/// instead swings the offset foot-anchor through an arc every tick, dragging it through
+/// the joint constraint and pumping a destabilizing torque into a launched deck — the
+/// gravity-turn rider tumble of 2026-07-14, which only bit once felt-up began rotating
+/// (i.e. the moment the pitchover started at `TURN_SPEED`). On the ground / in coast the
+/// orientation is identity, so the pivot shift is a no-op.
 pub fn drive_felt_up(
     commands: &mut Commands,
     entity: Entity,
     felt: Option<Mut<FeltUp>>,
     rotation: &mut Rotation,
+    position: &mut Position,
+    pivot: Vec3,
     target: Vec3,
 ) {
     match felt {
         Some(mut felt) => {
             felt.sample(target);
+            let foot_world = position.0 + rotation.0 * pivot;
             rotation.0 = felt.orientation();
+            position.0 = foot_world - rotation.0 * pivot;
         }
         None => {
             commands.entity(entity).try_insert(FeltUp::default());

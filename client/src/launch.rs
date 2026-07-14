@@ -32,8 +32,8 @@ use bad_spaceship_shared::net::{
     SetLocked,
 };
 use bad_spaceship_shared::part::{
-    avatar_lock_contacts, cleanup_lock_joints, despawn_player_lock_welds, Gimbal, Holdable,
-    LockJoint, RocketEngine, SuppressLocalParts, TargetPosition,
+    avatar_lock_contacts, capsule_bottom_center, cleanup_lock_joints, despawn_player_lock_welds,
+    Gimbal, Holdable, LockJoint, RocketEngine, SuppressLocalParts, TargetPosition,
 };
 use bad_spaceship_shared::character::{apparent_up, drive_felt_up, FeltUp};
 use bad_spaceship_shared::Character;
@@ -571,11 +571,15 @@ fn reset_flame_targets(mut throttles: Query<&mut FlameThrottle>) {
 fn sample_felt_up(
     mut commands: Commands,
     apparent: Res<ApparentUp>,
-    mut characters: Query<(Entity, Option<&mut FeltUp>, &mut Rotation), With<Character>>,
+    mut characters: Query<
+        (Entity, Option<&mut FeltUp>, &mut Rotation, &mut Position, &Collider),
+        With<Character>,
+    >,
 ) {
     let target = apparent.0.unwrap_or(Vec3::Y);
-    for (entity, felt, mut rotation) in &mut characters {
-        drive_felt_up(&mut commands, entity, felt, &mut rotation, target);
+    for (entity, felt, mut rotation, mut position, collider) in &mut characters {
+        let pivot = capsule_bottom_center(collider);
+        drive_felt_up(&mut commands, entity, felt, &mut rotation, &mut position, pivot, target);
     }
 }
 

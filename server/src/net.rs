@@ -46,10 +46,10 @@ use bad_spaceship_shared::map::{
     apply_gravity_correction, GROUND_LAYER, PLANET_CENTER, PLANET_RADIUS, PLANET_RESPAWN_Y,
 };
 use bad_spaceship_shared::part::{
-    avatar_lock_contacts, despawn_player_lock_welds, part_gap_contacts, part_state_diverged,
-    spawn_random_part, spawn_random_rocket, spawn_rocket_engine, spawn_saved_cuboid, Gimbal,
-    LockJoint, RocketEngine, SuppressLocalParts, DELETE_RADIUS, NUM_PARTS, NUM_ROCKET_ENGINES,
-    PART_FALL_Y, ROCKET_VOLUME,
+    avatar_lock_contacts, capsule_bottom_center, despawn_player_lock_welds, part_gap_contacts,
+    part_state_diverged, spawn_random_part, spawn_random_rocket, spawn_rocket_engine,
+    spawn_saved_cuboid, Gimbal, LockJoint, RocketEngine, SuppressLocalParts, DELETE_RADIUS,
+    NUM_PARTS, NUM_ROCKET_ENGINES, PART_FALL_Y, ROCKET_VOLUME,
 };
 use bad_spaceship_shared::{Grass, SuppressLocalPlayer, Yaw};
 use bevy::math::DVec3;
@@ -2695,11 +2695,15 @@ fn apply_room_rocket_thrust(
 fn sample_felt_up(
     mut commands: Commands,
     apparent: Res<RoomApparentUp>,
-    mut avatars: Query<(Entity, &RoomMember, Option<&mut FeltUp>, &mut Rotation), With<ServerAvatar>>,
+    mut avatars: Query<
+        (Entity, &RoomMember, Option<&mut FeltUp>, &mut Rotation, &mut Position, &Collider),
+        With<ServerAvatar>,
+    >,
 ) {
-    for (entity, member, felt, mut rotation) in &mut avatars {
+    for (entity, member, felt, mut rotation, mut position, collider) in &mut avatars {
         let target = apparent.0.get(&member.0).copied().unwrap_or(Vec3::Y);
-        drive_felt_up(&mut commands, entity, felt, &mut rotation, target);
+        let pivot = capsule_bottom_center(collider);
+        drive_felt_up(&mut commands, entity, felt, &mut rotation, &mut position, pivot, target);
     }
 }
 
