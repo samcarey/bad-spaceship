@@ -79,6 +79,18 @@ pub fn escaped(true_pos: Vec3, true_vel: Vec3) -> bool {
     specific_energy(true_pos, true_vel) >= 0.0
 }
 
+/// Whether escape is **secured**: energy ≥ 0 AND on the outbound leg (radial velocity
+/// ≥ 0). Scalar escape energy alone is NOT a safe cutoff: a near-horizontal burn can
+/// reach `E ≥ 0` while the path still points slightly downward — energy is conserved
+/// through the coast, but the hyperbola's periapsis can lie below the surface, and the
+/// "escaped" ship dives back to the ground (observed live: tilt to horizontal, then the
+/// altimeter unwinding to zero). Burning through the dip until the path turns outbound
+/// costs a little extra fuel and guarantees the coast never descends again: with
+/// `E ≥ 0` and `v·r̂ ≥ 0`, r grows monotonically forever.
+pub fn escape_secured(true_pos: Vec3, true_vel: Vec3) -> bool {
+    escaped(true_pos, true_vel) && (true_pos - PLANET_CENTER).dot(true_vel) >= 0.0
+}
+
 /// The commanded thrust direction (unit) for the ascent law at a true position +
 /// velocity: radial-out tipped by the blended `pitchover` below [`TURN_SPEED`], prograde
 /// (a gravity turn) above it. `pitchover` of 0 is a pure vertical ascent.
@@ -182,7 +194,7 @@ impl PitchProgram {
             if samples.last().is_none_or(|&(s, _)| speed > s + 1.0) {
                 samples.push((speed, angle));
             }
-            if escaped(pos, vel) {
+            if escape_secured(pos, vel) {
                 break;
             }
             let accel = dir * thrust_accel + gravity_at(pos);
@@ -225,7 +237,7 @@ impl PitchProgram {
 /// [`ascent_thrust_dir`] (the raw closed-loop law) remains the *planning* model the
 /// program is sampled from.
 pub fn program_guidance(true_pos: Vec3, true_vel: Vec3, program: &PitchProgram) -> Guidance {
-    let throttle = if escaped(true_pos, true_vel) { 0.0 } else { 1.0 };
+    let throttle = if escape_secured(true_pos, true_vel) { 0.0 } else { 1.0 };
     Guidance { thrust_dir: program.thrust_dir(true_pos, true_vel.length()), throttle }
 }
 
@@ -288,7 +300,7 @@ pub fn propagate(
             path.push(pos);
             return Prediction { path, burn_dv: None, escaped: false };
         }
-        if escaped(pos, vel) {
+        if escape_secured(pos, vel) {
             path.push(pos);
             return Prediction { path, burn_dv: Some(burn_dv), escaped: true };
         }
