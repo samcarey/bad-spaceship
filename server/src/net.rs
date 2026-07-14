@@ -2653,33 +2653,22 @@ fn apply_room_rocket_thrust(
                     );
                 }
             }
-            // Diagnostics (BS_DEBUG_ATTITUDE): how far the controller's parts-only COM is
-            // from the TRUE COM (with locked riders), and the torque actually produced.
-            // This is the test for "the autopilot is blind to the rider's weight".
+            // Diagnostics (BS_DEBUG_ATTITUDE): the attitude-hold state the recorder can't
+            // see — how many riders are in the mass model, the body tilt, the torque the
+            // burn actually produces about the (rider-inclusive) COM, and how hard the
+            // integral is working. A large standing |net_tau|/|I| = the controller fighting
+            // an unmodelled disturbance.
             static DEBUG_ATT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
             if *DEBUG_ATT.get_or_init(|| std::env::var("BS_DEBUG_ATTITUDE").is_ok()) {
                 use std::sync::atomic::{AtomicU32, Ordering};
                 static AT: AtomicU32 = AtomicU32::new(0);
                 if AT.fetch_add(1, Ordering::Relaxed) % 30 == 0 {
-                    let parts_mass: f32 =
-                        members.iter().filter(|(.., r)| r.id == *room).map(|(_, _, _, m, _)| m.value()).sum();
-                    let mut true_mass = parts_mass;
-                    let mut true_wp = com * parts_mass;
-                    let mut n_riders = 0;
-                    for (_, pos, _, m) in riders.iter().filter(|(rm, ..)| rm.0 == *room) {
-                        true_wp += pos.0 * m.value();
-                        true_mass += m.value();
-                        n_riders += 1;
-                    }
-                    let true_com = true_wp / true_mass;
+                    let n_riders = riders.iter().filter(|(rm, ..)| rm.0 == *room).count();
                     let net_torque: Vec3 = burn.iter().map(|b| (b.point - com).cross(b.force)).sum();
-                    let axis = rockets[0].2 * Vec3::Y;
-                    let tilt = axis.angle_between(Vec3::Y).to_degrees();
+                    let tilt = (rockets[0].2 * Vec3::Y).angle_between(Vec3::Y).to_degrees();
                     println!(
-                        "[att] nparts={} nrider={} tilt={:.1} comOff={:.3} (lat={:.3}) |w|={:.3} |net_tau|={:.2} |I|={:.2}",
+                        "[att] nparts={} nrider={} tilt={:.1} |w|={:.3} |net_tau|={:.2} |I|={:.2}",
                         rockets.len(), n_riders, tilt,
-                        (true_com - com).length(),
-                        (true_com - com).with_y(0.0).length(),
                         spin.angular_velocity.length(),
                         net_torque.length(),
                         integral.length(),
