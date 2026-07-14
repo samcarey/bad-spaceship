@@ -43,6 +43,11 @@ pub struct MagmaParams {
     emissive_strength: f32,
     /// Time-driven flicker depth of the glow [0, 1].
     flicker: f32,
+    /// The room's visual floating-origin offset (xyz; w padding). The planet meshes
+    /// ride the ground, which the client parks at `-offset`, so the triplanar noise
+    /// would slide across the surface without adding this back. Driven by
+    /// `sync_visual_room_frame`.
+    frame_offset: Vec4,
 }
 
 impl Default for MagmaParams {
@@ -60,6 +65,7 @@ impl Default for MagmaParams {
             rivulet_hi: 0.95,
             emissive_strength: 2.2,
             flicker: 0.25,
+            frame_offset: Vec4::ZERO,
         }
     }
 }
@@ -68,6 +74,23 @@ impl Default for MagmaParams {
 pub struct MagmaExtension {
     #[uniform(100)]
     params: MagmaParams,
+}
+
+impl crate::render_main_pass::FrameOffsetMaterial for MagmaMaterial {
+    /// Full xyz (the triplanar sample uses all three planes). Kept raw (no modulo) —
+    /// the triplanar FBM isn't periodic, and once the offset is large enough to lose
+    /// f32 precision the planet is a distant dot whose fine rivulets aren't resolvable.
+    fn frame_target(&self, visual_offset: bevy::math::DVec3) -> Vec4 {
+        visual_offset.as_vec3().extend(0.0)
+    }
+
+    fn stored_frame(&self) -> Vec4 {
+        self.extension.params.frame_offset
+    }
+
+    fn set_stored_frame(&mut self, value: Vec4) {
+        self.extension.params.frame_offset = value;
+    }
 }
 
 impl MaterialExtension for MagmaExtension {

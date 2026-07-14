@@ -52,6 +52,11 @@ pub struct GrassParams {
     /// fragments skip the parallax march.
     fade_start: f32,
     fade_end: f32,
+    /// The room's visual floating-origin offset (xy = world XZ; zw padding). The
+    /// ground mesh is parked at `-offset` in render space, so `world.xz` slides
+    /// under the turf as the room co-moves; the shader adds this back to key the
+    /// noise to the true planet-fixed coordinate. Driven by `sync_visual_room_frame`.
+    frame_offset: Vec4,
 }
 
 impl Default for GrassParams {
@@ -73,6 +78,7 @@ impl Default for GrassParams {
             dry_strength: 0.35,
             fade_start: 25.0,
             fade_end: 55.0,
+            frame_offset: Vec4::ZERO,
         }
     }
 }
@@ -81,6 +87,26 @@ impl Default for GrassParams {
 pub struct GrassExtension {
     #[uniform(100)]
     params: GrassParams,
+}
+
+impl crate::render_main_pass::FrameOffsetMaterial for GrassMaterial {
+    /// World XZ packed into xy (see `GrassParams::frame_offset`). Kept raw (no
+    /// modulo, unlike ash's periodic lattice): the FBM isn't periodic. Precision is
+    /// safe not because the *offset* is bounded but because the shader sums it with
+    /// `world.xz` and grass is culled beyond `fade_end` (~55 m) — for ground-anchored
+    /// grass the ascent offset ≈ the camera-to-ground distance, so the summed sample
+    /// coordinate stays f32-exact wherever blades are actually drawn.
+    fn frame_target(&self, visual_offset: bevy::math::DVec3) -> Vec4 {
+        Vec4::new(visual_offset.x as f32, visual_offset.z as f32, 0.0, 0.0)
+    }
+
+    fn stored_frame(&self) -> Vec4 {
+        self.extension.params.frame_offset
+    }
+
+    fn set_stored_frame(&mut self, value: Vec4) {
+        self.extension.params.frame_offset = value;
+    }
 }
 
 impl MaterialExtension for GrassExtension {

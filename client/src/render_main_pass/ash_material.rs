@@ -88,7 +88,7 @@ pub struct AshMaterial {
     params: AshParams,
 }
 
-impl AshMaterial {
+impl crate::render_main_pass::FrameOffsetMaterial for AshMaterial {
     /// The box-modulo lattice anchor for a room's visual floating-origin offset
     /// (see `AshParams::frame_offset`).
     fn frame_target(&self, visual_offset: bevy::math::DVec3) -> Vec4 {
@@ -96,16 +96,12 @@ impl AshMaterial {
         target.as_vec3().extend(0.0)
     }
 
-    /// Whether `set_frame` would actually change the uniform — callers check this
-    /// on a read borrow first, so a settled frame doesn't re-upload the material
-    /// every frame (mutably borrowing the asset flags a GPU re-upload).
-    pub fn frame_needs_update(&self, visual_offset: bevy::math::DVec3) -> bool {
-        self.frame_target(visual_offset).distance_squared(self.params.frame_offset) > 1.0e-4
+    fn stored_frame(&self) -> Vec4 {
+        self.params.frame_offset
     }
 
-    /// Anchor the flake lattice for the room's visual floating-origin offset.
-    pub fn set_frame(&mut self, visual_offset: bevy::math::DVec3) {
-        self.params.frame_offset = self.frame_target(visual_offset);
+    fn set_stored_frame(&mut self, value: Vec4) {
+        self.params.frame_offset = value;
     }
 }
 
