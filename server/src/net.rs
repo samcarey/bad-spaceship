@@ -41,7 +41,10 @@ use bad_spaceship_shared::net::{
     ResetPosition, ResetRoom, RollbackReport, SaveGame, SetAvatar, SetLocked, SetName,
     GROUND_JOINT_ID, MONSTER_COUNT, TICK,
 };
-use bad_spaceship_shared::map::{apply_gravity_correction, gravity_at, GROUND_LAYER, PLANET_RESPAWN_Y};
+use bad_spaceship_shared::map::{
+    apply_gravity_correction, gravity_at, GROUND_LAYER, PLANET_CENTER, PLANET_RADIUS,
+    PLANET_RESPAWN_Y,
+};
 use bad_spaceship_shared::part::{
     avatar_lock_contacts, despawn_player_lock_welds, part_gap_contacts, part_state_diverged,
     spawn_random_part, spawn_random_rocket, spawn_rocket_engine, spawn_saved_cuboid, Gimbal,
@@ -1125,11 +1128,21 @@ fn detect_assembly_crash(
 ) {
     for (position, part_room) in &assembly {
         let room = part_room.id;
-        // Skip parts of rooms already flagged this frame, or launched / in-flight rooms.
-        if pending.0.contains(&room)
-            || launches.is_launched(room)
-            || frames.get(room).is_active()
-        {
+        if pending.0.contains(&room) {
+            continue;
+        }
+        if launches.is_launched(room) || frames.get(room).is_active() {
+            // In flight the crash surface is radial: the planet has no collider away
+            // from the pad bowl, so an assembly whose TRUE position sinks below the
+            // planet sphere has flown into the terrain. Without this, a flight whose
+            // realized attitude sagged flatter than planned (e.g. a side-hung rider's
+            // standing torque) could circle *inside* the visual planet burning forever —
+            // escape energy is unreachable that deep in the well. Small margin so a low
+            // skim that visibly grazes the surface reads as the crash it looks like.
+            let true_pos = position.0 + frames.get(room).offset.as_vec3();
+            if (true_pos - PLANET_CENTER).length() < PLANET_RADIUS - 50.0 {
+                pending.0.insert(room);
+            }
             continue;
         }
         if position.0.y < ASSEMBLY_CRASH_Y {
