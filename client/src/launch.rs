@@ -93,10 +93,14 @@ impl Plugin for LaunchPlugin {
                     // Feed each rider's felt-up window (camera + movement basis) from
                     // the apparent-up the burn above just published.
                     sample_felt_up,
-                    // Structural damping across welded pairs (single-player joints and
-                    // the predicted multiplayer twins alike) — drains contact/joint pump
-                    // energy before it can run away (see `damp_weld_motion`).
-                    bad_spaceship_shared::part::damp_weld_motion,
+                    // Structural damping across welded pairs — drains contact/joint
+                    // pump energy before it can run away (see `damp_weld_motion`).
+                    // Single-player ONLY: on the predicted multiplayer twin the damper
+                    // would smear half-applied rollback corrections across the cluster
+                    // and feed a rollback storm; the server's authoritative damping
+                    // protects multiplayer flights.
+                    bad_spaceship_shared::part::damp_weld_motion
+                        .run_if(not(resource_exists::<SuppressLocalParts>)),
                 )
                     .chain(),
             );

@@ -920,6 +920,18 @@ pub fn cleanup_lock_joints(
 /// hinged parts just swing viscously instead of jangling.
 const WELD_DAMPING_PER_TICK: f32 = 0.3;
 
+/// Relative speed below which the damper does nothing (m/s linear, rad/s angular).
+/// Normal flight keeps welded pairs within solver-noise of zero relative motion — a
+/// damper acting there is a no-op physically but NOT numerically: on a predicted
+/// multiplayer client it smears half-applied rollback corrections across the welded
+/// cluster, injecting client-only velocity deltas that feed a rollback storm (observed:
+/// ~18 rollbacks/s and a mid-flight breakup with a browser client attached, while
+/// bot-only flights of the same binary flew clean). The dead-zone keeps the damper
+/// silent until a pair shows REAL divergence — an actual pump — which is also why the
+/// damper only registers on authoritative sims (server + single-player), never on the
+/// predicted twin.
+const WELD_DAMPING_DEADZONE: f32 = 0.5;
+
 /// Apply [`WELD_DAMPING_PER_TICK`] across every jointed **dynamic** pair, once per pair
 /// per tick (a pair welded by several joints is damped once). Skips pairs touching a
 /// non-dynamic body: a static ground clamp partner ignores velocity writes for motion,
@@ -954,15 +966,22 @@ pub fn damp_weld_motion(
             continue;
         }
         // Momentum-conserving relative-velocity bleed: the light body yields more.
-        let dv = (v2.0 - v1.0) * WELD_DAMPING_PER_TICK;
-        v1.0 += dv * (m2 / total);
-        v2.0 -= dv * (m1 / total);
+        // Dead-zoned (see `WELD_DAMPING_DEADZONE`) so it acts only on real pumps.
+        let rel_v = v2.0 - v1.0;
+        if rel_v.length_squared() > WELD_DAMPING_DEADZONE * WELD_DAMPING_DEADZONE {
+            let dv = rel_v * WELD_DAMPING_PER_TICK;
+            v1.0 += dv * (m2 / total);
+            v2.0 -= dv * (m1 / total);
+        }
         // Same for spin (mass-weighted — a cheap stand-in for inertia weighting; exact
         // conservation matters less than the guarantee of never adding energy, which
         // holds for any convex weighting).
-        let dw = (w2.0 - w1.0) * WELD_DAMPING_PER_TICK;
-        w1.0 += dw * (m2 / total);
-        w2.0 -= dw * (m1 / total);
+        let rel_w = w2.0 - w1.0;
+        if rel_w.length_squared() > WELD_DAMPING_DEADZONE * WELD_DAMPING_DEADZONE {
+            let dw = rel_w * WELD_DAMPING_PER_TICK;
+            w1.0 += dw * (m2 / total);
+            w2.0 -= dw * (m1 / total);
+        }
     }
 }
 
