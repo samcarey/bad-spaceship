@@ -76,26 +76,20 @@ pub struct MagmaExtension {
     params: MagmaParams,
 }
 
-impl MagmaExtension {
-    /// The shader-side offset for a room's visual floating-origin offset (see
-    /// `MagmaParams::frame_offset`). Kept raw (no modulo) — the triplanar FBM isn't
-    /// periodic, and once the offset is large enough to lose f32 precision the planet
-    /// is a distant dot whose fine rivulets are no longer resolvable.
+impl crate::render_main_pass::FrameOffsetMaterial for MagmaMaterial {
+    /// Full xyz (the triplanar sample uses all three planes). Kept raw (no modulo) —
+    /// the triplanar FBM isn't periodic, and once the offset is large enough to lose
+    /// f32 precision the planet is a distant dot whose fine rivulets aren't resolvable.
     fn frame_target(&self, visual_offset: bevy::math::DVec3) -> Vec4 {
         visual_offset.as_vec3().extend(0.0)
     }
 
-    /// Whether `set_frame` would change the uniform — checked on a read borrow so a
-    /// settled frame doesn't re-upload the material every frame.
-    pub fn frame_needs_update(&self, visual_offset: bevy::math::DVec3) -> bool {
-        self.frame_target(visual_offset)
-            .distance_squared(self.params.frame_offset)
-            > 1.0e-4
+    fn stored_frame(&self) -> Vec4 {
+        self.extension.params.frame_offset
     }
 
-    /// Pin the magma noise to the room's visual floating-origin offset.
-    pub fn set_frame(&mut self, visual_offset: bevy::math::DVec3) {
-        self.params.frame_offset = self.frame_target(visual_offset);
+    fn set_stored_frame(&mut self, value: Vec4) {
+        self.extension.params.frame_offset = value;
     }
 }
 

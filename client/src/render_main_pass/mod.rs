@@ -29,8 +29,9 @@ use flame_material::{
     register_flame_mesh, spawn_flame, update_flames, FlameMaterial, FLAME_SHADER_HANDLE,
 };
 pub use grass_material::GrassMaterial;
+pub use magma_material::MagmaMaterial;
 use grass_material::{GrassExtension, GRASS_SHADER_HANDLE};
-use magma_material::{MagmaMaterial, MAGMA_SHADER_HANDLE};
+use magma_material::MAGMA_SHADER_HANDLE;
 use metal_material::{part_visual, rocket_body_material, MetalMaterial, METAL_SHADER_HANDLE};
 use avian3d::prelude::Collider;
 
@@ -39,6 +40,33 @@ use avian3d::prelude::Collider;
 /// resolvable when the material pipelines compile.
 const NOISE_SHADER_HANDLE: Handle<Shader> =
     uuid_handle!("26176534-6a5e-4030-8788-5ebe6e74318d");
+
+/// A world-anchored procedural material whose noise is keyed off `world_position`
+/// and therefore slides when the ground it sits on is parked at `-offset` by the
+/// room's floating-origin frame (see `sync_visual_room_frame`). Carries a
+/// `frame_offset` uniform re-anchored to the TRUE frame each frame; `pin_material_frames`
+/// drives every implementor from one loop.
+pub trait FrameOffsetMaterial {
+    /// The shader-side offset for a given visual floating-origin offset. Each material
+    /// picks its own reduction: ash reduces modulo its periodic lattice; grass/magma
+    /// keep it raw (their FBM isn't periodic, so a modulo would inject a visible seam).
+    fn frame_target(&self, offset: bevy::math::DVec3) -> Vec4;
+    fn stored_frame(&self) -> Vec4;
+    fn set_stored_frame(&mut self, value: Vec4);
+
+    /// Whether `set_frame` would change the uniform — checked on a read borrow so a
+    /// settled frame doesn't re-upload the material (mutating the asset flags a GPU
+    /// re-upload).
+    fn frame_needs_update(&self, offset: bevy::math::DVec3) -> bool {
+        self.frame_target(offset).distance_squared(self.stored_frame()) > 1.0e-4
+    }
+
+    /// Re-anchor the noise to the room's visual floating-origin offset.
+    fn set_frame(&mut self, offset: bevy::math::DVec3) {
+        let target = self.frame_target(offset);
+        self.set_stored_frame(target);
+    }
+}
 
 pub struct RenderMainPassPlugin;
 

@@ -89,26 +89,23 @@ pub struct GrassExtension {
     params: GrassParams,
 }
 
-impl GrassExtension {
-    /// The shader-side offset for a room's visual floating-origin offset: world
-    /// XZ packed into xy (see `GrassParams::frame_offset`). Kept raw (no modulo,
-    /// unlike ash's periodic lattice) — grass only renders within `fade_end` of
-    /// the camera, so the offset is small and f32-exact in the visible window.
+impl crate::render_main_pass::FrameOffsetMaterial for GrassMaterial {
+    /// World XZ packed into xy (see `GrassParams::frame_offset`). Kept raw (no
+    /// modulo, unlike ash's periodic lattice): the FBM isn't periodic. Precision is
+    /// safe not because the *offset* is bounded but because the shader sums it with
+    /// `world.xz` and grass is culled beyond `fade_end` (~55 m) — for ground-anchored
+    /// grass the ascent offset ≈ the camera-to-ground distance, so the summed sample
+    /// coordinate stays f32-exact wherever blades are actually drawn.
     fn frame_target(&self, visual_offset: bevy::math::DVec3) -> Vec4 {
         Vec4::new(visual_offset.x as f32, visual_offset.z as f32, 0.0, 0.0)
     }
 
-    /// Whether `set_frame` would change the uniform — checked on a read borrow so
-    /// a settled frame doesn't re-upload the material every frame.
-    pub fn frame_needs_update(&self, visual_offset: bevy::math::DVec3) -> bool {
-        self.frame_target(visual_offset)
-            .distance_squared(self.params.frame_offset)
-            > 1.0e-4
+    fn stored_frame(&self) -> Vec4 {
+        self.extension.params.frame_offset
     }
 
-    /// Pin the turf noise to the room's visual floating-origin offset.
-    pub fn set_frame(&mut self, visual_offset: bevy::math::DVec3) {
-        self.params.frame_offset = self.frame_target(visual_offset);
+    fn set_stored_frame(&mut self, value: Vec4) {
+        self.extension.params.frame_offset = value;
     }
 }
 

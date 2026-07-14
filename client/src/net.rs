@@ -21,9 +21,7 @@ use bevy::transform::TransformSystems;
 use lightyear::prediction::correction::VisualCorrection;
 use lightyear::prediction::rollback::RollbackSystems;
 
-use crate::render_main_pass::magma_material::MagmaMaterial;
-use crate::render_main_pass::AshMaterial;
-use crate::render_main_pass::GrassMaterial;
+use crate::render_main_pass::{AshMaterial, FrameOffsetMaterial, GrassMaterial, MagmaMaterial};
 use bad_spaceship_shared::character::{
     insert_character_body, insert_remote_avatar_body, CharacterMovement, Config as CharacterConfig,
 };
@@ -1063,33 +1061,24 @@ fn sync_visual_room_frame(
         }
     }
 
-    for material in &ash {
-        // Read-check before `get_mut` — mutating the asset re-uploads the uniform.
-        if ash_materials.get(material.id()).is_some_and(|m| m.frame_needs_update(offset)) {
-            if let Some(mut mat) = ash_materials.get_mut(material.id()) {
+    pin_material_frames(&ash, &mut ash_materials, offset);
+    pin_material_frames(&grass, &mut grass_materials, offset);
+    pin_material_frames(&magma, &mut magma_materials, offset);
+}
+
+/// Re-anchor every handle of a world-anchored procedural material to the room's
+/// visual floating-origin `offset` (see [`FrameOffsetMaterial`]). The read-borrow
+/// `frame_needs_update` check skips the GPU re-upload once the frame settles (a
+/// grounded room sits at `offset ≈ 0`, so the uniform stops changing).
+fn pin_material_frames<M: Asset + Material + FrameOffsetMaterial>(
+    handles: &Query<&MeshMaterial3d<M>>,
+    materials: &mut Assets<M>,
+    offset: DVec3,
+) {
+    for handle in handles {
+        if materials.get(handle.id()).is_some_and(|m| m.frame_needs_update(offset)) {
+            if let Some(mut mat) = materials.get_mut(handle.id()) {
                 mat.set_frame(offset);
-            }
-        }
-    }
-
-    for material in &grass {
-        if grass_materials
-            .get(material.id())
-            .is_some_and(|m| m.extension.frame_needs_update(offset))
-        {
-            if let Some(mut mat) = grass_materials.get_mut(material.id()) {
-                mat.extension.set_frame(offset);
-            }
-        }
-    }
-
-    for material in &magma {
-        if magma_materials
-            .get(material.id())
-            .is_some_and(|m| m.extension.frame_needs_update(offset))
-        {
-            if let Some(mut mat) = magma_materials.get_mut(material.id()) {
-                mat.extension.set_frame(offset);
             }
         }
     }
