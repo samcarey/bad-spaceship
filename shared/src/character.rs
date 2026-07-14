@@ -1,6 +1,6 @@
 use avian3d::prelude::{
-    Collider, CollisionLayers, Collisions, LinearVelocity, LockedAxes, Mass, Position, RigidBody,
-    Rotation, SphericalJoint,
+    Collider, ColliderDisabled, CollisionLayers, Collisions, LinearVelocity, LockedAxes, Mass,
+    Position, RigidBody, Rotation, SphericalJoint,
 };
 use bevy::prelude::*;
 use bevy::reflect::TypePath;
@@ -52,12 +52,49 @@ impl Plugin for CharacterPlugin {
                 )
                     .in_set(CharacterMovement),
             )
+            // Disable a locked rider's collider so the welded, frozen, rotation-locked
+            // capsule can never fight the assembly it rides. Same three-world discipline
+            // as the movement freeze: derived purely from the live lock-joint set, so
+            // server, single-player, and the predicted client stay identical.
+            .add_systems(FixedUpdate, toggle_locked_rider_collision)
             // Run the fixed timestep at the netcode tick rate (60 Hz) so single-
             // player physics + movement match the multiplayer simulation tick
             // (Bevy's default `Time<Fixed>` is 64 Hz). Avian steps on this too.
             .insert_resource(Time::<Fixed>::from_duration(crate::net::TICK))
             .init_resource::<MovementTuning>()
             .init_asset::<Config>();
+    }
+}
+
+/// Insert [`ColliderDisabled`] on every locked rider and remove it once unlocked, so a
+/// rider welded to the assembly contributes no contacts at all while locked. The lock
+/// weld already owns the rider's pose (feet pinned to the deck) and the movement systems
+/// freeze its velocity, so a live capsule adds only a capsule-vs-deck fight as the deck
+/// tilts under thrust — exactly what the weld census drops for the *welded* part, now
+/// dropped for the *whole* assembly. Mass-neutral: disabling a collider does not
+/// recompute its `ColliderMassProperties`, so the autopilot's rider-mass accounting is
+/// unchanged. Runs in every world (server, single-player, predicted client): the state
+/// is derived from the live `LockJoint` set (rebuilt identically on each side), so it
+/// can't diverge under rollback. `try_insert`/`try_remove` tolerate an avatar despawned
+/// before these deferred commands apply.
+fn toggle_locked_rider_collision(
+    mut commands: Commands,
+    lock_joints: Query<&SphericalJoint, With<crate::part::LockJoint>>,
+    disabled: Query<Entity, With<ColliderDisabled>>,
+) {
+    // A lock weld's `body1` is always the rider's avatar — disable each one that isn't
+    // already disabled.
+    for joint in &lock_joints {
+        if disabled.get(joint.body1).is_err() {
+            commands.entity(joint.body1).try_insert(ColliderDisabled);
+        }
+    }
+    // Re-enable any body this system disabled once it is no longer locked. Nothing else
+    // uses `ColliderDisabled`, so a disabled body that isn't locked was unlocked.
+    for entity in &disabled {
+        if !crate::part::is_locked(&lock_joints, entity) {
+            commands.entity(entity).try_remove::<ColliderDisabled>();
+        }
     }
 }
 
@@ -141,17 +178,32 @@ pub fn apparent_up(net_thrust_force: Vec3, total_mass: f32, true_com: Vec3) -> V
 /// the new average — or insert a default `FeltUp` if it has none yet. The single owner of
 /// the "sample ⇒ body orientation" contract, called identically by the client and server
 /// felt-up samplers (which differ only in how they source `target`).
+///
+/// The stand-up rotation pivots about `pivot` (the capsule's foot point in body-local
+/// coordinates), not the body origin: the foot's world position is held fixed while the
+/// body re-orients. This is load-bearing for a *locked* rider — its lock weld anchors at
+/// that same foot (`avatar_lock_contacts`), so pivoting about the foot keeps the weld
+/// anchor stationary under a felt-up rotation. Pivoting about the *centre* (the origin)
+/// instead swings the offset foot-anchor through an arc every tick, dragging it through
+/// the joint constraint and pumping a destabilizing torque into a launched deck — the
+/// gravity-turn rider tumble of 2026-07-14, which only bit once felt-up began rotating
+/// (i.e. the moment the pitchover started at `TURN_SPEED`). On the ground / in coast the
+/// orientation is identity, so the pivot shift is a no-op.
 pub fn drive_felt_up(
     commands: &mut Commands,
     entity: Entity,
     felt: Option<Mut<FeltUp>>,
     rotation: &mut Rotation,
+    position: &mut Position,
+    pivot: Vec3,
     target: Vec3,
 ) {
     match felt {
         Some(mut felt) => {
             felt.sample(target);
+            let foot_world = position.0 + rotation.0 * pivot;
             rotation.0 = felt.orientation();
+            position.0 = foot_world - rotation.0 * pivot;
         }
         None => {
             commands.entity(entity).try_insert(FeltUp::default());

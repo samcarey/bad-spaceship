@@ -32,8 +32,8 @@ use bad_spaceship_shared::net::{
     SetLocked,
 };
 use bad_spaceship_shared::part::{
-    avatar_lock_contacts, cleanup_lock_joints, despawn_player_lock_welds, Gimbal, Holdable,
-    LockJoint, RocketEngine, SuppressLocalParts, TargetPosition,
+    avatar_lock_contacts, capsule_bottom_center, cleanup_lock_joints, despawn_player_lock_welds,
+    Gimbal, Holdable, LockJoint, RocketEngine, SuppressLocalParts, TargetPosition,
 };
 use bad_spaceship_shared::character::{apparent_up, drive_felt_up, FeltUp};
 use bad_spaceship_shared::Character;
@@ -345,6 +345,9 @@ fn apply_sp_thrust(
     // when the launch ends so a rebuilt stack gets re-planned. (Single player owns its
     // own optimizer — there's no server.)
     mut sp_plan: Local<Option<PitchProgram>>,
+    // Escape-cutoff hysteresis state (see `escape_cutoff`): held across ticks so the throttle
+    // can't flicker at the boundary, cleared with the plan when the launch ends.
+    mut cut: Local<bool>,
     local: Res<LaunchLocal>,
     parts: Query<(Entity, &GlobalTransform, &ComputedMass), With<Holdable>>,
     joints: Query<&SphericalJoint>,
@@ -366,6 +369,7 @@ fn apply_sp_thrust(
     if local.sp != SpPhase::Launched {
         fuel.0 = 0.0; // idle: keep the readout at zero until the next launch fires
         *sp_plan = None; // re-plan the ascent for the next launch
+        *cut = false; // reset the cutoff hysteresis for the next launch
         apparent.0 = None;
         return;
     }
@@ -416,7 +420,7 @@ fn apply_sp_thrust(
             + rider.iter().map(|m| m.value()).sum::<f32>();
         PitchProgram::plan(com, spin.linear_velocity, geometry.len(), gravity.0, total_mass, None)
     });
-    let guidance = program_guidance(com, spin.linear_velocity, program);
+    let guidance = program_guidance(com, spin.linear_velocity, program, &mut cut);
     let net_force = apply_thrust(
         com,
         gravity.0,
@@ -449,6 +453,9 @@ fn apply_mp_thrust(
     // The ascent plan mirror: the pitch program rebuilt from the server's replicated
     // pitchover angle (keyed by that angle so a re-plan on the server rebuilds here too).
     mut mp_plan: Local<Option<PitchProgram>>,
+    // Escape-cutoff hysteresis state (see `escape_cutoff`): stops the *predicted* engine
+    // chattering at the `E ≈ 0` boundary (the flame flicker), cleared when the room idles.
+    mut cut: Local<bool>,
     orb: Query<&NetLaunch>,
     // `Forces` takes `AngularVelocity` mutably inside, so the member read and the
     // force write cannot coexist as sibling queries (B0001) — sequence them.
@@ -481,6 +488,7 @@ fn apply_mp_thrust(
     let Some(launch) = orb.iter().next().filter(|l| l.launched) else {
         fuel.0 = 0.0; // idle: keep the readout at zero until the room launches
         *mp_plan = None; // re-plan on the next launch
+        *cut = false; // reset the cutoff hysteresis for the next launch
         apparent.0 = None;
         return;
     };
@@ -537,7 +545,7 @@ fn apply_mp_thrust(
             Some(pitchover),
         ));
     }
-    let guidance = program_guidance(true_com, true_vel, mp_plan.as_ref().unwrap());
+    let guidance = program_guidance(true_com, true_vel, mp_plan.as_ref().unwrap(), &mut cut);
     let net_force = apply_thrust(
         com,
         gravity.0,
@@ -571,11 +579,15 @@ fn reset_flame_targets(mut throttles: Query<&mut FlameThrottle>) {
 fn sample_felt_up(
     mut commands: Commands,
     apparent: Res<ApparentUp>,
-    mut characters: Query<(Entity, Option<&mut FeltUp>, &mut Rotation), With<Character>>,
+    mut characters: Query<
+        (Entity, Option<&mut FeltUp>, &mut Rotation, &mut Position, &Collider),
+        With<Character>,
+    >,
 ) {
     let target = apparent.0.unwrap_or(Vec3::Y);
-    for (entity, felt, mut rotation) in &mut characters {
-        drive_felt_up(&mut commands, entity, felt, &mut rotation, target);
+    for (entity, felt, mut rotation, mut position, collider) in &mut characters {
+        let pivot = capsule_bottom_center(collider);
+        drive_felt_up(&mut commands, entity, felt, &mut rotation, &mut position, pivot, target);
     }
 }
 
