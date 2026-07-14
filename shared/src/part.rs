@@ -10,7 +10,7 @@ use avian3d::prelude::{
     AngularVelocity, Collider, ColliderDensity, Collisions, Forces, Friction,
     Gravity, JointCollisionDisabled, LinearVelocity, Position, ReadRigidBodyForces, Restitution,
     Rotation,
-    RigidBody, SphericalJoint, SweptCcd, WriteRigidBodyForces,
+    ComputedMass, RigidBody, SphericalJoint, SweptCcd, WriteRigidBodyForces,
 };
 use bevy::prelude::*;
 use rand::prelude::ThreadRng;
@@ -900,6 +900,69 @@ pub fn cleanup_lock_joints(
         if bodies.get(joint.body1).is_err() || bodies.get(joint.body2).is_err() {
             commands.entity(entity).despawn();
         }
+    }
+}
+
+/// Fraction of the **relative** velocity (linear + angular) between two jointed bodies
+/// bled off per physics tick — structural damping for welded assemblies.
+///
+/// Why: a contact and a joint set solving the same pair (or a rigid loop of hinges — see
+/// [`maintain_weld_rigidity`]) can pump energy every substep; under the pitch program's
+/// sustained lateral load a marginal pair's pump can run away until the whole assembly
+/// detonates (recorder: six parts diverging at once, |ω| 400–1900 rad/s, mid-turn at
+/// ~1.2 km — a player build lost this way). Force-based fixes were tried in the census
+/// era and failed (joint compliance and doubled substeps both "neither stops the pump").
+/// This damping is different in kind: each tick the pair's relative velocity is scaled
+/// down directly, momentum-weighted, so it strictly REMOVES relative kinetic energy —
+/// it cannot inject any, no matter how violent the pump — and a runaway must now outgrow
+/// a 30%-per-tick drain to survive. Bodies a joint intends to be rigid have no
+/// legitimate relative motion, so the aggressive rate costs nothing real; dangling
+/// hinged parts just swing viscously instead of jangling.
+const WELD_DAMPING_PER_TICK: f32 = 0.3;
+
+/// Apply [`WELD_DAMPING_PER_TICK`] across every jointed **dynamic** pair, once per pair
+/// per tick (a pair welded by several joints is damped once). Skips pairs touching a
+/// non-dynamic body: a static ground clamp partner ignores velocity writes for motion,
+/// but scribbling on its `LinearVelocity` would leak into `GroundVelocity` support
+/// readings. Runs identically on the server, single-player, and the predicted client
+/// (the same shared-system discipline as the hold spring and gravity correction).
+pub fn damp_weld_motion(
+    joints: Query<&SphericalJoint>,
+    mut bodies: Query<(&RigidBody, &mut LinearVelocity, &mut AngularVelocity, &ComputedMass)>,
+) {
+    let mut seen: std::collections::HashSet<(Entity, Entity)> = std::collections::HashSet::new();
+    for joint in &joints {
+        let key = if joint.body1 <= joint.body2 {
+            (joint.body1, joint.body2)
+        } else {
+            (joint.body2, joint.body1)
+        };
+        if key.0 == key.1 || !seen.insert(key) {
+            continue;
+        }
+        let Ok([(rb1, mut v1, mut w1, m1), (rb2, mut v2, mut w2, m2)]) =
+            bodies.get_many_mut([key.0, key.1])
+        else {
+            continue;
+        };
+        if *rb1 != RigidBody::Dynamic || *rb2 != RigidBody::Dynamic {
+            continue;
+        }
+        let (m1, m2) = (m1.value(), m2.value());
+        let total = m1 + m2;
+        if total <= 0.0 {
+            continue;
+        }
+        // Momentum-conserving relative-velocity bleed: the light body yields more.
+        let dv = (v2.0 - v1.0) * WELD_DAMPING_PER_TICK;
+        v1.0 += dv * (m2 / total);
+        v2.0 -= dv * (m1 / total);
+        // Same for spin (mass-weighted — a cheap stand-in for inertia weighting; exact
+        // conservation matters less than the guarantee of never adding energy, which
+        // holds for any convex weighting).
+        let dw = (w2.0 - w1.0) * WELD_DAMPING_PER_TICK;
+        w1.0 += dw * (m2 / total);
+        w2.0 -= dw * (m1 / total);
     }
 }
 

@@ -93,6 +93,10 @@ impl Plugin for LaunchPlugin {
                     // the assembly attitude the burn above just flew.
                     sample_sp_felt_up.run_if(not(resource_exists::<SuppressLocalParts>)),
                     sample_mp_felt_up.run_if(resource_exists::<SuppressLocalParts>),
+                    // Structural damping across welded pairs (single-player joints and
+                    // the predicted multiplayer twins alike) — drains contact/joint pump
+                    // energy before it can run away (see `damp_weld_motion`).
+                    bad_spaceship_shared::part::damp_weld_motion,
                 )
                     .chain(),
             );

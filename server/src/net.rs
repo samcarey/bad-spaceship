@@ -473,6 +473,9 @@ impl Plugin for NetServerPlugin {
                 // assembly attitude the burn just flew — the server twin of the client's
                 // `sample_sp/mp_felt_up`, over the same replicated state.
                 sample_felt_up.after(apply_room_rocket_thrust),
+                // Structural damping across welded pairs — drains contact/joint pump
+                // energy before it can run away (see `damp_weld_motion`).
+                bad_spaceship_shared::part::damp_weld_motion.after(apply_room_rocket_thrust),
             ),
         );
     }
