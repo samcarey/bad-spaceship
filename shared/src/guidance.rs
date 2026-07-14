@@ -250,16 +250,16 @@ pub const ESCAPE_CUTOFF_MARGIN: f32 = 1.06;
 /// state is held, so boundary noise can't re-trigger it while a real fall-back still
 /// re-fires the engine. Callers clear `cut` when the launch ends so a re-launch thrusts.
 pub fn escape_cutoff(true_pos: Vec3, true_vel: Vec3, cut: &mut bool) -> bool {
-    let r = (true_pos - PLANET_CENTER).length().max(1.0);
-    let outbound = (true_pos - PLANET_CENTER).dot(true_vel) >= 0.0;
-    let energy = 0.5 * true_vel.length_squared() - GRAVITY_MU / r;
     *cut = if *cut {
-        // Stay cut while still escaped (E ≥ 0, outbound); re-fire the instant that fails.
-        energy >= 0.0 && outbound
+        // Stay cut while escape is still secured (E ≥ 0, outbound); re-fire the instant
+        // it's lost — the same canonical cutoff invariant the planner uses.
+        escape_secured(true_pos, true_vel)
     } else {
         // Cut once a margin past escape, outbound — clear of the E ≈ 0 knife-edge.
+        let r = (true_pos - PLANET_CENTER).length().max(1.0);
+        let outbound = (true_pos - PLANET_CENTER).dot(true_vel) >= 0.0;
         let margin_energy = (ESCAPE_CUTOFF_MARGIN * ESCAPE_CUTOFF_MARGIN - 1.0) * GRAVITY_MU / r;
-        energy >= margin_energy && outbound
+        specific_energy(true_pos, true_vel) >= margin_energy && outbound
     };
     *cut
 }

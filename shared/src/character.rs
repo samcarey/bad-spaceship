@@ -80,13 +80,12 @@ impl Plugin for CharacterPlugin {
 fn toggle_locked_rider_collision(
     mut commands: Commands,
     lock_joints: Query<&SphericalJoint, With<crate::part::LockJoint>>,
-    enabled: Query<(), Without<ColliderDisabled>>,
     disabled: Query<Entity, With<ColliderDisabled>>,
 ) {
-    // A lock weld's `body1` is always the rider's avatar — disable each distinct one
-    // that still has a live collider.
+    // A lock weld's `body1` is always the rider's avatar — disable each one that isn't
+    // already disabled.
     for joint in &lock_joints {
-        if enabled.get(joint.body1).is_ok() {
+        if disabled.get(joint.body1).is_err() {
             commands.entity(joint.body1).try_insert(ColliderDisabled);
         }
     }
