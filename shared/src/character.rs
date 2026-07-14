@@ -1,6 +1,6 @@
 use avian3d::prelude::{
-    Collider, CollisionLayers, Collisions, LinearVelocity, LockedAxes, Mass, Position, RigidBody,
-    Rotation, SphericalJoint,
+    Collider, ColliderDisabled, CollisionLayers, Collisions, LinearVelocity, LockedAxes, Mass,
+    Position, RigidBody, Rotation, SphericalJoint,
 };
 use bevy::prelude::*;
 use bevy::reflect::TypePath;
@@ -52,12 +52,50 @@ impl Plugin for CharacterPlugin {
                 )
                     .in_set(CharacterMovement),
             )
+            // Disable a locked rider's collider so the welded, frozen, rotation-locked
+            // capsule can never fight the assembly it rides. Same three-world discipline
+            // as the movement freeze: derived purely from the live lock-joint set, so
+            // server, single-player, and the predicted client stay identical.
+            .add_systems(FixedUpdate, toggle_locked_rider_collision)
             // Run the fixed timestep at the netcode tick rate (60 Hz) so single-
             // player physics + movement match the multiplayer simulation tick
             // (Bevy's default `Time<Fixed>` is 64 Hz). Avian steps on this too.
             .insert_resource(Time::<Fixed>::from_duration(crate::net::TICK))
             .init_resource::<MovementTuning>()
             .init_asset::<Config>();
+    }
+}
+
+/// Insert [`ColliderDisabled`] on every locked rider and remove it once unlocked, so a
+/// rider welded to the assembly contributes no contacts at all while locked. The lock
+/// weld already owns the rider's pose (feet pinned to the deck) and the movement systems
+/// freeze its velocity, so a live capsule adds only a capsule-vs-deck fight as the deck
+/// tilts under thrust — exactly what the weld census drops for the *welded* part, now
+/// dropped for the *whole* assembly. Mass-neutral: disabling a collider does not
+/// recompute its `ColliderMassProperties`, so the autopilot's rider-mass accounting is
+/// unchanged. Runs in every world (server, single-player, predicted client): the state
+/// is derived from the live `LockJoint` set (rebuilt identically on each side), so it
+/// can't diverge under rollback. `try_insert`/`try_remove` tolerate an avatar despawned
+/// before these deferred commands apply.
+fn toggle_locked_rider_collision(
+    mut commands: Commands,
+    lock_joints: Query<&SphericalJoint, With<crate::part::LockJoint>>,
+    enabled: Query<(), Without<ColliderDisabled>>,
+    disabled: Query<Entity, With<ColliderDisabled>>,
+) {
+    // A lock weld's `body1` is always the rider's avatar — disable each distinct one
+    // that still has a live collider.
+    for joint in &lock_joints {
+        if enabled.get(joint.body1).is_ok() {
+            commands.entity(joint.body1).try_insert(ColliderDisabled);
+        }
+    }
+    // Re-enable any body this system disabled once it is no longer locked. Nothing else
+    // uses `ColliderDisabled`, so a disabled body that isn't locked was unlocked.
+    for entity in &disabled {
+        if !crate::part::is_locked(&lock_joints, entity) {
+            commands.entity(entity).try_remove::<ColliderDisabled>();
+        }
     }
 }
 

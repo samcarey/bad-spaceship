@@ -884,6 +884,17 @@ pub fn avatar_lock_contacts<'a>(
     parts: impl Iterator<Item = (Entity, &'a Collider, Vec3, Quat)>,
     mut weld: impl FnMut(Entity, Vec3, Vec3),
 ) {
+    // Anchor on the avatar side at the CENTRE OF THE BOTTOM HEMISPHERE (the rider's
+    // feet), not the capsule centre: the pill pivots about its feet planted on the
+    // deck, like a standing person, rather than hinging at the waist. Computed once —
+    // it's a fixed point in the avatar's local frame.
+    let foot_local = capsule_bottom_center(avatar.0);
+    // Its world position now (the avatar rotates to the rider's felt up each tick — see
+    // `FeltUp` — but the deck rotates with the assembly, so the two rotate together and
+    // the feet stay planted). The rider's collider is disabled while locked (see
+    // `toggle_locked_rider_collision`), so there is no capsule-vs-deck contact fighting
+    // the weld regardless of where the anchor sits.
+    let foot_world = avatar.1 + avatar.2 * foot_local;
     let mut contacts = Vec::new();
     for (part, collider, position, rotation) in parts {
         contacts.clear();
@@ -891,16 +902,22 @@ pub fn avatar_lock_contacts<'a>(
         if contacts.is_empty() {
             continue;
         }
-        // ONE weld per touched part, anchored at the CAPSULE CENTRE on the avatar side.
-        // The avatar body rotates to the rider's felt up every physics tick (see
-        // `FeltUp`), and a surface-point anchor would be dragged through the constraint
-        // by that kinematic rotation — corrective impulses pumped into the deck at the
-        // exact moment the ascent starts tilting (destabilized a launch). Rotation
-        // about the centre never moves a centre anchor, so the weld is tilt-invariant;
-        // the spherical joint never constrained rotation anyway.
-        let part_anchor = rotation.inverse() * (avatar.1 - position);
-        weld(part, Vec3::ZERO, part_anchor);
+        // ONE weld per touched part: the feet anchor pinned to the deck point under them.
+        let part_anchor = rotation.inverse() * (foot_world - position);
+        weld(part, foot_local, part_anchor);
     }
+}
+
+/// Centre of a capsule collider's bottom hemisphere in the collider's local frame — the
+/// lower endpoint of the capsule's inner segment (Avian's capsule runs along local +Y,
+/// centred at the origin). Falls back to the origin (the capsule centre) for any other
+/// shape, so a non-capsule rider still gets a sane centre anchor.
+fn capsule_bottom_center(collider: &Collider) -> Vec3 {
+    collider.shape().as_capsule().map_or(Vec3::ZERO, |c| {
+        let (a, b) = (c.segment.a, c.segment.b);
+        let p = if a[1] <= b[1] { a } else { b };
+        Vec3::new(p[0], p[1], p[2])
+    })
 }
 
 /// Drop lock welds whose endpoints no longer exist: the avatar despawned
