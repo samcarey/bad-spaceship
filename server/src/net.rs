@@ -41,7 +41,7 @@ use bad_spaceship_shared::net::{
     ResetPosition, ResetRoom, RollbackReport, SaveGame, SetAvatar, SetLocked, SetName,
     GROUND_JOINT_ID, MONSTER_COUNT, TICK,
 };
-use bad_spaceship_shared::map::{apply_gravity_correction, GROUND_LAYER, PLANET_RESPAWN_Y};
+use bad_spaceship_shared::map::{apply_gravity_correction, gravity_at, GROUND_LAYER, PLANET_RESPAWN_Y};
 use bad_spaceship_shared::part::{
     avatar_lock_contacts, despawn_player_lock_welds, part_gap_contacts, part_state_diverged,
     spawn_random_part, spawn_random_rocket, spawn_rocket_engine, spawn_saved_cuboid, Gimbal,
@@ -328,6 +328,7 @@ impl Plugin for NetServerPlugin {
         app.init_resource::<RoomAttitudeIntegrals>();
         app.init_resource::<RoomFuel>();
         app.init_resource::<RoomPolicy>();
+        app.init_resource::<RoomApparentUp>();
         // Server-authoritative session resume: remember each player's last position
         // (keyed by its persistent `resume_id`) so a reconnect after an iOS reload
         // lands back in place rather than at the origin.
@@ -2295,6 +2296,14 @@ struct RoomFuel(HashMap<RoomId, f32>);
 #[derive(Resource, Default)]
 struct RoomPolicy(HashMap<RoomId, PitchProgram>);
 
+/// Per-room apparent-up for riders aboard a launched assembly (see the client's
+/// `ApparentUp` for the full rationale): `normalize(thrust_accel − gravity_at(true_com))`
+/// — bounded tilt near the planet, radial-up in coast, pure thrust axis in deep space.
+/// Written by [`apply_room_rocket_thrust`] each tick; rooms without an entry (not
+/// launched) fall back to world-up in [`sample_felt_up`].
+#[derive(Resource, Default)]
+struct RoomApparentUp(HashMap<RoomId, Vec3>);
+
 impl LaunchRegistry {
     /// Whether a room has blasted off — the state the rocket thrust keys on and
     /// the save snapshot persists.
@@ -2465,6 +2474,7 @@ fn apply_room_rocket_thrust(
     mut integrals: ResMut<RoomAttitudeIntegrals>,
     mut fuel: ResMut<RoomFuel>,
     mut policies: ResMut<RoomPolicy>,
+    mut apparent: ResMut<RoomApparentUp>,
     frames: Res<RoomFrames>,
     gravity: Res<Gravity>,
     // Riders' masses, for the ascent plan: every avatar is locked to the assembly at
@@ -2499,8 +2509,12 @@ fn apply_room_rocket_thrust(
         }
     }
     if per_room.is_empty() {
+        apparent.0.clear();
         return;
     }
+    // Drop apparent-up entries of rooms that are no longer launched (reset/landed).
+    let launched: std::collections::HashSet<RoomId> = per_room.keys().copied().collect();
+    apparent.0.retain(|room, _| launched.contains(room));
 
     // Resolve each room's burn (shared `assembly_burn`, so the client's predicted twin
     // computes the identical trims + gimbal slews). The COM + rotational state come
@@ -2575,6 +2589,25 @@ fn apply_room_rocket_thrust(
             let burn = assembly_burn(com, gravity.0, dt, rockets, &spin, integral, guidance);
             // Tally propellant burned this tick (see `RoomFuel` and `burn_impulse`).
             *fuel.0.entry(*room).or_default() += burn_impulse(&burn, dt);
+            // Publish the riders' apparent up (see `RoomApparentUp`); mass matches the
+            // client's (parts + riders) so the predicted movement basis agrees.
+            let total_mass: f32 = members
+                .iter()
+                .filter(|(.., r)| r.id == *room)
+                .map(|(_, _, _, m, _)| m.value())
+                .sum::<f32>()
+                + riders
+                    .iter()
+                    .filter(|(m, _)| m.0 == *room)
+                    .map(|(_, mass)| mass.value())
+                    .sum::<f32>();
+            if total_mass > 0.0 {
+                let net_force: Vec3 = burn.iter().map(|b| b.force).sum();
+                apparent.0.insert(
+                    *room,
+                    (net_force / total_mass - gravity_at(true_com)).normalize_or(Vec3::Y),
+                );
+            }
             // Diagnostics (BS_DEBUG_GIMBAL): once a second, the controller state the
             // flight recorder can't see - body axis vs velocity vs nozzle deflections.
             static DEBUG_GIMBAL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -2606,27 +2639,20 @@ fn apply_room_rocket_thrust(
     }
 }
 
-/// Feed every avatar's [`FeltUp`] window one sample of this tick's felt-acceleration
-/// direction: its room's launched-assembly mean engine axis (the thrust pressing the
-/// deck into the rider's feet), world +Y otherwise. The server half of the felt-up
-/// basis — the client samplers compute the same thing from the same replicated
-/// rotations, so camera/movement bases agree without replicating anything.
+/// Feed every avatar's [`FeltUp`] window one sample of this tick's apparent-up
+/// direction: its room's launched-assembly plumb line (see [`RoomApparentUp`]), world
+/// +Y otherwise. The server half of the felt-up basis — the client sampler consumes the
+/// same formula's output from its own predicted burn, so the bases agree without
+/// replicating anything.
 fn sample_felt_up(
     mut commands: Commands,
-    registry: Res<LaunchRegistry>,
-    rockets: Query<(&Rotation, &PartRoom), (With<InLargestAssembly>, With<RocketEngine>)>,
+    apparent: Res<RoomApparentUp>,
     mut avatars: Query<(Entity, &RoomMember, Option<&mut FeltUp>), With<ServerAvatar>>,
 ) {
-    let mut per_room: HashMap<RoomId, Vec3> = HashMap::new();
-    for (rotation, room) in &rockets {
-        if registry.is_launched(room.id) {
-            *per_room.entry(room.id).or_default() += rotation.0 * Vec3::Y;
-        }
-    }
     for (entity, member, felt) in &mut avatars {
-        let axis = per_room.get(&member.0).map(|sum| sum.normalize_or(Vec3::Y)).unwrap_or(Vec3::Y);
+        let target = apparent.0.get(&member.0).copied().unwrap_or(Vec3::Y);
         match felt {
-            Some(mut felt) => felt.sample(axis),
+            Some(mut felt) => felt.sample(target),
             None => {
                 commands.entity(entity).try_insert(FeltUp::default());
             }

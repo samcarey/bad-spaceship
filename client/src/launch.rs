@@ -26,7 +26,7 @@ use bad_spaceship_shared::guidance::{program_guidance, Guidance, PitchProgram};
 use bad_spaceship_shared::launch::{
     assembly_burn, burn_impulse, measure_assembly_spin, AssemblySpin, LAUNCH_COUNTDOWN_SECS,
 };
-use bad_spaceship_shared::map::apply_gravity_correction;
+use bad_spaceship_shared::map::{apply_gravity_correction, gravity_at};
 use bad_spaceship_shared::net::{
     ControlChannel, InLargestAssembly, NetLaunch, NetLockJoint, NetPart, NetPlayer, RequestLaunch,
     SetLocked,
@@ -57,6 +57,7 @@ impl Plugin for LaunchPlugin {
         app.init_resource::<LaunchLocal>()
             .init_resource::<LaunchCameraZoom>()
             .init_resource::<FuelUsed>()
+            .init_resource::<ApparentUp>()
             .add_message::<SpSetLock>()
             .add_systems(Update, (tick_launch, ease_launch_zoom))
             // Single-player half of the Lock button: weld/unweld the local character
@@ -90,9 +91,8 @@ impl Plugin for LaunchPlugin {
                     apply_sp_thrust.run_if(not(resource_exists::<SuppressLocalParts>)),
                     apply_mp_thrust.run_if(resource_exists::<SuppressLocalParts>),
                     // Feed each rider's felt-up window (camera + movement basis) from
-                    // the assembly attitude the burn above just flew.
-                    sample_sp_felt_up.run_if(not(resource_exists::<SuppressLocalParts>)),
-                    sample_mp_felt_up.run_if(resource_exists::<SuppressLocalParts>),
+                    // the apparent-up the burn above just published.
+                    sample_felt_up,
                     // Structural damping across welded pairs (single-player joints and
                     // the predicted multiplayer twins alike) — drains contact/joint pump
                     // energy before it can run away (see `damp_weld_motion`).
@@ -143,6 +143,23 @@ impl LaunchLocal {
         self.sp == SpPhase::Launched
     }
 }
+
+/// The launched assembly's **apparent up**: the direction a plumb line would hang for a
+/// passenger aboard — `normalize(thrust_accel − gravity_at(true_com))`. `None` whenever
+/// nothing is launched (the riders' target is then plain world-up).
+///
+/// Why this quantity and not the raw thrust/body axis: pure felt acceleration IS the
+/// thrust axis, but following it blindly turned the camera fully sideways-then-inverted
+/// as the gravity turn arced toward (and slightly below) horizontal. A passenger near a
+/// planet weighs the burn against the visible/gravitational down: subtracting gravity
+/// bounds the tilt (≈35° at a horizontal burn with TWR ~1.7 — the planet stays below),
+/// makes the pad/coast cases exactly radial-up (no slow roll with a drifting hull after
+/// cutoff — free fall feels nothing), and asymptotes to the pure thrust axis as gravity
+/// fades with distance, which is the true weightless-passenger feel. Written by the
+/// thrust systems (which have the burn forces, masses, and true position), read by
+/// [`sample_felt_up`].
+#[derive(Resource, Default)]
+struct ApparentUp(Option<Vec3>);
 
 /// Cumulative launch fuel spent by the local player's assembly, as thrust **impulse**
 /// (N·s = ∫ Σ|engine force| dt). Burning fuel doesn't reduce mass in this sim, so total
@@ -337,6 +354,7 @@ fn apply_sp_thrust(
     )>,
     gravity: Res<Gravity>,
     mut fuel: ResMut<FuelUsed>,
+    mut apparent: ResMut<ApparentUp>,
     // The rider's mass, for the ascent plan: locked aboard at launch, so their weight
     // flies with the stack and belongs in the planned thrust-to-weight.
     rider: Query<&ComputedMass, With<Character>>,
@@ -344,9 +362,11 @@ fn apply_sp_thrust(
     if local.sp != SpPhase::Launched {
         fuel.0 = 0.0; // idle: keep the readout at zero until the next launch fires
         *sp_plan = None; // re-plan the ascent for the next launch
+        apparent.0 = None;
         return;
     }
     let Some((members, _)) = main_assembly(&parts, &joints) else {
+        apparent.0 = None;
         return;
     };
     // The assembly's COM + motion state, via the shared measurement (see
@@ -393,7 +413,7 @@ fn apply_sp_thrust(
         PitchProgram::plan(com, spin.linear_velocity, geometry.len(), gravity.0, total_mass, None)
     });
     let guidance = program_guidance(com, spin.linear_velocity, program);
-    apply_thrust(
+    let net_force = apply_thrust(
         com,
         gravity.0,
         &geometry,
@@ -404,6 +424,15 @@ fn apply_sp_thrust(
         &mut fuel.0,
         &mut set.p2(),
     );
+    // Apparent up for the riders (see `ApparentUp`); single-player true == local.
+    let total_mass: f32 = parts
+        .iter()
+        .filter(|(entity, ..)| members.contains(entity))
+        .map(|(_, _, m)| m.value())
+        .sum::<f32>()
+        + rider.iter().map(|m| m.value()).sum::<f32>();
+    apparent.0 = (total_mass > 0.0)
+        .then(|| (net_force / total_mass - gravity_at(com)).normalize_or(Vec3::Y));
 }
 
 /// Apply balanced thrust to the multiplayer assembly's **predicted** rockets each physics
@@ -441,6 +470,7 @@ fn apply_mp_thrust(
     frame: Res<ClientRoomFrame>,
     gravity: Res<Gravity>,
     mut fuel: ResMut<FuelUsed>,
+    mut apparent: ResMut<ApparentUp>,
     // Riders' masses for the ascent plan (all avatars in the room are locked aboard at
     // launch, and all are predicted): matches the server's rider-inclusive plan.
     riders: Query<&ComputedMass, (With<Character>, With<Predicted>)>,
@@ -448,6 +478,7 @@ fn apply_mp_thrust(
     let Some(launch) = orb.iter().next().filter(|l| l.launched) else {
         fuel.0 = 0.0; // idle: keep the readout at zero until the room launches
         *mp_plan = None; // re-plan on the next launch
+        apparent.0 = None;
         return;
     };
     // The server's optimized ascent angle, replicated so the predicted turn matches
@@ -475,14 +506,14 @@ fn apply_mp_thrust(
                 gimbal.map(|g| (entity, position.0, rotation.0, g.0))
             })
             .collect();
-        let part_mass_total: f32 = if need_plan {
-            members.iter().map(|(_, _, _, _, _, part_mass, _)| part_mass.value()).sum()
-        } else {
-            0.0
-        };
+        // Needed every tick now (apparent-up divides the net thrust by it), not just
+        // on plan-rebuild ticks.
+        let part_mass_total: f32 =
+            members.iter().map(|(_, _, _, _, _, part_mass, _)| part_mass.value()).sum();
         (measure_assembly_spin(samples), geometry, part_mass_total)
     };
     let Some((com, spin)) = measured else {
+        apparent.0 = None;
         return;
     };
     // True planet-frame state folds in the room's floating-origin frame (offset +
@@ -504,7 +535,7 @@ fn apply_mp_thrust(
         ));
     }
     let guidance = program_guidance(true_com, true_vel, mp_plan.as_ref().unwrap());
-    apply_thrust(
+    let net_force = apply_thrust(
         com,
         gravity.0,
         &geometry,
@@ -515,6 +546,11 @@ fn apply_mp_thrust(
         &mut fuel.0,
         &mut set.p1(),
     );
+    // Apparent up for the riders (see `ApparentUp`), from the true (frame-folded) state —
+    // same formula as the server so the predicted movement basis matches.
+    let total_mass = part_mass_total + riders.iter().map(|m| m.value()).sum::<f32>();
+    apparent.0 = (total_mass > 0.0)
+        .then(|| (net_force / total_mass - gravity_at(true_com)).normalize_or(Vec3::Y));
 }
 
 /// Per-tick flame reset — see the registration comment and
@@ -525,63 +561,20 @@ fn reset_flame_targets(mut throttles: Query<&mut FlameThrottle>) {
     }
 }
 
-/// Feed every character's [`FeltUp`] window one sample of this tick's felt-acceleration
-/// direction: the launched assembly's mean engine axis (the thrust that presses the deck
-/// into the rider's feet), world +Y otherwise. Single-player flavour — membership from
-/// the local joint graph, pose from `GlobalTransform` (same reads as `apply_sp_thrust`).
-fn sample_sp_felt_up(
+/// Feed every character's [`FeltUp`] window one sample of this tick's apparent-up
+/// direction (see [`ApparentUp`]): the launched assembly's plumb-line direction while
+/// launched, plain world-up otherwise. One system for both modes — the thrust systems
+/// (whichever ran) already published the target; predicted and single-player avatars
+/// alike carry `Character`.
+fn sample_felt_up(
     mut commands: Commands,
-    local: Res<LaunchLocal>,
-    parts: Query<(Entity, &GlobalTransform, &ComputedMass), With<Holdable>>,
-    joints: Query<&SphericalJoint>,
-    rockets: Query<(Entity, &GlobalTransform), With<RocketEngine>>,
+    apparent: Res<ApparentUp>,
     mut characters: Query<(Entity, Option<&mut FeltUp>), With<Character>>,
 ) {
-    let axis = if local.sp_launched() {
-        main_assembly(&parts, &joints)
-            .map(|(members, _)| {
-                rockets
-                    .iter()
-                    .filter(|(entity, _)| members.contains(entity))
-                    .map(|(_, transform)| transform.to_scale_rotation_translation().1 * Vec3::Y)
-                    .sum::<Vec3>()
-                    .normalize_or(Vec3::Y)
-            })
-            .unwrap_or(Vec3::Y)
-    } else {
-        Vec3::Y
-    };
+    let target = apparent.0.unwrap_or(Vec3::Y);
     for (entity, felt) in &mut characters {
         match felt {
-            Some(mut felt) => felt.sample(axis),
-            None => {
-                commands.entity(entity).try_insert(FeltUp::default());
-            }
-        }
-    }
-}
-
-/// The multiplayer flavour of [`sample_sp_felt_up`]: membership from the replicated
-/// `InLargestAssembly` markers, pose from the predicted Avian `Rotation` (same reads as
-/// `apply_mp_thrust`), on every predicted avatar — the same per-avatar sampling the
-/// server runs, over the same replicated state, so the bases agree without replication.
-fn sample_mp_felt_up(
-    mut commands: Commands,
-    orb: Query<&NetLaunch>,
-    rockets: Query<
-        &Rotation,
-        (With<NetPart>, With<Predicted>, With<InLargestAssembly>, With<RocketEngine>),
-    >,
-    mut characters: Query<(Entity, Option<&mut FeltUp>), (With<Character>, With<Predicted>)>,
-) {
-    let axis = if orb.iter().next().is_some_and(|l| l.launched) {
-        rockets.iter().map(|rotation| rotation.0 * Vec3::Y).sum::<Vec3>().normalize_or(Vec3::Y)
-    } else {
-        Vec3::Y
-    };
-    for (entity, felt) in &mut characters {
-        match felt {
-            Some(mut felt) => felt.sample(axis),
+            Some(mut felt) => felt.sample(target),
             None => {
                 commands.entity(entity).try_insert(FeltUp::default());
             }
@@ -592,7 +585,8 @@ fn sample_mp_felt_up(
 /// Resolve the assembly's burn for this tick (shared `assembly_burn`) and write each
 /// rocket's slewed gimbal + deflected flare-base force (plus its flame's throttle, for
 /// the exhaust visual). Shared by the single-player and multiplayer thrust systems
-/// (which differ only in how they gather membership + pose).
+/// (which differ only in how they gather membership + pose). Returns the net thrust
+/// force this tick (for the riders' apparent-up).
 #[allow(clippy::too_many_arguments)]
 fn apply_thrust(
     com: Vec3,
@@ -607,14 +601,15 @@ fn apply_thrust(
         (Entity, Forces, &mut Gimbal, Option<&mut FlameThrottle>),
         impl bevy::ecs::query::QueryFilter,
     >,
-) {
+) -> Vec3 {
     if geometry.is_empty() {
-        return;
+        return Vec3::ZERO;
     }
     let full = bad_spaceship_shared::launch::full_rocket_thrust(gravity);
     let burns = assembly_burn(com, gravity, dt, geometry, spin, integral, guidance);
     // Fuel spent this tick (see `FuelUsed` and the shared `burn_impulse` definition).
     *fuel += burn_impulse(&burns, dt);
+    let net_force: Vec3 = burns.iter().map(|b| b.force).sum();
     for burn in burns {
         if let Ok((_, mut forces, mut gimbal, flame)) = rocket_forces.get_mut(burn.entity) {
             gimbal.0 = burn.gimbal;
@@ -626,6 +621,7 @@ fn apply_thrust(
             }
         }
     }
+    net_force
 }
 
 /// The lock-state inputs of [`show_launch_ui`], bundled into one `SystemParam`
