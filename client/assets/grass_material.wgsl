@@ -55,6 +55,14 @@ struct GrassParams {
     dry_strength: f32,
     fade_start: f32,
     fade_end: f32,
+    // The room's visual floating-origin offset (xy = world XZ; zw padding).
+    // The ground mesh is parked at `-offset` in render space every frame as the
+    // room co-moves/rebases, so `world.xz` slides under the turf during ascent.
+    // Adding this back keys the noise to the TRUE (planet-fixed) coordinate, so
+    // the blades stay pinned to the ground. Grass only renders within `fade_end`
+    // of the camera (~55 m), so the offset is small here and f32 is exact — no
+    // modulo reduction is needed (unlike the periodic ash lattice).
+    frame_offset: vec4<f32>,
 }
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(100)
@@ -91,7 +99,11 @@ fn fragment(
         let v = rel / dist;
         let uv_step = (v.xz / max(v.y, 0.25)) * (grass.turf_depth * INV_LAYERS);
 
-        var uv = world.xz;
+        // Sample the noise in the planet-fixed frame so it doesn't slide as the
+        // floating origin co-moves under the ground (see `frame_offset`). The
+        // parallax offset above stays in render space — it's view-relative.
+        let field = world.xz + grass.frame_offset.xy;
+        var uv = field;
         var turf = grass.base_color.rgb;
         var depth_ratio = 0.0;
         for (var i = 0; i < LAYERS; i++) {
@@ -102,7 +114,7 @@ fn fragment(
             // toward the tip), so the threshold shrinks with depth.
             if combined > grass.threshold * (1.0 - depth_ratio) {
                 // `patch` is a reserved WGSL keyword, hence `patchiness`.
-                let patchiness = vnoise(world.xz * grass.dry_patch_freq);
+                let patchiness = vnoise(field * grass.dry_patch_freq);
                 let tint = mix(grass.highlight_color.rgb, grass.dry_color.rgb, patchiness * grass.dry_strength);
                 turf = mix(tint, grass.base_color.rgb, depth_ratio);
                 break;

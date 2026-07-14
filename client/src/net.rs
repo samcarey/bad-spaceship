@@ -21,7 +21,9 @@ use bevy::transform::TransformSystems;
 use lightyear::prediction::correction::VisualCorrection;
 use lightyear::prediction::rollback::RollbackSystems;
 
+use crate::render_main_pass::magma_material::MagmaMaterial;
 use crate::render_main_pass::AshMaterial;
+use crate::render_main_pass::GrassMaterial;
 use bad_spaceship_shared::character::{
     insert_character_body, insert_remote_avatar_body, CharacterMovement, Config as CharacterConfig,
 };
@@ -996,6 +998,12 @@ fn sync_visual_room_frame(
     >,
     ash: Query<&MeshMaterial3d<AshMaterial>>,
     mut ash_materials: ResMut<Assets<AshMaterial>>,
+    // Ground materials also key their procedural noise off world position; pin them
+    // to the true frame so the turf/magma don't slide as the origin co-moves.
+    grass: Query<&MeshMaterial3d<GrassMaterial>>,
+    mut grass_materials: ResMut<Assets<GrassMaterial>>,
+    magma: Query<&MeshMaterial3d<MagmaMaterial>>,
+    mut magma_materials: ResMut<Assets<MagmaMaterial>>,
 ) {
     // One room per client: its orb is the only entity carrying a frame.
     let Some(net) = net_frames.iter().next() else {
@@ -1060,6 +1068,28 @@ fn sync_visual_room_frame(
         if ash_materials.get(material.id()).is_some_and(|m| m.frame_needs_update(offset)) {
             if let Some(mut mat) = ash_materials.get_mut(material.id()) {
                 mat.set_frame(offset);
+            }
+        }
+    }
+
+    for material in &grass {
+        if grass_materials
+            .get(material.id())
+            .is_some_and(|m| m.extension.frame_needs_update(offset))
+        {
+            if let Some(mut mat) = grass_materials.get_mut(material.id()) {
+                mat.extension.set_frame(offset);
+            }
+        }
+    }
+
+    for material in &magma {
+        if magma_materials
+            .get(material.id())
+            .is_some_and(|m| m.extension.frame_needs_update(offset))
+        {
+            if let Some(mut mat) = magma_materials.get_mut(material.id()) {
+                mat.extension.set_frame(offset);
             }
         }
     }

@@ -52,6 +52,11 @@ pub struct GrassParams {
     /// fragments skip the parallax march.
     fade_start: f32,
     fade_end: f32,
+    /// The room's visual floating-origin offset (xy = world XZ; zw padding). The
+    /// ground mesh is parked at `-offset` in render space, so `world.xz` slides
+    /// under the turf as the room co-moves; the shader adds this back to key the
+    /// noise to the true planet-fixed coordinate. Driven by `sync_visual_room_frame`.
+    frame_offset: Vec4,
 }
 
 impl Default for GrassParams {
@@ -73,6 +78,7 @@ impl Default for GrassParams {
             dry_strength: 0.35,
             fade_start: 25.0,
             fade_end: 55.0,
+            frame_offset: Vec4::ZERO,
         }
     }
 }
@@ -81,6 +87,29 @@ impl Default for GrassParams {
 pub struct GrassExtension {
     #[uniform(100)]
     params: GrassParams,
+}
+
+impl GrassExtension {
+    /// The shader-side offset for a room's visual floating-origin offset: world
+    /// XZ packed into xy (see `GrassParams::frame_offset`). Kept raw (no modulo,
+    /// unlike ash's periodic lattice) — grass only renders within `fade_end` of
+    /// the camera, so the offset is small and f32-exact in the visible window.
+    fn frame_target(&self, visual_offset: bevy::math::DVec3) -> Vec4 {
+        Vec4::new(visual_offset.x as f32, visual_offset.z as f32, 0.0, 0.0)
+    }
+
+    /// Whether `set_frame` would change the uniform — checked on a read borrow so
+    /// a settled frame doesn't re-upload the material every frame.
+    pub fn frame_needs_update(&self, visual_offset: bevy::math::DVec3) -> bool {
+        self.frame_target(visual_offset)
+            .distance_squared(self.params.frame_offset)
+            > 1.0e-4
+    }
+
+    /// Pin the turf noise to the room's visual floating-origin offset.
+    pub fn set_frame(&mut self, visual_offset: bevy::math::DVec3) {
+        self.params.frame_offset = self.frame_target(visual_offset);
+    }
 }
 
 impl MaterialExtension for GrassExtension {

@@ -39,6 +39,14 @@ struct MagmaParams {
     rivulet_hi: f32,
     emissive_strength: f32,
     flicker: f32,
+    // The room's visual floating-origin offset (xyz; w padding). The planet meshes
+    // are children of the ground, which is parked at `-offset` in render space every
+    // frame as the room co-moves/rebases — so `world_position` slides under the
+    // triplanar noise during ascent, and the molten pattern crawls across the fixed
+    // planet geometry (visible against the pinned grass area). Adding it back keys
+    // the noise to the TRUE planet-fixed coordinate. Full xyz: the triplanar sample
+    // uses all three planes (flat top + vertical cliffs).
+    frame_offset: vec4<f32>,
 }
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(100)
@@ -78,7 +86,10 @@ fn fragment(
 ) -> FragmentOutput {
     var pbr_input = pbr_input_from_standard_material(in, is_front);
 
-    let p = in.world_position.xyz;
+    // Sample in the planet-fixed frame so the magma doesn't slide as the floating
+    // origin co-moves the ground under it (see `frame_offset`). The `globals.time`
+    // scroll below is the intended flow and stays independent of this.
+    let p = in.world_position.xyz + magma.frame_offset.xyz;
     let n = normalize(in.world_normal);
     let t = globals.time;
 

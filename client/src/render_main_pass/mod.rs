@@ -28,7 +28,8 @@ pub use ash_material::AshMaterial;
 use flame_material::{
     register_flame_mesh, spawn_flame, update_flames, FlameMaterial, FLAME_SHADER_HANDLE,
 };
-use grass_material::{GrassExtension, GrassMaterial, GRASS_SHADER_HANDLE};
+pub use grass_material::GrassMaterial;
+use grass_material::{GrassExtension, GRASS_SHADER_HANDLE};
 use magma_material::{MagmaMaterial, MAGMA_SHADER_HANDLE};
 use metal_material::{part_visual, rocket_body_material, MetalMaterial, METAL_SHADER_HANDLE};
 use avian3d::prelude::Collider;
