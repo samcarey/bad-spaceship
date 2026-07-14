@@ -573,12 +573,20 @@ fn reset_flame_targets(mut throttles: Query<&mut FlameThrottle>) {
 fn sample_felt_up(
     mut commands: Commands,
     apparent: Res<ApparentUp>,
-    mut characters: Query<(Entity, Option<&mut FeltUp>), With<Character>>,
+    mut characters: Query<(Entity, Option<&mut FeltUp>, &mut Rotation), With<Character>>,
 ) {
     let target = apparent.0.unwrap_or(Vec3::Y);
-    for (entity, felt) in &mut characters {
+    for (entity, felt, mut rotation) in &mut characters {
         match felt {
-            Some(mut felt) => felt.sample(target),
+            Some(mut felt) => {
+                felt.sample(target);
+                // The body itself tilts to the felt up: it is ROTATION_LOCKED (the
+                // solver never spins it), so this direct write is the single owner of
+                // its orientation — collider, camera rig, mesh, name tag are children
+                // and inherit the tilt from the hierarchy. No divergence between the
+                // character's physics and visuals. Server writes the same value.
+                rotation.0 = Quat::from_rotation_arc(Vec3::Y, felt.up);
+            }
             None => {
                 commands.entity(entity).try_insert(FeltUp::default());
             }

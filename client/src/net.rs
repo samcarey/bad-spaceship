@@ -817,26 +817,16 @@ fn redress_replicated_players(
 /// are drawn facing the way they're looking. Uses the same basis as the movement
 /// code (`Quat::from_rotation_y(-yaw)`, see `walk_based_on_input`), so the +Z nose
 /// points along the avatar's forward. Reads `NetFacing`, not the owner's local-input
-/// `Yaw` (which isn't replicated — replicating it broke the owner's turning). The
-/// pivot is additionally tilted to the avatar's felt up (see `face_own_monster` —
-/// same-room riders share the room's apparent-up, so everyone tilts together);
-/// the tilt changes every tick during a launch, so no `Changed` filter — the
-/// compare-before-write keeps idle frames clean instead.
+/// `Yaw` (which isn't replicated — replicating it broke the owner's turning). No
+/// felt-up handling here: the avatar BODY rotates to the felt up (see the felt-up
+/// samplers), and the pivot inherits the tilt as its child.
 fn face_replicated_players(
-    avatars: Query<
-        (&NetFacing, Option<&bad_spaceship_shared::character::FeltUp>, &AvatarVisual),
-        With<Predicted>,
-    >,
+    avatars: Query<(&NetFacing, &AvatarVisual), (With<Predicted>, Changed<NetFacing>)>,
     mut pivots: Query<&mut Transform>,
 ) {
-    for (facing, felt, visual) in &avatars {
+    for (facing, visual) in &avatars {
         if let Ok(mut transform) = pivots.get_mut(visual.0) {
-            let up = felt.map(|f| f.up).unwrap_or(Vec3::Y);
-            let swing = Quat::from_rotation_arc(Vec3::Y, up);
-            let rotation = swing * Quat::from_rotation_y(-facing.0);
-            if transform.rotation != rotation {
-                transform.rotation = rotation;
-            }
+            transform.rotation = Quat::from_rotation_y(-facing.0);
         }
     }
 }

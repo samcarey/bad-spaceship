@@ -2660,12 +2660,19 @@ fn apply_room_rocket_thrust(
 fn sample_felt_up(
     mut commands: Commands,
     apparent: Res<RoomApparentUp>,
-    mut avatars: Query<(Entity, &RoomMember, Option<&mut FeltUp>), With<ServerAvatar>>,
+    mut avatars: Query<(Entity, &RoomMember, Option<&mut FeltUp>, &mut Rotation), With<ServerAvatar>>,
 ) {
-    for (entity, member, felt) in &mut avatars {
+    for (entity, member, felt, mut rotation) in &mut avatars {
         let target = apparent.0.get(&member.0).copied().unwrap_or(Vec3::Y);
         match felt {
-            Some(mut felt) => felt.sample(target),
+            Some(mut felt) => {
+                felt.sample(target);
+                // The body itself tilts to the felt up (single source for collider,
+                // camera rig, mesh — all children inherit it); ROTATION_LOCKED keeps
+                // the solver from fighting the write. The predicted client writes the
+                // same value from its own sampler, so replication stays quiet.
+                rotation.0 = Quat::from_rotation_arc(Vec3::Y, felt.up);
+            }
             None => {
                 commands.entity(entity).try_insert(FeltUp::default());
             }

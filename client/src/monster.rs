@@ -247,21 +247,18 @@ fn dress_characters(
 }
 
 /// Turn the own monster to the look yaw (same sign convention as
-/// `face_replicated_players`: the models face +Z), tilted to the rider's felt up —
-/// the physics capsule is rotation-locked and stays world-vertical, so without the
-/// tilt the character appears to lean backwards by the whole camera tilt while
-/// riding a pitched-over rocket (rider, deck, and camera should agree on up).
-/// Compare-before-write so a stationary look doesn't dirty the pivot's transform
-/// tree every frame.
+/// `face_replicated_players`: the models face +Z). The pivot needs no felt-up
+/// handling of its own: the character BODY rotates to the felt up (see the felt-up
+/// samplers) and the pivot is its child, so the mesh inherits the tilt from the
+/// hierarchy like everything else on the character. Compare-before-write so a
+/// stationary look doesn't dirty the pivot's transform tree every frame.
 fn face_own_monster(
-    own: Query<(&Yaw, Option<&bad_spaceship_shared::character::FeltUp>, &OwnMonsterPivot)>,
+    own: Query<(&Yaw, &OwnMonsterPivot)>,
     mut pivots: Query<&mut Transform>,
 ) {
-    for (yaw, felt, pivot) in &own {
+    for (yaw, pivot) in &own {
         if let Ok(mut transform) = pivots.get_mut(pivot.0) {
-            let up = felt.map(|f| f.up).unwrap_or(Vec3::Y);
-            let swing = Quat::from_rotation_arc(Vec3::Y, up);
-            let rotation = swing * Quat::from_rotation_y(-yaw.0);
+            let rotation = Quat::from_rotation_y(-yaw.0);
             if transform.rotation != rotation {
                 transform.rotation = rotation;
             }

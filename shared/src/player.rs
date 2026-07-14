@@ -298,14 +298,12 @@ fn mouse_motion(
         &MouseMotionDelta,
         &Holding,
         &Modifying,
-        Option<&crate::character::FeltUp>,
     )>,
     mut camera_orbit_center_transforms: Query<(&mut Transform, &OrbitOffset)>,
     configs: ResMut<Assets<Config>>,
 ) {
     if let Some((_, config)) = configs.iter().next() {
-        if let Some((mut yaw, mut pitch, mouse_delta, holding, modifying, felt)) =
-            query.iter_mut().next()
+        if let Some((mut yaw, mut pitch, mouse_delta, holding, modifying)) = query.iter_mut().next()
         {
             if !(holding.0 && modifying.0) {
                 yaw.0 = (yaw.0 + mouse_delta.0.x * time.delta_secs() * config.look_sensitivity)
@@ -326,16 +324,14 @@ fn mouse_motion(
             // orbit centre's whole subtree (camera, hold point) every frame.
             if let Some((mut transform, offset)) = camera_orbit_center_transforms.iter_mut().next()
             {
-                // The rider's felt up (see `FeltUp`: the 2 s-averaged assembly axis
-                // while riding a launched rocket, world +Y otherwise) tilts the whole
-                // look rig: `swing` re-aims the yaw axis along it, so the horizon rolls
-                // with the deck as the autopilot pitches over — the rocket feels like
-                // "up". Identity when not riding, reducing to the old composition.
-                let up = felt.map(|f| f.up).unwrap_or(Vec3::Y);
-                let swing = Quat::from_rotation_arc(Vec3::Y, up);
+                // The rig's tilt comes from its PARENT: the character body rotates to
+                // the rider's felt up (see `FeltUp` / the felt-up samplers), and the
+                // orbit centre is its child — so this local composition stays pure
+                // yaw*pitch and the whole look rig (camera, hold point) inherits the
+                // tilt from the hierarchy, exactly like the collider and the mesh.
                 let look_yaw = Quat::from_rotation_y(-yaw.0);
-                let rotation = swing * look_yaw * Quat::from_rotation_x(pitch.0);
-                let translation = swing * (look_yaw * offset.0);
+                let rotation = look_yaw * Quat::from_rotation_x(pitch.0);
+                let translation = look_yaw * offset.0;
                 if transform.rotation != rotation || transform.translation != translation {
                     transform.rotation = rotation;
                     transform.translation = translation;
