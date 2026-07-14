@@ -817,7 +817,9 @@ fn redress_replicated_players(
 /// are drawn facing the way they're looking. Uses the same basis as the movement
 /// code (`Quat::from_rotation_y(-yaw)`, see `walk_based_on_input`), so the +Z nose
 /// points along the avatar's forward. Reads `NetFacing`, not the owner's local-input
-/// `Yaw` (which isn't replicated — replicating it broke the owner's turning).
+/// `Yaw` (which isn't replicated — replicating it broke the owner's turning). No
+/// felt-up handling here: the avatar BODY rotates to the felt up (see the felt-up
+/// samplers), and the pivot inherits the tilt as its child.
 fn face_replicated_players(
     avatars: Query<(&NetFacing, &AvatarVisual), (With<Predicted>, Changed<NetFacing>)>,
     mut pivots: Query<&mut Transform>,

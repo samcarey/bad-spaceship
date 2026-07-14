@@ -1,6 +1,6 @@
 use avian3d::prelude::{
     Collider, CollisionLayers, Collisions, LinearVelocity, LockedAxes, Mass, Position, RigidBody,
-    SphericalJoint,
+    Rotation, SphericalJoint,
 };
 use bevy::prelude::*;
 use bevy::reflect::TypePath;
@@ -9,7 +9,8 @@ use rand::Rng;
 use serde::Deserialize;
 
 use crate::{
-    Character, DirectionalInput, GameStickDirectionalInput, KeyboardDirectionalInput, Player, Yaw,
+    map::gravity_at, Character, DirectionalInput, GameStickDirectionalInput,
+    KeyboardDirectionalInput, Player, Yaw,
 };
 
 pub struct CharacterPlugin;
@@ -76,6 +77,86 @@ pub fn register_ground_state_rollback(app: &mut App) {
     app.local_rollback::<TouchingGround>();
     app.local_rollback::<GroundVelocity>();
     app.local_rollback::<LastSupport>();
+}
+
+/// Window of the [`FeltUp`] average in physics ticks: ~2 s at the 16 ms tick. Long
+/// enough to iron out attitude wobble and to double as the ease into/out of a launch
+/// (the average glides between world-up and the deck axis over the window).
+const FELT_UP_TICKS: usize = 120;
+
+/// A rider's sense of **up**: the direction of the felt (proper) acceleration aboard,
+/// averaged over the last ~2 seconds. Under thrust that is the assembly's body axis —
+/// gravity is free fall and isn't felt, so the deck pressing on your feet defines up —
+/// and it keeps the camera and the walking controls deck-relative as the autopilot
+/// pitches the rocket over. World +Y whenever not aboard a launched assembly.
+///
+/// Maintained per world by the felt-up sampler systems (client SP/MP in
+/// `client::launch`, server in `server::net`) from the same replicated rocket
+/// rotations, so the server and the predicted client agree without replicating it.
+/// Not rollback-registered: the window average moves far too slowly for a replayed
+/// tick's worth of divergence to matter.
+#[derive(Component)]
+pub struct FeltUp {
+    /// Ring of per-tick axis samples covering the window.
+    ring: [Vec3; FELT_UP_TICKS],
+    idx: usize,
+    /// The normalized window average — what the camera and movement basis read.
+    pub up: Vec3,
+}
+
+impl Default for FeltUp {
+    fn default() -> Self {
+        Self { ring: [Vec3::Y; FELT_UP_TICKS], idx: 0, up: Vec3::Y }
+    }
+}
+
+impl FeltUp {
+    /// Push this tick's felt-acceleration direction (unit) and refresh the average.
+    pub fn sample(&mut self, target: Vec3) {
+        self.ring[self.idx] = target;
+        self.idx = (self.idx + 1) % FELT_UP_TICKS;
+        self.up = self.ring.iter().copied().sum::<Vec3>().normalize_or(Vec3::Y);
+    }
+
+    /// The body orientation that stands a rider up along the averaged felt up — the
+    /// single owner of a `ROTATION_LOCKED` avatar's rotation (collider, camera rig, and
+    /// mesh inherit it as children).
+    pub fn orientation(&self) -> Quat {
+        Quat::from_rotation_arc(Vec3::Y, self.up)
+    }
+}
+
+/// A rider's **apparent up** aboard a launched assembly: the plumb-line direction
+/// `normalize(thrust_accel − gravity_at(true_com))`. THE single definition the three
+/// thrust sites (single-player, predicted client, server) each publish, so the
+/// predicted movement/camera basis can never drift from the authoritative one. Not the
+/// raw thrust axis: weighing the burn against gravity bounds the tilt near the planet,
+/// gives radial-up on the pad and in coast, and asymptotes to the pure thrust axis far
+/// out (see the `ApparentUp`/`RoomApparentUp` producers).
+pub fn apparent_up(net_thrust_force: Vec3, total_mass: f32, true_com: Vec3) -> Vec3 {
+    (net_thrust_force / total_mass - gravity_at(true_com)).normalize_or(Vec3::Y)
+}
+
+/// Advance one avatar's [`FeltUp`] window by `target` and rewrite its body rotation from
+/// the new average — or insert a default `FeltUp` if it has none yet. The single owner of
+/// the "sample ⇒ body orientation" contract, called identically by the client and server
+/// felt-up samplers (which differ only in how they source `target`).
+pub fn drive_felt_up(
+    commands: &mut Commands,
+    entity: Entity,
+    felt: Option<Mut<FeltUp>>,
+    rotation: &mut Rotation,
+    target: Vec3,
+) {
+    match felt {
+        Some(mut felt) => {
+            felt.sample(target);
+            rotation.0 = felt.orientation();
+        }
+        None => {
+            commands.entity(entity).try_insert(FeltUp::default());
+        }
+    }
 }
 
 /// Selectable horizontal-movement model, chosen live from the in-game Movement
@@ -545,6 +626,7 @@ fn walk_based_on_input(
         &mut LinearVelocity,
         &TouchingGround,
         &GroundVelocity,
+        Option<&FeltUp>,
     )>,
     lock_joints: Query<&SphericalJoint, With<crate::part::LockJoint>>,
     tuning: Res<MovementTuning>,
@@ -553,7 +635,7 @@ fn walk_based_on_input(
     if dt <= 0.0 {
         return;
     }
-    for (entity, directional_input, yaw, mut velocity, touching_ground, ground_velocity) in
+    for (entity, directional_input, yaw, mut velocity, touching_ground, ground_velocity, felt) in
         query.iter_mut()
     {
         // A body pinned by a player-lock weld is frozen to its support: the joint owns
@@ -568,16 +650,24 @@ fn walk_based_on_input(
         // basis comes from the look `Yaw`, not the body transform: `back()` = +Z ("W"),
         // `left()` = -X ("A"), both yawed by `-yaw` (see `mouse_motion`). `wish`'s
         // magnitude (≤ 1 for analog sticks) doubles as the throttle.
+        // The movement plane is ⊥ the rider's felt up (`FeltUp`: the 2 s-averaged
+        // assembly axis while riding a launched rocket, world +Y otherwise — in which
+        // case `swing` is identity and every expression below reduces exactly to the
+        // old XZ-plane math). `swing` carries the yawed look basis onto that plane.
+        let up = felt.map(|f| f.up).unwrap_or(Vec3::Y);
+        let swing = Quat::from_rotation_arc(Vec3::Y, up);
+        let tangential = |v: Vec3| v - up * up.dot(v);
         let look = Quat::from_rotation_y(-yaw.0);
-        let wish =
-            look * Vec3::Z * directional_input.0.z + look * Vec3::NEG_X * directional_input.0.x;
+        let wish = swing
+            * (look * Vec3::Z * directional_input.0.z
+                + look * Vec3::NEG_X * directional_input.0.x);
         // Walk *relative to the support*: on a moving platform the target speed is
         // measured against the platform, not the world, so standing still on a
         // drifting rocket doesn't read as "moving" (and get braked against it).
         // `GroundVelocity` is zero whenever airborne or on static ground
         // (`touching_ground` clears it), so those behave exactly as before.
-        let support = Vec3::new(ground_velocity.0.x, 0.0, ground_velocity.0.z);
-        let horizontal = Vec3::new(velocity.0.x, 0.0, velocity.0.z) - support;
+        let support = tangential(ground_velocity.0);
+        let horizontal = tangential(velocity.0) - support;
 
         let new_horizontal = match tuning.model {
             MovementModel::Smooth => {
@@ -642,9 +732,9 @@ fn walk_based_on_input(
             }
         };
 
-        // Movement owns only the horizontal plane; gravity/jump own the vertical axis.
-        velocity.0.x = support.x + new_horizontal.x;
-        velocity.0.z = support.z + new_horizontal.z;
+        // Movement owns only the plane ⊥ up; gravity/jump own the up axis: replace the
+        // tangential part of the velocity, preserve its up-component untouched.
+        velocity.0 = up * up.dot(velocity.0) + support + new_horizontal;
     }
 }
 
@@ -657,14 +747,26 @@ fn jump_based_on_input(
         &TouchingGround,
         &GroundVelocity,
         &LastSupport,
+        Option<&FeltUp>,
     )>,
     lock_joints: Query<&SphericalJoint, With<crate::part::LockJoint>>,
     tuning: Res<MovementTuning>,
 ) {
     let dt = time.delta_secs();
-    for (entity, directional_input, mut velocity, touching_ground, ground_velocity, last_support) in
-        query.iter_mut()
+    for (
+        entity,
+        directional_input,
+        mut velocity,
+        touching_ground,
+        ground_velocity,
+        last_support,
+        felt,
+    ) in query.iter_mut()
     {
+        // Same felt-up basis as `walk_based_on_input` (world +Y when not riding —
+        // every expression reduces to the old axis-aligned math then).
+        let up = felt.map(|f| f.up).unwrap_or(Vec3::Y);
+        let tangential = |v: Vec3| v - up * up.dot(v);
         // Locked riders are welded in place — jumps and the separation clamps are the
         // weld's business now (see `walk_based_on_input`).
         if crate::part::is_locked(&lock_joints, entity) {
@@ -700,7 +802,8 @@ fn jump_based_on_input(
         }
         if !touching_ground.0 && last_support.ticks_since_grounded <= 2 {
             let rel = velocity.0 - last_support.velocity;
-            if rel.y > tuning.jump_force + 0.25 {
+            let rel_up = up.dot(rel);
+            if rel_up > tuning.jump_force + 0.25 {
                 // Grant a snap-down (+1 relative — re-lands within a couple of
                 // ticks), NOT a jump: kicks scale with platform speed (+49 m/s
                 // measured at 46 m/s ascent), and converting each one into an
@@ -708,11 +811,16 @@ fn jump_based_on_input(
                 // onto the rider — which is how they still ended up off the
                 // deck edge. A real jump (rel exactly jump_force) passes.
                 if debug_clamp {
-                    println!("[clamp!] vy {:.1} -> {:.1}", velocity.0.y, last_support.velocity.y + 1.0);
+                    println!(
+                        "[clamp!] v_up {:.1} -> {:.1}",
+                        up.dot(velocity.0),
+                        up.dot(last_support.velocity) + 1.0
+                    );
                 }
-                velocity.0.y = last_support.velocity.y + 1.0;
+                let v = velocity.0;
+                velocity.0 = v + up * (up.dot(last_support.velocity) + 1.0 - up.dot(v));
             }
-            // Horizontally, keep the flat `max_speed + 3` cap. (An earned-speed cap —
+            // In the plane, keep the flat `max_speed + 3` cap. (An earned-speed cap —
             // "what the walk model commanded on the last grounded tick + margin" — was
             // tried against the 8–11 m/s diagonal kicks seen on thrust-vectoring
             // stacks, and made things WORSE: a stand-still rider's earned speed is ~0,
@@ -721,26 +829,28 @@ fn jump_based_on_input(
             // until the stack spun apart — recorder showed |ω| → 173 rad/s with a
             // rider standing dead still. The diagonal drift that remains under this
             // flat cap is real airborne motion over a swaying deck, not a kick.)
-            let horizontal = Vec3::new(rel.x, 0.0, rel.z);
+            let horizontal = tangential(rel);
             let cap = tuning.max_speed + 3.0;
             if horizontal.length() > cap {
                 let scaled = horizontal * (cap / horizontal.length());
-                velocity.0.x = last_support.velocity.x + scaled.x;
-                velocity.0.z = last_support.velocity.z + scaled.z;
+                velocity.0 =
+                    up * up.dot(velocity.0) + tangential(last_support.velocity) + scaled;
             }
         }
         // Jump: while grounded and the up-intent is held, set the upward speed directly
-        // (the body's up is always +Y — it's rotation-locked). Held-space re-jumps each
-        // tick it's grounded, matching the original behaviour. The jump is *relative to
-        // the support*: a world-frame `vy = jump_force` on a platform ascending at
-        // 120 m/s instantly clamped the rider ~112 m/s slower than their ride.
+        // (the body itself is rotation-locked; "up" is the felt-up basis). Held-space
+        // re-jumps each tick it's grounded, matching the original behaviour. The jump is
+        // *relative to the support*: a world-frame `vy = jump_force` on a platform
+        // ascending at 120 m/s instantly clamped the rider ~112 m/s slower than their
+        // ride.
         if directional_input.0.y > 0.0 && touching_ground.0 {
-            velocity.0.y = ground_velocity.0.y + tuning.jump_force;
+            let v = velocity.0;
+            velocity.0 = v + up * (up.dot(ground_velocity.0) + tuning.jump_force - up.dot(v));
         }
         // Snappier, less-floaty fall: extra downward acceleration while descending,
         // applied only to the character so global gravity (and the parts) is untouched.
-        if !touching_ground.0 && velocity.0.y < 0.0 && tuning.fall_multiplier > 0.0 {
-            velocity.0.y -= tuning.fall_multiplier * dt;
+        if !touching_ground.0 && up.dot(velocity.0) < 0.0 && tuning.fall_multiplier > 0.0 {
+            velocity.0 -= up * (tuning.fall_multiplier * dt);
         }
     }
 }

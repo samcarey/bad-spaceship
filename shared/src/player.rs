@@ -324,6 +324,11 @@ fn mouse_motion(
             // orbit centre's whole subtree (camera, hold point) every frame.
             if let Some((mut transform, offset)) = camera_orbit_center_transforms.iter_mut().next()
             {
+                // The rig's tilt comes from its PARENT: the character body rotates to
+                // the rider's felt up (see `FeltUp` / the felt-up samplers), and the
+                // orbit centre is its child — so this local composition stays pure
+                // yaw*pitch and the whole look rig (camera, hold point) inherits the
+                // tilt from the hierarchy, exactly like the collider and the mesh.
                 let look_yaw = Quat::from_rotation_y(-yaw.0);
                 let rotation = look_yaw * Quat::from_rotation_x(pitch.0);
                 let translation = look_yaw * offset.0;

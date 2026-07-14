@@ -79,6 +79,18 @@ pub fn escaped(true_pos: Vec3, true_vel: Vec3) -> bool {
     specific_energy(true_pos, true_vel) >= 0.0
 }
 
+/// Whether escape is **secured**: energy ≥ 0 AND on the outbound leg (radial velocity
+/// ≥ 0). Scalar escape energy alone is NOT a safe cutoff: a near-horizontal burn can
+/// reach `E ≥ 0` while the path still points slightly downward — energy is conserved
+/// through the coast, but the hyperbola's periapsis can lie below the surface, and the
+/// "escaped" ship dives back to the ground (observed live: tilt to horizontal, then the
+/// altimeter unwinding to zero). Burning through the dip until the path turns outbound
+/// costs a little extra fuel and guarantees the coast never descends again: with
+/// `E ≥ 0` and `v·r̂ ≥ 0`, r grows monotonically forever.
+pub fn escape_secured(true_pos: Vec3, true_vel: Vec3) -> bool {
+    escaped(true_pos, true_vel) && (true_pos - PLANET_CENTER).dot(true_vel) >= 0.0
+}
+
 /// The commanded thrust direction (unit) for the ascent law at a true position +
 /// velocity: radial-out tipped by the blended `pitchover` below [`TURN_SPEED`], prograde
 /// (a gravity turn) above it. `pitchover` of 0 is a pure vertical ascent.
@@ -150,7 +162,18 @@ impl PitchProgram {
         if total_mass <= 0.0 {
             return Self::default();
         }
-        let thrust_accel = engines as f32 * crate::launch::full_rocket_thrust(gravity) / total_mass;
+        // Plan against DERATED thrust: the throttle allocator trims engines for attitude
+        // (lift floor 0.85, deeper transients with a rider's standing torque), so the
+        // realized mean thrust is below nominal. Planning at the floor puts reality on
+        // the SAFE side of the plan — a better-than-planned burn climbs above the
+        // planned arc, never below it (a side-hung rider once realized ~20% less thrust
+        // than a nominal plan assumed, and the 23° arc sagged kilometres under the
+        // surface line).
+        // == the allocator's `LIFT_FLOOR` on purpose (planning at the realized-thrust
+        // floor keeps reality on the safe side of the plan); one source, not a twin literal.
+        let thrust_accel = crate::launch::LIFT_FLOOR * engines as f32
+            * crate::launch::full_rocket_thrust(gravity)
+            / total_mass;
         let pitchover =
             forced.unwrap_or_else(|| optimize_pitchover(true_pos, true_vel, thrust_accel));
         Self::build(true_pos, true_vel, thrust_accel, pitchover)
@@ -172,7 +195,7 @@ impl PitchProgram {
             if samples.last().is_none_or(|&(s, _)| speed > s + 1.0) {
                 samples.push((speed, angle));
             }
-            if escaped(pos, vel) {
+            if escape_secured(pos, vel) {
                 break;
             }
             let accel = dir * thrust_accel + gravity_at(pos);
@@ -215,7 +238,7 @@ impl PitchProgram {
 /// [`ascent_thrust_dir`] (the raw closed-loop law) remains the *planning* model the
 /// program is sampled from.
 pub fn program_guidance(true_pos: Vec3, true_vel: Vec3, program: &PitchProgram) -> Guidance {
-    let throttle = if escaped(true_pos, true_vel) { 0.0 } else { 1.0 };
+    let throttle = if escape_secured(true_pos, true_vel) { 0.0 } else { 1.0 };
     Guidance { thrust_dir: program.thrust_dir(true_pos, true_vel.length()), throttle }
 }
 
@@ -252,6 +275,11 @@ pub fn propagate(
 ) -> Prediction {
     let mut path = Vec::with_capacity(max_steps / sample_every.max(1) + 2);
     let mut burn_dv = 0.0f32;
+    // The floor only arms once the trajectory has climbed above it — a floor with a
+    // clearance margin sits ABOVE the launch pad, and enforcing it from step 0 would
+    // declare every launch crashed at lift-off. Below the arm point the true ground
+    // still applies.
+    let mut cleared_floor = false;
     for step in 0..max_steps {
         if step % sample_every.max(1) == 0 {
             path.push(pos);
@@ -263,12 +291,17 @@ pub fn propagate(
         burn_dv += thrust_accel * dt;
         vel += accel * dt;
         pos += vel * dt;
-        // Sank below the floor before escaping → crashed; fuel-to-escape is undefined.
-        if (pos - PLANET_CENTER).length() < floor_radius {
+        // Sank below the (armed) floor before escaping → crashed; fuel-to-escape is
+        // undefined.
+        let r = (pos - PLANET_CENTER).length();
+        if r >= floor_radius {
+            cleared_floor = true;
+        }
+        if r < if cleared_floor { floor_radius } else { GROUND_RADIUS } {
             path.push(pos);
             return Prediction { path, burn_dv: None, escaped: false };
         }
-        if escaped(pos, vel) {
+        if escape_secured(pos, vel) {
             path.push(pos);
             return Prediction { path, burn_dv: Some(burn_dv), escaped: true };
         }
@@ -295,6 +328,10 @@ pub const OPTIMIZER_STEPS: usize = 4000;
 /// fuel for altitude margin.
 pub fn optimize_pitchover(true_pos: Vec3, true_vel: Vec3, thrust_accel: f32) -> f32 {
     const SAFETY: f32 = 0.85;
+    /// The optimizer's arc must hold this much altitude margin over the pad (latched —
+    /// see `propagate`): the real vehicle flies the plan imperfectly (attitude lag,
+    /// rider trim), and an ideal arc that grazes the terrain leaves no room for that.
+    const OPTIMIZER_CLEARANCE_M: f32 = 400.0;
     /// Attitude-execution cost of a commanded lean, as extra fuel Δv (m/s) per radian of
     /// pitchover. The point-mass sim assumes thrust snaps to the guidance direction; the
     /// real stack must physically rotate, and imperfect tracking points some thrust
@@ -324,7 +361,7 @@ pub fn optimize_pitchover(true_pos: Vec3, true_vel: Vec3, thrust_accel: f32) -> 
             OPTIMIZER_DT,
             OPTIMIZER_STEPS,
             OPTIMIZER_STEPS, // no path samples needed — only the fuel figure
-            GROUND_RADIUS,
+            GRAVITY_REF_RADIUS + OPTIMIZER_CLEARANCE_M,
         )
         .burn_dv
         .unwrap_or(f32::INFINITY);

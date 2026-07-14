@@ -30,7 +30,10 @@ use bad_spaceship_shared::guidance::{program_guidance, PitchProgram, DEFAULT_PIT
 use bad_spaceship_shared::launch::{
     assembly_burn, burn_impulse, measure_assembly_spin, LAUNCH_COUNTDOWN_SECS,
 };
-use bad_spaceship_shared::character::{spawn_position, CharacterMovement, InitialPose, ServerAvatar};
+use bad_spaceship_shared::character::{
+    apparent_up, drive_felt_up, spawn_position, CharacterMovement, FeltUp, InitialPose,
+    ServerAvatar,
+};
 use bad_spaceship_shared::net::{
     apply_hold_spring, apply_net_input, focused_part, monster_index, sanitize_name,
     ClientPanicReport, InLargestAssembly, NetFacing, NetHold, NetInput, NetJoint, NetLockJoint,
@@ -39,7 +42,9 @@ use bad_spaceship_shared::net::{
     ResetPosition, ResetRoom, RollbackReport, SaveGame, SetAvatar, SetLocked, SetName,
     GROUND_JOINT_ID, MONSTER_COUNT, TICK,
 };
-use bad_spaceship_shared::map::{apply_gravity_correction, GROUND_LAYER, PLANET_RESPAWN_Y};
+use bad_spaceship_shared::map::{
+    apply_gravity_correction, GROUND_LAYER, PLANET_CENTER, PLANET_RADIUS, PLANET_RESPAWN_Y,
+};
 use bad_spaceship_shared::part::{
     avatar_lock_contacts, despawn_player_lock_welds, part_gap_contacts, part_state_diverged,
     spawn_random_part, spawn_random_rocket, spawn_rocket_engine, spawn_saved_cuboid, Gimbal,
@@ -326,6 +331,7 @@ impl Plugin for NetServerPlugin {
         app.init_resource::<RoomAttitudeIntegrals>();
         app.init_resource::<RoomFuel>();
         app.init_resource::<RoomPolicy>();
+        app.init_resource::<RoomApparentUp>();
         // Server-authoritative session resume: remember each player's last position
         // (keyed by its persistent `resume_id`) so a reconnect after an iOS reload
         // lands back in place rather than at the origin.
@@ -467,6 +473,13 @@ impl Plugin for NetServerPlugin {
                 // Balanced rocket thrust for launched rooms — a continuous force, so it
                 // runs per physics tick like the hold spring.
                 apply_room_rocket_thrust,
+                // Feed each rider's felt-up window (camera + movement basis) from the
+                // assembly attitude the burn just flew — the server twin of the client's
+                // `sample_sp/mp_felt_up`, over the same replicated state.
+                sample_felt_up.after(apply_room_rocket_thrust),
+                // Structural damping across welded pairs — drains contact/joint pump
+                // energy before it can run away (see `damp_weld_motion`).
+                bad_spaceship_shared::part::damp_weld_motion.after(apply_room_rocket_thrust),
             ),
         );
     }
@@ -1115,11 +1128,21 @@ fn detect_assembly_crash(
 ) {
     for (position, part_room) in &assembly {
         let room = part_room.id;
-        // Skip parts of rooms already flagged this frame, or launched / in-flight rooms.
-        if pending.0.contains(&room)
-            || launches.is_launched(room)
-            || frames.get(room).is_active()
-        {
+        if pending.0.contains(&room) {
+            continue;
+        }
+        if launches.is_launched(room) || frames.get(room).is_active() {
+            // In flight the crash surface is radial: the planet has no collider away
+            // from the pad bowl, so an assembly whose TRUE position sinks below the
+            // planet sphere has flown into the terrain. Without this, a flight whose
+            // realized attitude sagged flatter than planned (e.g. a side-hung rider's
+            // standing torque) could circle *inside* the visual planet burning forever —
+            // escape energy is unreachable that deep in the well. Small margin so a low
+            // skim that visibly grazes the surface reads as the crash it looks like.
+            let true_pos = position.0 + frames.get(room).offset.as_vec3();
+            if (true_pos - PLANET_CENTER).length() < PLANET_RADIUS - 50.0 {
+                pending.0.insert(room);
+            }
             continue;
         }
         if position.0.y < ASSEMBLY_CRASH_Y {
@@ -2286,6 +2309,14 @@ struct RoomFuel(HashMap<RoomId, f32>);
 #[derive(Resource, Default)]
 struct RoomPolicy(HashMap<RoomId, PitchProgram>);
 
+/// Per-room apparent-up for riders aboard a launched assembly (see the client's
+/// `ApparentUp` for the full rationale): `normalize(thrust_accel − gravity_at(true_com))`
+/// — bounded tilt near the planet, radial-up in coast, pure thrust axis in deep space.
+/// Written by [`apply_room_rocket_thrust`] each tick; rooms without an entry (not
+/// launched) fall back to world-up in [`sample_felt_up`].
+#[derive(Resource, Default)]
+struct RoomApparentUp(HashMap<RoomId, Vec3>);
+
 impl LaunchRegistry {
     /// Whether a room has blasted off — the state the rocket thrust keys on and
     /// the save snapshot persists.
@@ -2456,6 +2487,7 @@ fn apply_room_rocket_thrust(
     mut integrals: ResMut<RoomAttitudeIntegrals>,
     mut fuel: ResMut<RoomFuel>,
     mut policies: ResMut<RoomPolicy>,
+    mut apparent: ResMut<RoomApparentUp>,
     frames: Res<RoomFrames>,
     gravity: Res<Gravity>,
     // Riders' masses, for the ascent plan: every avatar is locked to the assembly at
@@ -2490,8 +2522,12 @@ fn apply_room_rocket_thrust(
         }
     }
     if per_room.is_empty() {
+        apparent.0.clear();
         return;
     }
+    // Drop apparent-up entries of rooms that are no longer launched (reset/landed).
+    let launched: std::collections::HashSet<RoomId> = per_room.keys().copied().collect();
+    apparent.0.retain(|room, _| launched.contains(room));
 
     // Resolve each room's burn (shared `assembly_burn`, so the client's predicted twin
     // computes the identical trims + gimbal slews). The COM + rotational state come
@@ -2566,6 +2602,22 @@ fn apply_room_rocket_thrust(
             let burn = assembly_burn(com, gravity.0, dt, rockets, &spin, integral, guidance);
             // Tally propellant burned this tick (see `RoomFuel` and `burn_impulse`).
             *fuel.0.entry(*room).or_default() += burn_impulse(&burn, dt);
+            // Publish the riders' apparent up (see `RoomApparentUp`); mass matches the
+            // client's (parts + riders) so the predicted movement basis agrees.
+            let total_mass: f32 = members
+                .iter()
+                .filter(|(.., r)| r.id == *room)
+                .map(|(_, _, _, m, _)| m.value())
+                .sum::<f32>()
+                + riders
+                    .iter()
+                    .filter(|(m, _)| m.0 == *room)
+                    .map(|(_, mass)| mass.value())
+                    .sum::<f32>();
+            if total_mass > 0.0 {
+                let net_force: Vec3 = burn.iter().map(|b| b.force).sum();
+                apparent.0.insert(*room, apparent_up(net_force, total_mass, true_com));
+            }
             // Diagnostics (BS_DEBUG_GIMBAL): once a second, the controller state the
             // flight recorder can't see - body axis vs velocity vs nozzle deflections.
             static DEBUG_GIMBAL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -2594,6 +2646,22 @@ fn apply_room_rocket_thrust(
             gimbal.0 = burn.gimbal;
             forces.apply_force_at_point(burn.force, burn.point);
         }
+    }
+}
+
+/// Feed every avatar's [`FeltUp`] window one sample of this tick's apparent-up
+/// direction: its room's launched-assembly plumb line (see [`RoomApparentUp`]), world
+/// +Y otherwise. The server half of the felt-up basis — the client sampler consumes the
+/// same formula's output from its own predicted burn, so the bases agree without
+/// replicating anything.
+fn sample_felt_up(
+    mut commands: Commands,
+    apparent: Res<RoomApparentUp>,
+    mut avatars: Query<(Entity, &RoomMember, Option<&mut FeltUp>, &mut Rotation), With<ServerAvatar>>,
+) {
+    for (entity, member, felt, mut rotation) in &mut avatars {
+        let target = apparent.0.get(&member.0).copied().unwrap_or(Vec3::Y);
+        drive_felt_up(&mut commands, entity, felt, &mut rotation, target);
     }
 }
 

@@ -10,7 +10,7 @@ use avian3d::prelude::{
     AngularVelocity, Collider, ColliderDensity, Collisions, Forces, Friction,
     Gravity, JointCollisionDisabled, LinearVelocity, Position, ReadRigidBodyForces, Restitution,
     Rotation,
-    RigidBody, SphericalJoint, SweptCcd, WriteRigidBodyForces,
+    ComputedMass, RigidBody, SphericalJoint, SweptCcd, WriteRigidBodyForces,
 };
 use bevy::prelude::*;
 use rand::prelude::ThreadRng;
@@ -562,7 +562,7 @@ fn replace_fallen_rocket_engines(
 /// cut), so deleting joints off a rigid weld automatically re-arms its contact.
 fn maintain_weld_rigidity(
     mut commands: Commands,
-    joints: Query<(Entity, &SphericalJoint)>,
+    joints: Query<(Entity, &SphericalJoint, Has<LockJoint>)>,
     changed: Query<(), Changed<SphericalJoint>>,
     mut removed: RemovedComponents<SphericalJoint>,
 ) {
@@ -575,12 +575,21 @@ fn maintain_weld_rigidity(
     type PairJoints = Vec<(Entity, Vec3, Vec3)>; // (joint, anchor in key.0, anchor in key.1)
     let mut pairs: std::collections::HashMap<(Entity, Entity), PairJoints> =
         std::collections::HashMap::new();
-    for (entity, joint) in &joints {
+    let mut lock_pairs: std::collections::HashSet<(Entity, Entity)> =
+        std::collections::HashSet::new();
+    for (entity, joint, is_lock) in &joints {
         let (key, a_anchor, b_anchor) = if joint.body1 <= joint.body2 {
             ((joint.body1, joint.body2), joint.local_anchor1(), joint.local_anchor2())
         } else {
             ((joint.body2, joint.body1), joint.local_anchor2(), joint.local_anchor1())
         };
+        // A rider's lock weld owns its pair's relative pose outright (centre-anchored,
+        // rotation-free by design) — its contact adds nothing but a capsule-vs-deck
+        // fight while the tilting body sweeps through the surface. Always drop it,
+        // regardless of the anchor-count rigidity the census would compute.
+        if is_lock {
+            lock_pairs.insert(key);
+        }
         pairs.entry(key).or_default().push((
             entity,
             a_anchor.unwrap_or_default(),
@@ -638,7 +647,8 @@ fn maintain_weld_rigidity(
     }
 
     for (&(a, b), members) in &pairs {
-        let rigid = clusters.find(index[&a]) == clusters.find(index[&b]);
+        let rigid = lock_pairs.contains(&(a, b))
+            || clusters.find(index[&a]) == clusters.find(index[&b]);
         for &(entity, _, _) in members {
             // `try_insert`/`try_remove` (not `insert`/`remove`): a joint queried here can
             // be despawned before these deferred commands apply — the floating-origin
@@ -878,9 +888,18 @@ pub fn avatar_lock_contacts<'a>(
     for (part, collider, position, rotation) in parts {
         contacts.clear();
         part_gap_contacts(avatar.0, avatar.1, avatar.2, collider, position, rotation, &mut contacts);
-        for (avatar_local, part_local) in contacts.iter().copied() {
-            weld(part, avatar_local, part_local);
+        if contacts.is_empty() {
+            continue;
         }
+        // ONE weld per touched part, anchored at the CAPSULE CENTRE on the avatar side.
+        // The avatar body rotates to the rider's felt up every physics tick (see
+        // `FeltUp`), and a surface-point anchor would be dragged through the constraint
+        // by that kinematic rotation — corrective impulses pumped into the deck at the
+        // exact moment the ascent starts tilting (destabilized a launch). Rotation
+        // about the centre never moves a centre anchor, so the weld is tilt-invariant;
+        // the spherical joint never constrained rotation anyway.
+        let part_anchor = rotation.inverse() * (avatar.1 - position);
+        weld(part, Vec3::ZERO, part_anchor);
     }
 }
 
@@ -900,6 +919,87 @@ pub fn cleanup_lock_joints(
         if bodies.get(joint.body1).is_err() || bodies.get(joint.body2).is_err() {
             commands.entity(entity).despawn();
         }
+    }
+}
+
+/// Fraction of the **relative** velocity (linear + angular) between two jointed bodies
+/// bled off per physics tick — structural damping for welded assemblies.
+///
+/// Why: a contact and a joint set solving the same pair (or a rigid loop of hinges — see
+/// [`maintain_weld_rigidity`]) can pump energy every substep; under the pitch program's
+/// sustained lateral load a marginal pair's pump can run away until the whole assembly
+/// detonates (recorder: six parts diverging at once, |ω| 400–1900 rad/s, mid-turn at
+/// ~1.2 km — a player build lost this way). Force-based fixes were tried in the census
+/// era and failed (joint compliance and doubled substeps both "neither stops the pump").
+/// This damping is different in kind: each tick the pair's relative velocity is scaled
+/// down directly, momentum-weighted, so it strictly REMOVES relative kinetic energy —
+/// it cannot inject any, no matter how violent the pump — and a runaway must now outgrow
+/// a 30%-per-tick drain to survive. Bodies a joint intends to be rigid have no
+/// legitimate relative motion, so the aggressive rate costs nothing real; dangling
+/// hinged parts just swing viscously instead of jangling.
+const WELD_DAMPING_PER_TICK: f32 = 0.3;
+
+/// Relative speed below which the damper does nothing (m/s linear, rad/s angular).
+/// Normal flight keeps welded pairs within solver-noise of zero relative motion — a
+/// damper acting there is a no-op physically but NOT numerically: on a predicted
+/// multiplayer client it smears half-applied rollback corrections across the welded
+/// cluster, injecting client-only velocity deltas that feed a rollback storm (observed:
+/// ~18 rollbacks/s and a mid-flight breakup with a browser client attached, while
+/// bot-only flights of the same binary flew clean). The dead-zone keeps the damper
+/// silent until a pair shows REAL divergence — an actual pump — which is also why the
+/// damper only registers on authoritative sims (server + single-player), never on the
+/// predicted twin.
+const WELD_DAMPING_DEADZONE: f32 = 0.5;
+
+/// Apply [`WELD_DAMPING_PER_TICK`] across every jointed **dynamic** pair, once per pair
+/// per tick (a pair welded by several joints is damped once). Skips pairs touching a
+/// non-dynamic body: a static ground clamp partner ignores velocity writes for motion,
+/// but scribbling on its `LinearVelocity` would leak into `GroundVelocity` support
+/// readings. Runs identically on the server, single-player, and the predicted client
+/// (the same shared-system discipline as the hold spring and gravity correction).
+pub fn damp_weld_motion(
+    joints: Query<&SphericalJoint>,
+    mut bodies: Query<(&RigidBody, &mut LinearVelocity, &mut AngularVelocity, &ComputedMass)>,
+) {
+    let mut seen: std::collections::HashSet<(Entity, Entity)> = std::collections::HashSet::new();
+    for joint in &joints {
+        let key = if joint.body1 <= joint.body2 {
+            (joint.body1, joint.body2)
+        } else {
+            (joint.body2, joint.body1)
+        };
+        if key.0 == key.1 || !seen.insert(key) {
+            continue;
+        }
+        let Ok([(rb1, mut v1, mut w1, m1), (rb2, mut v2, mut w2, m2)]) =
+            bodies.get_many_mut([key.0, key.1])
+        else {
+            continue;
+        };
+        if *rb1 != RigidBody::Dynamic || *rb2 != RigidBody::Dynamic {
+            continue;
+        }
+        let (m1, m2) = (m1.value(), m2.value());
+        let total = m1 + m2;
+        if total <= 0.0 {
+            continue;
+        }
+        // Momentum-conserving relative-velocity bleed: the light body yields more,
+        // dead-zoned (see `WELD_DAMPING_DEADZONE`) so it acts only on real pumps. Linear
+        // and angular are damped identically — one closure so they can't drift. (Spin
+        // uses mass weighting as a cheap stand-in for inertia weighting; exact
+        // conservation matters less than never *adding* energy, which holds for any
+        // convex weighting.)
+        let mut bleed = |a: &mut Vec3, b: &mut Vec3| {
+            let rel = *b - *a;
+            if rel.length_squared() > WELD_DAMPING_DEADZONE * WELD_DAMPING_DEADZONE {
+                let d = rel * WELD_DAMPING_PER_TICK;
+                *a += d * (m2 / total);
+                *b -= d * (m1 / total);
+            }
+        };
+        bleed(&mut v1.0, &mut v2.0);
+        bleed(&mut w1.0, &mut w2.0);
     }
 }
 

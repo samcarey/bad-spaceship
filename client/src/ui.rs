@@ -439,9 +439,18 @@ fn show_flight_hud(
     };
     // The reconciled frame offset keeps `offset + local` continuous through a
     // rebase; see `sync_visual_room_frame`.
-    let (frame_offset_y, frame_velocity) =
-        frame.map(|f| (f.offset.y, f.velocity)).unwrap_or((0.0, Vec3::ZERO));
-    let altitude = frame_offset_y + position.0.y as f64;
+    let (frame_offset, frame_velocity) =
+        frame.map(|f| (f.offset, f.velocity)).unwrap_or((bevy::math::DVec3::ZERO, Vec3::ZERO));
+    // Altitude is RADIAL — distance from the planet centre minus the pad's radius —
+    // NOT the raw y coordinate. On a sphere, arcing downrange drops your y toward zero
+    // while your height above the curved surface is unchanged, so a y-based readout
+    // wound down to zero mid-flight (reported: "altitude descends to zero while still
+    // in the air"). `r − GRAVITY_REF_RADIUS` reads 0 on the pad and stays honest all
+    // the way around the planet — the same altitude the guidance/`[guid]` trace uses.
+    let true_pos = frame_offset + position.0.as_dvec3();
+    let planet_center = bad_spaceship_shared::map::PLANET_CENTER.as_dvec3();
+    let altitude = (true_pos - planet_center).length()
+        - bad_spaceship_shared::map::GRAVITY_REF_RADIUS as f64;
     if altitude < SHOW_ABOVE_M {
         return Ok(());
     }

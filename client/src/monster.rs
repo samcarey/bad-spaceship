@@ -247,7 +247,10 @@ fn dress_characters(
 }
 
 /// Turn the own monster to the look yaw (same sign convention as
-/// `face_replicated_players`: the models face +Z). Compare-before-write so a
+/// `face_replicated_players`: the models face +Z). The pivot needs no felt-up
+/// handling of its own: the character BODY rotates to the felt up (see the felt-up
+/// samplers) and the pivot is its child, so the mesh inherits the tilt from the
+/// hierarchy like everything else on the character. Compare-before-write so a
 /// stationary look doesn't dirty the pivot's transform tree every frame.
 fn face_own_monster(
     own: Query<(&Yaw, &OwnMonsterPivot)>,
