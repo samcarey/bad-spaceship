@@ -169,8 +169,9 @@ impl PitchProgram {
         // planned arc, never below it (a side-hung rider once realized ~20% less thrust
         // than a nominal plan assumed, and the 23° arc sagged kilometres under the
         // surface line).
-        const PLAN_THRUST_DERATE: f32 = 0.85;
-        let thrust_accel = PLAN_THRUST_DERATE * engines as f32
+        // == the allocator's `LIFT_FLOOR` on purpose (planning at the realized-thrust
+        // floor keeps reality on the safe side of the plan); one source, not a twin literal.
+        let thrust_accel = crate::launch::LIFT_FLOOR * engines as f32
             * crate::launch::full_rocket_thrust(gravity)
             / total_mass;
         let pitchover =

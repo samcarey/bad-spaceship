@@ -1295,6 +1295,44 @@ fps-dependent). Key facts that shaped the design:
   flies clean or (roughly 1-in-4 for a TWR-1.3 build) gets pinned on the pad by
   contact-chatter throttle trim, or detonates a weld, depending on the contact state at
   the tick the countdown ends. Repeat any anomalous flight before believing it.
+  - **Escape CUTOFF is `escape_secured`, not `E ≥ 0`.** Scalar escape energy alone is an
+    unsafe cutoff: a near-horizontal burn reaches `E ≥ 0` with the path still tipping
+    down, and the conserved-energy hyperbola's periapsis can be underground — the
+    "escaped" ship dives back in (the altimeter unwinds mid-air). Cut only when `E ≥ 0`
+    AND radial velocity ≥ 0 (outbound); then `r` grows forever. Planner terminates on the
+    same condition so grazing arcs price as crashes.
+- **Felt-up / apparent-up (rider frame aboard a launched rocket).** A passenger's "up" is
+  the felt (proper) acceleration, `normalize(thrust_accel − gravity_at(true_com))` — the
+  **plumb line**, NOT the raw thrust/body axis. Using the body axis inverted the camera at
+  a horizontal skim burn; the plumb line bounds tilt (~35° at a horizontal TWR-1.7 burn,
+  planet always below), is radial-up on the pad and in coast (free fall feels nothing), and
+  asymptotes to the pure thrust axis far from the planet. The thrust systems publish it
+  (`ApparentUp` client / `RoomApparentUp` server per room), `FeltUp` (`shared::character`)
+  keeps a ~2 s ring-buffer average of it, and the felt-up samplers write the avatar's
+  **`Rotation` directly** (it's `ROTATION_LOCKED` — the solver never fights the write, same
+  discipline as movement writing `LinearVelocity`) so the collider, camera orbit rig, and
+  monster mesh all inherit the tilt from the hierarchy — one source, no visual/physics
+  divergence (an earlier visual-only tilt of the mesh left the capsule world-vertical and
+  the character read as leaning backward). Server + predicted client write the same value,
+  so replication stays quiet. **Corollary that bit hard: kinematically rotating a WELDED
+  body drags a surface-point weld anchor through the constraint** → impulses pumped into
+  the deck at tilt onset (destabilized a live launch). Fix: lock welds anchor at the
+  **capsule centre** (one per touched part — rotation-invariant) and the weld census always
+  drops a lock-pair's contact (the weld owns the pose).
+- **Structural weld damping (`damp_weld_motion`, `shared::part`).** A contact + a joint
+  solving the same pair (or a rigid loop of hinges) can pump energy every substep until a
+  marginal player build detonates mid-flight (force-based fixes — joint compliance, extra
+  substeps — failed in the census era). This bleeds 30%/tick of the **relative** velocity
+  (linear + angular, momentum-weighted) across each jointed dynamic pair: it strictly
+  *removes* relative KE (cannot inject any), so a runaway must outgrow the drain. A
+  dead-zone (0.5) keeps it silent below real divergence — WITHOUT it, on the predicted MP
+  twin it smeared half-applied rollback corrections into a rollback storm (~18/s + breakup,
+  visible only with a real browser client attached — bot-only flights masked it: **always
+  verify MP changes with a client attached**). Registered on the authoritative sims (server
+  + single-player) ONLY.
+- **The altimeter is RADIAL** (`|true_pos − PLANET_CENTER| − GRAVITY_REF_RADIUS`), not raw
+  `y`: on a sphere, arcing downrange drops `y` toward zero while height above the curved
+  surface is unchanged, so a `y`-based readout wound to zero mid-flight.
 - **Floating-origin rebase (unbounded ascent).** The old hard ceilings — ~33 km with a
   rider / ~524 km unmanned, f32 ULP starving the solver and renderer — are gone: each room
   carries a floating-origin frame (`RoomFrames` server-side; replicated as `NetRoomFrame`

@@ -31,7 +31,8 @@ use bad_spaceship_shared::launch::{
     assembly_burn, burn_impulse, measure_assembly_spin, LAUNCH_COUNTDOWN_SECS,
 };
 use bad_spaceship_shared::character::{
-    spawn_position, CharacterMovement, FeltUp, InitialPose, ServerAvatar,
+    apparent_up, drive_felt_up, spawn_position, CharacterMovement, FeltUp, InitialPose,
+    ServerAvatar,
 };
 use bad_spaceship_shared::net::{
     apply_hold_spring, apply_net_input, focused_part, monster_index, sanitize_name,
@@ -42,8 +43,7 @@ use bad_spaceship_shared::net::{
     GROUND_JOINT_ID, MONSTER_COUNT, TICK,
 };
 use bad_spaceship_shared::map::{
-    apply_gravity_correction, gravity_at, GROUND_LAYER, PLANET_CENTER, PLANET_RADIUS,
-    PLANET_RESPAWN_Y,
+    apply_gravity_correction, GROUND_LAYER, PLANET_CENTER, PLANET_RADIUS, PLANET_RESPAWN_Y,
 };
 use bad_spaceship_shared::part::{
     avatar_lock_contacts, despawn_player_lock_welds, part_gap_contacts, part_state_diverged,
@@ -2616,10 +2616,7 @@ fn apply_room_rocket_thrust(
                     .sum::<f32>();
             if total_mass > 0.0 {
                 let net_force: Vec3 = burn.iter().map(|b| b.force).sum();
-                apparent.0.insert(
-                    *room,
-                    (net_force / total_mass - gravity_at(true_com)).normalize_or(Vec3::Y),
-                );
+                apparent.0.insert(*room, apparent_up(net_force, total_mass, true_com));
             }
             // Diagnostics (BS_DEBUG_GIMBAL): once a second, the controller state the
             // flight recorder can't see - body axis vs velocity vs nozzle deflections.
@@ -2664,19 +2661,7 @@ fn sample_felt_up(
 ) {
     for (entity, member, felt, mut rotation) in &mut avatars {
         let target = apparent.0.get(&member.0).copied().unwrap_or(Vec3::Y);
-        match felt {
-            Some(mut felt) => {
-                felt.sample(target);
-                // The body itself tilts to the felt up (single source for collider,
-                // camera rig, mesh — all children inherit it); ROTATION_LOCKED keeps
-                // the solver from fighting the write. The predicted client writes the
-                // same value from its own sampler, so replication stays quiet.
-                rotation.0 = Quat::from_rotation_arc(Vec3::Y, felt.up);
-            }
-            None => {
-                commands.entity(entity).try_insert(FeltUp::default());
-            }
-        }
+        drive_felt_up(&mut commands, entity, felt, &mut rotation, target);
     }
 }
 

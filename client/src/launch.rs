@@ -26,7 +26,7 @@ use bad_spaceship_shared::guidance::{program_guidance, Guidance, PitchProgram};
 use bad_spaceship_shared::launch::{
     assembly_burn, burn_impulse, measure_assembly_spin, AssemblySpin, LAUNCH_COUNTDOWN_SECS,
 };
-use bad_spaceship_shared::map::{apply_gravity_correction, gravity_at};
+use bad_spaceship_shared::map::apply_gravity_correction;
 use bad_spaceship_shared::net::{
     ControlChannel, InLargestAssembly, NetLaunch, NetLockJoint, NetPart, NetPlayer, RequestLaunch,
     SetLocked,
@@ -35,7 +35,7 @@ use bad_spaceship_shared::part::{
     avatar_lock_contacts, cleanup_lock_joints, despawn_player_lock_welds, Gimbal, Holdable,
     LockJoint, RocketEngine, SuppressLocalParts, TargetPosition,
 };
-use bad_spaceship_shared::character::FeltUp;
+use bad_spaceship_shared::character::{apparent_up, drive_felt_up, FeltUp};
 use bad_spaceship_shared::Character;
 use bevy::prelude::*;
 use bevy_egui::{
@@ -303,7 +303,7 @@ fn cut_ground_joints(
 /// Planet gravity for the single-player sim: a per-tick radial correction on every
 /// dynamic body (avatar + parts) so gravity points at the planet centre and weakens
 /// with altitude. The correction rides on top of Avian's unchanged uniform `Gravity`
-/// (~zero at the pad, so building is untouched — see [`gravity_at`]). Single-player has
+/// (~zero at the pad, so building is untouched — see [`gravity_at`](bad_spaceship_shared::map::gravity_at)). Single-player has
 /// no floating-origin frame, so a body's local `Position` *is* its true world position.
 fn apply_sp_gravity(
     gravity: Res<Gravity>,
@@ -435,8 +435,7 @@ fn apply_sp_thrust(
         .map(|(_, _, m)| m.value())
         .sum::<f32>()
         + rider.iter().map(|m| m.value()).sum::<f32>();
-    apparent.0 = (total_mass > 0.0)
-        .then(|| (net_force / total_mass - gravity_at(com)).normalize_or(Vec3::Y));
+    apparent.0 = (total_mass > 0.0).then(|| apparent_up(net_force, total_mass, com));
 }
 
 /// Apply balanced thrust to the multiplayer assembly's **predicted** rockets each physics
@@ -553,8 +552,7 @@ fn apply_mp_thrust(
     // Apparent up for the riders (see `ApparentUp`), from the true (frame-folded) state —
     // same formula as the server so the predicted movement basis matches.
     let total_mass = part_mass_total + riders.iter().map(|m| m.value()).sum::<f32>();
-    apparent.0 = (total_mass > 0.0)
-        .then(|| (net_force / total_mass - gravity_at(true_com)).normalize_or(Vec3::Y));
+    apparent.0 = (total_mass > 0.0).then(|| apparent_up(net_force, total_mass, true_com));
 }
 
 /// Per-tick flame reset — see the registration comment and
@@ -577,20 +575,7 @@ fn sample_felt_up(
 ) {
     let target = apparent.0.unwrap_or(Vec3::Y);
     for (entity, felt, mut rotation) in &mut characters {
-        match felt {
-            Some(mut felt) => {
-                felt.sample(target);
-                // The body itself tilts to the felt up: it is ROTATION_LOCKED (the
-                // solver never spins it), so this direct write is the single owner of
-                // its orientation — collider, camera rig, mesh, name tag are children
-                // and inherit the tilt from the hierarchy. No divergence between the
-                // character's physics and visuals. Server writes the same value.
-                rotation.0 = Quat::from_rotation_arc(Vec3::Y, felt.up);
-            }
-            None => {
-                commands.entity(entity).try_insert(FeltUp::default());
-            }
-        }
+        drive_felt_up(&mut commands, entity, felt, &mut rotation, target);
     }
 }
 

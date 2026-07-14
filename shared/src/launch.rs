@@ -379,7 +379,7 @@ fn gimbal_correction(arm: Vec3, rotation: Quat, axial_thrust: f32, torque_share:
 /// otherwise throttle to nothing and never leave the ground. Lift wins over spin: below
 /// this average throttle we boost the rockets back toward full. `0.85` = at most a 15%
 /// average-thrust sacrifice for balance before lift takes priority.
-const LIFT_FLOOR: f32 = 0.85;
+pub const LIFT_FLOOR: f32 = 0.85;
 
 /// Per-rocket throttle factors `aᵢ ∈ [0, 1]` that steer an assembly's net thrust torque
 /// toward `target` (zero = just stop it spinning) without sacrificing so much thrust

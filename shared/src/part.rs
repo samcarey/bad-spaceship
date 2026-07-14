@@ -984,23 +984,22 @@ pub fn damp_weld_motion(
         if total <= 0.0 {
             continue;
         }
-        // Momentum-conserving relative-velocity bleed: the light body yields more.
-        // Dead-zoned (see `WELD_DAMPING_DEADZONE`) so it acts only on real pumps.
-        let rel_v = v2.0 - v1.0;
-        if rel_v.length_squared() > WELD_DAMPING_DEADZONE * WELD_DAMPING_DEADZONE {
-            let dv = rel_v * WELD_DAMPING_PER_TICK;
-            v1.0 += dv * (m2 / total);
-            v2.0 -= dv * (m1 / total);
-        }
-        // Same for spin (mass-weighted — a cheap stand-in for inertia weighting; exact
-        // conservation matters less than the guarantee of never adding energy, which
-        // holds for any convex weighting).
-        let rel_w = w2.0 - w1.0;
-        if rel_w.length_squared() > WELD_DAMPING_DEADZONE * WELD_DAMPING_DEADZONE {
-            let dw = rel_w * WELD_DAMPING_PER_TICK;
-            w1.0 += dw * (m2 / total);
-            w2.0 -= dw * (m1 / total);
-        }
+        // Momentum-conserving relative-velocity bleed: the light body yields more,
+        // dead-zoned (see `WELD_DAMPING_DEADZONE`) so it acts only on real pumps. Linear
+        // and angular are damped identically — one closure so they can't drift. (Spin
+        // uses mass weighting as a cheap stand-in for inertia weighting; exact
+        // conservation matters less than never *adding* energy, which holds for any
+        // convex weighting.)
+        let mut bleed = |a: &mut Vec3, b: &mut Vec3| {
+            let rel = *b - *a;
+            if rel.length_squared() > WELD_DAMPING_DEADZONE * WELD_DAMPING_DEADZONE {
+                let d = rel * WELD_DAMPING_PER_TICK;
+                *a += d * (m2 / total);
+                *b -= d * (m1 / total);
+            }
+        };
+        bleed(&mut v1.0, &mut v2.0);
+        bleed(&mut w1.0, &mut w2.0);
     }
 }
 

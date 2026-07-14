@@ -1,6 +1,6 @@
 use avian3d::prelude::{
     Collider, CollisionLayers, Collisions, LinearVelocity, LockedAxes, Mass, Position, RigidBody,
-    SphericalJoint,
+    Rotation, SphericalJoint,
 };
 use bevy::prelude::*;
 use bevy::reflect::TypePath;
@@ -9,7 +9,8 @@ use rand::Rng;
 use serde::Deserialize;
 
 use crate::{
-    Character, DirectionalInput, GameStickDirectionalInput, KeyboardDirectionalInput, Player, Yaw,
+    map::gravity_at, Character, DirectionalInput, GameStickDirectionalInput,
+    KeyboardDirectionalInput, Player, Yaw,
 };
 
 pub struct CharacterPlugin;
@@ -115,6 +116,46 @@ impl FeltUp {
         self.ring[self.idx] = target;
         self.idx = (self.idx + 1) % FELT_UP_TICKS;
         self.up = self.ring.iter().copied().sum::<Vec3>().normalize_or(Vec3::Y);
+    }
+
+    /// The body orientation that stands a rider up along the averaged felt up — the
+    /// single owner of a `ROTATION_LOCKED` avatar's rotation (collider, camera rig, and
+    /// mesh inherit it as children).
+    pub fn orientation(&self) -> Quat {
+        Quat::from_rotation_arc(Vec3::Y, self.up)
+    }
+}
+
+/// A rider's **apparent up** aboard a launched assembly: the plumb-line direction
+/// `normalize(thrust_accel − gravity_at(true_com))`. THE single definition the three
+/// thrust sites (single-player, predicted client, server) each publish, so the
+/// predicted movement/camera basis can never drift from the authoritative one. Not the
+/// raw thrust axis: weighing the burn against gravity bounds the tilt near the planet,
+/// gives radial-up on the pad and in coast, and asymptotes to the pure thrust axis far
+/// out (see the `ApparentUp`/`RoomApparentUp` producers).
+pub fn apparent_up(net_thrust_force: Vec3, total_mass: f32, true_com: Vec3) -> Vec3 {
+    (net_thrust_force / total_mass - gravity_at(true_com)).normalize_or(Vec3::Y)
+}
+
+/// Advance one avatar's [`FeltUp`] window by `target` and rewrite its body rotation from
+/// the new average — or insert a default `FeltUp` if it has none yet. The single owner of
+/// the "sample ⇒ body orientation" contract, called identically by the client and server
+/// felt-up samplers (which differ only in how they source `target`).
+pub fn drive_felt_up(
+    commands: &mut Commands,
+    entity: Entity,
+    felt: Option<Mut<FeltUp>>,
+    rotation: &mut Rotation,
+    target: Vec3,
+) {
+    match felt {
+        Some(mut felt) => {
+            felt.sample(target);
+            rotation.0 = felt.orientation();
+        }
+        None => {
+            commands.entity(entity).try_insert(FeltUp::default());
+        }
     }
 }
 
