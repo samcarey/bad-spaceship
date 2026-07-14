@@ -232,13 +232,51 @@ impl PitchProgram {
     }
 }
 
+/// Speed margin (fraction of escape velocity) that sets the *upper* edge of the cutoff
+/// hysteresis band. Escape is `E ≥ 0` (`v = v_esc`); the live autopilot only cuts once a
+/// few % faster. The lower edge is plain escape (`E ≥ 0`, outbound), so once cut the engine
+/// re-fires only when the ship is *clearly* bound again — energy back below escape or
+/// actually falling inbound. Without the band a bare `E ≥ 0` test chatters at the knife
+/// edge under prediction/rebase noise and the predicted engine flickers against the
+/// server's steady state. Live-control only: the fuel-optimal planner still prices escape
+/// at exactly `E ≥ 0`.
+pub const ESCAPE_CUTOFF_MARGIN: f32 = 1.06;
+
+/// Whether the live autopilot should hold thrust cut, **with hysteresis** — NOT a one-way
+/// latch. `cut` is the current cutoff state, persisted by the caller across ticks: cut
+/// *off* (return `true`) once a margin past escape and outbound; turn thrust back *on*
+/// (return `false`) the instant escape is genuinely lost (energy below `E ≥ 0`, or radial
+/// velocity gone inbound — i.e. the ship is falling back). Between those two thresholds the
+/// state is held, so boundary noise can't re-trigger it while a real fall-back still
+/// re-fires the engine. Callers clear `cut` when the launch ends so a re-launch thrusts.
+pub fn escape_cutoff(true_pos: Vec3, true_vel: Vec3, cut: &mut bool) -> bool {
+    let r = (true_pos - PLANET_CENTER).length().max(1.0);
+    let outbound = (true_pos - PLANET_CENTER).dot(true_vel) >= 0.0;
+    let energy = 0.5 * true_vel.length_squared() - GRAVITY_MU / r;
+    *cut = if *cut {
+        // Stay cut while still escaped (E ≥ 0, outbound); re-fire the instant that fails.
+        energy >= 0.0 && outbound
+    } else {
+        // Cut once a margin past escape, outbound — clear of the E ≈ 0 knife-edge.
+        let margin_energy = (ESCAPE_CUTOFF_MARGIN * ESCAPE_CUTOFF_MARGIN - 1.0) * GRAVITY_MU / r;
+        energy >= margin_energy && outbound
+    };
+    *cut
+}
+
 /// The live autopilot's guidance command: the pitch-program direction at the vehicle's
-/// current speed, plus a throttle that cuts to zero once escape energy is reached
-/// (burning past `E ≥ 0` only wastes fuel). This is what the three thrust sites fly;
-/// [`ascent_thrust_dir`] (the raw closed-loop law) remains the *planning* model the
-/// program is sampled from.
-pub fn program_guidance(true_pos: Vec3, true_vel: Vec3, program: &PitchProgram) -> Guidance {
-    let throttle = if escape_secured(true_pos, true_vel) { 0.0 } else { 1.0 };
+/// current speed, plus a throttle that cuts to zero once escape is secured (see
+/// [`escape_cutoff`] — burning past escape only wastes fuel), with hysteresis so the cut
+/// can't flicker at the boundary yet still re-fires if the ship falls back. This is what
+/// the three thrust sites fly; [`ascent_thrust_dir`] (the raw closed-loop law) remains the
+/// *planning* model the program is sampled from.
+pub fn program_guidance(
+    true_pos: Vec3,
+    true_vel: Vec3,
+    program: &PitchProgram,
+    cut: &mut bool,
+) -> Guidance {
+    let throttle = if escape_cutoff(true_pos, true_vel, cut) { 0.0 } else { 1.0 };
     Guidance { thrust_dir: program.thrust_dir(true_pos, true_vel.length()), throttle }
 }
 
@@ -438,14 +476,43 @@ mod tests {
         assert!(fast.dot(vel.normalize()) > 0.999, "fast should be prograde: {fast:?}");
     }
 
-    /// Guidance cuts the throttle once escape energy is reached.
+    /// Guidance cuts a margin past escape with hysteresis: boundary noise can't re-ignite
+    /// it, but a genuine fall-back does.
     #[test]
-    fn throttle_cuts_at_escape() {
-        let pos = Vec3::new(0.0, 0.0, 0.0);
+    fn throttle_cutoff_has_hysteresis() {
+        let pos = Vec3::new(0.0, 0.0, 0.0); // one ref-radius from the planet centre
         let v_esc = (2.0 * GRAVITY_MU / GRAVITY_REF_RADIUS).sqrt();
         let program = PitchProgram::default();
-        assert_eq!(program_guidance(pos, Vec3::Y * (v_esc + 5.0), &program).throttle, 0.0);
-        assert_eq!(program_guidance(pos, Vec3::Y * 10.0, &program).throttle, 1.0);
+        let mut cut = false;
+        // Barely past escape but inside the cutoff margin, outbound: still burning.
+        assert_eq!(
+            program_guidance(pos, Vec3::Y * (v_esc + 5.0), &program, &mut cut).throttle,
+            1.0
+        );
+        assert!(!cut);
+        // Clearly past the margin, outbound: cut.
+        assert_eq!(
+            program_guidance(pos, Vec3::Y * v_esc * 1.1, &program, &mut cut).throttle,
+            0.0
+        );
+        assert!(cut);
+        // In the dead-band (just above escape, outbound): stays cut — no flicker.
+        assert_eq!(
+            program_guidance(pos, Vec3::Y * (v_esc + 5.0), &program, &mut cut).throttle,
+            0.0
+        );
+        // Genuinely bound again (below escape energy): the engine re-fires — not latched.
+        assert_eq!(
+            program_guidance(pos, Vec3::Y * 10.0, &program, &mut cut).throttle,
+            1.0
+        );
+        assert!(!cut);
+        // Past the margin but falling inbound (negative radial vel): does NOT cut.
+        let mut cut2 = false;
+        assert_eq!(
+            program_guidance(pos, Vec3::NEG_Y * v_esc * 1.2, &program, &mut cut2).throttle,
+            1.0
+        );
     }
 
     /// The shared plan constructor guards a mass-less assembly with the straight-up

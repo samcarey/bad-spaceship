@@ -332,6 +332,7 @@ impl Plugin for NetServerPlugin {
         app.init_resource::<RoomFuel>();
         app.init_resource::<RoomPolicy>();
         app.init_resource::<RoomApparentUp>();
+        app.init_resource::<RoomEscaped>();
         // Server-authoritative session resume: remember each player's last position
         // (keyed by its persistent `resume_id`) so a reconnect after an iOS reload
         // lands back in place rather than at the origin.
@@ -2317,6 +2318,13 @@ struct RoomPolicy(HashMap<RoomId, PitchProgram>);
 #[derive(Resource, Default)]
 struct RoomApparentUp(HashMap<RoomId, Vec3>);
 
+/// Per-room escape-cutoff hysteresis state (see [`escape_cutoff`]): whether a room's
+/// assembly currently has its throttle cut for reaching escape. Held across ticks so the
+/// cut can't chatter at the boundary, yet re-fires if the ship falls back below escape.
+/// Cleared for rooms that are no longer launched.
+#[derive(Resource, Default)]
+struct RoomEscaped(HashMap<RoomId, bool>);
+
 impl LaunchRegistry {
     /// Whether a room has blasted off — the state the rocket thrust keys on and
     /// the save snapshot persists.
@@ -2487,6 +2495,7 @@ fn apply_room_rocket_thrust(
     mut integrals: ResMut<RoomAttitudeIntegrals>,
     mut fuel: ResMut<RoomFuel>,
     mut policies: ResMut<RoomPolicy>,
+    mut escaped: ResMut<RoomEscaped>,
     mut apparent: ResMut<RoomApparentUp>,
     frames: Res<RoomFrames>,
     gravity: Res<Gravity>,
@@ -2531,6 +2540,7 @@ fn apply_room_rocket_thrust(
     // Drop apparent-up entries of rooms that are no longer launched (reset/landed).
     let launched: std::collections::HashSet<RoomId> = per_room.keys().copied().collect();
     apparent.0.retain(|room, _| launched.contains(room));
+    escaped.0.retain(|room, _| launched.contains(room));
 
     // Resolve each room's burn (shared `assembly_burn`, so the client's predicted twin
     // computes the identical trims + gimbal slews). The COM + rotational state come
@@ -2597,7 +2607,8 @@ fn apply_room_rocket_thrust(
                 PitchProgram::plan(true_com, true_vel, rockets.len(), gravity.0, total_mass, forced)
             });
             let pitchover = plan.pitchover;
-            let guidance = program_guidance(true_com, true_vel, plan);
+            let guidance =
+                program_guidance(true_com, true_vel, plan, escaped.0.entry(*room).or_default());
             static DEBUG_GUIDANCE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
             if *DEBUG_GUIDANCE.get_or_init(|| std::env::var("BS_DEBUG_GUIDANCE").is_ok()) {
                 use std::sync::atomic::{AtomicU32, Ordering};
