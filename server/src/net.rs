@@ -2495,7 +2495,10 @@ fn apply_room_rocket_thrust(
     // plan built from parts-only mass overestimates thrust-to-weight and the real arc
     // diverges from the planned one (recorder-verified: same program, 886 m vs 16 km
     // escape altitude with/without a rider in the mass model).
-    riders: Query<(&RoomMember, &ComputedMass), With<ServerAvatar>>,
+    riders: Query<
+        (&RoomMember, &Position, &LinearVelocity, &ComputedMass),
+        (With<ServerAvatar>, Without<RocketEngine>),
+    >,
     // `Forces` takes `AngularVelocity` mutably inside (and writes each rocket's
     // `Gimbal` the geometry pass reads), so the member/geometry reads and the force
     // write cannot coexist as sibling queries (B0001) — sequence them.
@@ -2538,11 +2541,24 @@ fn apply_room_rocket_thrust(
         let members = set.p1();
         for (room, rockets) in &per_room {
             let samples = || {
-                members.iter().filter(|(.., r)| r.id == *room).map(
-                    |(position, linear, angular, mass, _)| {
+                members
+                    .iter()
+                    .filter(|(.., r)| r.id == *room)
+                    .map(|(position, linear, angular, mass, _)| {
                         (position.0, linear.0, angular.0, mass.value())
-                    },
-                )
+                    })
+                    // Locked riders fly with the assembly (welded at launch), so their
+                    // weight belongs in the COM + inertia the attitude controller balances
+                    // about — otherwise thrust is trimmed about the parts-only COM and the
+                    // rider's off-centre mass is a standing disturbance the integral must
+                    // fight (and, on a small stack with an off-centre rider, can't). The
+                    // avatar is rotation-locked, so it contributes mass + linear motion but
+                    // no body spin (Vec3::ZERO angular).
+                    .chain(riders.iter().filter(|(rm, ..)| rm.0 == *room).map(
+                        |(_, position, linear, mass)| {
+                            (position.0, linear.0, Vec3::ZERO, mass.value())
+                        },
+                    ))
             };
             let Some((com, spin)) = measure_assembly_spin(samples) else {
                 continue;
@@ -2567,8 +2583,8 @@ fn apply_room_rocket_thrust(
                     .sum::<f32>()
                     + riders
                         .iter()
-                        .filter(|(m, _)| m.0 == *room)
-                        .map(|(_, mass)| mass.value())
+                        .filter(|(m, ..)| m.0 == *room)
+                        .map(|(.., mass)| mass.value())
                         .sum::<f32>();
                 static FORCE: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new();
                 let forced = FORCE
@@ -2611,8 +2627,8 @@ fn apply_room_rocket_thrust(
                 .sum::<f32>()
                 + riders
                     .iter()
-                    .filter(|(m, _)| m.0 == *room)
-                    .map(|(_, mass)| mass.value())
+                    .filter(|(m, ..)| m.0 == *room)
+                    .map(|(.., mass)| mass.value())
                     .sum::<f32>();
             if total_mass > 0.0 {
                 let net_force: Vec3 = burn.iter().map(|b| b.force).sum();
@@ -2634,6 +2650,39 @@ fn apply_room_rocket_thrust(
                         axis.x, axis.z, v.x, v.z,
                         spin.angular_velocity.x, spin.angular_velocity.y, spin.angular_velocity.z,
                         gims.join(" ")
+                    );
+                }
+            }
+            // Diagnostics (BS_DEBUG_ATTITUDE): how far the controller's parts-only COM is
+            // from the TRUE COM (with locked riders), and the torque actually produced.
+            // This is the test for "the autopilot is blind to the rider's weight".
+            static DEBUG_ATT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            if *DEBUG_ATT.get_or_init(|| std::env::var("BS_DEBUG_ATTITUDE").is_ok()) {
+                use std::sync::atomic::{AtomicU32, Ordering};
+                static AT: AtomicU32 = AtomicU32::new(0);
+                if AT.fetch_add(1, Ordering::Relaxed) % 30 == 0 {
+                    let parts_mass: f32 =
+                        members.iter().filter(|(.., r)| r.id == *room).map(|(_, _, _, m, _)| m.value()).sum();
+                    let mut true_mass = parts_mass;
+                    let mut true_wp = com * parts_mass;
+                    let mut n_riders = 0;
+                    for (_, pos, _, m) in riders.iter().filter(|(rm, ..)| rm.0 == *room) {
+                        true_wp += pos.0 * m.value();
+                        true_mass += m.value();
+                        n_riders += 1;
+                    }
+                    let true_com = true_wp / true_mass;
+                    let net_torque: Vec3 = burn.iter().map(|b| (b.point - com).cross(b.force)).sum();
+                    let axis = rockets[0].2 * Vec3::Y;
+                    let tilt = axis.angle_between(Vec3::Y).to_degrees();
+                    println!(
+                        "[att] nparts={} nrider={} tilt={:.1} comOff={:.3} (lat={:.3}) |w|={:.3} |net_tau|={:.2} |I|={:.2}",
+                        rockets.len(), n_riders, tilt,
+                        (true_com - com).length(),
+                        (true_com - com).with_y(0.0).length(),
+                        spin.angular_velocity.length(),
+                        net_torque.length(),
+                        integral.length(),
                     );
                 }
             }
