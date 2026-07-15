@@ -76,6 +76,23 @@ pub struct Vehicle {
     pub mass: f32,
 }
 
+impl Vehicle {
+    /// The point-mass vehicle for a stack of `engines` rockets at `total_mass`, at the
+    /// **derated** thrust every planning sim flies (the allocator's `LIFT_FLOOR` — see
+    /// the rationale in [`PitchProgram::plan`]). The one constructor shared by the
+    /// planner and the live trajectory preview, so the previewed arc is sampled from
+    /// exactly the vehicle the plan was optimized for. `total_mass` must be positive.
+    pub fn derated(engines: usize, gravity: Vec3, total_mass: f32) -> Self {
+        Self {
+            thrust_accel: crate::launch::LIFT_FLOOR
+                * engines as f32
+                * crate::launch::full_rocket_thrust(gravity)
+                / total_mass,
+            mass: total_mass,
+        }
+    }
+}
+
 /// Specific orbital energy `½v² − μ/r` (J/kg) at a true world position + velocity.
 /// `≥ 0` means the assembly is on an escape trajectory — it will leave the planet even
 /// with the engines off.
@@ -185,12 +202,7 @@ impl PitchProgram {
         // fly against the same [`crate::map::drag_force`] the physics applies (divided by
         // the assembly mass), so the flight plan already leans/burns to compensate for
         // the air rather than discovering it in flight.
-        let vehicle = Vehicle {
-            thrust_accel: crate::launch::LIFT_FLOOR * engines as f32
-                * crate::launch::full_rocket_thrust(gravity)
-                / total_mass,
-            mass: total_mass,
-        };
+        let vehicle = Vehicle::derated(engines, gravity, total_mass);
         let pitchover =
             forced.unwrap_or_else(|| optimize_pitchover(true_pos, true_vel, vehicle));
         Self::build(true_pos, true_vel, vehicle, pitchover)
@@ -283,6 +295,16 @@ pub fn escape_cutoff(true_pos: Vec3, true_vel: Vec3, cut: &mut bool) -> bool {
         specific_energy(true_pos, true_vel) >= margin_energy && outbound
     };
     *cut
+}
+
+/// The speed (m/s) at which [`escape_cutoff`]'s upper hysteresis edge trips at a given
+/// true position: [`ESCAPE_CUTOFF_MARGIN`] times the local escape speed `√(2μ/r)`
+/// (substituting `v = M·v_esc` into the margin-energy test makes it exact, outbound).
+/// This is the flight HUD's "target speed for engine shutdown" readout — derived here,
+/// next to the cutoff it mirrors, so the displayed target can't drift from the real cut.
+pub fn cutoff_speed(true_pos: Vec3) -> f32 {
+    let r = (true_pos - PLANET_CENTER).length().max(1.0);
+    ESCAPE_CUTOFF_MARGIN * (2.0 * GRAVITY_MU / r).sqrt()
 }
 
 /// The live autopilot's guidance command: the pitch-program direction at the vehicle's
@@ -541,6 +563,19 @@ mod tests {
             program_guidance(pos, Vec3::NEG_Y * v_esc * 1.2, &program, &mut cut2).throttle,
             1.0
         );
+    }
+
+    /// `cutoff_speed` is exactly where the cutoff's upper edge trips: just under it the
+    /// engine still burns, just over it (outbound) it cuts — so the HUD target it feeds
+    /// can't disagree with the real shutdown.
+    #[test]
+    fn cutoff_speed_matches_the_cutoff_edge() {
+        let pos = Vec3::new(0.0, 0.0, 0.0);
+        let target = cutoff_speed(pos);
+        let mut below = false;
+        assert!(!escape_cutoff(pos, Vec3::Y * (target - 1.0), &mut below));
+        let mut above = false;
+        assert!(escape_cutoff(pos, Vec3::Y * (target + 1.0), &mut above));
     }
 
     /// The shared plan constructor guards a mass-less assembly with the straight-up

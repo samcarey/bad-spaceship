@@ -29,6 +29,7 @@ mod planet;
 mod platform;
 mod render_main_pass;
 mod render_secondary_pass;
+mod trajectory;
 mod ui;
 
 #[bevy_main]
@@ -87,6 +88,7 @@ fn main() {
             outline::OutlinePlugin,
             planet::PlanetPlugin,
             LaunchPlugin,
+            trajectory::TrajectoryPlugin,
             RenderMainPassPlugin,
             monster::MonsterPlugin,
             RenderSecondaryPassPlugin,

@@ -429,6 +429,8 @@ fn show_flight_hud(
     character: Query<(&Position, &LinearVelocity), With<Character>>,
     frame: Option<Res<crate::net::ClientRoomFrame>>,
     fuel: Option<Res<crate::launch::FuelUsed>>,
+    autopilot: Res<crate::launch::Autopilot>,
+    flight_path: Res<crate::trajectory::FlightPath>,
     mut smoothed_speed: Local<f32>,
 ) -> Result {
     /// Below this true altitude the readout is clutter (the pad, block towers,
@@ -451,7 +453,9 @@ fn show_flight_hud(
     let planet_center = bad_spaceship_shared::map::PLANET_CENTER.as_dvec3();
     let altitude = (true_pos - planet_center).length()
         - bad_spaceship_shared::map::GRAVITY_REF_RADIUS as f64;
-    if altitude < SHOW_ABOVE_M {
+    // While the autopilot is flying, the panel shows regardless of altitude — the
+    // whole point of its readout is watching the plan from the moment of liftoff.
+    if altitude < SHOW_ABOVE_M && autopilot.0.is_none() {
         return Ok(());
     }
     // The two velocity halves swap magnitude at a rebase (the boost moves from
@@ -463,16 +467,8 @@ fn show_flight_hud(
         *smoothed_speed = raw_speed;
     }
     let speed = *smoothed_speed;
-    let altitude_text = if altitude < 10_000.0 {
-        format!("{altitude:.0} m")
-    } else {
-        format!("{:.1} km", altitude / 1000.0)
-    };
-    let speed_text = if speed < 3000.0 {
-        format!("{speed:.0} m/s")
-    } else {
-        format!("{:.2} km/s", speed / 1000.0)
-    };
+    let altitude_text = altitude_label(altitude);
+    let speed_text = speed_label(speed);
     // Fuel spent this launch, as thrust impulse in kN·s (see `FuelUsed`). Only shown
     // once a launch has actually burned something, so a plain tall-tower climb (no
     // rockets fired) doesn't carry a "Fuel 0" clutter line.
@@ -481,6 +477,56 @@ fn show_flight_hud(
         .filter(|&j| j > 1.0)
         .map(|j| format!(" · Fuel {:.1} kN·s", j / 1000.0))
         .unwrap_or_default();
+    // The autopilot readout: what the flight computer is doing (phase + commanded
+    // tilt), how far the burn is from the engine-off point (speed vs the live cutoff
+    // target, plus the previewed time/altitude of the cut), and the air it's fighting.
+    let mut autopilot_lines: Vec<String> = Vec::new();
+    if let Some(ap) = &autopilot.0 {
+        use bad_spaceship_shared::guidance::{cutoff_speed, TURN_SPEED};
+        let speed = ap.true_vel.length();
+        let burning = ap.throttle > 0.0;
+        let phase = if !burning {
+            "coasting"
+        } else if ap.pitchover.abs() < 0.01 {
+            "vertical climb"
+        } else if speed < TURN_SPEED {
+            "pitchover kick"
+        } else {
+            "gravity turn"
+        };
+        autopilot_lines.push(format!(
+            "Autopilot: {phase} · tilt {:.0} deg",
+            ap.command_angle.to_degrees()
+        ));
+        if burning {
+            // The speed the engines shut off at *this* altitude (it falls as we
+            // climb, so the two numbers race toward each other).
+            let target = cutoff_speed(ap.true_pos.as_vec3());
+            let mut burn = format!(
+                "Escape burn: {} of {} ({:.0}%)",
+                speed_label(speed),
+                speed_label(target),
+                (speed / target * 100.0).min(999.0),
+            );
+            match flight_path.plan.as_ref() {
+                Some(plan) if plan.escapes => burn.push_str(&format!(
+                    " · engines off in ~{:.0} s at {}",
+                    plan.eta_secs,
+                    altitude_label(plan.cutoff_alt as f64),
+                )),
+                Some(_) => burn.push_str(" · plan does not reach escape!"),
+                None => {}
+            }
+            autopilot_lines.push(burn);
+        } else {
+            autopilot_lines.push("Engines cut: escape secured, coasting away".to_owned());
+        }
+        let mut drag = format!("Drag {:.0} N", ap.drag);
+        if ap.net_thrust > 1.0 {
+            drag.push_str(&format!(" · {:.0}% of thrust", ap.drag / ap.net_thrust * 100.0));
+        }
+        autopilot_lines.push(drag);
+    }
     let ctx = contexts.ctx_mut()?;
     egui::Area::new(egui::Id::new("bs_flight_hud"))
         .anchor(Align2::CENTER_TOP, egui::vec2(0.0, 44.0))
@@ -502,9 +548,39 @@ fn show_flight_hud(
                         )
                         .wrap_mode(egui::TextWrapMode::Extend),
                     );
+                    // Autopilot readout, in the trajectory line's yellow so the two
+                    // read as one instrument.
+                    for line in &autopilot_lines {
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(line)
+                                    .size(14.0)
+                                    .color(Color32::from_rgb(255, 222, 110)),
+                            )
+                            .wrap_mode(egui::TextWrapMode::Extend),
+                        );
+                    }
                 });
         });
     Ok(())
+}
+
+/// Altitude as `123 m` below 10 km, `12.3 km` above — the flight HUD's one style.
+fn altitude_label(altitude_m: f64) -> String {
+    if altitude_m < 10_000.0 {
+        format!("{altitude_m:.0} m")
+    } else {
+        format!("{:.1} km", altitude_m / 1000.0)
+    }
+}
+
+/// Speed as `123 m/s` below 3 km/s, `1.23 km/s` above — the flight HUD's one style.
+fn speed_label(speed: f32) -> String {
+    if speed < 3000.0 {
+        format!("{speed:.0} m/s")
+    } else {
+        format!("{:.2} km/s", speed / 1000.0)
+    }
 }
 
 /// Transient HUD state for the top-left controls: whether the rename modal and the

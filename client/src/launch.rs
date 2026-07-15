@@ -22,7 +22,7 @@ use avian3d::prelude::{
     AngularVelocity, Collider, ComputedMass, Forces, Gravity, LinearVelocity, Position, Rotation,
     SphericalJoint, WriteRigidBodyForces,
 };
-use bad_spaceship_shared::guidance::{program_guidance, Guidance, PitchProgram};
+use bad_spaceship_shared::guidance::{program_guidance, Guidance, PitchProgram, Vehicle};
 use bad_spaceship_shared::launch::{
     assembly_burn, burn_impulse, measure_assembly_spin, AssemblySpin, LAUNCH_COUNTDOWN_SECS,
 };
@@ -58,6 +58,7 @@ impl Plugin for LaunchPlugin {
             .init_resource::<LaunchCameraZoom>()
             .init_resource::<FuelUsed>()
             .init_resource::<ApparentUp>()
+            .init_resource::<Autopilot>()
             .add_message::<SpSetLock>()
             .add_systems(Update, (tick_launch, ease_launch_zoom))
             // Single-player half of the Lock button: weld/unweld the local character
@@ -176,6 +177,34 @@ struct ApparentUp(Option<Vec3>);
 /// number for analysis.
 #[derive(Resource, Default)]
 pub struct FuelUsed(pub f32);
+
+/// The live autopilot's state this tick, published by whichever thrust system ran (SP or
+/// predicted MP) for the flight HUD and the trajectory line — the client computes full
+/// guidance locally in both modes, so nothing here needs the wire. `None` whenever no
+/// launch is being flown (idle, or the assembly broke up / lost its rockets).
+#[derive(Resource, Default)]
+pub struct Autopilot(pub Option<AutopilotSnapshot>);
+
+pub struct AutopilotSnapshot {
+    /// Assembly COM in the **true planet frame**, f64 (the flown trail must stay
+    /// smooth at Mm-scale altitudes where f32 steps by whole metres).
+    pub true_pos: bevy::math::DVec3,
+    /// Assembly velocity in the true planet frame (frame-folded in MP).
+    pub true_vel: Vec3,
+    /// The derated point-mass vehicle the plan was optimized for — what the trajectory
+    /// preview re-propagates.
+    pub vehicle: Vehicle,
+    /// The plan's pitchover angle (rad).
+    pub pitchover: f32,
+    /// The pitch program's commanded tilt from radial-up at the current speed (rad).
+    pub command_angle: f32,
+    /// Guidance throttle after the escape cutoff: `0.0` = engines cut, coasting.
+    pub throttle: f32,
+    /// Current aerodynamic drag on the assembly (N).
+    pub drag: f32,
+    /// Net thrust force actually applied this tick (N) — the drag readout's yardstick.
+    pub net_thrust: f32,
+}
 
 /// How far the camera zooms out once a launch lifts off — 2× the player's current
 /// distance, eased in/out. Applied on top of the scroll-zoom distance by
@@ -362,6 +391,7 @@ fn apply_sp_thrust(
     gravity: Res<Gravity>,
     mut fuel: ResMut<FuelUsed>,
     mut apparent: ResMut<ApparentUp>,
+    mut autopilot: ResMut<Autopilot>,
     // The rider's mass, for the ascent plan: locked aboard at launch, so their weight
     // flies with the stack and belongs in the planned thrust-to-weight.
     rider: Query<&ComputedMass, With<Character>>,
@@ -371,10 +401,12 @@ fn apply_sp_thrust(
         *sp_plan = None; // re-plan the ascent for the next launch
         *cut = false; // reset the cutoff hysteresis for the next launch
         apparent.0 = None;
+        autopilot.0 = None;
         return;
     }
     let Some((members, _)) = main_assembly(&parts, &joints) else {
         apparent.0 = None;
+        autopilot.0 = None;
         return;
     };
     // The assembly's COM + motion state, via the shared measurement (see
@@ -395,6 +427,7 @@ fn apply_sp_thrust(
         };
         measure_assembly_spin(samples)
     }) else {
+        autopilot.0 = None;
         return;
     };
     let geometry: Vec<(Entity, Vec3, Quat, bevy::math::Vec2)> = set
@@ -406,18 +439,20 @@ fn apply_sp_thrust(
             (entity, translation, rotation, gimbal.0)
         })
         .collect();
+    // Total flown mass — riders included (locked aboard at launch): feeds the ascent
+    // plan, the riders' apparent-up, and the autopilot snapshot's vehicle.
+    let total_mass: f32 = parts
+        .iter()
+        .filter(|(entity, ..)| members.contains(entity))
+        .map(|(_, _, m)| m.value())
+        .sum::<f32>()
+        + rider.iter().map(|m| m.value()).sum::<f32>();
     // Fuel-optimal ascent guidance: a per-assembly pitchover (optimized once at launch
     // from this stack's thrust-to-weight — heavy haulers lean, engine-dense stacks go
     // vertical), flown as a pitch program with an escape-energy throttle cutoff. No
     // floating origin in single player, so the true planet-frame state is just the local
     // COM + velocity.
     let program = sp_plan.get_or_insert_with(|| {
-        let total_mass: f32 = parts
-            .iter()
-            .filter(|(entity, ..)| members.contains(entity))
-            .map(|(_, _, m)| m.value())
-            .sum::<f32>()
-            + rider.iter().map(|m| m.value()).sum::<f32>();
         PitchProgram::plan(com, spin.linear_velocity, geometry.len(), gravity.0, total_mass, None)
     });
     let guidance = program_guidance(com, spin.linear_velocity, program, &mut cut);
@@ -436,13 +471,17 @@ fn apply_sp_thrust(
         &mut set.p2(),
     );
     // Apparent up for the riders (see `ApparentUp`); single-player true == local.
-    let total_mass: f32 = parts
-        .iter()
-        .filter(|(entity, ..)| members.contains(entity))
-        .map(|(_, _, m)| m.value())
-        .sum::<f32>()
-        + rider.iter().map(|m| m.value()).sum::<f32>();
     apparent.0 = (total_mass > 0.0).then(|| apparent_up(net_force, total_mass, com));
+    autopilot.0 = (total_mass > 0.0).then(|| AutopilotSnapshot {
+        true_pos: com.as_dvec3(),
+        true_vel: spin.linear_velocity,
+        vehicle: Vehicle::derated(geometry.len(), gravity.0, total_mass),
+        pitchover: program.pitchover,
+        command_angle: program.angle_at(spin.linear_velocity.length()),
+        throttle: guidance.throttle,
+        drag: bad_spaceship_shared::map::drag_force(com, spin.linear_velocity).length(),
+        net_thrust: net_force.length(),
+    });
 }
 
 /// Apply balanced thrust to the multiplayer assembly's **predicted** rockets each physics
@@ -484,6 +523,7 @@ fn apply_mp_thrust(
     gravity: Res<Gravity>,
     mut fuel: ResMut<FuelUsed>,
     mut apparent: ResMut<ApparentUp>,
+    mut autopilot: ResMut<Autopilot>,
     // Riders' masses for the ascent plan (all avatars in the room are locked aboard at
     // launch, and all are predicted): matches the server's rider-inclusive plan.
     riders: Query<&ComputedMass, (With<Character>, With<Predicted>)>,
@@ -493,6 +533,7 @@ fn apply_mp_thrust(
         *mp_plan = None; // re-plan on the next launch
         *cut = false; // reset the cutoff hysteresis for the next launch
         apparent.0 = None;
+        autopilot.0 = None;
         return;
     };
     // The server's optimized ascent angle, replicated so the predicted turn matches
@@ -528,17 +569,18 @@ fn apply_mp_thrust(
     };
     let Some((com, spin)) = measured else {
         apparent.0 = None;
+        autopilot.0 = None;
         return;
     };
     // True planet-frame state folds in the room's floating-origin frame (offset +
     // co-moving velocity), so the guidance sees real altitude/velocity under a rebase.
     let true_com = com + frame.offset.as_vec3();
     let true_vel = spin.linear_velocity + frame.velocity;
+    let total_mass = part_mass_total + riders.iter().map(|m| m.value()).sum::<f32>();
     // Rebuild the pitch program when the replicated angle (re)arrives, through the same
     // shared constructor the server plans with — locally measured masses are identical
     // (same parts, same densities), so the rebuilt program matches the one it flies.
     if need_plan {
-        let total_mass = part_mass_total + riders.iter().map(|m| m.value()).sum::<f32>();
         *mp_plan = Some(PitchProgram::plan(
             true_com,
             true_vel,
@@ -566,8 +608,18 @@ fn apply_mp_thrust(
     );
     // Apparent up for the riders (see `ApparentUp`), from the true (frame-folded) state —
     // same formula as the server so the predicted movement basis matches.
-    let total_mass = part_mass_total + riders.iter().map(|m| m.value()).sum::<f32>();
     apparent.0 = (total_mass > 0.0).then(|| apparent_up(net_force, total_mass, true_com));
+    let program = mp_plan.as_ref().unwrap();
+    autopilot.0 = (total_mass > 0.0).then(|| AutopilotSnapshot {
+        true_pos: frame.offset + com.as_dvec3(),
+        true_vel,
+        vehicle: Vehicle::derated(geometry.len(), gravity.0, total_mass),
+        pitchover: program.pitchover,
+        command_angle: program.angle_at(true_vel.length()),
+        throttle: guidance.throttle,
+        drag: bad_spaceship_shared::map::drag_force(true_com, true_vel).length(),
+        net_thrust: net_force.length(),
+    });
 }
 
 /// Per-tick flame reset — see the registration comment and
