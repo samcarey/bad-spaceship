@@ -218,6 +218,35 @@ pub struct AutopilotSnapshot {
     pub net_thrust: f32,
 }
 
+impl AutopilotSnapshot {
+    /// Build the snapshot from the flown true (frame-folded) state and this tick's plan +
+    /// forces. The one constructor both thrust sites publish through, so the single-player
+    /// and predicted-multiplayer readouts can't drift: the derated vehicle, command angle,
+    /// and drag are derived here rather than spelled out per site. `net_force` is the raw
+    /// vector (its magnitude is stored). Single-player passes local == true.
+    fn new(
+        true_pos: bevy::math::DVec3,
+        true_vel: Vec3,
+        engines: usize,
+        gravity: Vec3,
+        total_mass: f32,
+        program: &PitchProgram,
+        throttle: f32,
+        net_force: Vec3,
+    ) -> Self {
+        Self {
+            true_pos,
+            true_vel,
+            vehicle: Vehicle::derated(engines, gravity, total_mass),
+            pitchover: program.pitchover,
+            command_angle: program.angle_at(true_vel.length()),
+            throttle,
+            drag: bad_spaceship_shared::map::drag_force(true_pos.as_vec3(), true_vel).length(),
+            net_thrust: net_force.length(),
+        }
+    }
+}
+
 /// How far the camera zooms out once a launch lifts off — 2× the player's current
 /// distance, eased in/out. Applied on top of the scroll-zoom distance by
 /// `client::input::zoom_camera`.
@@ -484,15 +513,17 @@ fn apply_sp_thrust(
     );
     // Apparent up for the riders (see `ApparentUp`); single-player true == local.
     apparent.0 = (total_mass > 0.0).then(|| apparent_up(net_force, total_mass, com));
-    autopilot.0 = (total_mass > 0.0).then(|| AutopilotSnapshot {
-        true_pos: com.as_dvec3(),
-        true_vel: spin.linear_velocity,
-        vehicle: Vehicle::derated(geometry.len(), gravity.0, total_mass),
-        pitchover: program.pitchover,
-        command_angle: program.angle_at(spin.linear_velocity.length()),
-        throttle: guidance.throttle,
-        drag: bad_spaceship_shared::map::drag_force(com, spin.linear_velocity).length(),
-        net_thrust: net_force.length(),
+    autopilot.0 = (total_mass > 0.0).then(|| {
+        AutopilotSnapshot::new(
+            com.as_dvec3(),
+            spin.linear_velocity,
+            geometry.len(),
+            gravity.0,
+            total_mass,
+            program,
+            guidance.throttle,
+            net_force,
+        )
     });
 }
 
@@ -622,15 +653,17 @@ fn apply_mp_thrust(
     // same formula as the server so the predicted movement basis matches.
     apparent.0 = (total_mass > 0.0).then(|| apparent_up(net_force, total_mass, true_com));
     let program = mp_plan.as_ref().unwrap();
-    autopilot.0 = (total_mass > 0.0).then(|| AutopilotSnapshot {
-        true_pos: frame.offset + com.as_dvec3(),
-        true_vel,
-        vehicle: Vehicle::derated(geometry.len(), gravity.0, total_mass),
-        pitchover: program.pitchover,
-        command_angle: program.angle_at(true_vel.length()),
-        throttle: guidance.throttle,
-        drag: bad_spaceship_shared::map::drag_force(true_com, true_vel).length(),
-        net_thrust: net_force.length(),
+    autopilot.0 = (total_mass > 0.0).then(|| {
+        AutopilotSnapshot::new(
+            frame.offset + com.as_dvec3(),
+            true_vel,
+            geometry.len(),
+            gravity.0,
+            total_mass,
+            program,
+            guidance.throttle,
+            net_force,
+        )
     });
 }
 
