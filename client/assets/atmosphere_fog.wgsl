@@ -24,10 +24,12 @@
 const CENTER: vec3<f32> = vec3<f32>(0.0, -15020.0, 0.0);
 // Radius of the platform play surface (map::GRAVITY_REF_RADIUS): altitude zero.
 const R_SURFACE: f32 = 15020.0;
-// Altitude where the air reaches exactly zero (map::ATMOSPHERE_TOP_ALT).
-const TOP: f32 = 4000.0;
-// e-folding height of the density profile (map::ATMOSPHERE_SCALE_HEIGHT).
+// e-folding height of the barometric profile (map::ATMOSPHERE_SCALE_HEIGHT).
 const H: f32 = 2000.0;
+// Numerical truncation altitude (map::ATMOSPHERE_TOP_ALT = 8·H, density e⁻⁸ ≈ 0.03%) —
+// NOT a visible edge, just where the ray-clip sphere ends. A real exponential
+// atmosphere has no top.
+const TOP: f32 = 8.0 * H;
 // Extinction coefficient at surface density (m⁻¹) — THE opacity knob (atmosphere.rs
 // mirrors it for the near-field DistanceFog). τ = 1 per ~140 m of surface-density air.
 const EXTINCTION: f32 = 0.007;
@@ -36,13 +38,14 @@ const EXTINCTION: f32 = 0.007;
 const FOG_RGB: vec3<f32> = vec3<f32>(0.2633, 0.0331, 0.0116);
 
 // Integration samples along the in-atmosphere segment. The profile is smooth (scale
-// height 2 km) and the longest possible chord ~23 km, so midpoint sampling every
-// ~1.5 km is plenty.
-const SAMPLES: i32 = 16;
+// height 2 km) and even the longest grazing chord (~54 km) has its density concentrated
+// in a ~15 km lobe around the tangent point, so midpoint sampling every ~2 km resolves
+// it to a few percent.
+const SAMPLES: i32 = 24;
 
 // Air density as a fraction of surface density at a TRUE world position — the exact
-// mirror of `map::atmosphere_fraction`: 1 at/below the surface, exponential falloff
-// renormalised to hit exactly 0 at TOP.
+// mirror of `map::atmosphere_fraction`: the barometric exponential e^(−alt/H), fading
+// gradually with no edge (clamped to zero only past the negligible TOP).
 fn density_frac(p: vec3<f32>) -> f32 {
     let alt = length(p - CENTER) - R_SURFACE;
     if alt <= 0.0 {
@@ -51,8 +54,7 @@ fn density_frac(p: vec3<f32>) -> f32 {
     if alt >= TOP {
         return 0.0;
     }
-    let e_top = exp(-TOP / H); // constant-folds
-    return (exp(-alt / H) - e_top) / (1.0 - e_top);
+    return exp(-alt / H);
 }
 
 // Transmittance e^(−τ) along the ray `cam + t·dir` for t ∈ [0, max_dist], with the

@@ -124,16 +124,19 @@ pub fn radial_altitude(true_pos: Vec3) -> f32 {
     (true_pos - PLANET_CENTER).length() - GRAVITY_REF_RADIUS
 }
 
-/// Altitude (m) at which the atmosphere reaches exactly zero — above this there is no
-/// air (no drag, no haze, no ash) and the stars are fully out. A thin 4 km shell on this
-/// 15 km world, so the ship breaks into clear space partway up its powered climb.
-pub const ATMOSPHERE_TOP_ALT: f32 = 4_000.0;
-
-/// e-folding height (m) of the density profile: air falls off exponentially with this
-/// scale, then the profile is renormalised so it hits exactly zero at
-/// [`ATMOSPHERE_TOP_ALT`] (a bare exponential never reaches zero, which would leave a
-/// whisper of ash/haze in space). Smaller = air hugs the surface more tightly.
+/// e-folding height (m) of the density profile — the one number that shapes the
+/// atmosphere. The profile is the **barometric exponential** `ρ = ρ₀·e^(−alt/H)`, what a
+/// real isothermal atmosphere in hydrostatic equilibrium does (Earth's H ≈ 8.4 km);
+/// ~86% of the air mass sits below 2 scale heights. Smaller = air hugs the surface more
+/// tightly.
 pub const ATMOSPHERE_SCALE_HEIGHT: f32 = 2_000.0;
+
+/// Numerical truncation altitude (m) — NOT a physical edge (a real exponential
+/// atmosphere has none; "space" is a convention). 8 scale heights, where density is
+/// e⁻⁸ ≈ 0.03% of surface: below any perceptible haze/ash/drag, so clamping to zero
+/// there lets the shaders clip their ray integrals to a finite sphere and the physics
+/// skip the math in deep space, with no visible seam.
+pub const ATMOSPHERE_TOP_ALT: f32 = 8.0 * ATMOSPHERE_SCALE_HEIGHT;
 
 /// Air density (kg/m³) at the surface. Tuned small for this toy scale: a 2 m sphere at
 /// real sea-level density would brake the light little assemblies to a standstill, so
@@ -159,9 +162,11 @@ pub const DRAG_K: f32 = 0.5
     * (DRAG_DIAMETER * 0.5);
 
 /// The atmosphere's density as a fraction of surface density at a true world position:
-/// `1` at/below the surface, falling exponentially with altitude and renormalised to
-/// exactly `0` at [`ATMOSPHERE_TOP_ALT`] and above. This is the master knob every
-/// atmospheric effect reads (drag, haze, ash, stars).
+/// the barometric exponential `e^(−alt/H)` — `1` at/below the surface, halving every
+/// ~0.7·[`ATMOSPHERE_SCALE_HEIGHT`], fading gradually with no physical edge (clamped to
+/// zero only past the negligible [`ATMOSPHERE_TOP_ALT`]). This is the master profile
+/// every atmospheric effect reads (drag, haze, ash, star visibility) — mirrored exactly
+/// by `density_frac` in `atmosphere_fog.wgsl`.
 pub fn atmosphere_fraction(true_pos: Vec3) -> f32 {
     let alt = radial_altitude(true_pos);
     if alt <= 0.0 {
@@ -170,9 +175,7 @@ pub fn atmosphere_fraction(true_pos: Vec3) -> f32 {
     if alt >= ATMOSPHERE_TOP_ALT {
         return 0.0;
     }
-    // Exponential profile shifted so f(TOP) = 0 and rescaled so f(0) = 1.
-    let top = (-ATMOSPHERE_TOP_ALT / ATMOSPHERE_SCALE_HEIGHT).exp();
-    ((-alt / ATMOSPHERE_SCALE_HEIGHT).exp() - top) / (1.0 - top)
+    (-alt / ATMOSPHERE_SCALE_HEIGHT).exp()
 }
 
 /// Air density (kg/m³) at a true world position — surface density scaled by
@@ -352,18 +355,19 @@ mod tests {
     }
 
     #[test]
-    fn atmosphere_is_full_at_the_pad_and_gone_in_space() {
+    fn atmosphere_is_barometric_and_gone_in_space() {
         // Surface (world y = 0): full density.
         assert!((atmosphere_fraction(Vec3::ZERO) - 1.0).abs() < 1e-4);
         assert!((air_density_at(Vec3::ZERO) - SEA_LEVEL_AIR_DENSITY).abs() < 1e-6);
-        // Exactly at the top and anywhere above: zero, hard.
-        let top = Vec3::new(0.0, ATMOSPHERE_TOP_ALT, 0.0);
-        assert_eq!(atmosphere_fraction(top), 0.0);
+        // The real barometric shape: 1/e at one scale height, 1/e² at two — a gradual
+        // exponential tail, not a renormalised clip.
+        let at = |alt: f32| atmosphere_fraction(Vec3::new(0.0, alt, 0.0));
+        assert!((at(ATMOSPHERE_SCALE_HEIGHT) - (-1.0f32).exp()).abs() < 1e-3);
+        assert!((at(2.0 * ATMOSPHERE_SCALE_HEIGHT) - (-2.0f32).exp()).abs() < 1e-3);
+        // Past the (numerically negligible) truncation and anywhere above: zero.
+        assert!(at(ATMOSPHERE_TOP_ALT - 1.0) < 1e-3, "truncation point is negligible");
+        assert_eq!(at(ATMOSPHERE_TOP_ALT), 0.0);
         assert_eq!(air_density_at(Vec3::new(0.0, ATMOSPHERE_TOP_ALT + 5_000.0, 0.0)), 0.0);
-        // Monotone thinning in between.
-        let mid = atmosphere_fraction(Vec3::new(0.0, ATMOSPHERE_TOP_ALT * 0.5, 0.0));
-        assert!(mid > 0.0 && mid < 1.0, "mid-altitude air {mid}");
-        assert!(mid < atmosphere_fraction(Vec3::new(0.0, ATMOSPHERE_TOP_ALT * 0.25, 0.0)));
     }
 
     #[test]
