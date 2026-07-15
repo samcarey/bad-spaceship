@@ -38,11 +38,16 @@ pub const STARFIELD_SHADER_HANDLE: Handle<Shader> =
 const FOG_COLOR: Color = Color::srgb(0.28, 0.19, 0.16);
 
 /// Exponential fog density at the surface (per metre); scaled down by
-/// [`atmosphere_fraction`] with altitude to zero in space. Tuned for aerial
-/// perspective — the near platform stays crisp, half-haze lands around ~280 m, and the
-/// far planet horizon (~775 m) reads as a hazed-but-present dusty limb rather than a
-/// wall of fog.
-const MAX_FOG_DENSITY: f32 = 0.0028;
+/// [`atmosphere_fraction`] with altitude. Thick enough that visibility is short inside
+/// the atmosphere — half-haze lands around ~100 m and the horizon is a wall of dust.
+const MAX_FOG_DENSITY: f32 = 0.007;
+
+/// The fog never fully clears: even in space a faint residual haze remains so the planet
+/// *surface*, viewed from orbit across kilometres, blurs into a soft glowing ball with no
+/// sharp detail (its atmosphere seen from outside). Small enough that anything near the
+/// camera — the ship, the stars (unlit, unfogged) — stays crisp; it only bites over the
+/// long sightline down to the distant surface.
+const ORBIT_HAZE_DENSITY: f32 = 0.0003;
 
 /// A camera-anchored star dome. The single `Vec4` uniform carries star visibility in
 /// `.x` (0 in thick air, 1 in clear space); the shader places every vertex on a
@@ -127,8 +132,9 @@ fn update_atmosphere(
     // so altitude is real even under a rebase.
     let fraction = atmosphere_fraction(transform.translation() + offset);
 
-    // Haze: exponential fog thinning to nothing in space.
-    let density = MAX_FOG_DENSITY * fraction;
+    // Haze: thick inside the atmosphere, thinning toward a small residual in space (so
+    // the distant surface still blurs when you look back — see ORBIT_HAZE_DENSITY).
+    let density = ORBIT_HAZE_DENSITY + (MAX_FOG_DENSITY - ORBIT_HAZE_DENSITY) * fraction;
     match fog {
         Some(mut fog) => {
             fog.color = FOG_COLOR;

@@ -125,11 +125,9 @@ pub fn radial_altitude(true_pos: Vec3) -> f32 {
 }
 
 /// Altitude (m) at which the atmosphere reaches exactly zero — above this there is no
-/// air (no drag, no haze, no ash) and the stars are fully out. Chosen a little above the
-/// altitude a typical stack reaches escape (~4 km on this 15 km world), so the ship flies
-/// most of its powered climb through measurable air and breaks into clear space around
-/// the time it escapes.
-pub const ATMOSPHERE_TOP_ALT: f32 = 6_000.0;
+/// air (no drag, no haze, no ash) and the stars are fully out. A thin 4 km shell on this
+/// 15 km world, so the ship breaks into clear space partway up its powered climb.
+pub const ATMOSPHERE_TOP_ALT: f32 = 4_000.0;
 
 /// e-folding height (m) of the density profile: air falls off exponentially with this
 /// scale, then the profile is renormalised so it hits exactly zero at

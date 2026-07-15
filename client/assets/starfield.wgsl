@@ -11,7 +11,7 @@
 // pokes through. Rendered transparent (depth-tested, no depth write) and unlit; the whole
 // effect is one draw call and a couple of uniforms.
 
-#import bevy_pbr::mesh_view_bindings::{view, globals}
+#import bevy_pbr::mesh_view_bindings::view
 
 // x = visibility 0..1 (0 in thick low air, 1 in clear space); yzw padding.
 @group(#{MATERIAL_BIND_GROUP}) @binding(0)
@@ -38,14 +38,16 @@ fn hash33(p: vec3<f32>) -> vec3<f32> {
     return fract((p3.xxy + p3.yzz) * p3.zyx);
 }
 
-const TAU: f32 = 6.2831853;
-
 @vertex
 fn vertex(v: Vertex) -> VertexOutput {
     let dir = normalize(v.position);
     let world = view.world_position + dir * STAR_RADIUS;
+    let clip = view.clip_from_world * vec4<f32>(world, 1.0);
     var out: VertexOutput;
-    out.clip_position = view.clip_from_world * vec4<f32>(world, 1.0);
+    // Pin the dome to the far plane (reverse-Z: far = 0) so EVERY piece of scene
+    // geometry — the planet included — occludes the stars behind it. Without this the
+    // finite-radius dome sits in front of the far-away planet and the stars show through.
+    out.clip_position = vec4<f32>(clip.xy, 0.0, clip.w);
     out.dir = dir;
     return out;
 }
@@ -64,14 +66,13 @@ fn starfield(dir: vec3<f32>) -> vec3<f32> {
     if h.z < 0.86 {
         return vec3<f32>(0.0);
     }
-    // Star position inside the cell, its size, and a slow independent twinkle.
+    // Star position inside the cell and its size — a steady (non-twinkling) point.
     let center = vec2<f32>(0.2 + 0.6 * h.x, 0.2 + 0.6 * h.y);
     let d = length(f - center);
     let core = smoothstep(0.09, 0.0, d);
-    let twinkle = 0.6 + 0.4 * sin(globals.time * (0.8 + h.x * 2.0) + h.y * TAU);
     // Faint colour variation: mostly white, a few warm/blue.
     let tint = mix(vec3<f32>(0.75, 0.82, 1.0), vec3<f32>(1.0, 0.85, 0.7), h.x);
-    return tint * core * twinkle;
+    return tint * core;
 }
 
 @fragment
