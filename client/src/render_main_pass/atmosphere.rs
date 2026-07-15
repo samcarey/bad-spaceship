@@ -33,9 +33,10 @@ use super::AshMaterial;
 pub const STARFIELD_SHADER_HANDLE: Handle<Shader> =
     uuid_handle!("f2a7c9e4-1b60-4d83-9c2a-6e5b0d47a318");
 
-/// The haze colour — a dusty, faintly-warm volcanic grey. Distant geometry fades toward
-/// this, so it reads as aerial perspective against the ash sky (`ClearColor` in main.rs).
-const FOG_COLOR: Color = Color::srgb(0.28, 0.19, 0.16);
+/// The haze colour — a warm, lit volcanic red-orange (bright, not a dark dusty grey), so
+/// the planet's lava glow reads as shining *through* the atmosphere: distant geometry
+/// fades toward this ember tone rather than going murky and dark.
+const FOG_COLOR: Color = Color::srgb(0.55, 0.20, 0.11);
 
 /// Exponential fog density at the surface (per metre); scaled down by
 /// [`atmosphere_fraction`] with altitude. Thick enough that visibility is short inside
