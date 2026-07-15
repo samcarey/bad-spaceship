@@ -13,6 +13,7 @@
     mesh_view_bindings::{view, globals},
 }
 #import bad_spaceship::noise::{vnoise, fbm}
+#import bad_spaceship::atmosphere::{transmittance, fog_radiance}
 
 #ifdef PREPASS_PIPELINE
 #import bevy_pbr::{
@@ -183,6 +184,19 @@ fn fragment(
 #else
     var out: FragmentOutput;
     out.color = apply_pbr_lighting(pbr_input);
+    // Physically-based atmosphere (bad_spaceship::atmosphere): attenuate the lit
+    // surface by the EXACT transmittance integrated camera→fragment. The planet is the
+    // scene's only long-sightline geometry, so it fogs by the real integral (the base
+    // StandardMaterial opts out of Bevy's camera-uniform fog — magma_material()) while
+    // near-field materials use DistanceFog, the same integral's short-path limit.
+    // Direction/distance are frame-invariant, so render-space values serve; only the
+    // camera position needs the true-frame fold.
+    let t_atm = transmittance(
+        view.world_position + magma.frame_offset.xyz,
+        (world - view.world_position) / max(dist, 1e-3),
+        dist,
+    );
+    out.color = vec4(fog_radiance(out.color.rgb, t_atm), out.color.a);
     out.color = main_pass_post_lighting_processing(pbr_input, out.color);
 #endif
 

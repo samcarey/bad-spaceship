@@ -1,17 +1,23 @@
-//! Altitude-driven atmosphere: distance haze, ash density, and a star dome, all driven
-//! by the one shared [`atmosphere_fraction`] so they fade in lockstep with the air (and
-//! the drag physics that same fraction produces).
+//! The atmosphere, physically based, from one model at every altitude.
 //!
-//! - **Haze** — a [`DistanceFog`] on the main camera whose density tracks the air, so
-//!   distant terrain washes into the sky low down and clears to crisp vacuum in space.
-//! - **Ash** — the falling-flake field ([`AshMaterial`]) thins to nothing above the
-//!   atmosphere (its shader culls flakes by the `density` we write here).
-//! - **Stars** — a camera-anchored [`StarfieldMaterial`] dome that fades in as the haze
-//!   and ash fade out (the inverse of the fraction), so the sky opens onto stars only
-//!   once the air is thin.
+//! The planet wears an exponential shell of lava-lit smog (`map::atmosphere_fraction`
+//! — the same profile the drag physics flies through). What any pixel sees is the
+//! optical depth of its sightline through that air, `τ = extinction·∫ρ dl`, computed by
+//! the shared WGSL library `bad_spaceship::atmosphere` (`atmosphere_fog.wgsl`):
 //!
-//! One system computes the camera's radial altitude once and drives all three, so they
-//! can never disagree about "how high, how thick".
+//! - **The sky** is a dome (`sky.wgsl`) shading every direction as
+//!   `smog·(1−T) + stars·T` along the infinite ray. The ground-level smog wall, stars
+//!   piercing the zenith first as you climb, the limb ring + halo from orbit, and the
+//!   planet occluding the stars behind it all fall out of the one integral — there is
+//!   no boundary to cross and nothing to fade in or out.
+//! - **The planet** (magma — the scene's only long-sightline geometry) attenuates its
+//!   lit color by the exact camera→fragment transmittance in its own shader.
+//! - **Near-field meshes** (parts, monsters, grass — always within a few hundred
+//!   metres) use Bevy's [`DistanceFog`] with density = extinction·ρ(camera): the exact
+//!   integral's short-path limit, so they blend seamlessly with the exact-fogged far
+//!   field.
+//! - **Ash flakes** thin with the local air (their shader culls by `density`), gone
+//!   above the atmosphere.
 
 use bevy::{
     asset::uuid_handle,
@@ -20,67 +26,58 @@ use bevy::{
     pbr::{DistanceFog, FogFalloff, MaterialPipeline, MaterialPipelineKey},
     prelude::*,
     render::render_resource::{
-        AsBindGroup, RenderPipelineDescriptor, ShaderType, SpecializedMeshPipelineError,
+        AsBindGroup, RenderPipelineDescriptor, SpecializedMeshPipelineError,
     },
     shader::ShaderRef,
 };
 use bevy_egui::PrimaryEguiContext;
 
-use bad_spaceship_shared::{
-    map::{atmosphere_fraction, ATMOSPHERE_TOP_ALT, PLANET_CENTER_Y, PLANET_RADIUS},
-    Grass,
-};
+use bad_spaceship_shared::map::atmosphere_fraction;
 
 use super::AshMaterial;
 
-pub const STARFIELD_SHADER_HANDLE: Handle<Shader> =
+pub const ATMOSPHERE_FOG_SHADER_HANDLE: Handle<Shader> =
+    uuid_handle!("8d5b2e91-4c7a-4f06-b3e8-a1d92c60f574");
+
+pub const SKY_SHADER_HANDLE: Handle<Shader> =
     uuid_handle!("f2a7c9e4-1b60-4d83-9c2a-6e5b0d47a318");
 
-pub const ATMOSPHERE_SHELL_SHADER_HANDLE: Handle<Shader> =
-    uuid_handle!("c4e81f37-9a20-4d6b-8f13-2b7e5c0a94d6");
+/// Extinction coefficient at surface air density (m⁻¹) — THE atmosphere opacity knob.
+/// Mirrors `EXTINCTION` in `atmosphere_fog.wgsl` (the exact-integral shaders); here it
+/// drives the near-field [`DistanceFog`] density so both paths measure the same air.
+const EXTINCTION: f32 = 0.007;
 
-/// The haze colour — a warm, lit volcanic red-orange (bright, not a dark dusty grey), so
-/// the planet's lava glow reads as shining *through* the atmosphere: distant geometry
-/// fades toward this ember tone rather than going murky and dark.
+/// What saturated smog looks like: warm ember red — the lava-lit haze. Mirrors
+/// `FOG_RGB` in `atmosphere_fog.wgsl` (linear 0.2633, 0.0331, 0.0116).
 const FOG_COLOR: Color = Color::srgb(0.55, 0.20, 0.11);
 
-/// Exponential fog density at the surface (per metre); scaled down by
-/// [`atmosphere_fraction`] with altitude. Thick enough that visibility is short inside
-/// the atmosphere — half-haze lands around ~100 m and the horizon is a wall of dust.
-const MAX_FOG_DENSITY: f32 = 0.007;
-
-/// The fog never fully clears: even in space a faint residual haze remains so the planet
-/// *surface*, viewed from orbit across kilometres, blurs into a soft glowing ball with no
-/// sharp detail (its atmosphere seen from outside). Small enough that anything near the
-/// camera — the ship, the stars (unlit, unfogged) — stays crisp; it only bites over the
-/// long sightline down to the distant surface.
-const ORBIT_HAZE_DENSITY: f32 = 0.0003;
-
-/// A camera-anchored star dome. The single `Vec4` uniform carries star visibility in
-/// `.x` (0 in thick air, 1 in clear space); the shader places every vertex on a
-/// fixed-radius dome around the camera and paints a sparse twinkling field.
+/// The sky dome (`sky.wgsl`): smog + stars from the atmosphere integral, per direction.
+/// The one uniform is the room's visual floating-origin offset (xyz), folding the
+/// camera back into the true planet frame during a rebased ascent.
 #[derive(Asset, AsBindGroup, Debug, Clone, TypePath)]
-pub struct StarfieldMaterial {
+pub struct SkyMaterial {
     #[uniform(0)]
-    params: Vec4,
+    frame_offset: Vec4,
 }
 
-impl Material for StarfieldMaterial {
+impl Material for SkyMaterial {
     fn vertex_shader() -> ShaderRef {
-        STARFIELD_SHADER_HANDLE.into()
+        SKY_SHADER_HANDLE.into()
     }
 
     fn fragment_shader() -> ShaderRef {
-        STARFIELD_SHADER_HANDLE.into()
+        SKY_SHADER_HANDLE.into()
     }
 
+    // Opaque: the dome IS the sky (pinned to the far plane, so all geometry wins the
+    // depth test and transparents blend over it).
     fn alpha_mode(&self) -> AlphaMode {
-        AlphaMode::Blend
+        AlphaMode::Opaque
     }
 
-    // A transparent, unlit, camera-relative dome writes no depth and casts no shadows —
-    // and its custom vertex shader doesn't match the default prepass/shadow interface, so
-    // opt both out (same reasoning as the ash field).
+    // A camera-relative dome writes no useful prepass depth and casts no shadows — and
+    // its custom vertex shader doesn't match the default prepass/shadow interface, so
+    // opt out of both (same reasoning as the ash field).
     fn enable_prepass() -> bool {
         false
     }
@@ -89,7 +86,7 @@ impl Material for StarfieldMaterial {
         false
     }
 
-    // The dome is viewed from the *inside*, so its outward-facing triangles are all
+    // The dome is viewed from the *inside*, so its outward-wound triangles are all
     // back-faces — disable culling or the whole sphere is invisible.
     fn specialize(
         _pipeline: &MaterialPipeline,
@@ -102,100 +99,26 @@ impl Material for StarfieldMaterial {
     }
 }
 
-/// The atmosphere shell's uniform (mirrors `AtmosphereShell` in the WGSL).
-#[derive(ShaderType, Debug, Clone)]
-struct ShellParams {
-    /// rgb = smog tint, a = overall intensity.
-    color: Vec4,
-    /// x = planet surface radius, y = atmosphere outer radius, z = density scale, w unused.
-    params: Vec4,
-}
-
-/// A planet-anchored smog shell (see `atmosphere_shell.wgsl`): rendered on a sphere at
-/// the atmosphere's outer radius, it reads as a layer of haze hugging the planet when
-/// viewed from orbit. Plain fragment-only material (the default mesh vertex supplies the
-/// world position + normal the chord integral needs).
-#[derive(Asset, AsBindGroup, Debug, Clone, TypePath)]
-pub struct AtmosphereShellMaterial {
-    #[uniform(0)]
-    shell: ShellParams,
-}
-
-impl Material for AtmosphereShellMaterial {
-    fn fragment_shader() -> ShaderRef {
-        ATMOSPHERE_SHELL_SHADER_HANDLE.into()
-    }
-
-    fn alpha_mode(&self) -> AlphaMode {
-        AlphaMode::Blend
-    }
-
-    fn enable_prepass() -> bool {
-        false
-    }
-
-    fn enable_shadows() -> bool {
-        false
-    }
-}
-
-/// Marks the ground once its atmosphere shell has been parented, so it spawns once.
-#[derive(Component)]
-struct AtmosphereShellSpawned;
-
-/// Parent a smog shell to the ground (which co-moves with the floating origin, like the
-/// planet in `planet.rs`), sized to the atmosphere. Back-face culling means it only draws
-/// from outside — i.e. once the camera climbs above the atmosphere and looks back.
-fn spawn_atmosphere_shell(
-    mut commands: Commands,
-    ground: Query<Entity, (With<Grass>, Without<AtmosphereShellSpawned>)>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<AtmosphereShellMaterial>>,
-) {
-    let Ok(ground) = ground.single() else {
-        return;
-    };
-    let r_surf = PLANET_RADIUS;
-    let r_top = PLANET_RADIUS + ATMOSPHERE_TOP_ALT;
-    let material = materials.add(AtmosphereShellMaterial {
-        shell: ShellParams {
-            // Warm lit smog, matching the haze tint.
-            color: Vec4::new(0.55, 0.18, 0.10, 1.0),
-            // Density scale tuned so the limb reads as thick smog (~0.7) while the disc
-            // centre is a faint wash (~0.1) — the "hugging" gradient.
-            params: Vec4::new(r_surf, r_top, 3.0e-5, 0.0),
-        },
-    });
-    let mesh = meshes.add(Sphere::new(r_top).mesh().ico(6).expect("shell icosphere in range"));
-    commands.entity(ground).insert(AtmosphereShellSpawned).with_children(|parent| {
-        parent.spawn((
-            Mesh3d(mesh),
-            MeshMaterial3d(material),
-            // Same centre as the planet sphere (planet.rs), so it hugs it.
-            Transform::from_xyz(0.0, PLANET_CENTER_Y, 0.0),
-            Name::new("Atmosphere shell"),
-        ));
-    });
-}
-
-/// Spawn the one star-dome mesh (a unit sphere; the shader ignores its transform and
-/// re-centres it on the camera each frame). `NoFrustumCulling` because the shader moves
-/// the vertices far from the baked AABB.
-fn spawn_starfield(
+/// Spawn the one sky-dome mesh (a unit sphere; the shader ignores its transform,
+/// re-centres it on the camera, and pins it to the far plane). `NoFrustumCulling`
+/// because the shader moves the vertices far from the baked AABB.
+fn spawn_sky(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StarfieldMaterial>>,
+    mut materials: ResMut<Assets<SkyMaterial>>,
 ) {
     commands.spawn((
         Mesh3d(meshes.add(Sphere::new(1.0).mesh().ico(4).unwrap())),
-        MeshMaterial3d(materials.add(StarfieldMaterial { params: Vec4::ZERO })),
+        MeshMaterial3d(materials.add(SkyMaterial { frame_offset: Vec4::ZERO })),
         NoFrustumCulling,
-        Name::new("Star dome"),
+        Name::new("Sky dome"),
     ));
 }
 
-/// Drive haze, ash density, and star visibility from the main camera's radial altitude.
-/// One `atmosphere_fraction` evaluation feeds all three so they stay consistent.
+/// Drive the near-field pieces from the camera's local air, and the sky from the
+/// floating-origin frame. One `atmosphere_fraction` evaluation feeds the
+/// [`DistanceFog`] density and the ash cull so they can never disagree; asset writes
+/// are gated on change (mutating an asset flags a GPU re-upload).
 fn update_atmosphere(
     mut commands: Commands,
     // Present only in multiplayer (the floating-origin frame); single-player true == local.
@@ -205,24 +128,22 @@ fn update_atmosphere(
         (With<Camera3d>, With<PrimaryEguiContext>),
     >,
     mut ash: ResMut<Assets<AshMaterial>>,
-    mut stars: ResMut<Assets<StarfieldMaterial>>,
+    mut skies: ResMut<Assets<SkyMaterial>>,
 ) {
     let offset = frame.map(|f| f.offset.as_vec3()).unwrap_or(Vec3::ZERO);
     let Some((entity, transform, fog)) = cameras.iter_mut().next() else {
         return;
     };
-    // The camera's TRUE world position (fold the room's floating-origin offset back in),
-    // so altitude is real even under a rebase.
+    // The camera's TRUE position (frame offset folded back in), so the air is measured
+    // at real altitude even under a rebase.
     let fraction = atmosphere_fraction(transform.translation() + offset);
 
-    // Haze: thick inside the atmosphere, thinning toward a small residual in space (so
-    // the distant surface still blurs when you look back — see ORBIT_HAZE_DENSITY).
-    let density = ORBIT_HAZE_DENSITY + (MAX_FOG_DENSITY - ORBIT_HAZE_DENSITY) * fraction;
+    // Near-field fog for plain PBR meshes: density = extinction × the air at the
+    // camera — exact for the short paths those meshes live at (the long-sightline
+    // surfaces integrate the real profile in their own shaders).
+    let density = EXTINCTION * fraction;
     match fog {
-        Some(mut fog) => {
-            fog.color = FOG_COLOR;
-            fog.falloff = FogFalloff::Exponential { density };
-        }
+        Some(mut fog) => fog.falloff = FogFalloff::Exponential { density },
         None => {
             commands.entity(entity).try_insert(DistanceFog {
                 color: FOG_COLOR,
@@ -233,37 +154,43 @@ fn update_atmosphere(
     }
 
     // Ash thins with the air (its shader culls flakes by this fraction).
-    for (_, material) in ash.iter_mut() {
-        material.set_density(fraction);
+    let ash_ids: Vec<_> = ash.ids().collect();
+    for id in ash_ids {
+        if ash.get(id).is_some_and(|m| m.density() != fraction) {
+            if let Some(mut m) = ash.get_mut(id) {
+                m.set_density(fraction);
+            }
+        }
     }
 
-    // Stars are the inverse — they emerge as the air clears, eased so they brighten
-    // gently rather than snapping on at the atmosphere edge.
-    let t = (1.0 - fraction).clamp(0.0, 1.0);
-    let visibility = t * t * (3.0 - 2.0 * t); // smoothstep
-    for (_, material) in stars.iter_mut() {
-        material.params.x = visibility;
+    // The sky integrates from the camera's true position: hand it the frame offset.
+    let target = offset.extend(0.0);
+    let sky_ids: Vec<_> = skies.ids().collect();
+    for id in sky_ids {
+        if skies.get(id).is_some_and(|m| m.frame_offset != target) {
+            if let Some(mut m) = skies.get_mut(id) {
+                m.frame_offset = target;
+            }
+        }
     }
 }
 
-/// Register the star material, load its shader, and add the atmosphere systems.
+/// Register the fog library + sky material and the atmosphere systems.
 pub fn plugin(app: &mut App) {
+    // The shared transmittance library first — sky + magma `#import` it.
     bevy::asset::load_internal_asset!(
         app,
-        STARFIELD_SHADER_HANDLE,
-        "../../assets/starfield.wgsl",
+        ATMOSPHERE_FOG_SHADER_HANDLE,
+        "../../assets/atmosphere_fog.wgsl",
         Shader::from_wgsl
     );
     bevy::asset::load_internal_asset!(
         app,
-        ATMOSPHERE_SHELL_SHADER_HANDLE,
-        "../../assets/atmosphere_shell.wgsl",
+        SKY_SHADER_HANDLE,
+        "../../assets/sky.wgsl",
         Shader::from_wgsl
     );
-    app.add_plugins((
-        MaterialPlugin::<StarfieldMaterial>::default(),
-        MaterialPlugin::<AtmosphereShellMaterial>::default(),
-    ))
-        .add_systems(Startup, spawn_starfield)
-        .add_systems(Update, (update_atmosphere, spawn_atmosphere_shell));
+    app.add_plugins(MaterialPlugin::<SkyMaterial>::default())
+        .add_systems(Startup, spawn_sky)
+        .add_systems(Update, update_atmosphere);
 }

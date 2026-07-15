@@ -97,6 +97,12 @@ impl AshMaterial {
     pub fn set_density(&mut self, density: f32) {
         self.params.density = density;
     }
+
+    /// The current flake density — read on a shared borrow so `update_atmosphere` can
+    /// skip the mutable touch (= GPU re-upload) when nothing changed.
+    pub fn density(&self) -> f32 {
+        self.params.density
+    }
 }
 
 impl crate::render_main_pass::FrameOffsetMaterial for AshMaterial {

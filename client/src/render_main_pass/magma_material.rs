@@ -108,6 +108,10 @@ pub fn magma_material() -> MagmaMaterial {
             perceptual_roughness: 1.0,
             metallic: 0.0,
             reflectance: 0.02,
+            // The magma shader applies the EXACT atmosphere integral itself (the planet
+            // is the one long-sightline surface); Bevy's camera-uniform DistanceFog
+            // would double-fog it.
+            fog_enabled: false,
             ..Default::default()
         },
         extension: MagmaExtension::default(),
