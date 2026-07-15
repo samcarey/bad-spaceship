@@ -32,7 +32,7 @@ use bevy::{
 };
 use bevy_egui::PrimaryEguiContext;
 
-use bad_spaceship_shared::map::atmosphere_fraction;
+use bad_spaceship_shared::map::atmosphere_optical_fraction;
 
 use super::AshMaterial;
 
@@ -134,9 +134,10 @@ fn update_atmosphere(
     let Some((entity, transform, fog)) = cameras.iter_mut().next() else {
         return;
     };
-    // The camera's TRUE position (frame offset folded back in), so the air is measured
-    // at real altitude even under a rebase.
-    let fraction = atmosphere_fraction(transform.translation() + offset);
+    // The camera's TRUE position (frame offset folded back in), so the smog is measured
+    // at real altitude even under a rebase. OPTICAL profile: the visuals track the
+    // aerosols (H/2), not the drag gas.
+    let fraction = atmosphere_optical_fraction(transform.translation() + offset);
 
     // Near-field fog for plain PBR meshes: density = extinction × the air at the
     // camera — exact for the short paths those meshes live at (the long-sightline

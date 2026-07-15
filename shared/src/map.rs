@@ -138,6 +138,27 @@ pub const ATMOSPHERE_SCALE_HEIGHT: f32 = 2_000.0;
 /// skip the math in deep space, with no visible seam.
 pub const ATMOSPHERE_TOP_ALT: f32 = 8.0 * ATMOSPHERE_SCALE_HEIGHT;
 
+/// e-folding height (m) of the **optical** (smog/aerosol) profile — what you SEE, as
+/// opposed to the gas you feel as drag. Half the gas scale height: real aerosols settle
+/// far lower than the air that carries them (Earth: ~1–2 km vs 8.4 km), so the ship
+/// climbs visually clear of the smog while still brushing thin-air drag above it.
+/// Mirrored by `H` in `atmosphere_fog.wgsl`.
+pub const ATMOSPHERE_OPTICAL_SCALE_HEIGHT: f32 = ATMOSPHERE_SCALE_HEIGHT / 2.0;
+
+/// The smog's density as a fraction of its surface density — the barometric exponential
+/// on the *optical* scale height. Drives everything visual (haze extinction, ash-flake
+/// density); [`atmosphere_fraction`] (the gas) drives the drag physics.
+pub fn atmosphere_optical_fraction(true_pos: Vec3) -> f32 {
+    let alt = radial_altitude(true_pos);
+    if alt <= 0.0 {
+        return 1.0;
+    }
+    if alt >= ATMOSPHERE_TOP_ALT {
+        return 0.0;
+    }
+    (-alt / ATMOSPHERE_OPTICAL_SCALE_HEIGHT).exp()
+}
+
 /// Air density (kg/m³) at the surface. Tuned small for this toy scale: a 2 m sphere at
 /// real sea-level density would brake the light little assemblies to a standstill, so
 /// this is set so drag is a gentle few-percent tax at low speed that grows into a real
