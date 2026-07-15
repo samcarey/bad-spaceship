@@ -20,18 +20,24 @@ use bevy::{
     pbr::{DistanceFog, FogFalloff, MaterialPipeline, MaterialPipelineKey},
     prelude::*,
     render::render_resource::{
-        AsBindGroup, RenderPipelineDescriptor, SpecializedMeshPipelineError,
+        AsBindGroup, RenderPipelineDescriptor, ShaderType, SpecializedMeshPipelineError,
     },
     shader::ShaderRef,
 };
 use bevy_egui::PrimaryEguiContext;
 
-use bad_spaceship_shared::map::atmosphere_fraction;
+use bad_spaceship_shared::{
+    map::{atmosphere_fraction, ATMOSPHERE_TOP_ALT, PLANET_CENTER_Y, PLANET_RADIUS},
+    Grass,
+};
 
 use super::AshMaterial;
 
 pub const STARFIELD_SHADER_HANDLE: Handle<Shader> =
     uuid_handle!("f2a7c9e4-1b60-4d83-9c2a-6e5b0d47a318");
+
+pub const ATMOSPHERE_SHELL_SHADER_HANDLE: Handle<Shader> =
+    uuid_handle!("c4e81f37-9a20-4d6b-8f13-2b7e5c0a94d6");
 
 /// The haze colour — a warm, lit volcanic red-orange (bright, not a dark dusty grey), so
 /// the planet's lava glow reads as shining *through* the atmosphere: distant geometry
@@ -94,6 +100,82 @@ impl Material for StarfieldMaterial {
         descriptor.primitive.cull_mode = None;
         Ok(())
     }
+}
+
+/// The atmosphere shell's uniform (mirrors `AtmosphereShell` in the WGSL).
+#[derive(ShaderType, Debug, Clone)]
+struct ShellParams {
+    /// rgb = smog tint, a = overall intensity.
+    color: Vec4,
+    /// x = planet surface radius, y = atmosphere outer radius, z = density scale, w unused.
+    params: Vec4,
+}
+
+/// A planet-anchored smog shell (see `atmosphere_shell.wgsl`): rendered on a sphere at
+/// the atmosphere's outer radius, it reads as a layer of haze hugging the planet when
+/// viewed from orbit. Plain fragment-only material (the default mesh vertex supplies the
+/// world position + normal the chord integral needs).
+#[derive(Asset, AsBindGroup, Debug, Clone, TypePath)]
+pub struct AtmosphereShellMaterial {
+    #[uniform(0)]
+    shell: ShellParams,
+}
+
+impl Material for AtmosphereShellMaterial {
+    fn fragment_shader() -> ShaderRef {
+        ATMOSPHERE_SHELL_SHADER_HANDLE.into()
+    }
+
+    fn alpha_mode(&self) -> AlphaMode {
+        AlphaMode::Blend
+    }
+
+    fn enable_prepass() -> bool {
+        false
+    }
+
+    fn enable_shadows() -> bool {
+        false
+    }
+}
+
+/// Marks the ground once its atmosphere shell has been parented, so it spawns once.
+#[derive(Component)]
+struct AtmosphereShellSpawned;
+
+/// Parent a smog shell to the ground (which co-moves with the floating origin, like the
+/// planet in `planet.rs`), sized to the atmosphere. Back-face culling means it only draws
+/// from outside — i.e. once the camera climbs above the atmosphere and looks back.
+fn spawn_atmosphere_shell(
+    mut commands: Commands,
+    ground: Query<Entity, (With<Grass>, Without<AtmosphereShellSpawned>)>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<AtmosphereShellMaterial>>,
+) {
+    let Ok(ground) = ground.single() else {
+        return;
+    };
+    let r_surf = PLANET_RADIUS;
+    let r_top = PLANET_RADIUS + ATMOSPHERE_TOP_ALT;
+    let material = materials.add(AtmosphereShellMaterial {
+        shell: ShellParams {
+            // Warm lit smog, matching the haze tint.
+            color: Vec4::new(0.55, 0.18, 0.10, 1.0),
+            // Density scale tuned so the limb reads as thick smog (~0.7) while the disc
+            // centre is a faint wash (~0.1) — the "hugging" gradient.
+            params: Vec4::new(r_surf, r_top, 3.0e-5, 0.0),
+        },
+    });
+    let mesh = meshes.add(Sphere::new(r_top).mesh().ico(6).expect("shell icosphere in range"));
+    commands.entity(ground).insert(AtmosphereShellSpawned).with_children(|parent| {
+        parent.spawn((
+            Mesh3d(mesh),
+            MeshMaterial3d(material),
+            // Same centre as the planet sphere (planet.rs), so it hugs it.
+            Transform::from_xyz(0.0, PLANET_CENTER_Y, 0.0),
+            Name::new("Atmosphere shell"),
+        ));
+    });
 }
 
 /// Spawn the one star-dome mesh (a unit sphere; the shader ignores its transform and
@@ -172,7 +254,16 @@ pub fn plugin(app: &mut App) {
         "../../assets/starfield.wgsl",
         Shader::from_wgsl
     );
-    app.add_plugins(MaterialPlugin::<StarfieldMaterial>::default())
+    bevy::asset::load_internal_asset!(
+        app,
+        ATMOSPHERE_SHELL_SHADER_HANDLE,
+        "../../assets/atmosphere_shell.wgsl",
+        Shader::from_wgsl
+    );
+    app.add_plugins((
+        MaterialPlugin::<StarfieldMaterial>::default(),
+        MaterialPlugin::<AtmosphereShellMaterial>::default(),
+    ))
         .add_systems(Startup, spawn_starfield)
-        .add_systems(Update, update_atmosphere);
+        .add_systems(Update, (update_atmosphere, spawn_atmosphere_shell));
 }

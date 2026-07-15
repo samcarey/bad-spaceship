@@ -147,9 +147,11 @@ fn vertex(v: Vertex) -> VertexOutput {
     let bright = r2.z >= 0.5;
     out.tint = select(ash.color.rgb * 0.6, vec3<f32>(1.6, 1.25, 0.15), bright);
     // Altitude density cull: keep this flake only if its stable hash falls under
-    // `density`, with a soft edge so flakes dissolve rather than pop as the field
-    // thins. `density` 1 = full field (low air), 0 = none (space).
-    let keep = 1.0 - smoothstep(ash.density, ash.density + 0.05, r.z);
+    // `density`, with a soft edge (just BELOW the threshold) so flakes dissolve rather
+    // than pop as the field thins. The band sits below `density` so that at density = 0
+    // (outside the atmosphere) EVERY flake is culled — a band straddling the threshold
+    // left ~5% of flakes (hash < 0.05) visible in space. 1 = full field, 0 = none.
+    let keep = 1.0 - smoothstep(ash.density - 0.05, ash.density, r.z);
     out.alpha = ash.color.a * near * edge * (0.4 + 0.6 * tumble) * keep;
     return out;
 }
