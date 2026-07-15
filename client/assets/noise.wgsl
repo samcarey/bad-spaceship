@@ -39,3 +39,12 @@ fn vnoise(pos: vec2<f32>) -> f32 {
 fn fbm(pos: vec2<f32>) -> f32 {
     return vnoise(pos) * 0.6667 + vnoise(pos * 2.0 + vec2(37.2, 17.7)) * 0.3333;
 }
+
+// Dave Hoskins' hash33 (https://www.shadertoy.com/view/4djSRW, CC0): a 3-vector seed to
+// three decorrelated randoms in [0,1). The 3D sibling of the ash shader's `hash31` —
+// kept here so the Hoskins family lives in the one shared library.
+fn hash33(p: vec3<f32>) -> vec3<f32> {
+    var p3 = fract(p * vec3<f32>(0.1031, 0.1030, 0.0973));
+    p3 += dot(p3, p3.yxz + 33.33);
+    return fract((p3.xxy + p3.yzz) * p3.zyx);
+}

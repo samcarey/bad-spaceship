@@ -429,6 +429,9 @@ fn apply_sp_thrust(
         time.delta_secs(),
         &mut integral,
         guidance,
+        // Single player has no floating-origin frame, so true state == local.
+        com,
+        spin.linear_velocity,
         &mut fuel.0,
         &mut set.p2(),
     );
@@ -554,6 +557,10 @@ fn apply_mp_thrust(
         time.delta_secs(),
         &mut integral,
         guidance,
+        // True (frame-folded) state — the same drag the server applies, so prediction
+        // converges.
+        true_com,
+        true_vel,
         &mut fuel.0,
         &mut set.p1(),
     );
@@ -605,6 +612,10 @@ fn apply_thrust(
     dt: f32,
     integral: &mut Vec3,
     guidance: Guidance,
+    // The assembly's TRUE (frame-folded) state, for the aerodynamic drag (see the
+    // shared `map::apply_assembly_drag` for the physics); single-player true == local.
+    true_com: Vec3,
+    true_vel: Vec3,
     fuel: &mut f32,
     rocket_forces: &mut Query<
         (Entity, Forces, &mut Gimbal, Option<&mut FlameThrottle>),
@@ -629,6 +640,10 @@ fn apply_thrust(
                 flame.target = (burn.force.length() / full).clamp(0.0, 1.0);
             }
         }
+    }
+    // Charge the whole assembly's drag to the first rocket (see `apply_assembly_drag`).
+    if let Ok((_, mut forces, _, _)) = rocket_forces.get_mut(geometry[0].0) {
+        bad_spaceship_shared::map::apply_assembly_drag(&mut forces, com, true_com, true_vel);
     }
     net_force
 }

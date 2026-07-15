@@ -43,7 +43,8 @@ use bad_spaceship_shared::net::{
     GROUND_JOINT_ID, MONSTER_COUNT, TICK,
 };
 use bad_spaceship_shared::map::{
-    apply_gravity_correction, GROUND_LAYER, PLANET_CENTER, PLANET_RADIUS, PLANET_RESPAWN_Y,
+    apply_assembly_drag, apply_gravity_correction, radial_altitude, GROUND_LAYER, PLANET_CENTER,
+    PLANET_RADIUS, PLANET_RESPAWN_Y,
 };
 use bad_spaceship_shared::part::{
     avatar_lock_contacts, capsule_bottom_center, despawn_player_lock_welds, part_gap_contacts,
@@ -2547,6 +2548,11 @@ fn apply_room_rocket_thrust(
     // from the shared `measure_assembly_spin`, over the same `ComputedMass`.
     let dt = time.delta_secs();
     let mut burns = Vec::new();
+    // Aerodynamic drag on each launched assembly (see the shared
+    // `map::apply_assembly_drag` for the physics): `(first rocket, local COM, true COM,
+    // true velocity)`, collected here (the member query is borrowed) and applied in the
+    // `Forces` pass below, after the thrust so it can't clobber a slewed gimbal.
+    let mut drags: Vec<(Entity, Vec3, Vec3, Vec3)> = Vec::new();
     {
         let members = set.p1();
         for (room, rockets) in &per_room {
@@ -2614,8 +2620,7 @@ fn apply_room_rocket_thrust(
                 use std::sync::atomic::{AtomicU32, Ordering};
                 static GT: AtomicU32 = AtomicU32::new(0);
                 if GT.fetch_add(1, Ordering::Relaxed) % 30 == 0 {
-                    let alt = (true_com - bad_spaceship_shared::map::PLANET_CENTER).length()
-                        - bad_spaceship_shared::map::GRAVITY_REF_RADIUS;
+                    let alt = radial_altitude(true_com);
                     let e = bad_spaceship_shared::guidance::specific_energy(true_com, true_vel);
                     let f = fuel.0.get(room).copied().unwrap_or(0.0);
                     println!(
@@ -2687,6 +2692,10 @@ fn apply_room_rocket_thrust(
                 }
             }
             burns.extend(burn);
+            // Drag on the whole stack, at its COM, charged to the first member rocket.
+            if let Some(first) = rockets.first() {
+                drags.push((first.0, com, true_com, true_vel));
+            }
         }
     }
     let mut rockets = set.p2();
@@ -2694,6 +2703,11 @@ fn apply_room_rocket_thrust(
         if let Ok((_, mut forces, mut gimbal)) = rockets.get_mut(burn.entity) {
             gimbal.0 = burn.gimbal;
             forces.apply_force_at_point(burn.force, burn.point);
+        }
+    }
+    for (entity, com, true_com, true_vel) in drags {
+        if let Ok((_, mut forces, _)) = rockets.get_mut(entity) {
+            apply_assembly_drag(&mut forces, com, true_com, true_vel);
         }
     }
 }

@@ -7,6 +7,7 @@ use bad_spaceship_shared::{
     Grass,
 };
 mod ash_material;
+mod atmosphere;
 pub mod flame_material;
 mod grass_material;
 pub mod magma_material;
@@ -25,6 +26,7 @@ use bevy::{
 };
 use ash_material::{spawn_ash_field, ASH_SHADER_HANDLE};
 pub use ash_material::AshMaterial;
+pub use atmosphere::SkyMaterial;
 use flame_material::{
     register_flame_mesh, spawn_flame, update_flames, FlameMaterial, FLAME_SHADER_HANDLE,
 };
@@ -106,6 +108,8 @@ impl Plugin for RenderMainPassPlugin {
             "../../assets/flame_material.wgsl",
             Shader::from_wgsl
         );
+        // The atmosphere module registers its own fog library + sky material.
+        atmosphere::plugin(app);
         app.add_plugins((
             MaterialPlugin::<GrassMaterial>::default(),
             MaterialPlugin::<MagmaMaterial>::default(),

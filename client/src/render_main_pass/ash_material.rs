@@ -50,6 +50,9 @@ pub struct AshParams {
     spin_freq: f32,
     /// Flakes closer than this (m) fade out.
     near_fade: f32,
+    /// Fraction of flakes present, 0..1, driven by altitude (see the WGSL): 1 in the
+    /// thick low air, 0 above the atmosphere. `update_atmosphere` writes this each frame.
+    density: f32,
     /// The room's visual floating-origin offset reduced modulo `box_size` (xyz; w
     /// padding). Anchors the flake lattice in TRUE world space — the shader wraps
     /// the lattice around `camera + frame_offset` — so a rebased room's ascent
@@ -77,6 +80,7 @@ impl Default for AshParams {
             sway_freq: 1.4,
             spin_freq: 7.0,
             near_fade: 1.5,
+            density: 1.0, // full field at the pad; altitude thins it (update_atmosphere)
             frame_offset: Vec4::ZERO,
         }
     }
@@ -86,6 +90,19 @@ impl Default for AshParams {
 pub struct AshMaterial {
     #[uniform(0)]
     params: AshParams,
+}
+
+impl AshMaterial {
+    /// Set the altitude-driven flake density (0 = clear space, 1 = full low-air field).
+    pub fn set_density(&mut self, density: f32) {
+        self.params.density = density;
+    }
+
+    /// The current flake density — read on a shared borrow so `update_atmosphere` can
+    /// skip the mutable touch (= GPU re-upload) when nothing changed.
+    pub fn density(&self) -> f32 {
+        self.params.density
+    }
 }
 
 impl crate::render_main_pass::FrameOffsetMaterial for AshMaterial {
