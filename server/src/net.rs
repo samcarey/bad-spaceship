@@ -2547,6 +2547,12 @@ fn apply_room_rocket_thrust(
     // from the shared `measure_assembly_spin`, over the same `ComputedMass`.
     let dt = time.delta_secs();
     let mut burns = Vec::new();
+    // Aerodynamic drag on each launched assembly, as one lumped-sphere force (see
+    // `map::drag_force`): `(rocket entity, local COM point, world force)`, applied after
+    // the thrust so it can't clobber a rocket's slewed gimbal. Applying the whole
+    // assembly's drag at its COM to any one welded member is a pure force on the rigid
+    // stack (net torque about the COM is zero) — the same shape thrust uses.
+    let mut drags: Vec<(Entity, Vec3, Vec3)> = Vec::new();
     {
         let members = set.p1();
         for (room, rockets) in &per_room {
@@ -2687,6 +2693,10 @@ fn apply_room_rocket_thrust(
                 }
             }
             burns.extend(burn);
+            // Drag on the whole stack, at its COM, charged to the first member rocket.
+            if let Some(first) = rockets.first() {
+                drags.push((first.0, com, bad_spaceship_shared::map::drag_force(true_com, true_vel)));
+            }
         }
     }
     let mut rockets = set.p2();
@@ -2694,6 +2704,11 @@ fn apply_room_rocket_thrust(
         if let Ok((_, mut forces, mut gimbal)) = rockets.get_mut(burn.entity) {
             gimbal.0 = burn.gimbal;
             forces.apply_force_at_point(burn.force, burn.point);
+        }
+    }
+    for (entity, point, force) in drags {
+        if let Ok((_, mut forces, _)) = rockets.get_mut(entity) {
+            forces.apply_force_at_point(force, point);
         }
     }
 }

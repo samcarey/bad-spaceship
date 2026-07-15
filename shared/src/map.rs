@@ -103,6 +103,102 @@ pub fn apply_gravity_correction(forces: &mut ForcesItem, true_pos: Vec3, gravity
     forces.apply_linear_acceleration(gravity_at(true_pos) - gravity);
 }
 
+// ---------------------------------------------------------------------------
+// Atmosphere + aerodynamic drag
+// ---------------------------------------------------------------------------
+//
+// The planet wears a thin shell of air that thins to nothing with altitude. One
+// scalar — [`atmosphere_fraction`] (1 at the surface, 0 at [`ATMOSPHERE_TOP_ALT`]) —
+// drives *everything*: the physics air density, the aero drag on a launched stack,
+// the distance-haze the camera renders, the ash-particle density, and (inverted) the
+// star visibility. Keeping it a single shared function is the same discipline
+// [`gravity_at`] uses — the sim and the autopilot's planning model both read the exact
+// same density, so the flown drag and the planned-for drag can never disagree, and the
+// visuals fade in lockstep with the physics that motivates them.
+
+/// Radial altitude (m) above the platform play surface: the true distance from the
+/// planet centre minus the reference radius. On a sphere this — not raw world `y` — is
+/// "how high up am I" (arcing downrange drops `y` while altitude holds), the same
+/// quantity the HUD altimeter and the guidance law use.
+pub fn radial_altitude(true_pos: Vec3) -> f32 {
+    (true_pos - PLANET_CENTER).length() - GRAVITY_REF_RADIUS
+}
+
+/// Altitude (m) at which the atmosphere reaches exactly zero — above this there is no
+/// air (no drag, no haze, no ash) and the stars are fully out. Chosen a little above the
+/// altitude a typical stack reaches escape (~4 km on this 15 km world), so the ship flies
+/// most of its powered climb through measurable air and breaks into clear space around
+/// the time it escapes.
+pub const ATMOSPHERE_TOP_ALT: f32 = 6_000.0;
+
+/// e-folding height (m) of the density profile: air falls off exponentially with this
+/// scale, then the profile is renormalised so it hits exactly zero at
+/// [`ATMOSPHERE_TOP_ALT`] (a bare exponential never reaches zero, which would leave a
+/// whisper of ash/haze in space). Smaller = air hugs the surface more tightly.
+pub const ATMOSPHERE_SCALE_HEIGHT: f32 = 2_000.0;
+
+/// Air density (kg/m³) at the surface. Tuned small for this toy scale: a 2 m sphere at
+/// real sea-level density would brake the light little assemblies to a standstill, so
+/// this is set so drag is a gentle few-percent tax at low speed that grows into a real
+/// cost near the peak ascent speed (drag ∝ v²) — enough to matter to the fuel budget and
+/// motivate the autopilot's compensation without making launch unwinnable.
+pub const SEA_LEVEL_AIR_DENSITY: f32 = 0.0025;
+
+/// Drag reference diameter (m): the whole launched assembly is modelled as a single
+/// sphere this wide (per the design — one lumped drag body, not per-part), so the drag
+/// area is fixed regardless of how the stack is built.
+pub const DRAG_DIAMETER: f32 = 2.0;
+
+/// Sphere drag coefficient (dimensionless) — the textbook ~0.47 for a smooth sphere.
+pub const DRAG_CD: f32 = 0.47;
+
+/// The lumped drag constant `k = ½·C_d·A` (m²): `F_drag = k·ρ·v²`. Folds the coefficient
+/// and the fixed reference area (`π·(D/2)²`) so [`drag_force`] is just `k·ρ·|v|·v`.
+pub const DRAG_K: f32 = 0.5
+    * DRAG_CD
+    * std::f32::consts::PI
+    * (DRAG_DIAMETER * 0.5)
+    * (DRAG_DIAMETER * 0.5);
+
+/// The atmosphere's density as a fraction of surface density at a true world position:
+/// `1` at/below the surface, falling exponentially with altitude and renormalised to
+/// exactly `0` at [`ATMOSPHERE_TOP_ALT`] and above. This is the master knob every
+/// atmospheric effect reads (drag, haze, ash, stars).
+pub fn atmosphere_fraction(true_pos: Vec3) -> f32 {
+    let alt = radial_altitude(true_pos);
+    if alt <= 0.0 {
+        return 1.0;
+    }
+    if alt >= ATMOSPHERE_TOP_ALT {
+        return 0.0;
+    }
+    // Exponential profile shifted so f(TOP) = 0 and rescaled so f(0) = 1.
+    let top = (-ATMOSPHERE_TOP_ALT / ATMOSPHERE_SCALE_HEIGHT).exp();
+    ((-alt / ATMOSPHERE_SCALE_HEIGHT).exp() - top) / (1.0 - top)
+}
+
+/// Air density (kg/m³) at a true world position — surface density scaled by
+/// [`atmosphere_fraction`]. Zero above [`ATMOSPHERE_TOP_ALT`].
+pub fn air_density_at(true_pos: Vec3) -> f32 {
+    SEA_LEVEL_AIR_DENSITY * atmosphere_fraction(true_pos)
+}
+
+/// The aerodynamic drag **force** (N, a world vector) on the launched assembly at a true
+/// position + velocity, modelling the whole stack as one [`DRAG_DIAMETER`] sphere:
+/// `F = −k·ρ·|v|·v`, opposing motion, growing with the square of speed and vanishing as
+/// the air thins out. Mass-independent (it's a force, not an acceleration) and
+/// frame-independent (velocity relative to the still air is the true planet-frame
+/// velocity, and a force vector is the same in any Galilean frame), so the three thrust
+/// sites apply it directly and the guidance planner divides it by mass — one function, no
+/// drift between the flown drag and the planned-for drag.
+pub fn drag_force(true_pos: Vec3, true_vel: Vec3) -> Vec3 {
+    let speed = true_vel.length();
+    if speed < 1e-3 {
+        return Vec3::ZERO;
+    }
+    -DRAG_K * air_density_at(true_pos) * speed * true_vel
+}
+
 /// The Avian collision-layer bit the ground sits on: bit 0 (value 1), Avian's
 /// default membership for a collider with no explicit `CollisionLayers` — like the
 /// bowl spawned below. The multiplayer collision scheme reserves it for the ground
@@ -255,6 +351,42 @@ mod tests {
         let to_center = (Vec3::new(0.0, PLANET_CENTER_Y, 0.0) - p).normalize();
         assert!(g.normalize().dot(to_center) > 0.999, "aimed at centre: {g:?}");
         assert!(g.x < 0.0, "pulled back toward the axis: {g:?}");
+    }
+
+    #[test]
+    fn atmosphere_is_full_at_the_pad_and_gone_in_space() {
+        // Surface (world y = 0): full density.
+        assert!((atmosphere_fraction(Vec3::ZERO) - 1.0).abs() < 1e-4);
+        assert!((air_density_at(Vec3::ZERO) - SEA_LEVEL_AIR_DENSITY).abs() < 1e-6);
+        // Exactly at the top and anywhere above: zero, hard.
+        let top = Vec3::new(0.0, ATMOSPHERE_TOP_ALT, 0.0);
+        assert_eq!(atmosphere_fraction(top), 0.0);
+        assert_eq!(air_density_at(Vec3::new(0.0, ATMOSPHERE_TOP_ALT + 5_000.0, 0.0)), 0.0);
+        // Monotone thinning in between.
+        let mid = atmosphere_fraction(Vec3::new(0.0, ATMOSPHERE_TOP_ALT * 0.5, 0.0));
+        assert!(mid > 0.0 && mid < 1.0, "mid-altitude air {mid}");
+        assert!(mid < atmosphere_fraction(Vec3::new(0.0, ATMOSPHERE_TOP_ALT * 0.25, 0.0)));
+    }
+
+    #[test]
+    fn drag_opposes_motion_and_grows_with_speed_squared() {
+        // At rest: no drag.
+        assert_eq!(drag_force(Vec3::ZERO, Vec3::ZERO), Vec3::ZERO);
+        // Drag points opposite the velocity.
+        let v = Vec3::new(30.0, 40.0, 0.0); // |v| = 50
+        let f = drag_force(Vec3::ZERO, v);
+        assert!(f.normalize().dot(v.normalize()) < -0.999, "drag opposes v: {f:?}");
+        // Doubling speed quadruples drag magnitude (∝ v²).
+        let f2 = drag_force(Vec3::ZERO, v * 2.0);
+        assert!((f2.length() / f.length() - 4.0).abs() < 1e-3, "v² scaling");
+        // Same speed, thinner air (higher up) → less drag.
+        let high = drag_force(Vec3::new(0.0, ATMOSPHERE_TOP_ALT * 0.5, 0.0), v);
+        assert!(high.length() < f.length(), "less drag in thinner air");
+        // Above the atmosphere: no drag at any speed.
+        assert_eq!(
+            drag_force(Vec3::new(0.0, ATMOSPHERE_TOP_ALT + 1.0, 0.0), v * 10.0),
+            Vec3::ZERO
+        );
     }
 }
 

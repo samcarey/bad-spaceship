@@ -174,16 +174,28 @@ impl PitchProgram {
         let thrust_accel = crate::launch::LIFT_FLOOR * engines as f32
             * crate::launch::full_rocket_thrust(gravity)
             / total_mass;
-        let pitchover =
-            forced.unwrap_or_else(|| optimize_pitchover(true_pos, true_vel, thrust_accel));
-        Self::build(true_pos, true_vel, thrust_accel, pitchover)
+        // The planning model is drag-aware: the optimizer and the sampled program both
+        // fly against the same [`crate::map::drag_force`] the physics applies (divided by
+        // the assembly mass), so the flight plan already leans/burns to compensate for
+        // the air rather than discovering it in flight. Mass feeds the force→accel step.
+        let pitchover = forced
+            .unwrap_or_else(|| optimize_pitchover(true_pos, true_vel, thrust_accel, total_mass));
+        Self::build(true_pos, true_vel, thrust_accel, total_mass, pitchover)
     }
 
     /// Build the program by flying the ideal ascent law ([`ascent_thrust_dir`]) as a
     /// point mass from the launch state and recording its command angle at each speed.
     /// A zero `pitchover` yields an all-zero program (straight up), so high-TWR stacks
-    /// are byte-identical to the fixed vertical command.
-    pub fn build(true_pos: Vec3, true_vel: Vec3, thrust_accel: f32, pitchover: f32) -> Self {
+    /// are byte-identical to the fixed vertical command. `mass` converts the shared
+    /// [`crate::map::drag_force`] into a deceleration so the sampled arc matches the real
+    /// drag-braked climb.
+    pub fn build(
+        true_pos: Vec3,
+        true_vel: Vec3,
+        thrust_accel: f32,
+        mass: f32,
+        pitchover: f32,
+    ) -> Self {
         let mut samples = Vec::new();
         let mut pos = true_pos;
         let mut vel = true_vel;
@@ -198,7 +210,7 @@ impl PitchProgram {
             if escape_secured(pos, vel) {
                 break;
             }
-            let accel = dir * thrust_accel + gravity_at(pos);
+            let accel = dir * thrust_accel + gravity_at(pos) + crate::map::drag_force(pos, vel) / mass;
             vel += accel * OPTIMIZER_DT;
             pos += vel * OPTIMIZER_DT;
             // Ideal trajectory dove below the pad (an over-aggressive angle the optimizer
@@ -301,10 +313,12 @@ pub struct Prediction {
 /// i.e. it assumes attitude tracks instantly. That's the right fidelity for "where is the
 /// autopilot taking me" and for ranking pitchover angles; the live controller handles the
 /// real attitude lag (and the optimizer's safety backoff covers the difference).
+#[allow(clippy::too_many_arguments)]
 pub fn propagate(
     mut pos: Vec3,
     mut vel: Vec3,
     thrust_accel: f32,
+    mass: f32,
     pitchover: f32,
     dt: f32,
     max_steps: usize,
@@ -325,7 +339,10 @@ pub fn propagate(
         // Full-throttle ideal law: the loop terminates the moment escape energy is
         // reached, so the escape cutoff never actually modulates the burn here.
         let dir = ascent_thrust_dir(pos, vel, pitchover);
-        let accel = dir * thrust_accel + gravity_at(pos);
+        // Drag brakes the climb (mass-independent force ÷ mass = deceleration); the burn
+        // has to fight through it, so a draggier ascent naturally takes more steps and
+        // more impulse to reach escape (`burn_dv` counts only thrust, as fuel should).
+        let accel = dir * thrust_accel + gravity_at(pos) + crate::map::drag_force(pos, vel) / mass;
         burn_dv += thrust_accel * dt;
         vel += accel * dt;
         pos += vel * dt;
@@ -357,14 +374,15 @@ pub const OPTIMIZER_STEPS: usize = 4000;
 /// Find the pitchover angle (rad) that reaches escape on the least fuel from a given true
 /// state, by forward-simulating [`propagate`] over a coarse-then-refined sweep of angles.
 /// `thrust_accel` is the assembly's full-throttle thrust acceleration (Σ engine thrust /
-/// total mass). This is the per-assembly "figure out the efficient path" step — it adapts
-/// the flight plan to whatever the player built.
+/// total mass) and `mass` its total mass (for the drag deceleration). This is the
+/// per-assembly "figure out the efficient path" step — it adapts the flight plan to
+/// whatever the player built *and* to the air it must climb through.
 ///
 /// The min-fuel angle sits right at the crash boundary (more lean = less gravity loss,
 /// until the arc clips the terrain), and the real attitude-lagged vehicle shouldn't fly
 /// the exact boundary — so the returned angle is backed off by `SAFETY`, trading a little
 /// fuel for altitude margin.
-pub fn optimize_pitchover(true_pos: Vec3, true_vel: Vec3, thrust_accel: f32) -> f32 {
+pub fn optimize_pitchover(true_pos: Vec3, true_vel: Vec3, thrust_accel: f32, mass: f32) -> f32 {
     const SAFETY: f32 = 0.85;
     /// The optimizer's arc must hold this much altitude margin over the pad (latched —
     /// see `propagate`): the real vehicle flies the plan imperfectly (attitude lag,
@@ -395,6 +413,7 @@ pub fn optimize_pitchover(true_pos: Vec3, true_vel: Vec3, thrust_accel: f32) -> 
             true_pos,
             true_vel,
             thrust_accel,
+            mass,
             angle,
             OPTIMIZER_DT,
             OPTIMIZER_STEPS,
@@ -536,10 +555,13 @@ mod tests {
     fn optimizer_beats_straight_up_at_low_twr() {
         let pos = Vec3::new(0.0, 0.0, 0.0);
         let thrust_accel = 1.35 * SURFACE_GRAVITY; // a heavy hauler
+        // Drag-negligible (huge mass) so this isolates the gravity-turn benefit.
+        let mass = 1.0e6;
         let straight = propagate(
             pos,
             Vec3::ZERO,
             thrust_accel,
+            mass,
             0.0,
             OPTIMIZER_DT,
             OPTIMIZER_STEPS,
@@ -547,12 +569,13 @@ mod tests {
             GROUND_RADIUS,
         );
         assert!(straight.escaped, "even TWR 1.35 escapes straight up eventually");
-        let angle = optimize_pitchover(pos, Vec3::ZERO, thrust_accel);
+        let angle = optimize_pitchover(pos, Vec3::ZERO, thrust_accel, mass);
         assert!(angle > 1.0_f32.to_radians(), "low TWR should get a real lean: {angle}");
         let turned = propagate(
             pos,
             Vec3::ZERO,
             thrust_accel,
+            mass,
             angle,
             OPTIMIZER_DT,
             OPTIMIZER_STEPS,
@@ -563,6 +586,37 @@ mod tests {
         assert!(t < s * 0.9, "turn ({t:.0}) should save >10% vs straight ({s:.0})");
     }
 
+    /// Drag makes the planning sim cost more fuel to escape — the point-mass model the
+    /// autopilot plans against is genuinely drag-aware (same stack, thinner-vs-thicker
+    /// effective air via a light-vs-heavy mass on the shared drag force).
+    #[test]
+    fn drag_costs_extra_fuel_in_the_plan() {
+        let pos = Vec3::new(0.0, 0.0, 0.0);
+        let thrust_accel = 3.0 * SURFACE_GRAVITY; // escapes straight up in either case
+        let run = |mass: f32| {
+            propagate(
+                pos,
+                Vec3::ZERO,
+                thrust_accel,
+                mass,
+                0.0,
+                OPTIMIZER_DT,
+                OPTIMIZER_STEPS,
+                OPTIMIZER_STEPS,
+                GROUND_RADIUS,
+            )
+        };
+        let clean = run(1.0e6); // drag-negligible
+        let draggy = run(40.0); // a light stack the air actually brakes
+        assert!(clean.escaped && draggy.escaped, "both reach escape");
+        assert!(
+            draggy.burn_dv.unwrap() > clean.burn_dv.unwrap() * 1.02,
+            "drag should cost measurably more fuel: clean {:.0} vs draggy {:.0}",
+            clean.burn_dv.unwrap(),
+            draggy.burn_dv.unwrap()
+        );
+    }
+
     /// The trajectory prediction produces a path that climbs and ends escaped.
     #[test]
     fn predicted_path_climbs_and_escapes() {
@@ -571,6 +625,7 @@ mod tests {
             pos,
             Vec3::ZERO,
             2.0 * SURFACE_GRAVITY,
+            1.0e6,
             10.0_f32.to_radians(),
             OPTIMIZER_DT,
             OPTIMIZER_STEPS,

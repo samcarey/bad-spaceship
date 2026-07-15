@@ -7,6 +7,7 @@ use bad_spaceship_shared::{
     Grass,
 };
 mod ash_material;
+mod atmosphere;
 pub mod flame_material;
 mod grass_material;
 pub mod magma_material;
@@ -113,7 +114,9 @@ impl Plugin for RenderMainPassPlugin {
             MaterialPlugin::<AshMaterial>::default(),
             MaterialPlugin::<FlameMaterial>::default(),
         ))
-            .add_systems(Startup, (add_lighting, spawn_ash_field))
+            .add_systems(Startup, (add_lighting, spawn_ash_field));
+        atmosphere::plugin(app);
+        app
             .add_systems(
                 Startup,
                 |mut meshes: ResMut<Assets<Mesh>>| register_flame_mesh(&mut meshes),
