@@ -421,6 +421,11 @@ impl Plugin for NetServerPlugin {
                 apply_avatar_changes,
                 apply_position_resets,
                 apply_room_resets,
+                // Demo hook (`BS_SPAWN_ON_DECK`): drop a fresh joiner straight onto
+                // its room's assembly deck instead of the pad, so a "rocket built +
+                // character onboard" save needs no walking. No-op unless the env var
+                // is set, so real rooms are unaffected.
+                spawn_demo_players_on_deck,
                 // Lock/Unlock rider welds, plus the shared sweep that drops welds
                 // whose avatar (disconnect) or part (recycle/reset) is gone.
                 apply_lock_changes,
@@ -1087,6 +1092,64 @@ fn apply_position_resets(
                 );
             }
         }
+    }
+}
+
+/// Marks an avatar the demo deck-spawn has already placed, so [`spawn_demo_players_on_deck`]
+/// runs once per join (and the player can then walk freely off the deck).
+#[derive(Component)]
+struct DemoOnDeck;
+
+/// Demo hook: when `BS_SPAWN_ON_DECK` is set, teleport each freshly-joined avatar onto
+/// the top of its room's largest assembly (the same mass-weighted deck point the
+/// mid-flight reset/fall path uses via [`deck_respawn_points`]) instead of leaving it on
+/// the pad. Lets a "rocket built + character onboard" save (a launch-ready stack loaded
+/// into the room) put the player standing on the deck at spawn — they only Lock + Launch.
+///
+/// Acts once per avatar (gated by the [`DemoOnDeck`] marker), and only once the room's
+/// parts exist and are tagged into the largest assembly (so `deck_respawn_points` has a
+/// deck to find) — on the first join that creates the room, that's a frame or two after
+/// the parts spawn. No-op (early return) unless the env var is set, so ordinary rooms are
+/// untouched.
+fn spawn_demo_players_on_deck(
+    mut commands: Commands,
+    deck_parts: DeckParts,
+    lock_joints: Query<(Entity, &SphericalJoint), With<LockJoint>>,
+    mut avatars: Query<
+        (
+            Entity,
+            Option<&RoomMember>,
+            &mut Position,
+            &mut LinearVelocity,
+            &mut AngularVelocity,
+        ),
+        (With<ServerAvatar>, Without<NetPart>, Without<DemoOnDeck>),
+    >,
+) {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ENABLED.get_or_init(|| std::env::var("BS_SPAWN_ON_DECK").is_ok()) {
+        return;
+    }
+    if avatars.iter().next().is_none() {
+        return;
+    }
+    let decks = deck_respawn_points(
+        deck_parts.iter().map(|(p, part, room)| (p.0, part_volume(part.shape), room.id)),
+    );
+    for (avatar, member, mut position, mut linear, mut angular) in &mut avatars {
+        let Some(deck) = member.and_then(|m| decks.get(&m.0)) else {
+            continue; // not roomed yet, or the room's assembly hasn't spawned/marked yet
+        };
+        teleport_avatar(
+            &mut commands,
+            &lock_joints,
+            avatar,
+            *deck,
+            &mut position,
+            &mut linear,
+            &mut angular,
+        );
+        commands.entity(avatar).insert(DemoOnDeck);
     }
 }
 
