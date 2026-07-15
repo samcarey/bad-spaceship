@@ -96,21 +96,21 @@ pub struct PlanReadout {
     pub cutoff_alt: f32,
 }
 
-/// Marker for the one trajectory-line mesh entity.
+/// Marker for the one trajectory-line mesh entity. Spawned **without** a `Mesh3d`:
+/// the draw system swaps in a freshly-allocated mesh asset per rebuild (replacing the
+/// handle drops the old asset). Registering an attribute-less placeholder mesh — or
+/// resizing one asset's buffers every frame — trips bevy_render's slab allocator on
+/// WebGL2 ("Use-after-free: attempted to copy element data for an unallocated key")
+/// and wedges the whole renderer the first frame the line goes visible.
 #[derive(Component)]
 struct TrajectoryLine;
 
 fn spawn_trajectory_line(
     mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     commands.spawn((
         TrajectoryLine,
-        Mesh3d(meshes.add(Mesh::new(
-            PrimitiveTopology::TriangleList,
-            RenderAssetUsages::default(),
-        ))),
         MeshMaterial3d(materials.add(StandardMaterial {
             base_color: Color::srgb(1.0, 0.85, 0.2),
             unlit: true,
@@ -120,6 +120,7 @@ fn spawn_trajectory_line(
         })),
         // The mesh is rebuilt around the camera every frame; its baked AABB means nothing.
         NoFrustumCulling,
+        Transform::IDENTITY,
         Visibility::Hidden,
         Name::new("Trajectory line"),
     ));
@@ -218,14 +219,15 @@ fn coast_path(mut pos: Vec3, mut vel: Vec3, mass: f32) -> Vec<DVec3> {
 /// Rebuild the dotted-line mesh: fold the true-frame path into room-local coordinates,
 /// walk it emitting camera-distance-scaled dots, and write one octahedron per dot.
 fn draw_flight_path(
+    mut commands: Commands,
     path: Res<FlightPath>,
     autopilot: Res<Autopilot>,
     frame: Option<Res<ClientRoomFrame>>,
     camera: Query<&GlobalTransform, With<Camera3d>>,
-    mut line: Query<(&Mesh3d, &mut Visibility), With<TrajectoryLine>>,
+    mut line: Query<(Entity, &mut Visibility), With<TrajectoryLine>>,
     mut meshes: ResMut<Assets<Mesh>>,
 ) {
-    let Ok((mesh_handle, mut visibility)) = line.single_mut() else {
+    let Ok((entity, mut visibility)) = line.single_mut() else {
         return;
     };
     let Ok(camera) = camera.single() else {
@@ -272,15 +274,14 @@ fn draw_flight_path(
         return;
     }
     *visibility = Visibility::Visible;
-    let Some(mut mesh) = meshes.get_mut(&mesh_handle.0) else {
-        return;
-    };
-    write_dot_mesh(&mut mesh, &dots);
+    // A fresh asset per rebuild (see [`TrajectoryLine`] for why not in-place mutation);
+    // replacing the `Mesh3d` handle drops the previous frame's mesh.
+    commands.entity(entity).insert(Mesh3d(meshes.add(dot_mesh(&dots))));
 }
 
-/// Overwrite `mesh` with one small octahedron per `(center, radius)` dot — the cheapest
+/// Build a mesh with one small octahedron per `(center, radius)` dot — the cheapest
 /// solid that reads as a round point from any angle (6 vertices, 8 faces).
-fn write_dot_mesh(mesh: &mut Mesh, dots: &[(Vec3, f32)]) {
+fn dot_mesh(dots: &[(Vec3, f32)]) -> Mesh {
     const AXES: [Vec3; 6] = [
         Vec3::X,
         Vec3::NEG_X,
@@ -311,7 +312,8 @@ fn write_dot_mesh(mesh: &mut Mesh, dots: &[(Vec3, f32)]) {
         }
         indices.extend(FACES.iter().flat_map(|f| f.map(|v| base + v)));
     }
-    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
-    mesh.insert_indices(Indices::U32(indices));
+    Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default())
+        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+        .with_inserted_indices(Indices::U32(indices))
 }
