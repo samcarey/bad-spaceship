@@ -502,22 +502,21 @@ fn show_flight_hud(
             // The speed the engines shut off at *this* altitude (it falls as we
             // climb, so the two numbers race toward each other).
             let target = cutoff_speed(ap.true_pos.as_vec3());
-            let mut burn = format!(
+            autopilot_lines.push(format!(
                 "Escape burn: {} of {} ({:.0}%)",
                 speed_label(speed),
                 speed_label(target),
                 (speed / target * 100.0).min(999.0),
-            );
+            ));
             match flight_path.plan.as_ref() {
-                Some(plan) if plan.escapes => burn.push_str(&format!(
-                    " · engines off in ~{:.0} s at {}",
+                Some(plan) if plan.escapes => autopilot_lines.push(format!(
+                    "Engines off in ~{:.0} s at {}",
                     plan.eta_secs,
                     altitude_label(plan.cutoff_alt as f64),
                 )),
-                Some(_) => burn.push_str(" · plan does not reach escape!"),
+                Some(_) => autopilot_lines.push("Plan does not reach escape!".to_owned()),
                 None => {}
             }
-            autopilot_lines.push(burn);
         } else {
             autopilot_lines.push("Engines cut: escape secured, coasting away".to_owned());
         }
