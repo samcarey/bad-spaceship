@@ -141,9 +141,27 @@ pub(crate) struct LaunchLocal {
     banner: f32,
     /// Single-player countdown/launch phase.
     sp: SpPhase,
-    /// Multiplayer: whether we've already fired the banner for the current launch (so the
-    /// replicated `launched` edge triggers the banner exactly once).
-    mp_banner_fired: bool,
+    /// Multiplayer: where this room is in the banner's one-shot lifecycle, so the
+    /// "Blastoff!" banner fires exactly once per launch and only on a transition we
+    /// witnessed — never when joining or reconnecting into an already-launched room
+    /// (which re-fired it every foreground).
+    mp_banner: MpBanner,
+}
+
+/// Lifecycle of the multiplayer blastoff banner for the current room. The banner is a
+/// launch *transition*, but the replicated `NetLaunch::launched` is a *level* whose
+/// source can be absent (the world is torn down during a reconnect, or not yet
+/// replicated on a fresh reload); this latch turns that level into a witnessed edge.
+#[derive(Default, PartialEq)]
+enum MpBanner {
+    /// (Re)connected; haven't seen this room un-launched yet, so a launched reading is a
+    /// join-into-flight, not a transition — stay quiet.
+    #[default]
+    WaitingForPrelaunch,
+    /// Saw the room un-launched; the next launched reading is a real blastoff → fire.
+    Armed,
+    /// Already fired for the current launch.
+    Fired,
 }
 
 impl LaunchLocal {
@@ -331,13 +349,24 @@ fn tick_launch(
     }
 
     if multiplayer.is_some() {
-        // Fire the banner once on the replicated `launched` rising edge.
-        let launched = orb.iter().next().is_some_and(|l| l.launched);
-        if launched && !local.mp_banner_fired {
-            local.banner = BLASTOFF_BANNER_SECS;
-            local.mp_banner_fired = true;
-        } else if !launched {
-            local.mp_banner_fired = false;
+        // Fire the banner once, on a launch edge we actually WITNESSED counting down —
+        // never when merely (re)joining an already-launched room. `orb` is absent while
+        // the replicated world is torn down (a tab-background reconnect) or before it
+        // first replicates (a fresh iOS reload), and absence must NOT read as "not
+        // launched" — doing so re-armed the banner every reconnect, so it flashed
+        // "Blastoff!" again on every foreground. Gate firing on having first seen the
+        // room un-launched (`mp_seen_prelaunch`); a client that arrives already-launched
+        // never sees that and stays quiet.
+        match orb.iter().next().map(|l| l.launched) {
+            // Un-launched: arm (and re-arm after a room reset, so a relaunch fires again).
+            Some(false) => local.mp_banner = MpBanner::Armed,
+            Some(true) if local.mp_banner == MpBanner::Armed => {
+                local.banner = BLASTOFF_BANNER_SECS;
+                local.mp_banner = MpBanner::Fired;
+            }
+            // Some(true) already fired, or orb absent (disconnected / not yet
+            // replicated): leave the latch untouched so a reconnect can't re-fire.
+            _ => {}
         }
         return;
     }
