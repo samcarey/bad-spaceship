@@ -32,6 +32,7 @@ use bevy::{
     prelude::*,
     render::render_resource::PrimitiveTopology,
 };
+use bevy_egui::PrimaryEguiContext;
 
 use crate::launch::Autopilot;
 use crate::net::ClientRoomFrame;
@@ -223,7 +224,11 @@ fn draw_flight_path(
     path: Res<FlightPath>,
     autopilot: Res<Autopilot>,
     frame: Option<Res<ClientRoomFrame>>,
-    camera: Query<&GlobalTransform, With<Camera3d>>,
+    // The MAIN camera specifically: the outline post-process spawns a second
+    // `Camera3d` (its offscreen mask camera), so a bare `With<Camera3d>` single()
+    // sees two and errors out every frame — which silently hid the whole line.
+    // The main camera is the one egui bound its primary context to.
+    camera: Query<&GlobalTransform, (With<Camera3d>, With<PrimaryEguiContext>)>,
     mut line: Query<(Entity, &mut Visibility), With<TrajectoryLine>>,
     mut meshes: ResMut<Assets<Mesh>>,
 ) {
