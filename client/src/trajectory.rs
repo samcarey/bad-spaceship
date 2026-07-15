@@ -68,8 +68,8 @@ const TRAIL_MIN_STEP: f64 = 2.0;
 /// Line thickness: half-width as a fraction of the camera distance (so the ribbon holds
 /// a roughly constant on-screen width from the pad to a plan-end tens of km up), floored
 /// so the near end never collapses to nothing.
-const LINE_HALF_WIDTH_PER_M: f32 = 0.006;
-const MIN_HALF_WIDTH: f32 = 0.1;
+const LINE_HALF_WIDTH_PER_M: f32 = 0.00075;
+const MIN_HALF_WIDTH: f32 = 0.0125;
 
 /// The recorded + predicted flight path, in true planet-frame coordinates.
 #[derive(Resource, Default)]
@@ -109,7 +109,9 @@ fn spawn_trajectory_line(
     commands.spawn((
         TrajectoryLine,
         MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgb(1.0, 0.85, 0.2),
+            // Neon (electric highlighter) yellow — the scene has no bloom, so an unlit
+            // fully-saturated bright yellow is what reads as "neon".
+            base_color: Color::srgb(0.95, 1.0, 0.05),
             unlit: true,
             // An instrument overlay: must read through the smog (see the module doc).
             fog_enabled: false,
