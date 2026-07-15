@@ -111,6 +111,18 @@ impl Plugin for LaunchPlugin {
 /// Seconds the "Blastoff!" banner lingers after the count reaches zero.
 const BLASTOFF_BANNER_SECS: f32 = 1.5;
 
+/// Top-centre HUD stack layout (points below the top edge). The Launch button owns the
+/// very top; the flight-telemetry HUD (drawn by `ui::show_flight_hud`, anchored at 44)
+/// stays hidden on the pad but grows to ~5 lines (~150 pt tall) once flying. So while
+/// idle the Lock button and countdown banner sit high, and once **launched** they drop
+/// below the now-visible HUD instead of being buried under it. All in egui points, so the
+/// spacing scales with the UI zoom the same way the panel's own text does (mobile-safe).
+const LAUNCH_BUTTON_Y: f32 = 24.0;
+const LOCK_BUTTON_Y_IDLE: f32 = 72.0;
+const LOCK_BUTTON_Y_FLIGHT: f32 = 168.0;
+const BANNER_Y_IDLE: f32 = 132.0;
+const BANNER_Y_FLIGHT: f32 = 232.0;
+
 /// Single-player countdown/launch phase. In multiplayer the server owns this (replicated
 /// via [`NetLaunch`]), so `sp` stays `Idle` there and is unused.
 #[derive(Default, PartialEq, Clone, Copy)]
@@ -764,9 +776,11 @@ fn show_launch_ui(
         None
     };
     if let Some(text) = banner {
+        // Countdown ("3/2/1") plays on the pad below the Lock button; the "Blastoff!"
+        // linger plays once flying, so it drops below the launch HUD like the Lock button.
+        let banner_y = if launched { BANNER_Y_FLIGHT } else { BANNER_Y_IDLE };
         egui::Area::new(egui::Id::new("bs_launch_banner"))
-            // Below the Lock button's slot (72), which stays visible mid-countdown.
-            .anchor(Align2::CENTER_TOP, egui::vec2(0.0, 132.0))
+            .anchor(Align2::CENTER_TOP, egui::vec2(0.0, banner_y))
             .show(ctx, |ui| {
                 // Let the big word size to its natural width instead of wrapping "Blastoff!"
                 // onto several lines inside the anchored (width-less) area.
@@ -827,8 +841,10 @@ fn show_launch_ui(
     // touch-gated button).
     if my_locked || touching {
         let mut toggle = false;
+        // High on the pad; below the (now tall, ~5-line) flight HUD once launched.
+        let lock_y = if launched { LOCK_BUTTON_Y_FLIGHT } else { LOCK_BUTTON_Y_IDLE };
         egui::Area::new(egui::Id::new("bs_lock_button"))
-            .anchor(Align2::CENTER_TOP, egui::vec2(0.0, 72.0))
+            .anchor(Align2::CENTER_TOP, egui::vec2(0.0, lock_y))
             .show(ctx, |ui| {
                 // The anchored (width-less) area remembers its previous size, so the
                 // label change (Lock ↔ Unlock) would wrap onto two lines without this.
@@ -870,7 +886,7 @@ fn show_launch_ui(
 
     let mut arm = false;
     egui::Area::new(egui::Id::new("bs_launch_button"))
-        .anchor(Align2::CENTER_TOP, egui::vec2(0.0, 24.0))
+        .anchor(Align2::CENTER_TOP, egui::vec2(0.0, LAUNCH_BUTTON_Y))
         .show(ctx, |ui| {
             Frame::default()
                 .fill(Color32::from_black_alpha(160))

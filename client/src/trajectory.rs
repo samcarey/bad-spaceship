@@ -12,13 +12,12 @@
 //! does rather than freezing the launch-day plan; after the escape cutoff it shows the
 //! engines-off ballistic coast instead.
 //!
-//! Rendering is one rebuilt-per-frame mesh of small octahedral dots. Dot **spacing and
-//! size scale with distance from the camera**, so the line reads as an evenly dotted
-//! screen-space path from the pad to a plan-end tens of kilometres up (fixed-size dots
-//! would vanish at distance or merge nearby), and the dot count stays log-bounded. The
-//! material is unlit with fog disabled: the trajectory is an instrument overlay, and it
-//! must stay legible **through** the smog it is about to climb out of — while still
-//! depth-tested, so the planet properly occludes the far side of an orbit-scale arc.
+//! Rendering is one rebuilt-per-frame **camera-facing ribbon** — a solid strip whose
+//! half-width scales with camera distance, so the line holds a roughly constant on-screen
+//! thickness from the pad to a plan-end tens of kilometres up. The material is unlit with
+//! fog disabled: the trajectory is an instrument overlay, and it must stay legible
+//! **through** the smog it is about to climb out of — while still depth-tested, so the
+//! planet properly occludes the far side of an orbit-scale arc.
 
 use bad_spaceship_shared::guidance::{
     propagate, GROUND_RADIUS, OPTIMIZER_DT, OPTIMIZER_STEPS,
@@ -66,14 +65,11 @@ const COAST_SAMPLE_EVERY: usize = 4;
 const MAX_TRAIL: usize = 4096;
 const TRAIL_MIN_STEP: f64 = 2.0;
 
-/// Dot layout: spacing and radius per metre of camera distance (an even screen-space
-/// rhythm — ~2 dots per degree, each ~a third of a degree wide), with floors so the
-/// dots right at the pad stay visible, and a hard count cap as a safety net.
-const DOT_SPACING_PER_M: f32 = 0.035;
-const DOT_RADIUS_PER_M: f32 = 0.006;
-const MIN_SPACING: f32 = 1.5;
-const MIN_RADIUS: f32 = 0.12;
-const MAX_DOTS: usize = 4000;
+/// Line thickness: half-width as a fraction of the camera distance (so the ribbon holds
+/// a roughly constant on-screen width from the pad to a plan-end tens of km up), floored
+/// so the near end never collapses to nothing.
+const LINE_HALF_WIDTH_PER_M: f32 = 0.006;
+const MIN_HALF_WIDTH: f32 = 0.1;
 
 /// The recorded + predicted flight path, in true planet-frame coordinates.
 #[derive(Resource, Default)]
@@ -117,6 +113,10 @@ fn spawn_trajectory_line(
             unlit: true,
             // An instrument overlay: must read through the smog (see the module doc).
             fog_enabled: false,
+            // The ribbon is a flat camera-facing strip; show it from either side so its
+            // winding relative to the eye never matters.
+            cull_mode: None,
+            double_sided: true,
             ..default()
         })),
         // The mesh is rebuilt around the camera every frame; its baked AABB means nothing.
@@ -145,8 +145,8 @@ fn update_flight_path(
     };
 
     // Trail: append when we've moved a step past the last record; thin by halving when
-    // full (doubles the record's spacing everywhere — invisible under the
-    // distance-scaled dot walk).
+    // full (doubles the record's spacing everywhere — the ribbon just spans the wider
+    // gaps, so it stays continuous).
     let step = (radial_altitude(snap.true_pos.as_vec3()) as f64 * 0.01).max(TRAIL_MIN_STEP);
     if path.trail.last().is_none_or(|last| last.distance(snap.true_pos) >= step) {
         path.trail.push(snap.true_pos);
@@ -217,8 +217,9 @@ fn coast_path(mut pos: Vec3, mut vel: Vec3, mass: f32) -> Vec<DVec3> {
     out
 }
 
-/// Rebuild the dotted-line mesh: fold the true-frame path into room-local coordinates,
-/// walk it emitting camera-distance-scaled dots, and write one octahedron per dot.
+/// Rebuild the line mesh: fold the true-frame path into room-local coordinates and
+/// build a camera-facing ribbon (a solid strip of roughly constant on-screen width)
+/// following it.
 fn draw_flight_path(
     mut commands: Commands,
     path: Res<FlightPath>,
@@ -250,75 +251,57 @@ fn draw_flight_path(
     points.extend(path.future.iter().skip(1).map(|p| (p - offset).as_vec3()));
 
     let cam = camera.translation();
-    let mut dots: Vec<(Vec3, f32)> = Vec::new();
-    // Arc-length walk: `carry` is the distance still to go before the next dot,
-    // carried across segment boundaries so corners don't double-dot.
-    let mut carry = 0.0f32;
-    'walk: for pair in points.windows(2) {
-        let seg = pair[1] - pair[0];
+    let Some(mesh) = ribbon_mesh(&points, cam) else {
+        *visibility = Visibility::Hidden;
+        return;
+    };
+    *visibility = Visibility::Visible;
+    // A fresh asset per rebuild (see [`TrajectoryLine`] for why not in-place mutation);
+    // replacing the `Mesh3d` handle drops the previous frame's mesh.
+    commands.entity(entity).insert(Mesh3d(meshes.add(mesh)));
+}
+
+/// Build a solid camera-facing ribbon following `points`: for each segment, offset both
+/// ends perpendicular to it *in the plane facing the camera* by a camera-distance-scaled
+/// half-width, so the strip reads as a line of roughly constant on-screen thickness that
+/// always faces the eye. `None` if the path has no drawable segment. The segments are
+/// short and nearly collinear (the path is smooth), so the tiny gaps/overlaps at the
+/// joints don't read. `None` when the path yields no drawable segment.
+fn ribbon_mesh(points: &[Vec3], cam: Vec3) -> Option<Mesh> {
+    let mut positions: Vec<[f32; 3]> = Vec::with_capacity(points.len() * 2);
+    let mut normals: Vec<[f32; 3]> = Vec::with_capacity(points.len() * 2);
+    let mut indices: Vec<u32> = Vec::with_capacity(points.len() * 6);
+    for pair in points.windows(2) {
+        let (a, b) = (pair[0], pair[1]);
+        let seg = b - a;
         let len = seg.length();
         if !len.is_finite() || len <= 1e-4 {
             continue; // degenerate or non-finite segment
         }
-        let dir = seg / len;
-        let mut t = carry;
-        while t < len {
-            let p = pair[0] + dir * t;
-            let dist = p.distance(cam);
-            dots.push((p, (dist * DOT_RADIUS_PER_M).max(MIN_RADIUS)));
-            if dots.len() >= MAX_DOTS {
-                break 'walk;
-            }
-            t += (dist * DOT_SPACING_PER_M).max(MIN_SPACING);
+        let seg_dir = seg / len;
+        // Perpendicular to the segment, in the plane facing the camera (segment × view).
+        let view = (0.5 * (a + b) - cam).normalize_or_zero();
+        let perp = seg_dir.cross(view).normalize_or_zero();
+        if perp == Vec3::ZERO {
+            continue; // segment points straight at/away from the eye — no facing width
         }
-        carry = t - len;
-    }
-
-    if dots.is_empty() {
-        *visibility = Visibility::Hidden;
-        return;
-    }
-    *visibility = Visibility::Visible;
-    // A fresh asset per rebuild (see [`TrajectoryLine`] for why not in-place mutation);
-    // replacing the `Mesh3d` handle drops the previous frame's mesh.
-    commands.entity(entity).insert(Mesh3d(meshes.add(dot_mesh(&dots))));
-}
-
-/// Build a mesh with one small octahedron per `(center, radius)` dot — the cheapest
-/// solid that reads as a round point from any angle (6 vertices, 8 faces).
-fn dot_mesh(dots: &[(Vec3, f32)]) -> Mesh {
-    const AXES: [Vec3; 6] = [
-        Vec3::X,
-        Vec3::NEG_X,
-        Vec3::Y,
-        Vec3::NEG_Y,
-        Vec3::Z,
-        Vec3::NEG_Z,
-    ];
-    // Outward-wound (CCW from outside) faces over the six axis vertices above.
-    const FACES: [[u32; 3]; 8] = [
-        [0, 2, 4],
-        [4, 2, 1],
-        [1, 2, 5],
-        [5, 2, 0],
-        [0, 4, 3],
-        [4, 1, 3],
-        [1, 5, 3],
-        [5, 0, 3],
-    ];
-    let mut positions = Vec::with_capacity(dots.len() * 6);
-    let mut normals = Vec::with_capacity(dots.len() * 6);
-    let mut indices = Vec::with_capacity(dots.len() * 24);
-    for (i, (center, radius)) in dots.iter().enumerate() {
-        let base = (i * 6) as u32;
-        for axis in AXES {
-            positions.push((*center + axis * *radius).to_array());
-            normals.push(axis.to_array());
+        let half = |p: Vec3| (p.distance(cam) * LINE_HALF_WIDTH_PER_M).max(MIN_HALF_WIDTH);
+        let (ha, hb) = (half(a) * perp, half(b) * perp);
+        let base = positions.len() as u32;
+        // Two triangles over the quad: (a+, a-, b+) and (b+, a-, b-).
+        for v in [a + ha, a - ha, b + hb, b - hb] {
+            positions.push(v.to_array());
+            normals.push((-view).to_array()); // face the camera (unlit ignores it anyway)
         }
-        indices.extend(FACES.iter().flat_map(|f| f.map(|v| base + v)));
+        indices.extend_from_slice(&[base, base + 1, base + 2, base + 2, base + 1, base + 3]);
     }
-    Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default())
-        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
-        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
-        .with_inserted_indices(Indices::U32(indices))
+    if indices.is_empty() {
+        return None;
+    }
+    Some(
+        Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default())
+            .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+            .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+            .with_inserted_indices(Indices::U32(indices)),
+    )
 }
