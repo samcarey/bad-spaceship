@@ -30,6 +30,12 @@ var<uniform> atmo: AtmosphereShell;
 // far side of the chord snaps from blocked (inside the disc) to visible (the halo).
 const LIMB_SOFT: f32 = 0.03;
 
+// Altitude (m above the shell's outer radius) over which the whole shell fades in as the
+// camera climbs out of the atmosphere. Back-face culling already hides the shell while
+// you're inside it; without this ramp it would snap fully on the instant you cross the
+// boundary. Fading over a few km makes it emerge smoothly as you rise and look back.
+const APPEAR_BAND: f32 = 3000.0;
+
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let world = in.world_position.xyz;
@@ -62,6 +68,11 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let t = smoothstep(rs2 * (1.0 - LIMB_SOFT), rs2 * (1.0 + LIMB_SOFT), b2);
     let path = mix(near_path, full_path, t);
 
-    let alpha = clamp(path * atmo.params.z, 0.0, 1.0) * atmo.color.a;
+    // Fade the whole shell in as the camera climbs above the atmosphere, so it emerges
+    // smoothly on the way out instead of snapping on at the boundary.
+    let cam_dist = length(cam - center);
+    let appear = smoothstep(r_top, r_top + APPEAR_BAND, cam_dist);
+
+    let alpha = clamp(path * atmo.params.z, 0.0, 1.0) * atmo.color.a * appear;
     return vec4<f32>(atmo.color.rgb, alpha);
 }
