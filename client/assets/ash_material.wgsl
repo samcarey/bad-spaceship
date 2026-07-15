@@ -152,6 +152,14 @@ fn vertex(v: Vertex) -> VertexOutput {
     // (outside the atmosphere) EVERY flake is culled — a band straddling the threshold
     // left ~5% of flakes (hash < 0.05) visible in space. 1 = full field, 0 = none.
     let keep = 1.0 - smoothstep(ash.density - 0.05, ash.density, r.z);
+    // A fully-culled flake still costs its rasterized fragments if only its alpha is
+    // zeroed (`NoFrustumCulling` keeps the mesh drawn at every altitude) — collapse it
+    // behind the far plane instead so it rasterizes nothing.
+    if keep <= 0.0 {
+        var gone: VertexOutput;
+        gone.clip_position = vec4<f32>(0.0, 0.0, 2.0, 1.0);
+        return gone;
+    }
     out.alpha = ash.color.a * near * edge * (0.4 + 0.6 * tumble) * keep;
     return out;
 }

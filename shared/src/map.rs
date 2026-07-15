@@ -38,7 +38,9 @@ pub const PLANET_RADIUS: f32 = 15_000.0;
 /// World-space y of the sphere's centre (surface minus radius).
 pub const PLANET_CENTER_Y: f32 = PLANET_SURFACE_Y - PLANET_RADIUS;
 /// The planet centre in true world coordinates — the single source for every module that
-/// measures radial distance (gravity, guidance, orbital energy).
+/// measures radial distance (gravity, guidance, orbital energy). Mirrored as `CENTER`
+/// in `atmosphere_fog.wgsl` (shaders can't import Rust consts — retune `PLANET_DROP` /
+/// `PLANET_RADIUS` and the shader copy must follow; `wgsl_constants_mirror_rust` pins it).
 pub const PLANET_CENTER: Vec3 = Vec3::new(0.0, PLANET_CENTER_Y, 0.0);
 /// Height a grounded avatar respawns at once it falls off the cliffs — 2 m above the
 /// planet surface, so it never visibly clips into the magma. Shared by the server
@@ -68,7 +70,7 @@ pub const SURFACE_GRAVITY: f32 = 9.81;
 /// Distance from the planet centre to the platform play surface (world y = 0) — the
 /// radius at which gravity equals [`SURFACE_GRAVITY`]. Equals `PLANET_RADIUS +
 /// PLANET_DROP` (= `-PLANET_CENTER_Y`): the platform sits `PLANET_DROP` above the 15 km
-/// sphere.
+/// sphere. Mirrored as `R_SURFACE` in `atmosphere_fog.wgsl` (see [`PLANET_CENTER`]).
 pub const GRAVITY_REF_RADIUS: f32 = -PLANET_CENTER_Y;
 /// Standard gravitational parameter μ = g₀·R² (m³/s²) — the planet's mass expressed the
 /// way the inverse-square law needs it, tuned so `gravity_at` yields [`SURFACE_GRAVITY`]
@@ -107,14 +109,16 @@ pub fn apply_gravity_correction(forces: &mut ForcesItem, true_pos: Vec3, gravity
 // Atmosphere + aerodynamic drag
 // ---------------------------------------------------------------------------
 //
-// The planet wears a thin shell of air that thins to nothing with altitude. One
-// scalar — [`atmosphere_fraction`] (1 at the surface, 0 at [`ATMOSPHERE_TOP_ALT`]) —
-// drives *everything*: the physics air density, the aero drag on a launched stack,
-// the distance-haze the camera renders, the ash-particle density, and (inverted) the
-// star visibility. Keeping it a single shared function is the same discipline
-// [`gravity_at`] uses — the sim and the autopilot's planning model both read the exact
-// same density, so the flown drag and the planned-for drag can never disagree, and the
-// visuals fade in lockstep with the physics that motivates them.
+// The planet wears a barometric shell of air, described by TWO exponential profiles
+// off one shared shape ([`barometric_fraction`]): the GAS ([`atmosphere_fraction`],
+// H = [`ATMOSPHERE_SCALE_HEIGHT`]) drives the physics — air density and the aero drag
+// on a launched stack — while the SMOG ([`atmosphere_optical_fraction`],
+// H/4 = [`ATMOSPHERE_OPTICAL_SCALE_HEIGHT`]) drives everything you see: the haze
+// extinction, the ash-flake density, and (through the shaders' ray integrals) the sky
+// and star visibility. Sharing the functions is the same discipline [`gravity_at`]
+// uses — the sim and the autopilot's planning model read the exact same gas density,
+// so the flown drag and the planned-for drag can never disagree, and every visual
+// reads the exact same smog density, so haze and ash thin in lockstep.
 
 /// Radial altitude (m) above the platform play surface: the true distance from the
 /// planet centre minus the reference radius. On a sphere this — not raw world `y` — is
@@ -149,16 +153,11 @@ pub const ATMOSPHERE_OPTICAL_SCALE_HEIGHT: f32 = ATMOSPHERE_SCALE_HEIGHT / 4.0;
 
 /// The smog's density as a fraction of its surface density — the barometric exponential
 /// on the *optical* scale height. Drives everything visual (haze extinction, ash-flake
-/// density); [`atmosphere_fraction`] (the gas) drives the drag physics.
+/// density); [`atmosphere_fraction`] (the gas) drives the drag physics. Mirrored exactly
+/// by `density_frac` in `atmosphere_fog.wgsl` (the shaders' ray integrals sample this
+/// profile).
 pub fn atmosphere_optical_fraction(true_pos: Vec3) -> f32 {
-    let alt = radial_altitude(true_pos);
-    if alt <= 0.0 {
-        return 1.0;
-    }
-    if alt >= ATMOSPHERE_TOP_ALT {
-        return 0.0;
-    }
-    (-alt / ATMOSPHERE_OPTICAL_SCALE_HEIGHT).exp()
+    barometric_fraction(radial_altitude(true_pos), ATMOSPHERE_OPTICAL_SCALE_HEIGHT)
 }
 
 /// Air density (kg/m³) at the surface. Tuned small for this toy scale: a 2 m sphere at
@@ -184,21 +183,24 @@ pub const DRAG_K: f32 = 0.5
     * (DRAG_DIAMETER * 0.5)
     * (DRAG_DIAMETER * 0.5);
 
-/// The atmosphere's density as a fraction of surface density at a true world position:
-/// the barometric exponential `e^(−alt/H)` — `1` at/below the surface, halving every
-/// ~0.7·[`ATMOSPHERE_SCALE_HEIGHT`], fading gradually with no physical edge (clamped to
-/// zero only past the negligible [`ATMOSPHERE_TOP_ALT`]). This is the master profile
-/// every atmospheric effect reads (drag, haze, ash, star visibility) — mirrored exactly
-/// by `density_frac` in `atmosphere_fog.wgsl`.
-pub fn atmosphere_fraction(true_pos: Vec3) -> f32 {
-    let alt = radial_altitude(true_pos);
+/// The one barometric shape both profiles share: `e^(−alt/H)`, clamped to `1` at/below
+/// the surface and to `0` past the (numerically negligible) [`ATMOSPHERE_TOP_ALT`].
+fn barometric_fraction(alt: f32, scale_height: f32) -> f32 {
     if alt <= 0.0 {
         return 1.0;
     }
     if alt >= ATMOSPHERE_TOP_ALT {
         return 0.0;
     }
-    (-alt / ATMOSPHERE_SCALE_HEIGHT).exp()
+    (-alt / scale_height).exp()
+}
+
+/// The **gas** density as a fraction of surface density at a true world position: the
+/// barometric exponential on [`ATMOSPHERE_SCALE_HEIGHT`] — `1` at/below the surface,
+/// halving every ~0.7·H, fading gradually with no physical edge. This is what the
+/// drag physics (and the autopilot's planning model) fly through.
+pub fn atmosphere_fraction(true_pos: Vec3) -> f32 {
+    barometric_fraction(radial_altitude(true_pos), ATMOSPHERE_SCALE_HEIGHT)
 }
 
 /// Air density (kg/m³) at a true world position — surface density scaled by
@@ -221,6 +223,17 @@ pub fn drag_force(true_pos: Vec3, true_vel: Vec3) -> Vec3 {
         return Vec3::ZERO;
     }
     -DRAG_K * air_density_at(true_pos) * speed * true_vel
+}
+
+/// Apply the assembly's aerodynamic drag to one member body: [`drag_force`] at the
+/// assembly's **local** COM (`com`), from its **true** (frame-folded) state. Applying
+/// the whole stack's drag at its COM to any one welded member is a pure force on the
+/// rigid assembly — zero net torque about the COM, the same shape thrust uses — so the
+/// choice of member is immaterial (callers use their first rocket). The shared-helper
+/// discipline of [`apply_gravity_correction`]: server, single-player, and predicted
+/// client all route through here, so the flown drag can't drift between worlds.
+pub fn apply_assembly_drag(forces: &mut ForcesItem, com: Vec3, true_com: Vec3, true_vel: Vec3) {
+    forces.apply_force_at_point(drag_force(true_com, true_vel), com);
 }
 
 /// The Avian collision-layer bit the ground sits on: bit 0 (value 1), Avian's
@@ -391,6 +404,34 @@ mod tests {
         assert!(at(ATMOSPHERE_TOP_ALT - 1.0) < 1e-3, "truncation point is negligible");
         assert_eq!(at(ATMOSPHERE_TOP_ALT), 0.0);
         assert_eq!(air_density_at(Vec3::new(0.0, ATMOSPHERE_TOP_ALT + 5_000.0, 0.0)), 0.0);
+    }
+
+    /// The WGSL fog library hand-mirrors constants from this module (shaders can't
+    /// import Rust consts). Struct-layout mirrors fail loudly at pipeline creation;
+    /// these scalars fail SILENTLY (the fog shell detaches from the physics planet,
+    /// visible only at altitude) — so pin each mirrored literal to its Rust source.
+    #[test]
+    fn wgsl_constants_mirror_rust() {
+        let wgsl = include_str!("../../client/assets/atmosphere_fog.wgsl");
+        let has = |needle: &str, what: &str| {
+            assert!(wgsl.contains(needle), "atmosphere_fog.wgsl lost its {what}: `{needle}`");
+        };
+        has(&format!("vec3<f32>(0.0, {:.1}, 0.0)", PLANET_CENTER_Y), "CENTER (PLANET_CENTER)");
+        has(&format!("R_SURFACE: f32 = {:.1}", GRAVITY_REF_RADIUS), "R_SURFACE (GRAVITY_REF_RADIUS)");
+        has(
+            &format!("H: f32 = {:.1}", ATMOSPHERE_OPTICAL_SCALE_HEIGHT),
+            "H (ATMOSPHERE_OPTICAL_SCALE_HEIGHT)",
+        );
+        // FOG_RGB mirrors atmosphere.rs's srgb(0.55, 0.20, 0.11) in linear space; verify
+        // the literals in the shader are that conversion (guards a hand-recompute slip).
+        let expect = bevy::color::Color::srgb(0.55, 0.20, 0.11).to_linear();
+        for (channel, value) in [("r", expect.red), ("g", expect.green), ("b", expect.blue)] {
+            let printed = format!("{value:.4}");
+            assert!(
+                wgsl.contains(&printed),
+                "FOG_RGB {channel} should be {printed} (linear of srgb 0.55/0.20/0.11)"
+            );
+        }
     }
 
     #[test]

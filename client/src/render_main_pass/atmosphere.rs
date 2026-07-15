@@ -1,9 +1,10 @@
 //! The atmosphere, physically based, from one model at every altitude.
 //!
-//! The planet wears an exponential shell of lava-lit smog (`map::atmosphere_fraction`
-//! — the same profile the drag physics flies through). What any pixel sees is the
-//! optical depth of its sightline through that air, `τ = extinction·∫ρ dl`, computed by
-//! the shared WGSL library `bad_spaceship::atmosphere` (`atmosphere_fog.wgsl`):
+//! The planet wears a barometric shell of lava-lit smog (`map::
+//! atmosphere_optical_fraction` — the aerosol sibling of the gas profile the drag
+//! physics flies through, settling 4× lower). What any pixel sees is the optical depth
+//! of its sightline through that smog, `τ = extinction·∫ρ dl`, computed by the shared
+//! WGSL library `bad_spaceship::atmosphere` (`atmosphere_fog.wgsl`):
 //!
 //! - **The sky** is a dome (`sky.wgsl`) shading every direction as
 //!   `smog·(1−T) + stars·T` along the infinite ray. The ground-level smog wall, stars
@@ -34,7 +35,7 @@ use bevy_egui::PrimaryEguiContext;
 
 use bad_spaceship_shared::map::atmosphere_optical_fraction;
 
-use super::AshMaterial;
+use super::{AshMaterial, FrameOffsetMaterial};
 
 pub const ATMOSPHERE_FOG_SHADER_HANDLE: Handle<Shader> =
     uuid_handle!("8d5b2e91-4c7a-4f06-b3e8-a1d92c60f574");
@@ -53,11 +54,30 @@ const FOG_COLOR: Color = Color::srgb(0.55, 0.20, 0.11);
 
 /// The sky dome (`sky.wgsl`): smog + stars from the atmosphere integral, per direction.
 /// The one uniform is the room's visual floating-origin offset (xyz), folding the
-/// camera back into the true planet frame during a rebased ascent.
+/// camera back into the true planet frame during a rebased ascent — driven by the same
+/// `pin_material_frames` loop as every other world-anchored material (see
+/// [`FrameOffsetMaterial`]), so the sky and the exact-fogged planet can never read
+/// different frames on the same frame.
 #[derive(Asset, AsBindGroup, Debug, Clone, TypePath)]
 pub struct SkyMaterial {
     #[uniform(0)]
     frame_offset: Vec4,
+}
+
+impl FrameOffsetMaterial for SkyMaterial {
+    /// Raw xyz, like grass/magma: the integral needs the true offset, and by the time
+    /// f32 loses precision the ray is saturated or out of the atmosphere entirely.
+    fn frame_target(&self, visual_offset: bevy::math::DVec3) -> Vec4 {
+        visual_offset.as_vec3().extend(0.0)
+    }
+
+    fn stored_frame(&self) -> Vec4 {
+        self.frame_offset
+    }
+
+    fn set_stored_frame(&mut self, value: Vec4) {
+        self.frame_offset = value;
+    }
 }
 
 impl Material for SkyMaterial {
@@ -115,10 +135,11 @@ fn spawn_sky(
     ));
 }
 
-/// Drive the near-field pieces from the camera's local air, and the sky from the
-/// floating-origin frame. One `atmosphere_fraction` evaluation feeds the
-/// [`DistanceFog`] density and the ash cull so they can never disagree; asset writes
-/// are gated on change (mutating an asset flags a GPU re-upload).
+/// Drive the near-field pieces from the camera's local smog: one
+/// `atmosphere_optical_fraction` evaluation feeds the [`DistanceFog`] density and the
+/// ash cull so they can never disagree; asset writes are gated on change (mutating an
+/// asset flags a GPU re-upload). (The sky's frame offset rides `pin_material_frames`
+/// with the other world-anchored materials.)
 fn update_atmosphere(
     mut commands: Commands,
     // Present only in multiplayer (the floating-origin frame); single-player true == local.
@@ -128,7 +149,6 @@ fn update_atmosphere(
         (With<Camera3d>, With<PrimaryEguiContext>),
     >,
     mut ash: ResMut<Assets<AshMaterial>>,
-    mut skies: ResMut<Assets<SkyMaterial>>,
 ) {
     let offset = frame.map(|f| f.offset.as_vec3()).unwrap_or(Vec3::ZERO);
     let Some((entity, transform, fog)) = cameras.iter_mut().next() else {
@@ -154,23 +174,12 @@ fn update_atmosphere(
         }
     }
 
-    // Ash thins with the air (its shader culls flakes by this fraction).
+    // Ash thins with the smog (its shader culls flakes by this fraction).
     let ash_ids: Vec<_> = ash.ids().collect();
     for id in ash_ids {
         if ash.get(id).is_some_and(|m| m.density() != fraction) {
             if let Some(mut m) = ash.get_mut(id) {
                 m.set_density(fraction);
-            }
-        }
-    }
-
-    // The sky integrates from the camera's true position: hand it the frame offset.
-    let target = offset.extend(0.0);
-    let sky_ids: Vec<_> = skies.ids().collect();
-    for id in sky_ids {
-        if skies.get(id).is_some_and(|m| m.frame_offset != target) {
-            if let Some(mut m) = skies.get_mut(id) {
-                m.frame_offset = target;
             }
         }
     }

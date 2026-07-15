@@ -26,6 +26,7 @@ use bevy::{
 };
 use ash_material::{spawn_ash_field, ASH_SHADER_HANDLE};
 pub use ash_material::AshMaterial;
+pub use atmosphere::SkyMaterial;
 use flame_material::{
     register_flame_mesh, spawn_flame, update_flames, FlameMaterial, FLAME_SHADER_HANDLE,
 };
@@ -107,6 +108,8 @@ impl Plugin for RenderMainPassPlugin {
             "../../assets/flame_material.wgsl",
             Shader::from_wgsl
         );
+        // The atmosphere module registers its own fog library + sky material.
+        atmosphere::plugin(app);
         app.add_plugins((
             MaterialPlugin::<GrassMaterial>::default(),
             MaterialPlugin::<MagmaMaterial>::default(),
@@ -114,9 +117,7 @@ impl Plugin for RenderMainPassPlugin {
             MaterialPlugin::<AshMaterial>::default(),
             MaterialPlugin::<FlameMaterial>::default(),
         ))
-            .add_systems(Startup, (add_lighting, spawn_ash_field));
-        atmosphere::plugin(app);
-        app
+            .add_systems(Startup, (add_lighting, spawn_ash_field))
             .add_systems(
                 Startup,
                 |mut meshes: ResMut<Assets<Mesh>>| register_flame_mesh(&mut meshes),

@@ -21,7 +21,9 @@ use bevy::transform::TransformSystems;
 use lightyear::prediction::correction::VisualCorrection;
 use lightyear::prediction::rollback::RollbackSystems;
 
-use crate::render_main_pass::{AshMaterial, FrameOffsetMaterial, GrassMaterial, MagmaMaterial};
+use crate::render_main_pass::{
+    AshMaterial, FrameOffsetMaterial, GrassMaterial, MagmaMaterial, SkyMaterial,
+};
 use bad_spaceship_shared::character::{
     insert_character_body, insert_remote_avatar_body, CharacterMovement, Config as CharacterConfig,
 };
@@ -1002,6 +1004,9 @@ fn sync_visual_room_frame(
     mut grass_materials: ResMut<Assets<GrassMaterial>>,
     magma: Query<&MeshMaterial3d<MagmaMaterial>>,
     mut magma_materials: ResMut<Assets<MagmaMaterial>>,
+    // The sky dome's transmittance integral folds the camera back into the true frame.
+    sky: Query<&MeshMaterial3d<SkyMaterial>>,
+    mut sky_materials: ResMut<Assets<SkyMaterial>>,
 ) {
     // One room per client: its orb is the only entity carrying a frame.
     let Some(net) = net_frames.iter().next() else {
@@ -1064,6 +1069,7 @@ fn sync_visual_room_frame(
     pin_material_frames(&ash, &mut ash_materials, offset);
     pin_material_frames(&grass, &mut grass_materials, offset);
     pin_material_frames(&magma, &mut magma_materials, offset);
+    pin_material_frames(&sky, &mut sky_materials, offset);
 }
 
 /// Re-anchor every handle of a world-anchored procedural material to the room's

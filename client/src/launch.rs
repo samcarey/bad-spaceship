@@ -421,8 +421,6 @@ fn apply_sp_thrust(
         PitchProgram::plan(com, spin.linear_velocity, geometry.len(), gravity.0, total_mass, None)
     });
     let guidance = program_guidance(com, spin.linear_velocity, program, &mut cut);
-    // Single player has no floating-origin frame, so true state == local.
-    let drag = bad_spaceship_shared::map::drag_force(com, spin.linear_velocity);
     let net_force = apply_thrust(
         com,
         gravity.0,
@@ -431,7 +429,9 @@ fn apply_sp_thrust(
         time.delta_secs(),
         &mut integral,
         guidance,
-        drag,
+        // Single player has no floating-origin frame, so true state == local.
+        com,
+        spin.linear_velocity,
         &mut fuel.0,
         &mut set.p2(),
     );
@@ -549,9 +549,6 @@ fn apply_mp_thrust(
         ));
     }
     let guidance = program_guidance(true_com, true_vel, mp_plan.as_ref().unwrap(), &mut cut);
-    // Drag from the true (frame-folded) state — same force the server applies, so
-    // prediction converges; applied at the local COM inside `apply_thrust`.
-    let drag = bad_spaceship_shared::map::drag_force(true_com, true_vel);
     let net_force = apply_thrust(
         com,
         gravity.0,
@@ -560,7 +557,10 @@ fn apply_mp_thrust(
         time.delta_secs(),
         &mut integral,
         guidance,
-        drag,
+        // True (frame-folded) state — the same drag the server applies, so prediction
+        // converges.
+        true_com,
+        true_vel,
         &mut fuel.0,
         &mut set.p1(),
     );
@@ -612,10 +612,10 @@ fn apply_thrust(
     dt: f32,
     integral: &mut Vec3,
     guidance: Guidance,
-    // Aerodynamic drag on the whole assembly this tick (see `map::drag_force`), a world
-    // force applied at the local COM to the first rocket — a pure force on the rigid
-    // stack (zero net torque about the COM), the same shape thrust uses.
-    drag: Vec3,
+    // The assembly's TRUE (frame-folded) state, for the aerodynamic drag (see the
+    // shared `map::apply_assembly_drag` for the physics); single-player true == local.
+    true_com: Vec3,
+    true_vel: Vec3,
     fuel: &mut f32,
     rocket_forces: &mut Query<
         (Entity, Forces, &mut Gimbal, Option<&mut FlameThrottle>),
@@ -641,9 +641,9 @@ fn apply_thrust(
             }
         }
     }
-    // Charge the whole assembly's drag to the first rocket, at the assembly COM.
+    // Charge the whole assembly's drag to the first rocket (see `apply_assembly_drag`).
     if let Ok((_, mut forces, _, _)) = rocket_forces.get_mut(geometry[0].0) {
-        forces.apply_force_at_point(drag, com);
+        bad_spaceship_shared::map::apply_assembly_drag(&mut forces, com, true_com, true_vel);
     }
     net_force
 }

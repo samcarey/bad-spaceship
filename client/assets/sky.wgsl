@@ -16,15 +16,12 @@
 
 #import bevy_pbr::mesh_view_bindings::view
 #import bad_spaceship::atmosphere::{transmittance, FOG_RGB}
+#import bad_spaceship::noise::hash33
 
 // The room's visual floating-origin offset (xyz; w padding): camera TRUE position =
 // render position + this, so the integral sees real altitude during a rebased ascent.
 @group(#{MATERIAL_BIND_GROUP}) @binding(0)
 var<uniform> sky_frame_offset: vec4<f32>;
-
-// Apparent dome distance (m); arbitrary (the depth is overridden to the far plane and
-// the shading depends only on direction) — just comfortably past the near scene.
-const DOME_RADIUS: f32 = 900.0;
 
 struct Vertex {
     @location(0) position: vec3<f32>,
@@ -36,22 +33,15 @@ struct VertexOutput {
     @location(0) dir: vec3<f32>,
 };
 
-// Dave Hoskins' hash33 (https://www.shadertoy.com/view/4djSRW, CC0): a 3-vector seed to
-// three decorrelated randoms in [0,1).
-fn hash33(p: vec3<f32>) -> vec3<f32> {
-    var p3 = fract(p * vec3<f32>(0.1031, 0.1030, 0.0973));
-    p3 += dot(p3, p3.yxz + 33.33);
-    return fract((p3.xxy + p3.yzz) * p3.zyx);
-}
-
 @vertex
 fn vertex(v: Vertex) -> VertexOutput {
     let dir = normalize(v.position);
-    let world = view.world_position + dir * DOME_RADIUS;
-    let clip = view.clip_from_world * vec4<f32>(world, 1.0);
+    // Project the direction at infinity (w = 0 drops the camera translation — the
+    // standard skybox projection), then pin the depth to the far plane (reverse-Z:
+    // far = 0) so EVERY piece of scene geometry — the planet included — occludes the
+    // sky behind it.
+    let clip = view.clip_from_world * vec4<f32>(dir, 0.0);
     var out: VertexOutput;
-    // Pin the dome to the far plane (reverse-Z: far = 0) so EVERY piece of scene
-    // geometry — the planet included — occludes the sky behind it.
     out.clip_position = vec4<f32>(clip.xy, 0.0, clip.w);
     out.dir = dir;
     return out;
@@ -83,5 +73,11 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let dir = normalize(in.dir);
     let cam_true = view.world_position + sky_frame_offset.xyz;
     let t = transmittance(cam_true, dir, 1.0e9);
+    // Deep in the smog (the whole sky at pad level) the stars contribute nothing —
+    // skip their trig/hash entirely. Warp-coherent: neighbouring fragments share the
+    // regime, so the branch genuinely saves the work.
+    if t < 0.001 {
+        return vec4<f32>(FOG_RGB, 1.0);
+    }
     return vec4<f32>(starfield(dir) * t + FOG_RGB * (1.0 - t), 1.0);
 }

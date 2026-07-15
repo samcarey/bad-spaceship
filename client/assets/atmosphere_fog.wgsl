@@ -1,9 +1,10 @@
 // Physically-based atmosphere transmittance, shared by every shader that fogs.
 //
-// ONE model for ALL altitudes: the atmosphere is a density profile ρ(altitude) around
-// the planet (the same renormalised exponential as `map::atmosphere_fraction` — the
-// profile the drag physics flies through), and what any sightline sees is its optical
-// depth, τ = extinction · ∫ ρ dl along the ray, giving transmittance T = e^(−τ).
+// ONE model for ALL altitudes: the smog is a barometric density profile ρ(altitude)
+// around the planet (the exact mirror of `map::atmosphere_optical_fraction` — the
+// aerosol sibling of the gas profile the drag physics flies through), and what any
+// sightline sees is its optical depth, τ = extinction · ∫ ρ dl along the ray, giving
+// transmittance T = e^(−τ).
 // Everything the game needs falls out of that single integral with no special cases:
 //   * standing on the pad, rays toward the horizon rack up τ fast → a smog wall, while
 //     the zenith column is finite → the sky brightens (and stars first pierce) overhead;
@@ -39,30 +40,23 @@ const EXTINCTION: f32 = 0.007;
 // Mirrors FOG_COLOR in atmosphere.rs (srgb 0.55, 0.20, 0.11).
 const FOG_RGB: vec3<f32> = vec3<f32>(0.2633, 0.0331, 0.0116);
 
-// Integration samples along the in-atmosphere segment. The profile is smooth (scale
-// height 2 km) and even the longest grazing chord (~54 km) has its density concentrated
-// in a ~15 km lobe around the tangent point, so midpoint sampling every ~2 km resolves
-// it to a few percent.
-const SAMPLES: i32 = 24;
-
-// Air density as a fraction of surface density at a TRUE world position — the exact
-// mirror of `map::atmosphere_fraction`: the barometric exponential e^(−alt/H), fading
-// gradually with no edge (clamped to zero only past the negligible TOP).
-fn density_frac(p: vec3<f32>) -> f32 {
-    let alt = length(p - CENTER) - R_SURFACE;
-    if alt <= 0.0 {
-        return 1.0;
-    }
-    if alt >= TOP {
-        return 0.0;
-    }
-    return exp(-alt / H);
-}
+// Integration-sample cap. The profile is smooth (H = 500 m) and the longest possible
+// grazing chord (~23 km through the 4 km clip shell) concentrates its density in a
+// ~8 km lobe around the tangent point; the adaptive count below samples every ~1 km up
+// to this cap, which resolves that lobe to a few percent.
+const MAX_SAMPLES: i32 = 24;
 
 // Transmittance e^(−τ) along the ray `cam + t·dir` for t ∈ [0, max_dist], with the
 // integral clipped to the atmosphere sphere (radius R_SURFACE + TOP) — rays that never
 // enter the air return 1 without sampling. `cam` is the TRUE camera position (frame
 // offset folded in); `dir` unit; pass a huge `max_dist` (e.g. 1e9) for sky rays.
+//
+// The density along the ray is the barometric e^(−alt/H) — the exact mirror of
+// `map::atmosphere_optical_fraction` — evaluated in impact-parameter form: the radial
+// distance at parameter t is √(b² + (t − tca)²), so each sample is one fma + sqrt +
+// exp with no vector traffic. The sample count scales with the clipped segment
+// (~1 per km): a 20 m sightline to the nearby ground pays 1 sample, only the long
+// limb-grazing chords pay the full cap.
 fn transmittance(cam: vec3<f32>, dir: vec3<f32>, max_dist: f32) -> f32 {
     let r_top = R_SURFACE + TOP;
     let oc = CENTER - cam;
@@ -78,10 +72,14 @@ fn transmittance(cam: vec3<f32>, dir: vec3<f32>, max_dist: f32) -> f32 {
     if t1 <= t0 {
         return 1.0; // atmosphere lies behind the camera or beyond the target
     }
-    let dt = (t1 - t0) / f32(SAMPLES);
+    let n = clamp(i32((t1 - t0) * (1.0 / 1000.0)) + 1, 1, MAX_SAMPLES);
+    let dt = (t1 - t0) / f32(n);
     var tau = 0.0;
-    for (var i = 0; i < SAMPLES; i++) {
-        tau += density_frac(cam + dir * (t0 + (f32(i) + 0.5) * dt));
+    for (var i = 0; i < n; i++) {
+        let along = t0 + (f32(i) + 0.5) * dt - tca;
+        // Below-surface clamp (a chord can graze the sub-platform bowl): full density.
+        let alt = max(sqrt(b2 + along * along) - R_SURFACE, 0.0);
+        tau += exp(-alt / H);
     }
     return exp(-tau * EXTINCTION * dt);
 }
