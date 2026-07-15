@@ -139,11 +139,13 @@ pub const ATMOSPHERE_SCALE_HEIGHT: f32 = 2_000.0;
 pub const ATMOSPHERE_TOP_ALT: f32 = 8.0 * ATMOSPHERE_SCALE_HEIGHT;
 
 /// e-folding height (m) of the **optical** (smog/aerosol) profile — what you SEE, as
-/// opposed to the gas you feel as drag. Half the gas scale height: real aerosols settle
-/// far lower than the air that carries them (Earth: ~1–2 km vs 8.4 km), so the ship
-/// climbs visually clear of the smog while still brushing thin-air drag above it.
-/// Mirrored by `H` in `atmosphere_fog.wgsl`.
-pub const ATMOSPHERE_OPTICAL_SCALE_HEIGHT: f32 = ATMOSPHERE_SCALE_HEIGHT / 2.0;
+/// opposed to the gas you feel as drag. A quarter of the gas scale height: real
+/// aerosols settle far lower than the air that carries them (Earth: ~1–2 km vs 8.4 km),
+/// so the ship climbs visually clear of the smog while still brushing thin-air drag
+/// above it. Drives haze extinction AND the ash-flake density (both read
+/// [`atmosphere_optical_fraction`]), so they thin in lockstep. Mirrored by `H` in
+/// `atmosphere_fog.wgsl`.
+pub const ATMOSPHERE_OPTICAL_SCALE_HEIGHT: f32 = ATMOSPHERE_SCALE_HEIGHT / 4.0;
 
 /// The smog's density as a fraction of its surface density — the barometric exponential
 /// on the *optical* scale height. Drives everything visual (haze extinction, ash-flake

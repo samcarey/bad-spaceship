@@ -25,10 +25,10 @@ const CENTER: vec3<f32> = vec3<f32>(0.0, -15020.0, 0.0);
 // Radius of the platform play surface (map::GRAVITY_REF_RADIUS): altitude zero.
 const R_SURFACE: f32 = 15020.0;
 // e-folding height of the OPTICAL (smog/aerosol) profile — what you see
-// (map::ATMOSPHERE_OPTICAL_SCALE_HEIGHT). Half the gas/drag scale height: aerosols
-// settle far lower than the air that carries them, so the ship climbs visually clear
-// of the smog while still brushing thin-air drag.
-const H: f32 = 1000.0;
+// (map::ATMOSPHERE_OPTICAL_SCALE_HEIGHT). A quarter of the gas/drag scale height:
+// aerosols settle far lower than the air that carries them, so the ship climbs
+// visually clear of the smog while still brushing thin-air drag.
+const H: f32 = 500.0;
 // Numerical truncation altitude (8·H, density e⁻⁸ ≈ 0.03%) — NOT a visible edge, just
 // where the ray-clip sphere ends. A real exponential atmosphere has no top.
 const TOP: f32 = 8.0 * H;
