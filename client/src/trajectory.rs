@@ -12,12 +12,16 @@
 //! does rather than freezing the launch-day plan; after the escape cutoff it shows the
 //! engines-off ballistic coast instead.
 //!
-//! Rendering is one rebuilt-per-frame **camera-facing ribbon** — a solid strip whose
-//! half-width scales with camera distance, so the line holds a roughly constant on-screen
-//! thickness from the pad to a plan-end tens of kilometres up. The material is unlit with
-//! fog disabled: the trajectory is an instrument overlay, and it must stay legible
-//! **through** the smog it is about to climb out of — while still depth-tested, so the
-//! planet properly occludes the far side of an orbit-scale arc.
+//! Rendering is one rebuilt-per-frame **3D tube** — a thin extruded pipe following the
+//! path, its radius scaling with camera distance so the line holds a roughly constant
+//! on-screen thickness from the pad to a plan-end tens of kilometres up. (A camera-facing
+//! flat ribbon was tried first and rejected: a billboarded strip collapses to a
+//! flickering 2D sliver when viewed edge-on — looking along the line — and creases at
+//! bends. A tube reads identically from every angle.) The frame is carried along the path
+//! by parallel transport so the tube never kinks. The material is unlit with fog
+//! disabled: the trajectory is an instrument overlay, and it must stay legible **through**
+//! the smog it is about to climb out of — while still depth-tested, so the planet properly
+//! occludes the far side of an orbit-scale arc.
 
 use bad_spaceship_shared::guidance::{
     propagate, GROUND_RADIUS, OPTIMIZER_DT, OPTIMIZER_STEPS,
@@ -65,11 +69,14 @@ const COAST_SAMPLE_EVERY: usize = 4;
 const MAX_TRAIL: usize = 4096;
 const TRAIL_MIN_STEP: f64 = 2.0;
 
-/// Line thickness: half-width as a fraction of the camera distance (so the ribbon holds
-/// a roughly constant on-screen width from the pad to a plan-end tens of km up), floored
-/// so the near end never collapses to nothing.
-const LINE_HALF_WIDTH_PER_M: f32 = 0.00075;
-const MIN_HALF_WIDTH: f32 = 0.0125;
+/// Line thickness: tube radius as a fraction of the camera distance (so it holds a
+/// roughly constant on-screen width from the pad to a plan-end tens of km up), floored so
+/// the near end never collapses to nothing.
+const LINE_RADIUS_PER_M: f32 = 0.00075;
+const MIN_RADIUS: f32 = 0.0125;
+/// Cross-section sides of the tube. Few: it's a thin line, so it only needs to read as
+/// round-ish from any angle, not be smooth.
+const TUBE_SIDES: usize = 5;
 
 /// The recorded + predicted flight path, in true planet-frame coordinates.
 #[derive(Resource, Default)]
@@ -115,10 +122,6 @@ fn spawn_trajectory_line(
             unlit: true,
             // An instrument overlay: must read through the smog (see the module doc).
             fog_enabled: false,
-            // The ribbon is a flat camera-facing strip; show it from either side so its
-            // winding relative to the eye never matters.
-            cull_mode: None,
-            double_sided: true,
             ..default()
         })),
         // The mesh is rebuilt around the camera every frame; its baked AABB means nothing.
@@ -220,8 +223,7 @@ fn coast_path(mut pos: Vec3, mut vel: Vec3, mass: f32) -> Vec<DVec3> {
 }
 
 /// Rebuild the line mesh: fold the true-frame path into room-local coordinates and
-/// build a camera-facing ribbon (a solid strip of roughly constant on-screen width)
-/// following it.
+/// build a thin 3D tube (roughly constant on-screen width) following it.
 fn draw_flight_path(
     mut commands: Commands,
     path: Res<FlightPath>,
@@ -253,7 +255,7 @@ fn draw_flight_path(
     points.extend(path.future.iter().skip(1).map(|p| (p - offset).as_vec3()));
 
     let cam = camera.translation();
-    let Some(mesh) = ribbon_mesh(&points, cam) else {
+    let Some(mesh) = tube_mesh(&points, cam) else {
         *visibility = Visibility::Hidden;
         return;
     };
@@ -263,42 +265,61 @@ fn draw_flight_path(
     commands.entity(entity).insert(Mesh3d(meshes.add(mesh)));
 }
 
-/// Build a solid camera-facing ribbon following `points`: for each segment, offset both
-/// ends perpendicular to it *in the plane facing the camera* by a camera-distance-scaled
-/// half-width, so the strip reads as a line of roughly constant on-screen thickness that
-/// always faces the eye. `None` if the path has no drawable segment. The segments are
-/// short and nearly collinear (the path is smooth), so the tiny gaps/overlaps at the
-/// joints don't read. `None` when the path yields no drawable segment.
-fn ribbon_mesh(points: &[Vec3], cam: Vec3) -> Option<Mesh> {
-    let mut positions: Vec<[f32; 3]> = Vec::with_capacity(points.len() * 2);
-    let mut normals: Vec<[f32; 3]> = Vec::with_capacity(points.len() * 2);
-    let mut indices: Vec<u32> = Vec::with_capacity(points.len() * 6);
-    for pair in points.windows(2) {
-        let (a, b) = (pair[0], pair[1]);
-        let seg = b - a;
-        let len = seg.length();
-        if !len.is_finite() || len <= 1e-4 {
-            continue; // degenerate or non-finite segment
+/// Build a thin tube following `points`: one [`TUBE_SIDES`]-gon ring per point (radius
+/// scaled by the point's camera distance), consecutive rings stitched into a pipe. The
+/// ring frame is carried along the path by **parallel transport** — each ring's basis is
+/// the previous one re-orthogonalised against the new tangent — so there is no twist or
+/// kink even where the tangent swings through a world axis. Unlike a camera-facing
+/// billboard, a tube never collapses edge-on. `None` when the path is too short to draw.
+///
+/// First the points are de-duplicated (a stalled assembly re-records the same spot; a
+/// zero-length segment has no tangent), so the frame math always sees a real direction.
+fn tube_mesh(points: &[Vec3], cam: Vec3) -> Option<Mesh> {
+    let mut pts: Vec<Vec3> = Vec::with_capacity(points.len());
+    for &p in points {
+        if p.is_finite() && pts.last().is_none_or(|&last| last.distance(p) > 1e-3) {
+            pts.push(p);
         }
-        let seg_dir = seg / len;
-        // Perpendicular to the segment, in the plane facing the camera (segment × view).
-        let view = (0.5 * (a + b) - cam).normalize_or_zero();
-        let perp = seg_dir.cross(view).normalize_or_zero();
-        if perp == Vec3::ZERO {
-            continue; // segment points straight at/away from the eye — no facing width
-        }
-        let half = |p: Vec3| (p.distance(cam) * LINE_HALF_WIDTH_PER_M).max(MIN_HALF_WIDTH);
-        let (ha, hb) = (half(a) * perp, half(b) * perp);
-        let base = positions.len() as u32;
-        // Two triangles over the quad: (a+, a-, b+) and (b+, a-, b-).
-        for v in [a + ha, a - ha, b + hb, b - hb] {
-            positions.push(v.to_array());
-            normals.push((-view).to_array()); // face the camera (unlit ignores it anyway)
-        }
-        indices.extend_from_slice(&[base, base + 1, base + 2, base + 2, base + 1, base + 3]);
     }
-    if indices.is_empty() {
+    if pts.len() < 2 {
         return None;
+    }
+
+    let n = pts.len();
+    let mut positions: Vec<[f32; 3]> = Vec::with_capacity(n * TUBE_SIDES);
+    let mut normals: Vec<[f32; 3]> = Vec::with_capacity(n * TUBE_SIDES);
+    // Seed the transported frame with any vector perpendicular to the first tangent.
+    let first_tan = (pts[1] - pts[0]).normalize_or(Vec3::Y);
+    let mut side = first_tan.any_orthonormal_vector();
+    for i in 0..n {
+        // Tangent: centred difference inside, one-sided at the ends.
+        let tan = match i {
+            0 => pts[1] - pts[0],
+            _ if i == n - 1 => pts[n - 1] - pts[n - 2],
+            _ => pts[i + 1] - pts[i - 1],
+        }
+        .normalize_or(first_tan);
+        // Parallel transport: project the carried `side` onto the plane perpendicular to
+        // the new tangent (removes twist), renormalise, rebuild the orthonormal frame.
+        side = (side - tan * side.dot(tan)).normalize_or(tan.any_orthonormal_vector());
+        let up = tan.cross(side);
+        let radius = (pts[i].distance(cam) * LINE_RADIUS_PER_M).max(MIN_RADIUS);
+        for s in 0..TUBE_SIDES {
+            let a = s as f32 / TUBE_SIDES as f32 * std::f32::consts::TAU;
+            let dir = side * a.cos() + up * a.sin();
+            positions.push((pts[i] + dir * radius).to_array());
+            normals.push(dir.to_array());
+        }
+    }
+
+    let mut indices: Vec<u32> = Vec::with_capacity((n - 1) * TUBE_SIDES * 6);
+    for i in 0..n - 1 {
+        let (ra, rb) = ((i * TUBE_SIDES) as u32, ((i + 1) * TUBE_SIDES) as u32);
+        for s in 0..TUBE_SIDES as u32 {
+            let s1 = (s + 1) % TUBE_SIDES as u32;
+            // Quad (ra+s, ra+s1, rb+s1, rb+s) → two outward-wound triangles.
+            indices.extend_from_slice(&[ra + s, rb + s, ra + s1, ra + s1, rb + s, rb + s1]);
+        }
     }
     Some(
         Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default())
