@@ -413,6 +413,17 @@ impl Plugin for NetServerPlugin {
                 .before(server_grab)
                 .before(apply_room_rocket_thrust),
         );
+        // Re-attach locked riders that reconnected (`relock_resumed_riders`) or drifted
+        // clear of the assembly (`keep_riders_aboard`). After the fall/respawn chain (so
+        // the body has settled near its deck) and before the force writers, since both
+        // teleport avatars — a pose change must land before this tick's physics step.
+        app.add_systems(
+            FixedUpdate,
+            (relock_resumed_riders, keep_riders_aboard)
+                .chain()
+                .after(respawn_fallen_avatars)
+                .before(apply_server_gravity),
+        );
         app.add_systems(
             Update,
             (
@@ -547,8 +558,11 @@ const RESUME_GRACE_SECS: u64 = 1800;
 /// re-sends its persisted id, and the server places it back where it was.
 #[derive(Resource, Default)]
 struct ResumeRegistry {
-    /// resume id → (last position, room code it was recorded in, when).
-    by_id: HashMap<u64, (Vec3, [u8; 6], SystemTime)>,
+    /// resume id → (last position, room code it was recorded in, lock anchor if the
+    /// rider was locked, when). The lock anchor lets a reconnecting locked rider re-weld
+    /// to its deck point instead of returning free on a moving assembly (see
+    /// `relock_resumed_riders`).
+    by_id: HashMap<u64, (Vec3, [u8; 6], Option<LockAnchor>, SystemTime)>,
 }
 
 /// The room code a resumed position came from, riding on the avatar until its
@@ -1441,7 +1455,7 @@ fn respawn_fallen_avatars(
     deck_parts: DeckParts,
     lock_joints: Query<(Entity, &SphericalJoint), With<LockJoint>>,
     mut avatars: Query<
-        (Entity, &RoomMember, &mut Position, &mut LinearVelocity, &mut AngularVelocity),
+        (Entity, &RoomMember, &mut Position, &mut LinearVelocity, &mut AngularVelocity, Option<&RiderLock>),
         (With<ServerAvatar>, Without<NetPart>),
     >,
 ) {
@@ -1454,7 +1468,7 @@ fn respawn_fallen_avatars(
     // Deck points are only needed for avatars in active-frame rooms — computed
     // lazily so the (common) all-grounded case never builds them.
     let mut decks: Option<HashMap<RoomId, Vec3>> = None;
-    for (avatar, member, mut position, mut linear, mut angular) in &mut avatars {
+    for (avatar, member, mut position, mut linear, mut angular, locked) in &mut avatars {
         let deck = frames
             .get(member.0)
             .is_active()
@@ -1472,7 +1486,12 @@ fn respawn_fallen_avatars(
             Some(deck) => position.0.y < deck.y - FLIGHT_FALL_MARGIN,
             None => position.0.y < AVATAR_FALL_Y,
         };
-        if fallen || part_state_diverged(position.0, linear.0, angular.0) {
+        // A rider who INTENDS to be locked (`RiderLock`) but whose weld broke and let it
+        // fall is left to the tether (`keep_riders_aboard`), which snaps it back onto its
+        // lock point and re-welds — respawning it here would unlock it (teleport clears
+        // `RiderLock`) and strand it standing free. Divergence (NaN / runaway) still
+        // respawns unconditionally: the broadphase would otherwise panic.
+        if part_state_diverged(position.0, linear.0, angular.0) || (fallen && locked.is_none()) {
             teleport_avatar(
                 &mut commands,
                 &lock_joints,
@@ -1483,6 +1502,158 @@ fn respawn_fallen_avatars(
                 &mut angular,
             );
         }
+    }
+}
+
+/// How long a reconnecting rider keeps trying to re-weld to its remembered deck point
+/// before giving up (the deck may be gone — landed, reset — by the time it returns).
+const RELOCK_GRACE_SECS: f32 = 8.0;
+
+/// Distance past which a rider that has come loose from its lock (a solver break flung
+/// it clear, or a reconnect left it near-but-unwelded) is snapped back onto its
+/// [`RiderLock`] deck point and re-welded — the "locked riders can't be left behind"
+/// safety net. A live weld pins the feet ~0 m from the anchor, so a still-welded rider
+/// never trips it. Frame-invariant (both poses room-local).
+const RIDER_TETHER_M: f32 = 50.0;
+
+/// A reconnecting rider that was LOCKED when its session dropped, carrying the anchor to
+/// restore the weld with. `spawn_player_for_client` restores position but not the weld
+/// (it lived on the despawned `SessionBased` avatar); `relock_resumed_riders` re-welds
+/// once the body + room are ready.
+#[derive(Component)]
+struct RelockOnResume {
+    anchor: LockAnchor,
+    timer: f32,
+}
+
+/// Re-weld a resumed locked rider ([`RelockOnResume`]) to its remembered deck point.
+/// Once the reconnected body + `RoomMember` exist and the referenced part is present,
+/// snap the feet exactly onto the lock point (so the weld can't miss the gap) and
+/// re-weld, recording the fresh [`RiderLock`]. Gives up after [`RELOCK_GRACE_SECS`] if
+/// the part never reappears (the room was reset or the rider rejoined a different one).
+/// Runs after `respawn_fallen_avatars` so the body has already settled near the deck.
+fn relock_resumed_riders(
+    mut commands: Commands,
+    time: Res<Time>,
+    parts: Query<(Entity, &NetPart, &Collider, &Position, &Rotation, &PartRoom)>,
+    lock_joints: Query<(Entity, &SphericalJoint), With<LockJoint>>,
+    mut riders: Query<
+        (
+            Entity,
+            &Collider,
+            &mut Position,
+            &Rotation,
+            &mut LinearVelocity,
+            &mut AngularVelocity,
+            &HeldPart,
+            &RoomMember,
+            &NetPlayer,
+            &mut RelockOnResume,
+        ),
+        (With<ServerAvatar>, Without<NetPart>),
+    >,
+) {
+    let dt = time.delta_secs();
+    for (avatar, collider, mut position, rotation, mut linear, mut angular, held, member, player, mut relock) in
+        &mut riders
+    {
+        let anchor = relock.anchor;
+        if let Some(target) = lock_target(&parts, member.0, anchor, rotation.0) {
+            teleport_avatar(
+                &mut commands,
+                &lock_joints,
+                avatar,
+                target,
+                &mut position,
+                &mut linear,
+                &mut angular,
+            );
+            let (welds, primary) = weld_avatar_to_room_parts(
+                &mut commands,
+                &parts,
+                avatar,
+                collider,
+                target,
+                rotation.0,
+                held.0,
+                member.0,
+                player.client_id,
+            );
+            commands.entity(avatar).insert(RiderLock(primary.unwrap_or(anchor)));
+            commands.entity(avatar).remove::<RelockOnResume>();
+            println!("[lock] client_id={} re-locked on resume ({} welds)", player.client_id, welds);
+            continue;
+        }
+        relock.timer -= dt;
+        if relock.timer <= 0.0 {
+            commands.entity(avatar).remove::<RelockOnResume>();
+            println!("[lock] client_id={} relock-on-resume gave up (deck gone)", player.client_id);
+        }
+    }
+}
+
+/// Tether: snap a rider that has drifted more than [`RIDER_TETHER_M`] from its
+/// [`RiderLock`] deck point back onto it and re-weld. A held weld keeps the feet at the
+/// anchor, so this only fires once the weld is genuinely gone AND the rider has fallen
+/// clear — the safety net for "a rider falls away from the assembly." If the reference
+/// part has vanished (recycled/reset), the lock is meaningless, so drop `RiderLock` and
+/// let the normal fall-respawn take over next tick.
+fn keep_riders_aboard(
+    mut commands: Commands,
+    parts: Query<(Entity, &NetPart, &Collider, &Position, &Rotation, &PartRoom)>,
+    lock_joints: Query<(Entity, &SphericalJoint), With<LockJoint>>,
+    mut riders: Query<
+        (
+            Entity,
+            &Collider,
+            &mut Position,
+            &Rotation,
+            &mut LinearVelocity,
+            &mut AngularVelocity,
+            &HeldPart,
+            &RoomMember,
+            &NetPlayer,
+            &RiderLock,
+        ),
+        (With<ServerAvatar>, Without<NetPart>),
+    >,
+) {
+    for (avatar, collider, mut position, rotation, mut linear, mut angular, held, member, player, lock) in
+        &mut riders
+    {
+        let anchor = lock.0;
+        let Some(target) = lock_target(&parts, member.0, anchor, rotation.0) else {
+            commands.entity(avatar).remove::<RiderLock>();
+            continue;
+        };
+        // `target` places the feet on the anchor; the feet's current offset from the
+        // body (`rotation·foot_local`) is common to both, so feet-to-anchor distance is
+        // just how far the body is from `target`.
+        if position.0.distance(target) <= RIDER_TETHER_M {
+            continue;
+        }
+        teleport_avatar(
+            &mut commands,
+            &lock_joints,
+            avatar,
+            target,
+            &mut position,
+            &mut linear,
+            &mut angular,
+        );
+        let (welds, primary) = weld_avatar_to_room_parts(
+            &mut commands,
+            &parts,
+            avatar,
+            collider,
+            target,
+            rotation.0,
+            held.0,
+            member.0,
+            player.client_id,
+        );
+        commands.entity(avatar).insert(RiderLock(primary.unwrap_or(anchor)));
+        println!("[lock] client_id={} tether snap-back ({} welds)", player.client_id, welds);
     }
 }
 
@@ -1497,7 +1668,10 @@ fn record_resume_positions(
     time: Res<Time>,
     mut throttle: Local<f32>,
     mut resume: ResMut<ResumeRegistry>,
-    avatars: Query<(&ActionState<NetInput>, &Position), With<RoomMember>>,
+    avatars: Query<
+        (&ActionState<NetInput>, &Position, Option<&RiderLock>, Option<&RelockOnResume>),
+        With<RoomMember>,
+    >,
 ) {
     *throttle -= time.delta_secs();
     if *throttle > 0.0 {
@@ -1505,13 +1679,18 @@ fn record_resume_positions(
     }
     *throttle = 0.25;
     let now = SystemTime::now();
-    for (state, position) in &avatars {
+    for (state, position, lock, relock) in &avatars {
         if state.0.resume_id != 0 {
-            resume.by_id.insert(state.0.resume_id, (position.0, state.0.room, now));
+            // Lock intent = welded (`RiderLock`) OR still re-welding after a reconnect
+            // (`RelockOnResume`). Folding in the pending case keeps a fast second
+            // reconnect from recording the transient un-welded avatar as *unlocked* and
+            // blanking the anchor before the relock completes.
+            let anchor = lock.map(|l| l.0).or_else(|| relock.map(|r| r.anchor));
+            resume.by_id.insert(state.0.resume_id, (position.0, state.0.room, anchor, now));
         }
     }
     // Drop records for players who didn't return within the grace window.
-    resume.by_id.retain(|_, (_, _, at)| {
+    resume.by_id.retain(|_, (_, _, _, at)| {
         at.elapsed().map(|e| e.as_secs() < RESUME_GRACE_SECS).unwrap_or(false)
     });
 }
@@ -1961,7 +2140,10 @@ fn server_delete(
 /// physics step, so the weld never solves across the jump), then set the pose and
 /// zero the velocities. THE way to move an avatar server-side; every teleport site
 /// (reset-position, fall respawn, room reset, resume revoke) goes through it so the
-/// "teleport implies unlock" invariant can't be forgotten at a future site.
+/// "teleport implies unlock" invariant can't be forgotten at a future site. Also drops
+/// the persistent [`RiderLock`] anchor, so a reset/respawn genuinely unlocks the rider
+/// and the tether ([`keep_riders_aboard`]) won't drag them back to the old spot; the
+/// two re-lock sites re-insert it right after their own teleport.
 fn teleport_avatar(
     commands: &mut Commands,
     lock_joints: &Query<(Entity, &SphericalJoint), With<LockJoint>>,
@@ -1972,9 +2154,104 @@ fn teleport_avatar(
     angular: &mut AngularVelocity,
 ) {
     despawn_player_lock_welds(commands, lock_joints, avatar);
+    commands.entity(avatar).try_remove::<RiderLock>();
     position.0 = to;
     linear.0 = Vec3::ZERO;
     angular.0 = Vec3::ZERO;
+}
+
+/// A rider's lock reference point: the primary weld's part (by stable replicated id)
+/// plus the two anchors, so the server can restore the weld after the live joint is
+/// gone — on reconnect (the `SessionBased` avatar and its welds despawned with the
+/// session) or after a solver break flings the rider clear ([`keep_riders_aboard`]).
+/// Deliberately the server-side, non-replicated twin of `NetLockJoint` (which rides the
+/// per-weld replicated entity and dies with the avatar's session): clients derive
+/// lockedness from the `NetLockJoint` set; this is the server's private memory of
+/// *where* to re-attach.
+#[derive(Clone, Copy)]
+struct LockAnchor {
+    /// Stable `NetPart::id` of the part the primary weld pins to (survives entity churn).
+    part_net_id: u64,
+    /// Rider-frame foot anchor (`body1` local anchor) — rotation-invariant.
+    foot_local: Vec3,
+    /// Part-frame anchor (`body2` local anchor).
+    part_local: Vec3,
+}
+
+/// Marks an avatar as *intending* to be locked, carrying the anchor to restore the weld
+/// with. Set on lock ([`apply_lock_changes`]) and after a reconnect/tether re-weld;
+/// cleared on unlock and on any teleport ([`teleport_avatar`]).
+#[derive(Component, Clone, Copy)]
+struct RiderLock(LockAnchor);
+
+/// Weld an avatar to every same-room part within the lock gap (skipping its own held
+/// part), spawning each `SphericalJoint` + replicated `NetLockJoint`. Returns the weld
+/// count and the PRIMARY anchor (the first weld) for the caller to store as the rider's
+/// [`RiderLock`]. The weld geometry is the shared `avatar_lock_contacts`, so the server
+/// lock can't drift from single-player.
+fn weld_avatar_to_room_parts(
+    commands: &mut Commands,
+    parts: &Query<(Entity, &NetPart, &Collider, &Position, &Rotation, &PartRoom)>,
+    avatar: Entity,
+    collider: &Collider,
+    position: Vec3,
+    rotation: Quat,
+    held: Option<Entity>,
+    member: RoomId,
+    client_id: u64,
+) -> (usize, Option<LockAnchor>) {
+    let mut welds = 0usize;
+    let mut primary = None;
+    let candidates = parts
+        .iter()
+        .filter(|(part, _, _, _, _, part_room)| part_room.id == member && held != Some(*part))
+        .map(|(part, _, c, p, r, _)| (part, c, p.0, r.0));
+    avatar_lock_contacts(
+        (collider, position, rotation),
+        candidates,
+        |part, avatar_local, part_local| {
+            // Shared-borrow re-read of the same query the candidates iterate — just to
+            // name the part's stable replicated id on the weld (and the anchor record).
+            let net_id = parts.get(part).map(|(_, net_part, ..)| net_part.id).unwrap_or(0);
+            commands.spawn((
+                SphericalJoint::new(avatar, part)
+                    .with_local_anchor1(avatar_local)
+                    .with_local_anchor2(part_local),
+                LockJoint,
+                NetLockJoint {
+                    player: client_id,
+                    part: net_id,
+                    anchor_player: avatar_local.to_array(),
+                    anchor_part: part_local.to_array(),
+                },
+                Replicate::to_clients(NetworkTarget::All),
+                Rooms::single(member),
+                RoomMember(member),
+            ));
+            if primary.is_none() {
+                primary =
+                    Some(LockAnchor { part_net_id: net_id, foot_local: avatar_local, part_local });
+            }
+            welds += 1;
+        },
+    );
+    (welds, primary)
+}
+
+/// The avatar position that lands its feet exactly on a [`LockAnchor`]'s deck point,
+/// given the referenced part's current pose (looked up by stable id within the rider's
+/// room). `None` if that part is no longer present (recycled/reset). Frame-invariant:
+/// both sides are room-local, so a floating-origin rebase can't spoof it.
+fn lock_target(
+    parts: &Query<(Entity, &NetPart, &Collider, &Position, &Rotation, &PartRoom)>,
+    member: RoomId,
+    anchor: LockAnchor,
+    rotation: Quat,
+) -> Option<Vec3> {
+    let (_, _, _, part_pos, part_rot, _) =
+        parts.iter().find(|(_, np, _, _, _, pr)| pr.id == member && np.id == anchor.part_net_id)?;
+    let anchor_world = part_pos.0 + part_rot.0 * anchor.part_local;
+    Some(anchor_world - rotation * anchor.foot_local)
 }
 
 /// Apply a client's "Lock"/"Unlock" request ([`SetLocked`]). Locking welds the
@@ -2021,47 +2298,29 @@ fn apply_lock_changes(
         let already_locked = lock_joints.iter().any(|(_, joint)| joint.body1 == avatar);
         if !want.0 {
             despawn_player_lock_welds(&mut commands, &lock_joints, avatar);
+            commands.entity(avatar).remove::<RiderLock>();
             println!("[lock] client_id={} unlocked", player.client_id);
             continue;
         }
         if already_locked {
             continue; // A duplicate delivery or a stale press.
         }
-        // Candidate parts: same room, not the sender's own held part. The weld
-        // geometry itself (gap manifold, freeze-in-place anchors) is the shared
-        // `avatar_lock_contacts`, so it can't drift from single-player.
-        let mut welds = 0usize;
-        let candidates = parts
-            .iter()
-            .filter(|(part, _, _, _, _, part_room)| {
-                part_room.id == member.0 && held.0 != Some(*part)
-            })
-            .map(|(part, _, c, p, r, _)| (part, c, p.0, r.0));
-        avatar_lock_contacts(
-            (collider, position.0, rotation.0),
-            candidates,
-            |part, avatar_local, part_local| {
-                // Shared-borrow re-read of the same query the candidates iterate —
-                // just to name the part's stable replicated id on the weld.
-                let net_id = parts.get(part).map(|(_, net_part, ..)| net_part.id).unwrap_or(0);
-                commands.spawn((
-                    SphericalJoint::new(avatar, part)
-                        .with_local_anchor1(avatar_local)
-                        .with_local_anchor2(part_local),
-                    LockJoint,
-                    NetLockJoint {
-                        player: player.client_id,
-                        part: net_id,
-                        anchor_player: avatar_local.to_array(),
-                        anchor_part: part_local.to_array(),
-                    },
-                    Replicate::to_clients(NetworkTarget::All),
-                    Rooms::single(member.0),
-                    RoomMember(member.0),
-                ));
-                welds += 1;
-            },
+        // Weld to every same-room part within the gap and remember the primary anchor so
+        // a reconnect or a >50 m break can restore the weld (`RiderLock`).
+        let (welds, anchor) = weld_avatar_to_room_parts(
+            &mut commands,
+            &parts,
+            avatar,
+            collider,
+            position.0,
+            rotation.0,
+            held.0,
+            member.0,
+            player.client_id,
         );
+        if let Some(anchor) = anchor {
+            commands.entity(avatar).insert(RiderLock(anchor));
+        }
         println!("[lock] client_id={} locked with {} welds", player.client_id, welds);
     }
 }
@@ -3182,7 +3441,7 @@ fn spawn_player_for_client(
     mut commands: Commands,
     remote: Query<&RemoteId>,
     tokens: Query<&TokenUserData>,
-    mut resume: ResMut<ResumeRegistry>,
+    resume: Res<ResumeRegistry>,
 ) {
     let client = trigger.entity;
     let client_id = client_identity(client, &remote);
@@ -3190,7 +3449,11 @@ fn spawn_player_for_client(
     // `build_netcode_client`). Resolve the remembered position NOW, at connect — before
     // the avatar's body assembles and its first `Position` replicates — so a reconnecting
     // avatar is built directly at its saved spot (`InitialPose`), with no origin→saved
-    // ease. Consume the record; `record_resume_positions` re-tracks the live avatar after.
+    // ease. READ, don't consume: mobile clients often reconnect twice in quick succession
+    // (a `reconnect_dropped` attempt that flaps, then the real one), and removing the
+    // record on the first attempt left the second — the one that sticks — a fresh,
+    // unlocked avatar. The record stays until `record_resume_positions` overwrites it with
+    // the live avatar's pose or the grace window expires.
     let rid = tokens
         .get(client)
         .ok()
@@ -3198,11 +3461,11 @@ fn spawn_player_for_client(
         .unwrap_or(0);
     let resume_pos = (rid != 0)
         .then(|| {
-            resume.by_id.remove(&rid).and_then(|(pos, room, at)| {
+            resume.by_id.get(&rid).copied().and_then(|(pos, room, lock, at)| {
                 at.elapsed()
                     .map(|e| e.as_secs() < RESUME_GRACE_SECS)
                     .unwrap_or(false)
-                    .then_some((pos, room))
+                    .then_some((pos, room, lock))
             })
         })
         .flatten();
@@ -3255,13 +3518,22 @@ fn spawn_player_for_client(
         // unique per-room default), so the client never queries a nameless avatar.
         NetName::default(),
     ));
-    if let Some((pos, room)) = resume_pos {
+    if let Some((pos, room, lock)) = resume_pos {
         // Optimistically build at the remembered spot (the common case — an iOS
         // reload rejoining the same room — must not slide in from the origin).
         // `assign_rooms` revokes it if the first input reveals a DIFFERENT room:
         // a remembered position means nothing in another room's world.
         avatar.insert((InitialPose(pos), ResumeRoom(room)));
-        println!("[resume] client_id={client_id} reconnect -> spawn at {pos:?}");
+        // A rider who was LOCKED when the session dropped: re-weld it to that deck
+        // point once the body + room are ready (`relock_resumed_riders`), so a
+        // tab-background mid-flight doesn't leave it standing free on a moving deck.
+        if let Some(anchor) = lock {
+            avatar.insert(RelockOnResume { anchor, timer: RELOCK_GRACE_SECS });
+        }
+        println!(
+            "[resume] client_id={client_id} reconnect -> spawn at {pos:?} (locked={})",
+            lock.is_some()
+        );
     } else {
         println!("[resume] client_id={client_id} fresh connect (no remembered position)");
     }
