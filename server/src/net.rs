@@ -161,6 +161,9 @@ struct Sample {
     pos_triggers: Option<u32>,
     late_inputs: Option<u32>,
     input_ticks: Option<u32>,
+    /// Client render FPS ×10 (average and worst-frame), or `None` if not reported.
+    fps_x10: Option<u16>,
+    min_fps_x10: Option<u16>,
 }
 
 /// SQLite telemetry sink. `Connection` is `Send` but not `Sync`, so wrap it in a
@@ -173,8 +176,9 @@ impl TelemetryDb {
         let conn = self.0.lock().unwrap();
         if let Err(e) = conn.execute(
             "INSERT INTO samples (ts_ms, sha, client, rtt_ms, jitter_ms, samples, \
-             rollbacks, rollback_ticks, max_pos_err_mm, pos_triggers, late_inputs, input_ticks) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+             rollbacks, rollback_ticks, max_pos_err_mm, pos_triggers, late_inputs, input_ticks, \
+             fps_x10, min_fps_x10) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             rusqlite::params![
                 row.ts_ms,
                 row.sha,
@@ -188,6 +192,8 @@ impl TelemetryDb {
                 row.pos_triggers,
                 row.late_inputs,
                 row.input_ticks,
+                row.fps_x10,
+                row.min_fps_x10,
             ],
         ) {
             eprintln!("[tel] insert failed: {e}");
@@ -218,7 +224,9 @@ fn open_telemetry_db(mut commands: Commands) {
                      max_pos_err_mm INTEGER, \
                      pos_triggers   INTEGER, \
                      late_inputs    INTEGER, \
-                     input_ticks    INTEGER \
+                     input_ticks    INTEGER, \
+                     fps_x10        INTEGER, \
+                     min_fps_x10    INTEGER \
                  ); \
                  CREATE INDEX IF NOT EXISTS idx_samples_client_ts ON samples(client, ts_ms);",
             ) {
@@ -292,10 +300,21 @@ fn flush_telemetry(
         let rollback_ticks = report.as_ref().map(|r| r.rollback_ticks);
         let max_pos_err_mm = report.as_ref().map(|r| r.max_pos_err_mm);
         let pos_triggers = report.as_ref().map(|r| r.pos_triggers);
+        // Client FPS ×10 → display as one decimal (0 sample means "not reported yet").
+        let fps = report
+            .as_ref()
+            .map(|r| r.fps_x10)
+            .filter(|v| *v > 0)
+            .map(|v| v as f64 / 10.0);
+        let min_fps = report
+            .as_ref()
+            .map(|r| r.min_fps_x10)
+            .filter(|v| *v > 0)
+            .map(|v| v as f64 / 10.0);
         let (late_inputs, input_ticks) = late.get(&entity).copied().unzip();
 
         println!(
-            "[tel] client={} rtt={}ms jitter={}ms samples={} rb={} rbt={} errmm={} trig={} late={}/{}",
+            "[tel] client={} rtt={}ms jitter={}ms samples={} rb={} rbt={} errmm={} trig={} late={}/{} fps={} minfps={}",
             entity.to_bits(),
             o(rtt_ms.map(|v| format!("{v:.1}"))),
             o(jitter_ms.map(|v| format!("{v:.1}"))),
@@ -306,6 +325,8 @@ fn flush_telemetry(
             o(pos_triggers),
             o(late_inputs),
             o(input_ticks),
+            o(fps.map(|v| format!("{v:.1}"))),
+            o(min_fps.map(|v| format!("{v:.1}"))),
         );
 
         if let Some(db) = &db {
@@ -322,6 +343,8 @@ fn flush_telemetry(
                 pos_triggers,
                 late_inputs,
                 input_ticks,
+                fps_x10: report.as_ref().map(|r| r.fps_x10).filter(|v| *v > 0),
+                min_fps_x10: report.as_ref().map(|r| r.min_fps_x10).filter(|v| *v > 0),
             });
         }
     }

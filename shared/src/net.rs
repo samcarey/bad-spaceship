@@ -745,6 +745,14 @@ pub struct RollbackReport {
     /// chaos (large). See `take_rollback_diag`.
     pub max_pos_err_mm: u32,
     pub pos_triggers: u32,
+    /// Client render frame rate ×10 (so one decimal fits a `u16`): the smoothed
+    /// (average) FPS and the *worst* single-frame FPS over the recent history buffer.
+    /// This is the signal for "the phone's loop is throttling" — a sustained FPS
+    /// collapse is what inflates measured RTT/jitter and starves the input timeline
+    /// (iOS/WebKit power-governs a sustained-100%-GPU page within seconds). `0` = the
+    /// FPS diagnostic wasn't available yet.
+    pub fps_x10: u16,
+    pub min_fps_x10: u16,
 }
 
 /// TEMPORARY client-crash self-telemetry. A wasm Rust panic aborts silently to the

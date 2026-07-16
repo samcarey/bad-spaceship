@@ -16,6 +16,7 @@ use avian3d::prelude::{
     Forces, Gravity, LinearVelocity, PhysicsSystems, Position, RigidBody, Rotation,
     SphericalJoint,
 };
+use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::math::DVec3;
 use bevy::transform::TransformSystems;
 use lightyear::prediction::correction::VisualCorrection;
@@ -363,6 +364,7 @@ fn report_rollbacks(
     time: Res<Time>,
     mut acc: Local<f32>,
     metrics: Option<Res<PredictionMetrics>>,
+    diagnostics: Res<DiagnosticsStore>,
     mut sender: Query<&mut MessageSender<RollbackReport>, With<Connected>>,
 ) {
     *acc += time.delta_secs();
@@ -373,11 +375,32 @@ fn report_rollbacks(
     let Some(metrics) = metrics else { return };
     let Ok(mut sender) = sender.single_mut() else { return };
     let (max_pos_err_mm, pos_triggers) = take_rollback_diag();
+    // FPS curve: smoothed (average) + the worst single frame in the diagnostic's
+    // recent history buffer, so a stutter shows even if the average holds. This is the
+    // primary signal for "the phone's loop is throttling after a few seconds".
+    let (fps_x10, min_fps_x10) = diagnostics
+        .get(&FrameTimeDiagnosticsPlugin::FPS)
+        .map(|fps| {
+            let avg = fps.smoothed().unwrap_or(0.0);
+            let worst = fps
+                .values()
+                .copied()
+                .filter(|v| *v > 0.0)
+                .fold(f64::INFINITY, f64::min);
+            let worst = if worst.is_finite() { worst } else { avg };
+            (
+                (avg * 10.0).round().clamp(0.0, u16::MAX as f64) as u16,
+                (worst * 10.0).round().clamp(0.0, u16::MAX as f64) as u16,
+            )
+        })
+        .unwrap_or((0, 0));
     sender.send::<TelemetryChannel>(RollbackReport {
         rollbacks: metrics.rollbacks,
         rollback_ticks: metrics.rollback_ticks,
         max_pos_err_mm,
         pos_triggers,
+        fps_x10,
+        min_fps_x10,
     });
 }
 
