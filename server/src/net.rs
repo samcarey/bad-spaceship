@@ -52,7 +52,7 @@ use bad_spaceship_shared::part::{
     spawn_saved_cuboid, Gimbal, LockJoint, RocketEngine, SuppressLocalParts, DELETE_RADIUS,
     NUM_PARTS, NUM_ROCKET_ENGINES, PART_FALL_Y, ROCKET_VOLUME,
 };
-use bad_spaceship_shared::{Grass, SuppressLocalPlayer, Yaw};
+use bad_spaceship_shared::{DirectionalInput, Grass, SuppressLocalPlayer, Yaw};
 use bevy::math::DVec3;
 use bevy::prelude::*;
 
@@ -98,6 +98,47 @@ fn count_late_inputs(
             if buffer.get(tick).is_none() {
                 stats.late += 1;
             }
+        }
+    }
+}
+
+/// Consecutive ticks a client's exact input has been missing (server running on the
+/// reused last input). Reset to 0 the moment a fresh input lands. Feeds
+/// [`stop_stale_avatars`].
+#[derive(Component, Default)]
+struct StaleInputRun(u32);
+
+/// After this many consecutive stale ticks, stop reusing the client's last movement
+/// intent and zero it instead. ~165 ms at 60 Hz: long enough that ordinary jitter (a
+/// few late ticks, where reusing a held direction is correct) never trips it, short
+/// enough that a genuine connection stall *parks* the avatar instead of walking it off
+/// the level on the last-seen "move forward". Momentary reuse of a stale direction is
+/// invisible (you resume); reuse of a stale "keep walking" past a real stall is the
+/// runaway a high-jitter phone hit.
+const STALE_INPUT_STOP_TICKS: u32 = 10;
+
+/// Zero a client avatar's movement/jump once its input has been stale too long
+/// (`StaleInputRun` past [`STALE_INPUT_STOP_TICKS`]). Runs after [`apply_net_input`]
+/// (which wrote `DirectionalInput` from the possibly-reused `ActionState`) and before
+/// `CharacterMovement` reads it, on the server only — the owning client always has its
+/// own input for the current tick locally, so its predicted avatar is never stale and
+/// this can't perturb client prediction. Yaw (facing) is left untouched; only the
+/// translational intent can run you off the map.
+fn stop_stale_avatars(
+    timeline: Res<LocalTimeline>,
+    mut avatars: Query<(
+        &InputBuffer<ActionState<NetInput>, NetInput>,
+        &mut StaleInputRun,
+        &mut DirectionalInput,
+    )>,
+) {
+    let tick = timeline.tick();
+    for (buffer, mut run, mut dir) in &mut avatars {
+        // Stale = the buffer has a fallback (client is live) but not the exact tick.
+        let stale = buffer.get_predict(tick).is_some() && buffer.get(tick).is_none();
+        run.0 = if stale { run.0 + 1 } else { 0 };
+        if run.0 > STALE_INPUT_STOP_TICKS {
+            dir.0 = Vec3::ZERO;
         }
     }
 }
@@ -487,6 +528,11 @@ impl Plugin for NetServerPlugin {
             FixedUpdate,
             (
                 apply_net_input.before(CharacterMovement),
+                // Safety net: park an avatar whose input has stalled instead of
+                // reusing its last "keep walking" indefinitely (runaway on a lossy link).
+                stop_stale_avatars
+                    .after(apply_net_input)
+                    .before(CharacterMovement),
                 (server_grab, server_hold, server_attach, server_delete).chain(),
                 // Balanced rocket thrust for launched rooms — a continuous force, so it
                 // runs per physics tick like the hold spring.
@@ -3508,6 +3554,8 @@ fn spawn_player_for_client(
         // Telemetry: server-measured late/lost-input tally for this client (the
         // `InputBuffer` lightyear adds on first input lands on this same entity).
         LateInputStats::default(),
+        // Runaway guard: consecutive-stale-input counter for `stop_stale_avatars`.
+        StaleInputRun::default(),
         // Replicated facing (mirrored from the avatar's `Yaw` by
         // `sync_avatar_facing`) so remote clients can draw it facing its look.
         NetFacing::default(),
