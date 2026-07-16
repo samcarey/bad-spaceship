@@ -233,6 +233,12 @@ fn open_telemetry_db(mut commands: Commands) {
                 eprintln!("[tel] schema init failed: {e}");
                 return;
             }
+            // Add columns appended after a table was first created by an older binary
+            // (CREATE IF NOT EXISTS won't alter an existing table). Errors = column
+            // already present, so ignore them.
+            for col in ["fps_x10", "min_fps_x10"] {
+                let _ = conn.execute(&format!("ALTER TABLE samples ADD COLUMN {col} INTEGER"), []);
+            }
             println!("[tel] telemetry db at {path}");
             commands.insert_resource(TelemetryDb(Mutex::new(conn)));
         }

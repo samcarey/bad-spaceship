@@ -8,6 +8,19 @@ use bad_spaceship_shared::player;
 // `GlobalAmbientLight` *resource* (the component now only overrides per-camera).
 use bevy::light::GlobalAmbientLight;
 use bevy::prelude::*;
+use bevy::window::WindowResolution;
+#[cfg(target_arch = "wasm32")]
+use bevy::winit::{UpdateMode, WinitSettings};
+#[cfg(target_arch = "wasm32")]
+use core::time::Duration;
+
+/// Web-only render frame-rate cap (fps). iOS Safari power-governs a page that pins the
+/// GPU at 100 %, clamping it to ~7 fps after a few seconds; rendering fewer frames keeps
+/// the GPU below that trigger so the phone holds a *steady* rate instead of collapsing.
+/// A building/walking game reads fine at 30. Paired with the DPR clamp
+/// (`platform::render_scale_factor_override`), which cuts per-frame cost.
+#[cfg(target_arch = "wasm32")]
+const WEB_FPS_CAP: f64 = 30.0;
 
 use gamepad::GamepadPlugin;
 use input::InputPlugin;
@@ -58,6 +71,12 @@ fn main() {
         ..default()
     });
 
+    // Cap render resolution on high-DPR mobile displays (None = native scale factor).
+    let mut resolution = WindowResolution::default();
+    if let Some(scale) = platform::render_scale_factor_override() {
+        resolution = resolution.with_scale_factor_override(scale);
+    }
+
     app.add_plugins(
         DefaultPlugins
             .set(WindowPlugin {
@@ -66,6 +85,7 @@ fn main() {
                     // Bevy 0.13 removed `Window::fit_canvas_to_parent`; the WASM
                     // canvas is now sized to the viewport via CSS in index.html
                     // (`canvas { width/height: 100% }`).
+                    resolution,
                     ..default()
                 }),
                 ..default()
@@ -99,6 +119,22 @@ fn main() {
         .insert_resource(ClearColor(Color::srgb(0.17, 0.125, 0.115)))
         .add_systems(Startup, load_configs)
         .add_systems(Update, add_camera_to_player);
+
+    // Web-only frame-rate cap. Timer-paced updates (react_to_* = false) so the cap holds
+    // *during* input too — the touch-drag while moving is exactly when the phone chokes,
+    // so a cap that input wakes past would miss the point. Input is still sampled each
+    // capped frame (Bevy reads the buffered state), and the iOS reload-on-foreground in
+    // play.html covers any post-background wake, so timer scheduling can't strand the app.
+    #[cfg(target_arch = "wasm32")]
+    app.insert_resource(WinitSettings {
+        focused_mode: UpdateMode::Reactive {
+            wait: Duration::from_secs_f64(1.0 / WEB_FPS_CAP),
+            react_to_device_events: false,
+            react_to_user_events: false,
+            react_to_window_events: false,
+        },
+        unfocused_mode: UpdateMode::reactive_low_power(Duration::from_secs(1)),
+    });
 
     // Avian physics — with the multiplayer transform-sync handling disabled when
     // we're connecting (so `lightyear_avian3d` can own it). Must precede
