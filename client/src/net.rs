@@ -377,6 +377,8 @@ fn report_rollbacks(
     let Some(metrics) = metrics else { return };
     let Ok(mut sender) = sender.single_mut() else { return };
     let (max_pos_err_mm, pos_triggers) = take_rollback_diag();
+    // Encode a value ×10 into a u16 (one decimal place) for the telemetry fields.
+    let to_x10 = |v: f64| (v * 10.0).round().clamp(0.0, u16::MAX as f64) as u16;
     // FPS curve: smoothed (average) + the worst single frame in the diagnostic's
     // recent history buffer, so a stutter shows even if the average holds. This is the
     // primary signal for "the phone's loop is throttling after a few seconds".
@@ -384,22 +386,14 @@ fn report_rollbacks(
         .get(&FrameTimeDiagnosticsPlugin::FPS)
         .map(|fps| {
             let avg = fps.smoothed().unwrap_or(0.0);
-            let worst = fps
-                .values()
-                .copied()
-                .filter(|v| *v > 0.0)
-                .fold(f64::INFINITY, f64::min);
-            let worst = if worst.is_finite() { worst } else { avg };
-            (
-                (avg * 10.0).round().clamp(0.0, u16::MAX as f64) as u16,
-                (worst * 10.0).round().clamp(0.0, u16::MAX as f64) as u16,
-            )
+            let worst = fps.values().copied().filter(|v| *v > 0.0).reduce(f64::min).unwrap_or(avg);
+            (to_x10(avg), to_x10(worst))
         })
         .unwrap_or((0, 0));
     let render_scale_x10 = windows
         .iter()
         .next()
-        .map(|w| (w.resolution.scale_factor() * 10.0).round().clamp(0.0, u16::MAX as f64 as f32) as u16)
+        .map(|w| to_x10(w.resolution.scale_factor() as f64))
         .unwrap_or(0);
     // Reliable ControlChannel (not the unreliable TelemetryChannel): on a high-RTT/lossy
     // link — exactly the case we're diagnosing — every unreliable sample was dropping, so
@@ -728,7 +722,7 @@ fn update_focus(
     // Grabbing is off once the room has launched (you're riding, not building). Clear
     // any focus so nothing is outlined in flight — that also idles the mask camera's
     // extra render pass (`toggle_outline_pass`) exactly when the phone is most GPU-bound.
-    if launch.iter().next().is_some_and(|l| l.launched) {
+    if crate::launch::net_launched(&launch) {
         focused.0 = None;
         return;
     }
@@ -771,7 +765,7 @@ fn read_grab_intent(
     };
     // Grabbing/attaching/deleting is off once launched — drain any clicks so they don't
     // act, and drop anything still held so nothing floats along mid-flight.
-    if launch.iter().next().is_some_and(|l| l.launched) {
+    if crate::launch::net_launched(&launch) {
         clicks.clear();
         holding.0 = false;
         return;

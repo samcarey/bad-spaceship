@@ -306,23 +306,14 @@ fn flush_telemetry(
         let rollback_ticks = report.as_ref().map(|r| r.rollback_ticks);
         let max_pos_err_mm = report.as_ref().map(|r| r.max_pos_err_mm);
         let pos_triggers = report.as_ref().map(|r| r.pos_triggers);
-        // Client FPS ×10 → display as one decimal (0 sample means "not reported yet").
-        let fps = report
-            .as_ref()
-            .map(|r| r.fps_x10)
-            .filter(|v| *v > 0)
-            .map(|v| v as f64 / 10.0);
-        let min_fps = report
-            .as_ref()
-            .map(|r| r.min_fps_x10)
-            .filter(|v| *v > 0)
-            .map(|v| v as f64 / 10.0);
+        // Client-reported ×10 fields, dropping the 0 "not reported yet" sentinel. Kept
+        // as `Option<u16>` so the same value feeds both the `[tel]` line (÷10) and the DB.
+        let field = |f: fn(&RollbackReport) -> u16| report.as_ref().map(f).filter(|v| *v > 0);
+        let fps_x10 = field(|r| r.fps_x10);
+        let min_fps_x10 = field(|r| r.min_fps_x10);
         // Effective render scale factor (confirms the mobile DPR clamp is live).
-        let scale = report
-            .as_ref()
-            .map(|r| r.render_scale_x10)
-            .filter(|v| *v > 0)
-            .map(|v| v as f64 / 10.0);
+        let scale_x10 = field(|r| r.render_scale_x10);
+        let one_dp = |v: Option<u16>| v.map(|v| v as f64 / 10.0);
         let (late_inputs, input_ticks) = late.get(&entity).copied().unzip();
 
         println!(
@@ -337,9 +328,9 @@ fn flush_telemetry(
             o(pos_triggers),
             o(late_inputs),
             o(input_ticks),
-            o(fps.map(|v| format!("{v:.1}"))),
-            o(min_fps.map(|v| format!("{v:.1}"))),
-            o(scale.map(|v| format!("{v:.1}"))),
+            o(one_dp(fps_x10).map(|v| format!("{v:.1}"))),
+            o(one_dp(min_fps_x10).map(|v| format!("{v:.1}"))),
+            o(one_dp(scale_x10).map(|v| format!("{v:.1}"))),
         );
 
         if let Some(db) = &db {
@@ -356,8 +347,8 @@ fn flush_telemetry(
                 pos_triggers,
                 late_inputs,
                 input_ticks,
-                fps_x10: report.as_ref().map(|r| r.fps_x10).filter(|v| *v > 0),
-                min_fps_x10: report.as_ref().map(|r| r.min_fps_x10).filter(|v| *v > 0),
+                fps_x10,
+                min_fps_x10,
             });
         }
     }
