@@ -14,7 +14,7 @@
     // engine) at dpr 3 → canvas backing 1.5× (Playwright). Tune MAX_DPR down (1.25/1.0)
     // if the phone still throttles, up for sharper desktop.
     (function () {
-      var MAX_DPR = 1.5;
+      var MAX_DPR = 1.25;
       var real = window.devicePixelRatio || 1;
       if (real > MAX_DPR) {
         try {
