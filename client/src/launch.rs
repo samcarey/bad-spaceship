@@ -310,10 +310,16 @@ pub(crate) fn room_launched(
     orb: &Query<&NetLaunch>,
 ) -> bool {
     if multiplayer {
-        orb.iter().next().is_some_and(|l| l.launched)
+        net_launched(orb)
     } else {
         local.sp_launched()
     }
+}
+
+/// Whether the (multiplayer) room's assembly has launched, read straight off the
+/// replicated [`NetLaunch`]. For MP-only systems that don't carry [`LaunchLocal`].
+pub(crate) fn net_launched(orb: &Query<&NetLaunch>) -> bool {
+    orb.iter().next().is_some_and(|l| l.launched)
 }
 
 /// Whether the room's assembly is mid-launch (counting down or lifted off), across both

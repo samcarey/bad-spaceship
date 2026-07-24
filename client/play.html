@@ -3,6 +3,27 @@
 
 <head>
   <meta charset="utf-8" />
+  <script>
+    // Cap the WebGL render resolution on high-DPR (mobile) displays, BEFORE wasm boots.
+    // winit-web sizes the canvas backing store to CSS-size × window.devicePixelRatio, so
+    // an iPhone (dpr ~3) renders ~9× the CSS pixels — a fragment load iOS Safari's GPU
+    // governor clamps to ~7 fps after a few seconds (measured). Capping the reported dpr
+    // cuts that ~4×. NB: Bevy's Rust-side WindowResolution::scale_factor_override is a
+    // no-op on web (winit's ResizeObserver resets the buffer to CSS×dpr); spoofing
+    // devicePixelRatio is what winit actually reads. Verified in WebKit (iOS Safari's
+    // engine) at dpr 3 → canvas backing 1.5× (Playwright). Tune MAX_DPR down (1.25/1.0)
+    // if the phone still throttles, up for sharper desktop.
+    (function () {
+      var MAX_DPR = 1.25;
+      var real = window.devicePixelRatio || 1;
+      if (real > MAX_DPR) {
+        try {
+          Object.defineProperty(window, 'devicePixelRatio',
+            { get: function () { return MAX_DPR; }, configurable: true });
+        } catch (e) {}
+      }
+    })();
+  </script>
   <meta name="viewport"
     content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0" />
   <title>Bad Spaceship</title>

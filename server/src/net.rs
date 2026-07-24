@@ -52,7 +52,7 @@ use bad_spaceship_shared::part::{
     spawn_saved_cuboid, Gimbal, LockJoint, RocketEngine, SuppressLocalParts, DELETE_RADIUS,
     NUM_PARTS, NUM_ROCKET_ENGINES, PART_FALL_Y, ROCKET_VOLUME,
 };
-use bad_spaceship_shared::{Grass, SuppressLocalPlayer, Yaw};
+use bad_spaceship_shared::{DirectionalInput, Grass, SuppressLocalPlayer, Yaw};
 use bevy::math::DVec3;
 use bevy::prelude::*;
 
@@ -102,6 +102,47 @@ fn count_late_inputs(
     }
 }
 
+/// Consecutive ticks a client's exact input has been missing (server running on the
+/// reused last input). Reset to 0 the moment a fresh input lands. Feeds
+/// [`stop_stale_avatars`].
+#[derive(Component, Default)]
+struct StaleInputRun(u32);
+
+/// After this many consecutive stale ticks, stop reusing the client's last movement
+/// intent and zero it instead. ~165 ms at 60 Hz: long enough that ordinary jitter (a
+/// few late ticks, where reusing a held direction is correct) never trips it, short
+/// enough that a genuine connection stall *parks* the avatar instead of walking it off
+/// the level on the last-seen "move forward". Momentary reuse of a stale direction is
+/// invisible (you resume); reuse of a stale "keep walking" past a real stall is the
+/// runaway a high-jitter phone hit.
+const STALE_INPUT_STOP_TICKS: u32 = 10;
+
+/// Zero a client avatar's movement/jump once its input has been stale too long
+/// (`StaleInputRun` past [`STALE_INPUT_STOP_TICKS`]). Runs after [`apply_net_input`]
+/// (which wrote `DirectionalInput` from the possibly-reused `ActionState`) and before
+/// `CharacterMovement` reads it, on the server only — the owning client always has its
+/// own input for the current tick locally, so its predicted avatar is never stale and
+/// this can't perturb client prediction. Yaw (facing) is left untouched; only the
+/// translational intent can run you off the map.
+fn stop_stale_avatars(
+    timeline: Res<LocalTimeline>,
+    mut avatars: Query<(
+        &InputBuffer<ActionState<NetInput>, NetInput>,
+        &mut StaleInputRun,
+        &mut DirectionalInput,
+    )>,
+) {
+    let tick = timeline.tick();
+    for (buffer, mut run, mut dir) in &mut avatars {
+        // Stale = the buffer has a fallback (client is live) but not the exact tick.
+        let stale = buffer.get_predict(tick).is_some() && buffer.get(tick).is_none();
+        run.0 = if stale { run.0 + 1 } else { 0 };
+        if run.0 > STALE_INPUT_STOP_TICKS {
+            dir.0 = Vec3::ZERO;
+        }
+    }
+}
+
 /// One per-client telemetry row (a ~2s window). `None` columns are written as SQL
 /// NULL: rtt/jitter before the first ping samples land, the rollback fields when no
 /// report arrived this window, late-input when the avatar had no live input buffer.
@@ -120,6 +161,9 @@ struct Sample {
     pos_triggers: Option<u32>,
     late_inputs: Option<u32>,
     input_ticks: Option<u32>,
+    /// Client render FPS ×10 (average and worst-frame), or `None` if not reported.
+    fps_x10: Option<u16>,
+    min_fps_x10: Option<u16>,
 }
 
 /// SQLite telemetry sink. `Connection` is `Send` but not `Sync`, so wrap it in a
@@ -132,8 +176,9 @@ impl TelemetryDb {
         let conn = self.0.lock().unwrap();
         if let Err(e) = conn.execute(
             "INSERT INTO samples (ts_ms, sha, client, rtt_ms, jitter_ms, samples, \
-             rollbacks, rollback_ticks, max_pos_err_mm, pos_triggers, late_inputs, input_ticks) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+             rollbacks, rollback_ticks, max_pos_err_mm, pos_triggers, late_inputs, input_ticks, \
+             fps_x10, min_fps_x10) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             rusqlite::params![
                 row.ts_ms,
                 row.sha,
@@ -147,6 +192,8 @@ impl TelemetryDb {
                 row.pos_triggers,
                 row.late_inputs,
                 row.input_ticks,
+                row.fps_x10,
+                row.min_fps_x10,
             ],
         ) {
             eprintln!("[tel] insert failed: {e}");
@@ -177,12 +224,20 @@ fn open_telemetry_db(mut commands: Commands) {
                      max_pos_err_mm INTEGER, \
                      pos_triggers   INTEGER, \
                      late_inputs    INTEGER, \
-                     input_ticks    INTEGER \
+                     input_ticks    INTEGER, \
+                     fps_x10        INTEGER, \
+                     min_fps_x10    INTEGER \
                  ); \
                  CREATE INDEX IF NOT EXISTS idx_samples_client_ts ON samples(client, ts_ms);",
             ) {
                 eprintln!("[tel] schema init failed: {e}");
                 return;
+            }
+            // Add columns appended after a table was first created by an older binary
+            // (CREATE IF NOT EXISTS won't alter an existing table). Errors = column
+            // already present, so ignore them.
+            for col in ["fps_x10", "min_fps_x10"] {
+                let _ = conn.execute(&format!("ALTER TABLE samples ADD COLUMN {col} INTEGER"), []);
             }
             println!("[tel] telemetry db at {path}");
             commands.insert_resource(TelemetryDb(Mutex::new(conn)));
@@ -251,10 +306,18 @@ fn flush_telemetry(
         let rollback_ticks = report.as_ref().map(|r| r.rollback_ticks);
         let max_pos_err_mm = report.as_ref().map(|r| r.max_pos_err_mm);
         let pos_triggers = report.as_ref().map(|r| r.pos_triggers);
+        // Client-reported ×10 fields, dropping the 0 "not reported yet" sentinel. Kept
+        // as `Option<u16>` so the same value feeds both the `[tel]` line (÷10) and the DB.
+        let field = |f: fn(&RollbackReport) -> u16| report.as_ref().map(f).filter(|v| *v > 0);
+        let fps_x10 = field(|r| r.fps_x10);
+        let min_fps_x10 = field(|r| r.min_fps_x10);
+        // Effective render scale factor (confirms the mobile DPR clamp is live).
+        let scale_x10 = field(|r| r.render_scale_x10);
+        let one_dp = |v: Option<u16>| v.map(|v| v as f64 / 10.0);
         let (late_inputs, input_ticks) = late.get(&entity).copied().unzip();
 
         println!(
-            "[tel] client={} rtt={}ms jitter={}ms samples={} rb={} rbt={} errmm={} trig={} late={}/{}",
+            "[tel] client={} rtt={}ms jitter={}ms samples={} rb={} rbt={} errmm={} trig={} late={}/{} fps={} minfps={} scale={}",
             entity.to_bits(),
             o(rtt_ms.map(|v| format!("{v:.1}"))),
             o(jitter_ms.map(|v| format!("{v:.1}"))),
@@ -265,6 +328,9 @@ fn flush_telemetry(
             o(pos_triggers),
             o(late_inputs),
             o(input_ticks),
+            o(one_dp(fps_x10).map(|v| format!("{v:.1}"))),
+            o(one_dp(min_fps_x10).map(|v| format!("{v:.1}"))),
+            o(one_dp(scale_x10).map(|v| format!("{v:.1}"))),
         );
 
         if let Some(db) = &db {
@@ -281,6 +347,8 @@ fn flush_telemetry(
                 pos_triggers,
                 late_inputs,
                 input_ticks,
+                fps_x10,
+                min_fps_x10,
             });
         }
     }
@@ -487,6 +555,11 @@ impl Plugin for NetServerPlugin {
             FixedUpdate,
             (
                 apply_net_input.before(CharacterMovement),
+                // Safety net: park an avatar whose input has stalled instead of
+                // reusing its last "keep walking" indefinitely (runaway on a lossy link).
+                stop_stale_avatars
+                    .after(apply_net_input)
+                    .before(CharacterMovement),
                 (server_grab, server_hold, server_attach, server_delete).chain(),
                 // Balanced rocket thrust for launched rooms — a continuous force, so it
                 // runs per physics tick like the hold spring.
@@ -1872,8 +1945,15 @@ fn tag_room_part(
 fn server_grab(
     mut players: Query<(&ActionState<NetInput>, &mut HeldPart, &RoomMember)>,
     parts: Query<(Entity, &Position, &PartRoom), With<NetPart>>,
+    launches: Res<LaunchRegistry>,
 ) {
     for (state, mut held, member) in &mut players {
+        // Grabbing is off once the room has launched (you're riding, not building):
+        // never latch a new part, and release anything still held.
+        if launches.is_launched(member.0) {
+            held.0 = None;
+            continue;
+        }
         if !state.0.grab {
             held.0 = None;
             continue;
@@ -3508,6 +3588,8 @@ fn spawn_player_for_client(
         // Telemetry: server-measured late/lost-input tally for this client (the
         // `InputBuffer` lightyear adds on first input lands on this same entity).
         LateInputStats::default(),
+        // Runaway guard: consecutive-stale-input counter for `stop_stale_avatars`.
+        StaleInputRun::default(),
         // Replicated facing (mirrored from the avatar's `Yaw` by
         // `sync_avatar_facing`) so remote clients can draw it facing its look.
         NetFacing::default(),

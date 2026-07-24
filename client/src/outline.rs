@@ -253,14 +253,24 @@ fn resize_mask_image(
 }
 
 /// Add/remove [`OutlineSettings`] on the main camera so the full-screen composite
-/// pass only runs while at least one part is outlined.
+/// pass only runs while at least one part is outlined — and deactivate the mask
+/// camera when nothing is outlined so its extra full-resolution render pass (a
+/// per-frame clear + write of a screen-sized mask target — real bandwidth on a
+/// mobile tiled GPU) costs nothing in the common case (not mid-grab). The mask cam
+/// reactivates the frame something is outlined, so the highlight is unaffected.
 fn toggle_outline_pass(
     mut commands: Commands,
     outlined: Query<(), With<Outlined>>,
     planet: Query<(), (With<Outlined>, With<PlanetOutline>)>,
     cam: Query<(Entity, Has<OutlineSettings>), (With<Camera3d>, Without<MaskCam>)>,
+    mut mask_cam: Query<&mut Camera, With<MaskCam>>,
 ) {
     let want = !outlined.is_empty();
+    if let Ok(mut mask) = mask_cam.single_mut() {
+        if mask.is_active != want {
+            mask.is_active = want;
+        }
+    }
     // Green while the planet is being outlined (post-blastoff), else grabbable yellow.
     // The two never overlap (see `PlanetOutline`), so `want` always passes through
     // `false` between a yellow and a green episode — inserting on the rising edge picks

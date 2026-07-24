@@ -16,6 +16,7 @@ use avian3d::prelude::{
     Forces, Gravity, LinearVelocity, PhysicsSystems, Position, RigidBody, Rotation,
     SphericalJoint,
 };
+use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::math::DVec3;
 use bevy::transform::TransformSystems;
 use lightyear::prediction::correction::VisualCorrection;
@@ -30,8 +31,9 @@ use bad_spaceship_shared::character::{
 use bad_spaceship_shared::net::{
     apply_hold_spring, apply_net_input, focused_part, room_code_bytes, ClientPanicReport,
     ControlChannel,
-    NetFacing, NetHold, NetInput, NetJoint, NetLockJoint, NetPart, PartShape, take_rollback_diag,
-    NetPlayer, NetRoomFrame, ProtocolPlugin, RollbackReport, TelemetryChannel, GROUND_JOINT_ID,
+    NetFacing, NetHold, NetInput, NetJoint, NetLaunch, NetLockJoint, NetPart, PartShape,
+    take_rollback_diag,
+    NetPlayer, NetRoomFrame, ProtocolPlugin, RollbackReport, GROUND_JOINT_ID,
     TICK,
 };
 use bad_spaceship_shared::part::{
@@ -55,8 +57,8 @@ use lightyear::prelude::client::*;
 use lightyear::prelude::input::native::{ActionState, InputMarker};
 use lightyear::netcode::ConnectToken;
 use lightyear::prelude::{
-    Authentication, Connected, LocalId, MessageSender, PeerId, Predicted, PredictionManager,
-    PredictionMetrics,
+    Authentication, Connected, InputTimelineConfig, LocalId, MessageSender, PeerId, Predicted,
+    PredictionManager, PredictionMetrics, SyncConfig,
 };
 use lightyear::frame_interpolation::{FrameInterpolate, FrameInterpolationPlugin};
 use std::net::SocketAddr;
@@ -363,6 +365,8 @@ fn report_rollbacks(
     time: Res<Time>,
     mut acc: Local<f32>,
     metrics: Option<Res<PredictionMetrics>>,
+    diagnostics: Res<DiagnosticsStore>,
+    windows: Query<&Window>,
     mut sender: Query<&mut MessageSender<RollbackReport>, With<Connected>>,
 ) {
     *acc += time.delta_secs();
@@ -373,11 +377,36 @@ fn report_rollbacks(
     let Some(metrics) = metrics else { return };
     let Ok(mut sender) = sender.single_mut() else { return };
     let (max_pos_err_mm, pos_triggers) = take_rollback_diag();
-    sender.send::<TelemetryChannel>(RollbackReport {
+    // Encode a value ×10 into a u16 (one decimal place) for the telemetry fields.
+    let to_x10 = |v: f64| (v * 10.0).round().clamp(0.0, u16::MAX as f64) as u16;
+    // FPS curve: smoothed (average) + the worst single frame in the diagnostic's
+    // recent history buffer, so a stutter shows even if the average holds. This is the
+    // primary signal for "the phone's loop is throttling after a few seconds".
+    let (fps_x10, min_fps_x10) = diagnostics
+        .get(&FrameTimeDiagnosticsPlugin::FPS)
+        .map(|fps| {
+            let avg = fps.smoothed().unwrap_or(0.0);
+            let worst = fps.values().copied().filter(|v| *v > 0.0).reduce(f64::min).unwrap_or(avg);
+            (to_x10(avg), to_x10(worst))
+        })
+        .unwrap_or((0, 0));
+    let render_scale_x10 = windows
+        .iter()
+        .next()
+        .map(|w| to_x10(w.resolution.scale_factor() as f64))
+        .unwrap_or(0);
+    // Reliable ControlChannel (not the unreliable TelemetryChannel): on a high-RTT/lossy
+    // link — exactly the case we're diagnosing — every unreliable sample was dropping, so
+    // fps/scale/rb never reached the server. One small sequenced-reliable message per 2 s
+    // is negligible traffic and newest-wins, so we always get the latest window.
+    sender.send::<ControlChannel>(RollbackReport {
         rollbacks: metrics.rollbacks,
         rollback_ticks: metrics.rollback_ticks,
         max_pos_err_mm,
         pos_triggers,
+        fps_x10,
+        min_fps_x10,
+        render_scale_x10,
     });
 }
 
@@ -684,11 +713,19 @@ fn update_focus(
     // (read by `update_active_joints`) reports against, so focus the same copy the
     // server grab + the join preview resolve over — not the invisible `Confirmed` ones.
     parts: Query<(Entity, &Transform), (With<NetPart>, With<Predicted>)>,
+    launch: Query<&NetLaunch>,
     mut player: Query<(&Holding, &mut FocusedInteractable), With<Player>>,
 ) {
     let Ok((holding, mut focused)) = player.single_mut() else {
         return;
     };
+    // Grabbing is off once the room has launched (you're riding, not building). Clear
+    // any focus so nothing is outlined in flight — that also idles the mask camera's
+    // extra render pass (`toggle_outline_pass`) exactly when the phone is most GPU-bound.
+    if crate::launch::net_launched(&launch) {
+        focused.0 = None;
+        return;
+    }
     // While holding, keep the part latched the frame the grab began — don't re-aim.
     if holding.0 {
         return;
@@ -718,6 +755,7 @@ fn update_focus(
 fn read_grab_intent(
     mut clicks: MessageReader<PlayerClick>,
     modifying: Query<&Modifying, With<Player>>,
+    launch: Query<&NetLaunch>,
     mut player: Query<(&mut Holding, &FocusedInteractable), With<Player>>,
     mut want_attach: ResMut<WantAttach>,
     mut want_delete: ResMut<WantDelete>,
@@ -725,6 +763,13 @@ fn read_grab_intent(
     let Ok((mut holding, focused)) = player.single_mut() else {
         return;
     };
+    // Grabbing/attaching/deleting is off once launched — drain any clicks so they don't
+    // act, and drop anything still held so nothing floats along mid-flight.
+    if crate::launch::net_launched(&launch) {
+        clicks.clear();
+        holding.0 = false;
+        return;
+    }
     let modding = modifying.iter().next().is_some_and(|m| m.0);
     let looking_at_part = focused.0.is_some();
     for _ in clicks.read() {
@@ -1328,6 +1373,36 @@ fn reconnect_dropped(
     *cooldown = 2.0;
 }
 
+/// Per-client input timing. The design intent is a **pure prediction** model:
+/// **zero local input delay** (your own moves apply to your predicted sim instantly),
+/// with the *only* delay being that the client simulates each tick some ticks *ahead*
+/// of the server, so its input for tick T reaches the server before the server runs T.
+/// The server thus effectively sits behind every client by that lead — and the lead is
+/// recomputed every sync from live RTT/jitter, so it adapts continuously (a struggling,
+/// high-jitter client self-sizes a *bigger* lead; a good one stays tight). This is NOT
+/// a one-time tune.
+///
+/// We therefore keep the default `no_input_delay` input-delay config (no local input
+/// delay; all latency covered by the client running ahead) and only widen the
+/// **adaptive** lead margin. The `InputTimeline` objective is
+/// `remote + RTT/2 + jitter·jitter_multiple + (jitter_margin + 1 + error_margin) ticks`;
+/// the `jitter·jitter_multiple` term is live-jitter-driven, so raising `jitter_multiple`
+/// makes the whole margin scale up with measured jitter. The default (`4`) was too tight
+/// for a real jittery phone: a two-phone session logged 15–38 % of that phone's inputs
+/// arriving *late* (server reusing its last input → the runaway + rollback lag) vs ~0 %
+/// for the good phone. `6` + a 2-tick fixed floor gives it enough adaptive lead to land
+/// inputs on time without adding any local input delay.
+fn input_timeline_config() -> InputTimelineConfig {
+    InputTimelineConfig::default().with_sync_config(SyncConfig {
+        // Adaptive: multiplies the *live* jitter estimate, so the lead grows and
+        // shrinks with the connection. 4 → 6 widens the safety band for bursty links.
+        jitter_multiple: 6,
+        // Fixed fractional-tick floor on top of the jitter-derived margin.
+        jitter_margin: 2.0,
+        ..Default::default()
+    })
+}
+
 /// (Re)spawn the netcode client entity and start connecting. Called at startup
 /// and again by `reconnect_dropped`; each call builds a fresh `NetcodeClient`
 /// (new token + client id), so it survives connect-token expiry across a long
@@ -1354,7 +1429,9 @@ fn spawn_client(commands: &mut Commands) {
     // insert-hook creates the `PredictionResource` lightyear needs to process
     // predicted entities. It is NOT auto-added (unlike the interpolation config),
     // so without it receiving a predicted avatar panics in `receive_replication`.
-    let client = commands.spawn((netcode, io, PredictionManager::default())).id();
+    let client = commands
+        .spawn((netcode, io, PredictionManager::default(), input_timeline_config()))
+        .id();
     commands.trigger(Connect { entity: client });
     info!("connecting to multiplayer server at {url}");
 }
@@ -1379,7 +1456,9 @@ fn spawn_client(commands: &mut Commands) {
     // See the native counterpart: `PredictionManager` enables client-side
     // prediction (creates `PredictionResource`); required or receiving a predicted
     // entity panics.
-    let client = commands.spawn((netcode, io, PredictionManager::default())).id();
+    let client = commands
+        .spawn((netcode, io, PredictionManager::default(), input_timeline_config()))
+        .id();
     commands.trigger(Connect { entity: client });
     info!("connecting to multiplayer server at {url}");
 }

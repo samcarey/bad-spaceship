@@ -65,7 +65,9 @@ fn main() {
                     title: "Bad Spaceship".to_string(),
                     // Bevy 0.13 removed `Window::fit_canvas_to_parent`; the WASM
                     // canvas is now sized to the viewport via CSS in index.html
-                    // (`canvas { width/height: 100% }`).
+                    // (`canvas { width/height: 100% }`). The mobile render-resolution
+                    // cap is done in JS in play.html (spoofing devicePixelRatio before
+                    // boot) — Bevy's scale_factor_override is a no-op on web.
                     ..default()
                 }),
                 ..default()
@@ -99,6 +101,11 @@ fn main() {
         .insert_resource(ClearColor(Color::srgb(0.17, 0.125, 0.115)))
         .add_systems(Startup, load_configs)
         .add_systems(Update, add_camera_to_player);
+    // NOTE: an earlier attempt capped the frame rate via `WinitSettings::Reactive`, but
+    // that throttles the WHOLE app loop — including lightyear's PreUpdate/PostUpdate
+    // packet send/receive/ping — so it inflated RTT and made things worse on the very
+    // phone it was meant to help. Render-rate must not be coupled to the netcode loop;
+    // the DPR clamp reduces GPU load without touching update cadence.
 
     // Avian physics — with the multiplayer transform-sync handling disabled when
     // we're connecting (so `lightyear_avian3d` can own it). Must precede
