@@ -317,10 +317,16 @@ fn flush_telemetry(
             .map(|r| r.min_fps_x10)
             .filter(|v| *v > 0)
             .map(|v| v as f64 / 10.0);
+        // Effective render scale factor (confirms the mobile DPR clamp is live).
+        let scale = report
+            .as_ref()
+            .map(|r| r.render_scale_x10)
+            .filter(|v| *v > 0)
+            .map(|v| v as f64 / 10.0);
         let (late_inputs, input_ticks) = late.get(&entity).copied().unzip();
 
         println!(
-            "[tel] client={} rtt={}ms jitter={}ms samples={} rb={} rbt={} errmm={} trig={} late={}/{} fps={} minfps={}",
+            "[tel] client={} rtt={}ms jitter={}ms samples={} rb={} rbt={} errmm={} trig={} late={}/{} fps={} minfps={} scale={}",
             entity.to_bits(),
             o(rtt_ms.map(|v| format!("{v:.1}"))),
             o(jitter_ms.map(|v| format!("{v:.1}"))),
@@ -333,6 +339,7 @@ fn flush_telemetry(
             o(input_ticks),
             o(fps.map(|v| format!("{v:.1}"))),
             o(min_fps.map(|v| format!("{v:.1}"))),
+            o(scale.map(|v| format!("{v:.1}"))),
         );
 
         if let Some(db) = &db {

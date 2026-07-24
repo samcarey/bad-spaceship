@@ -365,6 +365,7 @@ fn report_rollbacks(
     mut acc: Local<f32>,
     metrics: Option<Res<PredictionMetrics>>,
     diagnostics: Res<DiagnosticsStore>,
+    windows: Query<&Window>,
     mut sender: Query<&mut MessageSender<RollbackReport>, With<Connected>>,
 ) {
     *acc += time.delta_secs();
@@ -394,6 +395,11 @@ fn report_rollbacks(
             )
         })
         .unwrap_or((0, 0));
+    let render_scale_x10 = windows
+        .iter()
+        .next()
+        .map(|w| (w.resolution.scale_factor() * 10.0).round().clamp(0.0, u16::MAX as f64 as f32) as u16)
+        .unwrap_or(0);
     sender.send::<TelemetryChannel>(RollbackReport {
         rollbacks: metrics.rollbacks,
         rollback_ticks: metrics.rollback_ticks,
@@ -401,6 +407,7 @@ fn report_rollbacks(
         pos_triggers,
         fps_x10,
         min_fps_x10,
+        render_scale_x10,
     });
 }
 

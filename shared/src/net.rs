@@ -753,6 +753,10 @@ pub struct RollbackReport {
     /// FPS diagnostic wasn't available yet.
     pub fps_x10: u16,
     pub min_fps_x10: u16,
+    /// The window's effective render scale factor ×10 (physical/logical pixels).
+    /// Confirms the mobile DPR clamp is live: an un-clamped iPhone reports ~30 (3.0×),
+    /// the clamp forces ~15 (1.5×). `0` if unavailable.
+    pub render_scale_x10: u16,
 }
 
 /// TEMPORARY client-crash self-telemetry. A wasm Rust panic aborts silently to the
