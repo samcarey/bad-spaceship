@@ -201,19 +201,6 @@ pub fn take_text_edit(purpose: TextPrompt) -> Option<String> {
 /// panic message + location in `localStorage`; `net::report_stored_panic` forwards it to
 /// the server on the next connect (logged `[panic] …`) and clears it. Chains the prior
 /// hook so the console still gets it. Remove once the freeze is fixed.
-/// Cap the WebGL render resolution on high-DPR mobile displays. An iPhone reports
-/// `devicePixelRatio` ~3, so the canvas backing store renders ~9× the CSS pixels — a
-/// fragment load heavy enough that iOS Safari's power governor clamps the whole page
-/// to ~7 fps a few seconds in (measured: FPS collapses, RTT doubles, inputs go late).
-/// Rendering at `min(dpr, MAX)` and letting the browser upscale the canvas cuts that
-/// load ~4× at a small sharpness cost. Returns `None` (→ no override, native OS scale
-/// factor) when the display is already at/below the cap, so DPR-1 desktops are untouched.
-pub fn render_scale_factor_override() -> Option<f32> {
-    const MAX_RENDER_SCALE: f32 = 1.5;
-    let dpr = web_sys::window()?.device_pixel_ratio() as f32;
-    (dpr > MAX_RENDER_SCALE).then_some(MAX_RENDER_SCALE)
-}
-
 pub fn install_panic_hook() {
     use std::sync::Once;
     static ONCE: Once = Once::new();

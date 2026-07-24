@@ -18,12 +18,6 @@ impl Plugin for PlatformPlugin {
 /// callers stay platform-agnostic.
 pub fn install_panic_hook() {}
 
-/// No render-resolution cap on native — desktop GPUs handle full resolution, and
-/// there's no browser power governor to appease. See the web counterpart.
-pub fn render_scale_factor_override() -> Option<f32> {
-    None
-}
-
 /// See `install_panic_hook` — native has nothing stored.
 pub fn take_stored_panic() -> Option<String> {
     None

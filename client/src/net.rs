@@ -32,7 +32,7 @@ use bad_spaceship_shared::net::{
     apply_hold_spring, apply_net_input, focused_part, room_code_bytes, ClientPanicReport,
     ControlChannel,
     NetFacing, NetHold, NetInput, NetJoint, NetLockJoint, NetPart, PartShape, take_rollback_diag,
-    NetPlayer, NetRoomFrame, ProtocolPlugin, RollbackReport, TelemetryChannel, GROUND_JOINT_ID,
+    NetPlayer, NetRoomFrame, ProtocolPlugin, RollbackReport, GROUND_JOINT_ID,
     TICK,
 };
 use bad_spaceship_shared::part::{
@@ -400,7 +400,11 @@ fn report_rollbacks(
         .next()
         .map(|w| (w.resolution.scale_factor() * 10.0).round().clamp(0.0, u16::MAX as f64 as f32) as u16)
         .unwrap_or(0);
-    sender.send::<TelemetryChannel>(RollbackReport {
+    // Reliable ControlChannel (not the unreliable TelemetryChannel): on a high-RTT/lossy
+    // link — exactly the case we're diagnosing — every unreliable sample was dropping, so
+    // fps/scale/rb never reached the server. One small sequenced-reliable message per 2 s
+    // is negligible traffic and newest-wins, so we always get the latest window.
+    sender.send::<ControlChannel>(RollbackReport {
         rollbacks: metrics.rollbacks,
         rollback_ticks: metrics.rollback_ticks,
         max_pos_err_mm,

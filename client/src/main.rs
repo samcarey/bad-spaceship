@@ -8,7 +8,6 @@ use bad_spaceship_shared::player;
 // `GlobalAmbientLight` *resource* (the component now only overrides per-camera).
 use bevy::light::GlobalAmbientLight;
 use bevy::prelude::*;
-use bevy::window::WindowResolution;
 
 use gamepad::GamepadPlugin;
 use input::InputPlugin;
@@ -59,12 +58,6 @@ fn main() {
         ..default()
     });
 
-    // Cap render resolution on high-DPR mobile displays (None = native scale factor).
-    let mut resolution = WindowResolution::default();
-    if let Some(scale) = platform::render_scale_factor_override() {
-        resolution = resolution.with_scale_factor_override(scale);
-    }
-
     app.add_plugins(
         DefaultPlugins
             .set(WindowPlugin {
@@ -72,8 +65,9 @@ fn main() {
                     title: "Bad Spaceship".to_string(),
                     // Bevy 0.13 removed `Window::fit_canvas_to_parent`; the WASM
                     // canvas is now sized to the viewport via CSS in index.html
-                    // (`canvas { width/height: 100% }`).
-                    resolution,
+                    // (`canvas { width/height: 100% }`). The mobile render-resolution
+                    // cap is done in JS in play.html (spoofing devicePixelRatio before
+                    // boot) — Bevy's scale_factor_override is a no-op on web.
                     ..default()
                 }),
                 ..default()
