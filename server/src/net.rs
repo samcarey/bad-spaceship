@@ -1954,8 +1954,15 @@ fn tag_room_part(
 fn server_grab(
     mut players: Query<(&ActionState<NetInput>, &mut HeldPart, &RoomMember)>,
     parts: Query<(Entity, &Position, &PartRoom), With<NetPart>>,
+    launches: Res<LaunchRegistry>,
 ) {
     for (state, mut held, member) in &mut players {
+        // Grabbing is off once the room has launched (you're riding, not building):
+        // never latch a new part, and release anything still held.
+        if launches.is_launched(member.0) {
+            held.0 = None;
+            continue;
+        }
         if !state.0.grab {
             held.0 = None;
             continue;

@@ -31,7 +31,8 @@ use bad_spaceship_shared::character::{
 use bad_spaceship_shared::net::{
     apply_hold_spring, apply_net_input, focused_part, room_code_bytes, ClientPanicReport,
     ControlChannel,
-    NetFacing, NetHold, NetInput, NetJoint, NetLockJoint, NetPart, PartShape, take_rollback_diag,
+    NetFacing, NetHold, NetInput, NetJoint, NetLaunch, NetLockJoint, NetPart, PartShape,
+    take_rollback_diag,
     NetPlayer, NetRoomFrame, ProtocolPlugin, RollbackReport, GROUND_JOINT_ID,
     TICK,
 };
@@ -718,11 +719,19 @@ fn update_focus(
     // (read by `update_active_joints`) reports against, so focus the same copy the
     // server grab + the join preview resolve over — not the invisible `Confirmed` ones.
     parts: Query<(Entity, &Transform), (With<NetPart>, With<Predicted>)>,
+    launch: Query<&NetLaunch>,
     mut player: Query<(&Holding, &mut FocusedInteractable), With<Player>>,
 ) {
     let Ok((holding, mut focused)) = player.single_mut() else {
         return;
     };
+    // Grabbing is off once the room has launched (you're riding, not building). Clear
+    // any focus so nothing is outlined in flight — that also idles the mask camera's
+    // extra render pass (`toggle_outline_pass`) exactly when the phone is most GPU-bound.
+    if launch.iter().next().is_some_and(|l| l.launched) {
+        focused.0 = None;
+        return;
+    }
     // While holding, keep the part latched the frame the grab began — don't re-aim.
     if holding.0 {
         return;
@@ -752,6 +761,7 @@ fn update_focus(
 fn read_grab_intent(
     mut clicks: MessageReader<PlayerClick>,
     modifying: Query<&Modifying, With<Player>>,
+    launch: Query<&NetLaunch>,
     mut player: Query<(&mut Holding, &FocusedInteractable), With<Player>>,
     mut want_attach: ResMut<WantAttach>,
     mut want_delete: ResMut<WantDelete>,
@@ -759,6 +769,13 @@ fn read_grab_intent(
     let Ok((mut holding, focused)) = player.single_mut() else {
         return;
     };
+    // Grabbing/attaching/deleting is off once launched — drain any clicks so they don't
+    // act, and drop anything still held so nothing floats along mid-flight.
+    if launch.iter().next().is_some_and(|l| l.launched) {
+        clicks.clear();
+        holding.0 = false;
+        return;
+    }
     let modding = modifying.iter().next().is_some_and(|m| m.0);
     let looking_at_part = focused.0.is_some();
     for _ in clicks.read() {
