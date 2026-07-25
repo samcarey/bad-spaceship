@@ -12,6 +12,16 @@
 //! does rather than freezing the launch-day plan; after the escape cutoff it shows the
 //! engines-off ballistic coast instead.
 //!
+//! **Stability.** Two things keep the line from thrashing. (1) The recorded **trail is
+//! continuity-gated**: a candidate point is dropped when its jump from the previous frame
+//! is far larger than speed·dt allows — a transient rollback replay or a one-frame
+//! floating-origin `offset`↔`com` desync would otherwise bake a permanent spike into the
+//! past that "never happened". (2) The **future eases**: each re-propagation lands in a
+//! `future_target`, and the drawn `future_display` approaches it exponentially
+//! ([`FUTURE_EASE_RATE`]) rather than snapping, so a re-plan slides the plan line over
+//! instead of jumping. The eased shape is stored as offsets from the live position and
+//! re-anchored to it each frame, so it stays glued to the vehicle as it settles.
+//!
 //! Rendering is one rebuilt-per-frame **3D tube** — a thin extruded pipe following the
 //! path, its radius scaling with camera distance so the line holds a roughly constant
 //! on-screen thickness from the pad to a plan-end tens of kilometres up. (A camera-facing
@@ -58,6 +68,22 @@ const REPLAN_SECS: f32 = 0.5;
 /// flight per sample) — dense enough that the dot walk sees a smooth curve.
 const PREVIEW_SAMPLE_EVERY: usize = 5;
 
+/// Every re-propagation is resampled to this fixed point count so the drawn shape can
+/// ease toward it **point-for-point** (each index is the same look-ahead time in both the
+/// old and the new plan). Plenty of resolution for a thin line following a smooth arc.
+const FUTURE_SAMPLES: usize = 96;
+
+/// Exponential rate the drawn future approaches a freshly re-planned one (1/s) — a ~0.3 s
+/// time constant, so a re-plan slides over in under a second instead of snapping. Frame-
+/// rate independent (`1 − e^(−rate·dt)`).
+const FUTURE_EASE_RATE: f32 = 3.0;
+
+/// A trail candidate is rejected as a glitch when its jump from the previous frame exceeds
+/// `speed·dt·SLACK + FLOOR` — generous headroom over real motion (which is exactly
+/// speed·dt) that still catches km-scale rollback/rebase teleports.
+const TRAIL_JUMP_SLACK: f64 = 5.0;
+const TRAIL_JUMP_FLOOR: f64 = 100.0;
+
 /// How far ahead the engines-off coast preview integrates (s), and its step/sampling.
 const COAST_PREVIEW_SECS: f32 = 240.0;
 const COAST_DT: f32 = 0.25;
@@ -83,8 +109,16 @@ const TUBE_SIDES: usize = 5;
 pub struct FlightPath {
     /// Where the assembly has been this launch (oldest first).
     trail: Vec<DVec3>,
-    /// Where the plan takes it from here (re-propagated every [`REPLAN_SECS`]).
-    future: Vec<DVec3>,
+    /// The live vehicle position (true frame) after the continuity gate — the junction
+    /// where the trail meets the future. Held frozen for the odd glitch frame so a
+    /// transient position spike can't jerk the whole line.
+    current: DVec3,
+    /// The latest re-propagated plan, as offsets from [`current`](Self::current),
+    /// resampled to [`FUTURE_SAMPLES`] — the shape the drawn line eases toward.
+    future_target: Vec<DVec3>,
+    /// The eased shape actually drawn: approaches [`future_target`](Self::future_target)
+    /// at [`FUTURE_EASE_RATE`], re-anchored to [`current`](Self::current) in the draw.
+    future_display: Vec<DVec3>,
     /// HUD readout of the current burn preview; `None` while coasting (engines cut).
     pub plan: Option<PlanReadout>,
 }
@@ -139,65 +173,121 @@ fn update_flight_path(
     autopilot: Res<Autopilot>,
     mut path: ResMut<FlightPath>,
     mut replan_in: Local<f32>,
+    // Previous frame's true position, for the trail continuity gate (below).
+    mut prev_pos: Local<Option<DVec3>>,
 ) {
     let Some(snap) = autopilot.0.as_ref() else {
         // Launch over (or broke up): clear everything so the next launch starts fresh.
-        if !path.trail.is_empty() || !path.future.is_empty() || path.plan.is_some() {
+        if !path.trail.is_empty() || !path.future_display.is_empty() || path.plan.is_some() {
             *path = FlightPath::default();
         }
         *replan_in = 0.0;
+        *prev_pos = None;
         return;
     };
+    let dt = time.delta_secs();
 
-    // Trail: append when we've moved a step past the last record; thin by halving when
-    // full (doubles the record's spacing everywhere — the ribbon just spans the wider
-    // gaps, so it stays continuous).
-    let step = (radial_altitude(snap.true_pos.as_vec3()) as f64 * 0.01).max(TRAIL_MIN_STEP);
-    if path.trail.last().is_none_or(|last| last.distance(snap.true_pos) >= step) {
-        path.trail.push(snap.true_pos);
-        if path.trail.len() > MAX_TRAIL {
-            let mut keep = false;
-            path.trail.retain(|_| {
-                keep = !keep;
-                keep
-            });
+    // Trail (past): only advance on a frame whose motion is physically plausible. A real
+    // step is speed·dt; a jump wildly past that is a glitch (a rollback replay, or a
+    // one-frame floating-origin `offset`↔`com` desync in MP) that would otherwise bake a
+    // permanent spike into the recorded past. Drop such a frame and re-anchor — the trail
+    // just skips it, and the junction (`current`) stays put rather than jerking.
+    let plausible = snap.true_vel.length() as f64 * dt as f64 * TRAIL_JUMP_SLACK + TRAIL_JUMP_FLOOR;
+    let continuous = prev_pos.is_none_or(|p| p.distance(snap.true_pos) <= plausible);
+    *prev_pos = Some(snap.true_pos);
+    if continuous {
+        let current = snap.true_pos;
+        path.current = current;
+        // Append when we've moved a step past the last record; thin by halving when full
+        // (doubles the record's spacing everywhere — the line just spans the wider gaps,
+        // so it stays continuous).
+        let step = (radial_altitude(current.as_vec3()) as f64 * 0.01).max(TRAIL_MIN_STEP);
+        if path.trail.last().is_none_or(|last| last.distance(current) >= step) {
+            path.trail.push(current);
+            if path.trail.len() > MAX_TRAIL {
+                let mut keep = false;
+                path.trail.retain(|_| {
+                    keep = !keep;
+                    keep
+                });
+            }
         }
     }
 
-    *replan_in -= time.delta_secs();
-    if *replan_in > 0.0 {
-        return;
+    // Future: re-propagate on a cadence into `future_target`, then ease `future_display`
+    // toward it every frame (below) so a re-plan slides over smoothly. Stored as offsets
+    // from the start (== the live position) so the eased line stays glued to the vehicle.
+    *replan_in -= dt;
+    if *replan_in <= 0.0 {
+        *replan_in = REPLAN_SECS;
+        let pos = snap.true_pos.as_vec3();
+        let future_abs: Vec<DVec3> = if snap.throttle > 0.0 {
+            // Burning: fly the same drag-aware point-mass law the optimizer ranked, from
+            // the live state — the preview IS the plan, continuously re-anchored.
+            let preview = propagate(
+                pos,
+                snap.true_vel,
+                snap.vehicle,
+                snap.pitchover,
+                OPTIMIZER_DT,
+                OPTIMIZER_STEPS,
+                PREVIEW_SAMPLE_EVERY,
+                GROUND_RADIUS,
+            );
+            path.plan = Some(PlanReadout {
+                escapes: preview.escaped,
+                // The path is one sample per PREVIEW_SAMPLE_EVERY steps, so its length is
+                // the flight time to the end point (± one sample interval — HUD-grade).
+                eta_secs: preview.path.len().saturating_sub(1) as f32
+                    * PREVIEW_SAMPLE_EVERY as f32
+                    * OPTIMIZER_DT,
+                cutoff_alt: preview.path.last().map_or(0.0, |p| radial_altitude(*p)),
+            });
+            preview.path.iter().map(|p| p.as_dvec3()).collect()
+        } else {
+            // Engines cut: the plan ahead is the ballistic coast (gravity + residual drag).
+            path.plan = None;
+            coast_path(pos, snap.true_vel, snap.vehicle.mass)
+        };
+        let start = future_abs.first().copied().unwrap_or(snap.true_pos);
+        let offsets: Vec<DVec3> = future_abs.iter().map(|p| *p - start).collect();
+        path.future_target = resample(&offsets, FUTURE_SAMPLES);
     }
-    *replan_in = REPLAN_SECS;
 
-    let pos = snap.true_pos.as_vec3();
-    if snap.throttle > 0.0 {
-        // Burning: fly the same drag-aware point-mass law the optimizer ranked, from
-        // the live state — the preview IS the plan, continuously re-anchored.
-        let preview = propagate(
-            pos,
-            snap.true_vel,
-            snap.vehicle,
-            snap.pitchover,
-            OPTIMIZER_DT,
-            OPTIMIZER_STEPS,
-            PREVIEW_SAMPLE_EVERY,
-            GROUND_RADIUS,
-        );
-        path.plan = Some(PlanReadout {
-            escapes: preview.escaped,
-            // The path is one sample per PREVIEW_SAMPLE_EVERY steps, so its length is
-            // the flight time to the end point (± one sample interval — HUD-grade).
-            eta_secs: preview.path.len().saturating_sub(1) as f32
-                * PREVIEW_SAMPLE_EVERY as f32
-                * OPTIMIZER_DT,
-            cutoff_alt: preview.path.last().map_or(0.0, |p| radial_altitude(*p)),
-        });
-        path.future = preview.path.iter().map(|p| p.as_dvec3()).collect();
+    // Ease the drawn shape toward the target. Snap on the first fill / a length change
+    // (a fresh launch, where there's nothing to ease from — easing from an empty/old
+    // shape would draw a line collapsing onto the vehicle).
+    if path.future_display.len() != path.future_target.len() {
+        path.future_display = path.future_target.clone();
     } else {
-        // Engines cut: the plan ahead is the ballistic coast (gravity + residual drag).
-        path.future = coast_path(pos, snap.true_vel, snap.vehicle.mass);
-        path.plan = None;
+        let alpha = (1.0 - (-FUTURE_EASE_RATE * dt).exp()) as f64;
+        // Reborrow to a plain `&mut` so the two fields split-borrow (they don't through
+        // `ResMut`'s `Deref`).
+        let path = &mut *path;
+        for (display, target) in path.future_display.iter_mut().zip(&path.future_target) {
+            *display = display.lerp(*target, alpha);
+        }
+    }
+}
+
+/// Resample a polyline to exactly `n` points, evenly by index (the samples are already
+/// uniform in flight time, so index ≈ look-ahead time). Lets two different-length plans
+/// be eased point-for-point. `n >= 2`; a shorter/degenerate input is padded by repetition.
+fn resample(path: &[DVec3], n: usize) -> Vec<DVec3> {
+    match path.len() {
+        0 => vec![DVec3::ZERO; n],
+        1 => vec![path[0]; n],
+        len => {
+            let last = len - 1;
+            (0..n)
+                .map(|i| {
+                    let s = i as f64 / (n - 1) as f64 * last as f64;
+                    let lo = s.floor() as usize;
+                    let hi = (lo + 1).min(last);
+                    path[lo].lerp(path[hi], s - lo as f64)
+                })
+                .collect()
+        }
     }
 }
 
@@ -227,7 +317,6 @@ fn coast_path(mut pos: Vec3, mut vel: Vec3, mass: f32) -> Vec<DVec3> {
 fn draw_flight_path(
     mut commands: Commands,
     path: Res<FlightPath>,
-    autopilot: Res<Autopilot>,
     frame: Option<Res<ClientRoomFrame>>,
     // The MAIN camera specifically: the outline post-process spawns a second
     // `Camera3d` (its offscreen mask camera), so a bare `With<Camera3d>` single()
@@ -243,16 +332,26 @@ fn draw_flight_path(
     let Ok(camera) = camera.single() else {
         return;
     };
-    // trail → current position → plan, one polyline in local coordinates. The visual
+    if path.trail.is_empty() && path.future_display.is_empty() {
+        *visibility = Visibility::Hidden; // idle: nothing to draw
+        return;
+    }
+    // trail → current position → eased plan, one polyline in local coordinates. The visual
     // frame mirror keeps `true − offset` continuous through a rebase snap.
     let offset = frame.map(|f| f.offset).unwrap_or(DVec3::ZERO);
-    let mut points: Vec<Vec3> = Vec::with_capacity(path.trail.len() + path.future.len() + 1);
+    let current_local = path.current - offset;
+    let mut points: Vec<Vec3> =
+        Vec::with_capacity(path.trail.len() + path.future_display.len() + 1);
     points.extend(path.trail.iter().map(|p| (p - offset).as_vec3()));
-    if let Some(snap) = autopilot.0.as_ref() {
-        points.push((snap.true_pos - offset).as_vec3());
-    }
-    // `future[0]` is the propagation start — the current position again; skip it.
-    points.extend(path.future.iter().skip(1).map(|p| (p - offset).as_vec3()));
+    points.push(current_local.as_vec3());
+    // The future is offsets from the live position; re-anchor to it here so the eased
+    // line stays glued to the vehicle. `future_display[0]` is ≈ the junction — skip it.
+    points.extend(
+        path.future_display
+            .iter()
+            .skip(1)
+            .map(|o| (current_local + *o).as_vec3()),
+    );
 
     let cam = camera.translation();
     let Some(mesh) = tube_mesh(&points, cam) else {
