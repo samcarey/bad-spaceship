@@ -24,16 +24,19 @@ use avian3d::prelude::{
 };
 use bad_spaceship_shared::guidance::{program_guidance, Guidance, PitchProgram, Vehicle};
 use bad_spaceship_shared::launch::{
-    assembly_burn, burn_impulse, measure_assembly_spin, AssemblySpin, LAUNCH_COUNTDOWN_SECS,
+    assembly_burn, burn_impulse, burn_trace, measure_assembly_spin, AssemblySpin,
+    LAUNCH_COUNTDOWN_SECS,
 };
 use bad_spaceship_shared::map::apply_gravity_correction;
 use bad_spaceship_shared::net::{
+    NetFeltUp,
     ControlChannel, InLargestAssembly, NetLaunch, NetLockJoint, NetPart, NetPlayer, RequestLaunch,
     SetLocked,
 };
 use bad_spaceship_shared::part::{
     avatar_lock_contacts, capsule_bottom_center, cleanup_lock_joints, despawn_player_lock_welds,
-    Gimbal, Holdable, LockJoint, RocketEngine, SuppressLocalParts, TargetPosition,
+    AttitudeIntegral, EscapeCut, Gimbal, Holdable, LockJoint, RocketEngine, SuppressLocalParts,
+    TargetPosition,
 };
 use bad_spaceship_shared::character::{apparent_up, drive_felt_up, FeltUp};
 use bad_spaceship_shared::Character;
@@ -60,7 +63,10 @@ impl Plugin for LaunchPlugin {
             .init_resource::<ApparentUp>()
             .init_resource::<Autopilot>()
             .add_message::<SpSetLock>()
-            .add_systems(Update, (tick_launch, ease_launch_zoom))
+            .add_systems(Update, (tick_launch, ease_launch_zoom));
+        #[cfg(not(target_arch = "wasm32"))]
+        app.add_systems(Update, autolock_rider);
+        app
             // Single-player half of the Lock button: weld/unweld the local character
             // to the parts it touches, plus the shared dangling-weld sweep. Gated off
             // in multiplayer, where the lock welds are server-owned replicated
@@ -95,16 +101,47 @@ impl Plugin for LaunchPlugin {
                     // the apparent-up the burn above just published.
                     sample_felt_up,
                     // Structural damping across welded pairs — drains contact/joint
-                    // pump energy before it can run away (see `damp_weld_motion`).
-                    // Single-player ONLY: on the predicted multiplayer twin the damper
-                    // would smear half-applied rollback corrections across the cluster
-                    // and feed a rollback storm; the server's authoritative damping
-                    // protects multiplayer flights.
-                    bad_spaceship_shared::part::damp_weld_motion
-                        .run_if(not(resource_exists::<SuppressLocalParts>)),
+                    // pump energy before it can run away (see `damp_weld_motion`). Runs in
+                    // ALL worlds, in the same chain position the server uses (after the
+                    // burn): the server damps its welded pairs every tick, so a predicted
+                    // client that skips it is running a *different simulation* by
+                    // construction — a systematic client/server asymmetry, and therefore a
+                    // permanent divergence source, no matter how well every other term is
+                    // matched. (An earlier trial gated it back off after an inconclusive
+                    // rollback-rate A/B; that measurement was variance-dominated and the
+                    // asymmetry it left behind is incompatible with zero divergence.)
+                    bad_spaceship_shared::part::damp_weld_motion,
                 )
                     .chain(),
             );
+    }
+}
+
+/// Test hook (native only): `BS_AUTOLOCK` welds this client to the deck it's standing
+/// on a few seconds after boot — turning a mid-flight-joining measurement client into a
+/// *locked rider* (the user's actual crash scenario: the rider's avatar↔deck lock-weld
+/// is the extra welded pair a spectator never has). Sends one `SetLocked(true)`, the
+/// same message the Lock button sends. No effect unless the env var is set.
+#[cfg(not(target_arch = "wasm32"))]
+fn autolock_rider(
+    time: Res<Time>,
+    mut elapsed: Local<f32>,
+    mut sent: Local<bool>,
+    mut sender: Query<&mut MessageSender<SetLocked>, With<Connected>>,
+) {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    if !*ON.get_or_init(|| std::env::var("BS_AUTOLOCK").is_ok()) || *sent {
+        return;
+    }
+    *elapsed += time.delta_secs();
+    if *elapsed < 6.0 {
+        return; // let it join, respawn onto the deck, and settle first
+    }
+    if let Ok(mut s) = sender.single_mut() {
+        s.send::<ControlChannel>(SetLocked(true));
+        *sent = true;
+        println!("[autolock] sent SetLocked(true)");
     }
 }
 
@@ -569,7 +606,7 @@ fn apply_sp_thrust(
 fn apply_mp_thrust(
     time: Res<Time>,
     // The launch autopilot's per-assembly PID integral state (see `assembly_burn`).
-    mut integral: Local<Vec3>,
+
     // The ascent plan mirror: the pitch program rebuilt from the server's replicated
     // pitchover angle (keyed by that angle so a re-plan on the server rebuilds here too).
     mut mp_plan: Local<Option<PitchProgram>>,
@@ -589,6 +626,9 @@ fn apply_mp_thrust(
                 &AngularVelocity,
                 &ComputedMass,
                 Option<&Gimbal>,
+                &NetPart,
+                Option<&AttitudeIntegral>,
+                Option<&EscapeCut>,
             ),
             (With<NetPart>, With<Predicted>, With<InLargestAssembly>),
         >,
@@ -596,15 +636,33 @@ fn apply_mp_thrust(
             (Entity, Forces, &mut Gimbal, Option<&mut FlameThrottle>),
             (With<RocketEngine>, With<Predicted>),
         >,
+        // Write-back of the rolled-back attitude integral (see `AttitudeIntegral`).
+        Query<(&mut AttitudeIntegral, &mut EscapeCut), (With<RocketEngine>, With<Predicted>)>,
     )>,
     frame: Res<ClientRoomFrame>,
     gravity: Res<Gravity>,
     mut fuel: ResMut<FuelUsed>,
     mut apparent: ResMut<ApparentUp>,
     mut autopilot: ResMut<Autopilot>,
-    // Riders' masses for the ascent plan (all avatars in the room are locked aboard at
-    // launch, and all are predicted): matches the server's rider-inclusive plan.
-    riders: Query<&ComputedMass, (With<Character>, With<Predicted>)>,
+    // Riders for the ascent plan AND the COM/inertia measurement (all avatars in the room
+    // are locked aboard at launch, and all are predicted): matches the server's
+    // rider-inclusive plan *and* its rider-inclusive `measure_assembly_spin`. Sorted by
+    // the replicated `client_id` so multi-rider reductions match the server's order too.
+    // `Without<RocketEngine>` keeps this disjoint from the `Forces` query in the ParamSet
+    // (which takes `LinearVelocity` mutably) — B0001 otherwise, same guard the server uses.
+    // Every predicted avatar in the room — keyed on `NetPlayer` (which only avatars
+    // carry), NOT on `Character`: only the OWNER's avatar gets `Character`
+    // (`insert_remote_avatar_body` deliberately omits it for remote players), so filtering
+    // on it silently dropped every *other* rider's mass from the COM/inertia and the
+    // thrust-to-weight — measured as an exactly-1.000 kg mass gap vs the server on every
+    // single tick of a two-player flight, which trims the burn about the wrong centre.
+    riders: Query<
+        (&Position, &LinearVelocity, &ComputedMass, &NetPlayer),
+        (With<Predicted>, Without<RocketEngine>, Without<NetPart>),
+    >,
+    // Tick-keyed burn trace (`BS_BURN_TRACE`), so the client's and server's burn inputs
+    // can be diffed at the SAME tick number instead of inferred by elimination.
+    timeline: Res<lightyear::prelude::LocalTimeline>,
 ) {
     let Some(launch) = orb.iter().next().filter(|l| l.launched) else {
         fuel.0 = 0.0; // idle: keep the readout at zero until the room launches
@@ -624,26 +682,63 @@ fn apply_mp_thrust(
     // the member rockets' poses alongside (`Gimbal` marks the rockets — it rides
     // `insert_rocket_physics`). The mass sum feeds only a plan rebuild, so it's
     // gathered only on the (once-per-launch) tick that needs it.
-    let (measured, geometry, part_mass_total) = {
+    let (measured, geometry, part_mass_total, integral_seed, cut_seed) = {
         let members = set.p0();
+        // **Cross-world stable member order.** Everything below is an order-sensitive
+        // float reduction: `measure_assembly_spin` mass-weights positions/velocities into
+        // the COM + inertia, the mass total is a plain sum, and `geometry` fixes the
+        // per-rocket order of the thrust least-squares solve (whose clamped refinement
+        // pass is order-dependent). Float addition isn't associative, so iterating in ECS
+        // query (spawn) order — which the server and a replication-fed client do NOT
+        // share — gives each peer a slightly different COM and therefore a different
+        // balanced thrust, which steers the assembly apart. Sorting by the replicated
+        // `NetPart::id` makes both peers reduce in the identical sequence.
+        let mut ordered: Vec<_> = members.iter().collect();
+        ordered.sort_unstable_by_key(|(_, _, _, _, _, _, _, net, _, _)| net.id);
+        // Locked riders fly with the assembly, so their weight belongs in the COM +
+        // inertia the attitude controller balances about — exactly as the server does it
+        // (`apply_room_rocket_thrust` chains its riders into the same measurement). The
+        // client used to measure a PARTS-ONLY COM while the server measured parts+riders,
+        // so the two peers trimmed thrust about different centres and the predicted
+        // attitude drifted from the confirmed one every tick — a standing divergence no
+        // amount of rollback could reconcile. Riders are rotation-locked, so they
+        // contribute mass + linear motion but no body spin (`Vec3::ZERO` angular), and
+        // they are chained AFTER the parts to match the server's reduction order.
+        let mut ordered_riders: Vec<_> = riders.iter().collect();
+        ordered_riders.sort_unstable_by_key(|(_, _, _, player)| player.client_id);
         let samples = || {
-            members
+            ordered
                 .iter()
-                .map(|(_, position, _, linear, angular, part_mass, _)| {
+                .map(|(_, position, _, linear, angular, part_mass, _, _, _, _)| {
                     (position.0, linear.0, angular.0, part_mass.value())
                 })
+                .chain(ordered_riders.iter().map(|(position, linear, mass, _)| {
+                    (position.0, linear.0, Vec3::ZERO, mass.value())
+                }))
         };
-        let geometry: Vec<(Entity, Vec3, Quat, bevy::math::Vec2)> = members
+        let geometry: Vec<(Entity, Vec3, Quat, bevy::math::Vec2)> = ordered
             .iter()
-            .filter_map(|(entity, position, rotation, _, _, _, gimbal)| {
-                gimbal.map(|g| (entity, position.0, rotation.0, g.0))
+            .filter_map(|(entity, position, rotation, _, _, _, gimbal, _, _, _)| {
+                gimbal.map(|g| (*entity, position.0, rotation.0, g.0))
             })
             .collect();
         // Needed every tick now (apparent-up divides the net thrust by it), not just
         // on plan-rebuild ticks.
         let part_mass_total: f32 =
-            members.iter().map(|(_, _, _, _, _, part_mass, _)| part_mass.value()).sum();
-        (measure_assembly_spin(samples), geometry, part_mass_total)
+            ordered.iter().map(|(_, _, _, _, _, part_mass, _, _, _, _)| part_mass.value()).sum();
+        // The assembly's live PID integral: read from its lowest-`NetPart::id` member, so
+        // which rocket holds the authoritative copy is cross-world stable. This value rides
+        // a rolled-back component, so a replay resumes from the integral the replayed tick
+        // actually had instead of re-integrating on top of the current one.
+        let integral_seed = ordered
+            .iter()
+            .find_map(|(_, _, _, _, _, _, _, _, integral, _)| integral.map(|i| i.0))
+            .unwrap_or(Vec3::ZERO);
+        let cut_seed = ordered
+            .iter()
+            .find_map(|(_, _, _, _, _, _, _, _, _, cut)| cut.map(|c| c.0))
+            .unwrap_or(false);
+        (measure_assembly_spin(samples), geometry, part_mass_total, integral_seed, cut_seed)
     };
     let Some((com, spin)) = measured else {
         apparent.0 = None;
@@ -654,7 +749,7 @@ fn apply_mp_thrust(
     // co-moving velocity), so the guidance sees real altitude/velocity under a rebase.
     let true_com = com + frame.offset.as_vec3();
     let true_vel = spin.linear_velocity + frame.velocity;
-    let total_mass = part_mass_total + riders.iter().map(|m| m.value()).sum::<f32>();
+    let total_mass = part_mass_total + riders.iter().map(|(_, _, mass, _)| mass.value()).sum::<f32>();
     // Rebuild the pitch program when the replicated angle (re)arrives, through the same
     // shared constructor the server plans with — locally measured masses are identical
     // (same parts, same densities), so the rebuilt program matches the one it flies.
@@ -668,7 +763,29 @@ fn apply_mp_thrust(
             Some(pitchover),
         ));
     }
-    let guidance = program_guidance(true_com, true_vel, mp_plan.as_ref().unwrap(), &mut cut);
+    // Same rollback discipline as the integral: latch from the replayed tick's state.
+    let mut cut_latch = cut_seed;
+    let guidance = program_guidance(true_com, true_vel, mp_plan.as_ref().unwrap(), &mut cut_latch);
+    if burn_trace() {
+        use lightyear::prelude::Timeline;
+        println!(
+            "[burn] C tick={:?} com={:.6},{:.6},{:.6} ang={:.6},{:.6},{:.6} lin={:.6},{:.6},{:.6} inert={:.6} m={:.6} int={:.6},{:.6},{:.6} thr={:.6} dir={:.6},{:.6},{:.6} n={}",
+            timeline.tick(),
+            com.x, com.y, com.z,
+            spin.angular_velocity.x, spin.angular_velocity.y, spin.angular_velocity.z,
+            spin.linear_velocity.x, spin.linear_velocity.y, spin.linear_velocity.z,
+            spin.inertia,
+            total_mass,
+            integral_seed.x, integral_seed.y, integral_seed.z,
+            guidance.throttle,
+            guidance.thrust_dir.x, guidance.thrust_dir.y, guidance.thrust_dir.z,
+            geometry.len(),
+        );
+    }
+    // Integrate from the ROLLED-BACK value, not a `Local` that accumulates once per replay
+    // (see `AttitudeIntegral`) — this is what keeps the predicted burn on the server's
+    // trajectory instead of drifting a little further apart with every rollback.
+    let mut integral = integral_seed;
     let net_force = apply_thrust(
         com,
         gravity.0,
@@ -684,6 +801,12 @@ fn apply_mp_thrust(
         &mut fuel.0,
         &mut set.p1(),
     );
+    // Persist the integral onto every member rocket so the rollback history carries it
+    // (all members hold the same value; the lowest-id one is read back next tick).
+    for (mut stored_integral, mut stored_cut) in &mut set.p2() {
+        stored_integral.0 = integral;
+        stored_cut.0 = cut_latch;
+    }
     // Apparent up for the riders (see `ApparentUp`), from the true (frame-folded) state —
     // same formula as the server so the predicted movement basis matches.
     apparent.0 = (total_mass > 0.0).then(|| apparent_up(net_force, total_mass, true_com));
@@ -722,11 +845,28 @@ fn sample_felt_up(
         (Entity, Option<&mut FeltUp>, &mut Rotation, &mut Position, &Collider),
         With<Character>,
     >,
+    // The server's averaged felt-up for each avatar (multiplayer only) — see `NetFeltUp`.
+    net_up: Query<&NetFeltUp>,
 ) {
     let target = apparent.0.unwrap_or(Vec3::Y);
     for (entity, felt, mut rotation, mut position, collider) in &mut characters {
         let pivot = capsule_bottom_center(collider);
-        drive_felt_up(&mut commands, entity, felt, &mut rotation, &mut position, pivot, target);
+        let up_before = felt.as_ref().map(|f| f.up);
+        // In multiplayer take the server's averaged felt-up (`NetFeltUp`); in single-player
+        // there is no authority, so the local ring is it.
+        let authoritative = net_up.get(entity).ok().map(|u| Vec3::from_array(u.0));
+        drive_felt_up(
+            &mut commands, entity, felt, &mut rotation, &mut position, pivot, target,
+            authoritative,
+        );
+        if burn_trace() {
+            if let Some(u) = up_before {
+                println!(
+                    "[felt] C tgt={:.6},{:.6},{:.6} up={:.6},{:.6},{:.6}",
+                    target.x, target.y, target.z, u.x, u.y, u.z
+                );
+            }
+        }
     }
 }
 
@@ -759,6 +899,18 @@ fn apply_thrust(
     }
     let full = bad_spaceship_shared::launch::full_rocket_thrust(gravity);
     let burns = assembly_burn(com, gravity, dt, geometry, spin, integral, guidance);
+    if burn_trace() {
+        // Per-rocket applied force, indexed by position in `geometry` — which BOTH peers
+        // sort by `NetPart::id`, so index i is the same physical rocket on each side.
+        for (i, b) in burns.iter().enumerate() {
+            let rot = geometry.get(i).map(|g| g.2).unwrap_or(Quat::IDENTITY);
+            println!(
+                "[force] C i={} f={:.6},{:.6},{:.6} p={:.6},{:.6},{:.6} g={:.6},{:.6} r={:.6},{:.6},{:.6},{:.6}",
+                i, b.force.x, b.force.y, b.force.z, b.point.x, b.point.y, b.point.z,
+                b.gimbal.x, b.gimbal.y, rot.x, rot.y, rot.z, rot.w
+            );
+        }
+    }
     // Fuel spent this tick (see `FuelUsed` and the shared `burn_impulse` definition).
     *fuel += burn_impulse(&burns, dt);
     let net_force: Vec3 = burns.iter().map(|b| b.force).sum();

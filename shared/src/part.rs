@@ -222,8 +222,42 @@ pub struct RocketEngine;
 /// limits, not an instant one. Local integrator state on every side (server, SP,
 /// predicted MP), not replicated: each side follows the same command law from the
 /// same measured state, so they converge like the throttle trim does.
-#[derive(Default, Component, Debug, Clone, Copy)]
+#[derive(
+    Default, Component, Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize,
+)]
 pub struct Gimbal(pub Vec2);
+
+/// The launch autopilot's per-assembly **attitude PID integral**, carried on every member
+/// rocket so it is *predicted client state that rolls back*.
+///
+/// This was a `Local<Vec3>` inside the client's thrust system, and that made it the
+/// dominant multiplayer divergence source. `apply_mp_thrust` runs on **every rollback
+/// replay tick**, so a `Local` integrates the same tick once per replay while the server
+/// integrates it exactly once: after a 13-tick rollback the client's integral has absorbed
+/// 13 extra integration steps. The integral commands attitude, so the two peers then fly
+/// *different* thrust — which diverges the assembly's rotation, triggering more rollbacks,
+/// which drift the integral further. Self-reinforcing, thrust-only, attitude-only: exactly
+/// the observed mid-ride storm (a welded assembly *at rest*, with no burn, measures
+/// bit-identical across peers).
+///
+/// Every member rocket holds the same value (written each tick by the burn); the assembly's
+/// live value is read from its lowest `NetPart::id` member so the choice is cross-world
+/// stable. Registered with lightyear's `local_rollback` so a replay restores it.
+#[derive(Default, Component, Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct AttitudeIntegral(pub Vec3);
+
+/// The escape-cutoff **hysteresis latch** (see `guidance::escape_cutoff`), carried on the
+/// member rockets for exactly the reason [`AttitudeIntegral`] is: it is predicted control
+/// state that must roll back. It gates the engines fully **on or off**, so if the client's
+/// latch flips on a different tick than the server's the two peers apply completely
+/// different thrust for those ticks — a far coarser divergence than any float drift. On
+/// this small planet escape is reached only a few km up, so an ordinary ride crosses the
+/// boundary and a `Local<bool>` (re-evaluated on every rollback replay) could latch there
+/// independently of the server.
+#[derive(
+    Default, Component, Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize,
+)]
+pub struct EscapeCut(pub bool);
 
 /// The part's random-appearance seed, minted at spawn. The client derives the
 /// whole metal look (tint, brushing, flakes, scratches) deterministically from
@@ -472,7 +506,14 @@ pub fn insert_rocket_physics(entity: &mut EntityCommands) {
     // the body centre is the flare's bottom rim.
     let flare_bottom_y = ROCKET_BODY_HEIGHT / 2.0 + ROCKET_FLARE_HEIGHT;
     let bounding_radius = (ROCKET_FLARE_BOTTOM_RADIUS.powi(2) + flare_bottom_y.powi(2)).sqrt();
-    entity.insert((RocketEngine, Gimbal::default(), collider, BoundingRadius(bounding_radius)));
+    entity.insert((
+        RocketEngine,
+        Gimbal::default(),
+        AttitudeIntegral::default(),
+        EscapeCut::default(),
+        collider,
+        BoundingRadius(bounding_radius),
+    ));
     // Density/friction/restitution/CCD/rigid-body — shared with the cuboid parts.
     insert_part_dynamics(entity);
 }
@@ -573,10 +614,10 @@ fn maintain_weld_rigidity(
     // (joints between the same two bodies may disagree on body1/body2 order; normalize
     // to the pair's smaller-entity-first key).
     type PairJoints = Vec<(Entity, Vec3, Vec3)>; // (joint, anchor in key.0, anchor in key.1)
-    let mut pairs: std::collections::HashMap<(Entity, Entity), PairJoints> =
-        std::collections::HashMap::new();
-    let mut lock_pairs: std::collections::HashSet<(Entity, Entity)> =
-        std::collections::HashSet::new();
+    let mut pairs: bevy::platform::collections::HashMap<(Entity, Entity), PairJoints> =
+        bevy::platform::collections::HashMap::new();
+    let mut lock_pairs: bevy::platform::collections::HashSet<(Entity, Entity)> =
+        bevy::platform::collections::HashSet::new();
     for (entity, joint, is_lock) in &joints {
         let (key, a_anchor, b_anchor) = if joint.body1 <= joint.body2 {
             ((joint.body1, joint.body2), joint.local_anchor1(), joint.local_anchor2())
@@ -601,7 +642,7 @@ fn maintain_weld_rigidity(
     // uses). Clusters form purely by absorption below: a per-pair rigid weld is just
     // the two-body case (a's 3+ anchors into b's singleton cluster), so it needs no
     // separate seeding pass.
-    let mut index: std::collections::HashMap<Entity, usize> = std::collections::HashMap::new();
+    let mut index: bevy::platform::collections::HashMap<Entity, usize> = bevy::platform::collections::HashMap::new();
     for &(a, b) in pairs.keys() {
         for body in [a, b] {
             let next = index.len();
@@ -615,10 +656,10 @@ fn maintain_weld_rigidity(
     // further bodies absorbable; the joint graphs here are tiny, so the loop is cheap.)
     loop {
         // body index → (other cluster root → this body's anchors into that cluster).
-        let mut into_cluster: std::collections::HashMap<
+        let mut into_cluster: bevy::platform::collections::HashMap<
             usize,
-            std::collections::HashMap<usize, Vec<Vec3>>,
-        > = std::collections::HashMap::new();
+            bevy::platform::collections::HashMap<usize, Vec<Vec3>>,
+        > = bevy::platform::collections::HashMap::new();
         for (&(a, b), members) in &pairs {
             let (ia, ib) = (index[&a], index[&b]);
             let (ra, rb) = (clusters.find(ia), clusters.find(ib));
@@ -980,7 +1021,7 @@ pub fn damp_weld_motion(
     joints: Query<&SphericalJoint>,
     mut bodies: Query<(&RigidBody, &mut LinearVelocity, &mut AngularVelocity, &ComputedMass)>,
 ) {
-    let mut seen: std::collections::HashSet<(Entity, Entity)> = std::collections::HashSet::new();
+    let mut seen: bevy::platform::collections::HashSet<(Entity, Entity)> = bevy::platform::collections::HashSet::new();
     for joint in &joints {
         let key = if joint.body1 <= joint.body2 {
             (joint.body1, joint.body2)

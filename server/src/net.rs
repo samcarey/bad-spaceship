@@ -37,7 +37,7 @@ use bad_spaceship_shared::character::{
 use bad_spaceship_shared::net::{
     apply_hold_spring, apply_net_input, focused_part, monster_index, sanitize_name,
     ClientPanicReport, InLargestAssembly, NetFacing, NetHold, NetInput, NetJoint, NetLockJoint,
-    NetMoving,
+    NetFeltUp, NetMoving,
     NetLaunch, NetName, NetPart, NetPlayer, NetRoomFrame, PartShape, ProtocolPlugin, RequestLaunch,
     ResetPosition, ResetRoom, RollbackReport, SaveGame, SetAvatar, SetLocked, SetName,
     GROUND_JOINT_ID, MONSTER_COUNT, TICK,
@@ -49,7 +49,9 @@ use bad_spaceship_shared::map::{
 use bad_spaceship_shared::part::{
     avatar_lock_contacts, capsule_bottom_center, despawn_player_lock_welds, part_gap_contacts,
     part_state_diverged, spawn_random_part, spawn_random_rocket, spawn_rocket_engine,
-    spawn_saved_cuboid, Gimbal, LockJoint, RocketEngine, SuppressLocalParts, DELETE_RADIUS,
+    spawn_saved_cuboid, AttitudeIntegral, EscapeCut, Gimbal, LockJoint, RocketEngine,
+    SuppressLocalParts,
+    DELETE_RADIUS,
     NUM_PARTS, NUM_ROCKET_ENGINES, PART_FALL_Y, ROCKET_VOLUME,
 };
 use bad_spaceship_shared::{DirectionalInput, Grass, SuppressLocalPlayer, Yaw};
@@ -306,6 +308,8 @@ fn flush_telemetry(
         let rollback_ticks = report.as_ref().map(|r| r.rollback_ticks);
         let max_pos_err_mm = report.as_ref().map(|r| r.max_pos_err_mm);
         let pos_triggers = report.as_ref().map(|r| r.pos_triggers);
+        let rot_triggers = report.as_ref().map(|r| r.rot_triggers);
+        let max_rot_deg = report.as_ref().map(|r| r.max_rot_mdeg as f64 / 1000.0);
         // Client-reported ×10 fields, dropping the 0 "not reported yet" sentinel. Kept
         // as `Option<u16>` so the same value feeds both the `[tel]` line (÷10) and the DB.
         let field = |f: fn(&RollbackReport) -> u16| report.as_ref().map(f).filter(|v| *v > 0);
@@ -317,7 +321,7 @@ fn flush_telemetry(
         let (late_inputs, input_ticks) = late.get(&entity).copied().unzip();
 
         println!(
-            "[tel] client={} rtt={}ms jitter={}ms samples={} rb={} rbt={} errmm={} trig={} late={}/{} fps={} minfps={} scale={}",
+            "[tel] client={} rtt={}ms jitter={}ms samples={} rb={} rbt={} errmm={} trig={} rottrig={} rotdeg={} late={}/{} fps={} minfps={} scale={}",
             entity.to_bits(),
             o(rtt_ms.map(|v| format!("{v:.1}"))),
             o(jitter_ms.map(|v| format!("{v:.1}"))),
@@ -326,6 +330,8 @@ fn flush_telemetry(
             o(rollback_ticks),
             o(max_pos_err_mm),
             o(pos_triggers),
+            o(rot_triggers),
+            o(max_rot_deg.map(|v| format!("{v:.1}"))),
             o(late_inputs),
             o(input_ticks),
             o(one_dp(fps_x10).map(|v| format!("{v:.1}"))),
@@ -570,7 +576,12 @@ impl Plugin for NetServerPlugin {
                 sample_felt_up.after(apply_room_rocket_thrust),
                 // Structural damping across welded pairs — drains contact/joint pump
                 // energy before it can run away (see `damp_weld_motion`).
-                bad_spaceship_shared::part::damp_weld_motion.after(apply_room_rocket_thrust),
+                // `BS_NO_DAMP` disables it (determinism discriminator: with the MP client
+                // not damping, running it only on the server is a client/server system
+                // asymmetry — turning it off on both makes the systems match).
+                bad_spaceship_shared::part::damp_weld_motion
+                    .after(apply_room_rocket_thrust)
+                    .run_if(|| std::env::var("BS_NO_DAMP").is_err()),
             ),
         );
     }
@@ -2148,16 +2159,17 @@ fn spawn_room_joint(
     (body1, anchor1, id1): (Entity, Vec3, u64),
     (body2, anchor2, id2): (Entity, Vec3, u64),
 ) {
+    let net = NetJoint {
+        body1: id1,
+        body2: id2,
+        anchor1: anchor1.to_array(),
+        anchor2: anchor2.to_array(),
+    };
     commands.spawn((
         SphericalJoint::new(body1, body2)
             .with_local_anchor1(anchor1)
             .with_local_anchor2(anchor2),
-        NetJoint {
-            body1: id1,
-            body2: id2,
-            anchor1: anchor1.to_array(),
-            anchor2: anchor2.to_array(),
-        },
+        net,
         Replicate::to_clients(NetworkTarget::All),
         Rooms::single(room),
         RoomMember(room),
@@ -2293,17 +2305,18 @@ fn weld_avatar_to_room_parts(
             // Shared-borrow re-read of the same query the candidates iterate — just to
             // name the part's stable replicated id on the weld (and the anchor record).
             let net_id = parts.get(part).map(|(_, net_part, ..)| net_part.id).unwrap_or(0);
+            let net_weld = NetLockJoint {
+                player: client_id,
+                part: net_id,
+                anchor_player: avatar_local.to_array(),
+                anchor_part: part_local.to_array(),
+            };
             commands.spawn((
                 SphericalJoint::new(avatar, part)
                     .with_local_anchor1(avatar_local)
                     .with_local_anchor2(part_local),
                 LockJoint,
-                NetLockJoint {
-                    player: client_id,
-                    part: net_id,
-                    anchor_player: avatar_local.to_array(),
-                    anchor_part: part_local.to_array(),
-                },
+                net_weld,
                 Replicate::to_clients(NetworkTarget::All),
                 Rooms::single(member),
                 RoomMember(member),
@@ -2911,30 +2924,41 @@ fn apply_room_rocket_thrust(
         (&RoomMember, &Position, &LinearVelocity, &ComputedMass),
         (With<ServerAvatar>, Without<RocketEngine>),
     >,
+    // Tick-keyed burn trace (`BS_BURN_TRACE`) — see the client twin in `apply_mp_thrust`.
+    timeline: Res<LocalTimeline>,
     // `Forces` takes `AngularVelocity` mutably inside (and writes each rocket's
     // `Gimbal` the geometry pass reads), so the member/geometry reads and the force
     // write cannot coexist as sibling queries (B0001) — sequence them.
     mut set: ParamSet<(
         Query<
-            (Entity, &Position, &Rotation, &PartRoom, &Gimbal),
+            (Entity, &Position, &Rotation, &PartRoom, &Gimbal, &NetPart),
             (With<InLargestAssembly>, With<RocketEngine>),
         >,
         Query<
-            (&Position, &LinearVelocity, &AngularVelocity, &ComputedMass, &PartRoom),
+            (&Position, &LinearVelocity, &AngularVelocity, &ComputedMass, &PartRoom, &NetPart),
             With<InLargestAssembly>,
         >,
         Query<(Entity, Forces, &mut Gimbal), With<RocketEngine>>,
+        // Write-side of the replicated autopilot integral (see `AttitudeIntegral`).
+        Query<(&PartRoom, &mut AttitudeIntegral, &mut EscapeCut), With<RocketEngine>>,
     )>,
 ) {
     // Group launched rooms' member rockets by room.
-    let mut per_room: HashMap<RoomId, Vec<(Entity, Vec3, Quat, Vec2)>> = HashMap::new();
-    for (entity, position, rotation, room, gimbal) in &set.p0() {
+    let mut per_room: HashMap<RoomId, Vec<(u64, Entity, Vec3, Quat, Vec2)>> = HashMap::new();
+    for (entity, position, rotation, room, gimbal, net) in &set.p0() {
         if registry.is_launched(room.id) {
             per_room
                 .entry(room.id)
                 .or_default()
-                .push((entity, position.0, rotation.0, gimbal.0));
+                .push((net.id, entity, position.0, rotation.0, gimbal.0));
         }
+    }
+    // Cross-world stable rocket order for the thrust least-squares solve: ECS query order
+    // is spawn order, which a predicting client does not share (see the client twin in
+    // `apply_mp_thrust`). Sort by the replicated `NetPart::id` so both peers solve the
+    // trim over rockets in the identical sequence.
+    for rockets in per_room.values_mut() {
+        rockets.sort_unstable_by_key(|(id, ..)| *id);
     }
     if per_room.is_empty() {
         apparent.0.clear();
@@ -2955,14 +2979,27 @@ fn apply_room_rocket_thrust(
     // true velocity)`, collected here (the member query is borrowed) and applied in the
     // `Forces` pass below, after the thrust so it can't clobber a slewed gimbal.
     let mut drags: Vec<(Entity, Vec3, Vec3, Vec3)> = Vec::new();
+    // Per-room autopilot PID integrals to publish onto the member rockets (replicated to
+    // predicting clients — see the note at the push site).
+    let mut room_integrals: Vec<(RoomId, Vec3)> = Vec::new();
+    // Per-room escape-cutoff latch to publish alongside the integral (see `EscapeCut`).
+    let mut room_cuts: Vec<(RoomId, bool)> = Vec::new();
     {
         let members = set.p1();
+        // Cross-world stable reduction order for the COM/inertia measurement: sort this
+        // room's members by the replicated `NetPart::id` (ECS query order is spawn order,
+        // which the predicting client doesn't share — and `measure_assembly_spin` is an
+        // order-sensitive float reduction). Riders are chained after the parts, matching
+        // the client's twin. (Rider-vs-rider order only matters with 2+ riders aboard one
+        // assembly; the client sorts them by `client_id`, which this query doesn't carry.)
         for (room, rockets) in &per_room {
+            let mut ordered_members: Vec<_> =
+                members.iter().filter(|(_, _, _, _, r, _)| r.id == *room).collect();
+            ordered_members.sort_unstable_by_key(|(_, _, _, _, _, net)| net.id);
             let samples = || {
-                members
+                ordered_members
                     .iter()
-                    .filter(|(.., r)| r.id == *room)
-                    .map(|(position, linear, angular, mass, _)| {
+                    .map(|(position, linear, angular, mass, _, _)| {
                         (position.0, linear.0, angular.0, mass.value())
                     })
                     // Locked riders fly with the assembly (welded at launch), so their
@@ -2994,10 +3031,9 @@ fn apply_room_rocket_thrust(
             // the identical program — including under `BS_FORCE_PITCHOVER_DEG`, the
             // headless A/B hook that forces the angle here at the seam where it's chosen.
             let plan = policies.0.entry(*room).or_insert_with(|| {
-                let total_mass: f32 = members
+                let total_mass: f32 = ordered_members
                     .iter()
-                    .filter(|(.., r)| r.id == *room)
-                    .map(|(_, _, _, m, _)| m.value())
+                    .map(|(_, _, _, m, _, _)| m.value())
                     .sum::<f32>()
                     + riders
                         .iter()
@@ -3033,15 +3069,43 @@ fn apply_room_rocket_thrust(
                 }
             }
             let integral = integrals.0.entry(*room).or_default();
-            let burn = assembly_burn(com, gravity.0, dt, rockets, &spin, integral, guidance);
+            if bad_spaceship_shared::launch::burn_trace() {
+                let total_mass_traced: f32 = ordered_members
+                    .iter()
+                    .map(|(_, _, _, m, _, _)| m.value())
+                    .sum::<f32>()
+                    + riders
+                        .iter()
+                        .filter(|(rm, ..)| rm.0 == *room)
+                        .map(|(.., mass)| mass.value())
+                        .sum::<f32>();
+                let g = guidance;
+                println!(
+                    "[burn] S tick={:?} com={:.6},{:.6},{:.6} ang={:.6},{:.6},{:.6} lin={:.6},{:.6},{:.6} inert={:.6} m={:.6} int={:.6},{:.6},{:.6} thr={:.6} dir={:.6},{:.6},{:.6} n={}",
+                    timeline.tick(),
+                    com.x, com.y, com.z,
+                    spin.angular_velocity.x, spin.angular_velocity.y, spin.angular_velocity.z,
+                    spin.linear_velocity.x, spin.linear_velocity.y, spin.linear_velocity.z,
+                    spin.inertia,
+                    total_mass_traced,
+                    integral.x, integral.y, integral.z,
+                    g.throttle,
+                    g.thrust_dir.x, g.thrust_dir.y, g.thrust_dir.z,
+                    rockets.len(),
+                );
+            }
+            // Drop the `NetPart::id` sort key: `assembly_burn` takes the geometry tuple.
+            let rocket_geometry: Vec<(Entity, Vec3, Quat, Vec2)> =
+                rockets.iter().map(|&(_, e, p, r, g)| (e, p, r, g)).collect();
+            let burn =
+                assembly_burn(com, gravity.0, dt, &rocket_geometry, &spin, integral, guidance);
             // Tally propellant burned this tick (see `RoomFuel` and `burn_impulse`).
             *fuel.0.entry(*room).or_default() += burn_impulse(&burn, dt);
             // Publish the riders' apparent up (see `RoomApparentUp`); mass matches the
             // client's (parts + riders) so the predicted movement basis agrees.
-            let total_mass: f32 = members
+            let total_mass: f32 = ordered_members
                 .iter()
-                .filter(|(.., r)| r.id == *room)
-                .map(|(_, _, _, m, _)| m.value())
+                .map(|(_, _, _, m, _, _)| m.value())
                 .sum::<f32>()
                 + riders
                     .iter()
@@ -3093,10 +3157,28 @@ fn apply_room_rocket_thrust(
                     );
                 }
             }
+            // Publish the autopilot's PID integral onto the member rockets so it
+            // REPLICATES to predicting clients (see `AttitudeIntegral`). It is hidden
+            // controller state: a client that joins (or reconnects) mid-flight starts its
+            // own integral at zero while the server's has already wound up, so without
+            // replication the two burn commands can never converge — measured directly as
+            // a steady integral gap in the tick-aligned burn trace.
+            room_integrals.push((*room, *integral));
+            room_cuts.push((*room, escaped.0.get(room).copied().unwrap_or(false)));
+            if bad_spaceship_shared::launch::burn_trace() {
+                for (i, b) in burn.iter().enumerate() {
+                    let rot = rocket_geometry.get(i).map(|g| g.2).unwrap_or(Quat::IDENTITY);
+                    println!(
+                        "[force] S i={} f={:.6},{:.6},{:.6} p={:.6},{:.6},{:.6} g={:.6},{:.6} r={:.6},{:.6},{:.6},{:.6}",
+                        i, b.force.x, b.force.y, b.force.z, b.point.x, b.point.y, b.point.z,
+                        b.gimbal.x, b.gimbal.y, rot.x, rot.y, rot.z, rot.w
+                    );
+                }
+            }
             burns.extend(burn);
             // Drag on the whole stack, at its COM, charged to the first member rocket.
             if let Some(first) = rockets.first() {
-                drags.push((first.0, com, true_com, true_vel));
+                drags.push((first.1, com, true_com, true_vel));
             }
         }
     }
@@ -3110,6 +3192,23 @@ fn apply_room_rocket_thrust(
     for (entity, com, true_com, true_vel) in drags {
         if let Ok((_, mut forces, _)) = rockets.get_mut(entity) {
             apply_assembly_drag(&mut forces, com, true_com, true_vel);
+        }
+    }
+    // Publish each room's autopilot integral onto its rockets so it replicates (see the
+    // push site): every member carries the same value, and predicting clients seed their
+    // burn from it instead of winding up an independent one from zero.
+    if !room_integrals.is_empty() {
+        for (room, mut stored, mut stored_cut) in &mut set.p3() {
+            if let Some((_, value)) = room_integrals.iter().find(|(r, _)| *r == room.id) {
+                if stored.0 != *value {
+                    stored.0 = *value;
+                }
+            }
+            if let Some((_, cut)) = room_cuts.iter().find(|(r, _)| *r == room.id) {
+                if stored_cut.0 != *cut {
+                    stored_cut.0 = *cut;
+                }
+            }
         }
     }
 }
@@ -3130,7 +3229,23 @@ fn sample_felt_up(
     for (entity, member, felt, mut rotation, mut position, collider) in &mut avatars {
         let target = apparent.0.get(&member.0).copied().unwrap_or(Vec3::Y);
         let pivot = capsule_bottom_center(collider);
-        drive_felt_up(&mut commands, entity, felt, &mut rotation, &mut position, pivot, target);
+        let up_before = felt.as_ref().map(|f| f.up);
+        drive_felt_up(
+            &mut commands, entity, felt, &mut rotation, &mut position, pivot, target, None,
+        );
+        // Publish the averaged felt-up so predicting clients orient riders from the same
+        // value instead of their own (necessarily different) ring history — see `NetFeltUp`.
+        if let Some(up) = up_before {
+            commands.entity(entity).try_insert(NetFeltUp(up.to_array()));
+        }
+        if bad_spaceship_shared::launch::burn_trace() {
+            if let Some(u) = up_before {
+                println!(
+                    "[felt] S tgt={:.6},{:.6},{:.6} up={:.6},{:.6},{:.6}",
+                    target.x, target.y, target.z, u.x, u.y, u.z
+                );
+            }
+        }
     }
 }
 

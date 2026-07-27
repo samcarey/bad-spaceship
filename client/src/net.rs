@@ -32,7 +32,7 @@ use bad_spaceship_shared::net::{
     apply_hold_spring, apply_net_input, focused_part, room_code_bytes, ClientPanicReport,
     ControlChannel,
     NetFacing, NetHold, NetInput, NetJoint, NetLaunch, NetLockJoint, NetPart, PartShape,
-    take_rollback_diag,
+    take_condition_triggers, take_divergence_floor, take_rollback_diag,
     NetPlayer, NetRoomFrame, ProtocolPlugin, RollbackReport, GROUND_JOINT_ID,
     TICK,
 };
@@ -60,6 +60,10 @@ use lightyear::prelude::{
     Authentication, Connected, InputTimelineConfig, LocalId, MessageSender, PeerId, Predicted,
     PredictionManager, PredictionMetrics, SyncConfig,
 };
+#[cfg(not(target_arch = "wasm32"))]
+use lightyear::prelude::{Link, LinkConditionerConfig, RecvLinkConditioner};
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Duration;
 use lightyear::frame_interpolation::{FrameInterpolate, FrameInterpolationPlugin};
 use std::net::SocketAddr;
 
@@ -223,6 +227,11 @@ impl Plugin for NetClientPlugin {
         // the rigid ground clamps (#145) — with the buzz gone the rollback rate is
         // ~0.7/s, so the replay-fidelity gain from restoring contact state is
         // marginal, and not worth crashing every high-altitude flight for.
+        // Re-tested `true` against the mid-ride rotation-rollback storm (2026-07-25):
+        // it made the storm MUCH WORSE (rot triggers ~5×) and crashed the client
+        // (`Abort trap: 6`) even below the rebase threshold — restoring stale
+        // contact/island state into the live broadphase amplifies divergence rather than
+        // fixing it. Stays `false`.
         app.add_plugins(lightyear_avian3d::prelude::LightyearAvianPlugin {
             replication_mode: lightyear_avian3d::plugin::AvianReplicationMode::Position,
             update_syncs_manually: false,
@@ -279,6 +288,12 @@ impl Plugin for NetClientPlugin {
         // Report our prediction load to the server's log for measurement (see
         // `RollbackReport`); diagnostics only, off the gameplay path.
         app.add_systems(Update, (report_rollbacks, report_stored_panic));
+        // Test hook (native only): `BS_AUTOSTART` drives Initial→InGame automatically
+        // so a scripted/headless measurement client (e.g. a native loopback repro with
+        // the `BS_SIM_LATENCY_MS` conditioner) joins its room and starts sending input
+        // without a mouse click. Real players always click to start; no effect unless set.
+        #[cfg(not(target_arch = "wasm32"))]
+        app.add_systems(Update, autostart_ingame);
         // Each frame: track the look-focused part (empty-handed) into
         // `FocusedInteractable`, then read the click → grab/attach intent gated on it.
         // After `InputEvents` (mobile `apply_pointer` / desktop `get_modifying`) so
@@ -361,6 +376,25 @@ impl Plugin for NetClientPlugin {
 /// client-side and on wasm the browser console is unreachable from the build box, so
 /// this is how prediction load is measured. Diagnostics only; nothing gameplay reads
 /// it. Mirrors the cadence of the server's `[rtt]` logger.
+/// See the `BS_AUTOSTART` registration in `NetClientPlugin::build`. Latches the env
+/// check once, then transitions `Initial → InGame` so an unattended native repro
+/// client enters the game (and thus room-assigns + sends input) without a click.
+#[cfg(not(target_arch = "wasm32"))]
+fn autostart_ingame(
+    state: Res<State<crate::AppState>>,
+    mut next: ResMut<NextState<crate::AppState>>,
+) {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    if !*ON.get_or_init(|| std::env::var("BS_AUTOSTART").is_ok()) {
+        return;
+    }
+    if *state.get() == crate::AppState::Initial {
+        next.set(crate::AppState::InGame);
+        println!("[autostart] entered InGame");
+    }
+}
+
 fn report_rollbacks(
     time: Res<Time>,
     mut acc: Local<f32>,
@@ -377,6 +411,33 @@ fn report_rollbacks(
     let Some(metrics) = metrics else { return };
     let Ok(mut sender) = sender.single_mut() else { return };
     let (max_pos_err_mm, pos_triggers) = take_rollback_diag();
+    // The non-position rollback breakdown: a flight rollback storm is `pos_triggers ≈ 0`
+    // while rotation triggers spike (the welded rider/assembly orientations ringing).
+    // `rot_triggers`/`max_rot_mdeg` ride the telemetry so the storm is visible in the
+    // server log even on a phone; linear/angular velocity triggers were measured ~always
+    // zero during flight and are dropped here after logging.
+    let (rot_triggers, linvel_triggers, angvel_triggers, max_rot_mdeg) = take_condition_triggers();
+    // Native-only stdout breakdown for the loopback repro (no telemetry round-trip): the
+    // per-window split with the (otherwise-dropped) velocity counts, for a full picture.
+    let (div_pos_um, div_rot_udeg, div_checks) = take_divergence_floor();
+    #[cfg(not(target_arch = "wasm32"))]
+    println!(
+        "[rbdiag] rb={} rbt={} pos_trig={} rot={} linvel={} angvel={} rotmaxdeg={:.1} | floor: posmax={:.3}mm rotmax={:.4}deg checks={}",
+        metrics.rollbacks,
+        metrics.rollback_ticks,
+        pos_triggers,
+        rot_triggers,
+        linvel_triggers,
+        angvel_triggers,
+        max_rot_mdeg as f32 / 1000.0,
+        div_pos_um as f32 / 1000.0,
+        div_rot_udeg as f32 / 1_000_000.0,
+        div_checks
+    );
+    #[cfg(target_arch = "wasm32")]
+    let _ = (div_pos_um, div_rot_udeg, div_checks);
+    #[cfg(target_arch = "wasm32")]
+    let _ = (linvel_triggers, angvel_triggers);
     // Encode a value ×10 into a u16 (one decimal place) for the telemetry fields.
     let to_x10 = |v: f64| (v * 10.0).round().clamp(0.0, u16::MAX as f64) as u16;
     // FPS curve: smoothed (average) + the worst single frame in the diagnostic's
@@ -404,6 +465,8 @@ fn report_rollbacks(
         rollback_ticks: metrics.rollback_ticks,
         max_pos_err_mm,
         pos_triggers,
+        rot_triggers,
+        max_rot_mdeg,
         fps_x10,
         min_fps_x10,
         render_scale_x10,
@@ -1429,8 +1492,32 @@ fn spawn_client(commands: &mut Commands) {
     // insert-hook creates the `PredictionResource` lightyear needs to process
     // predicted entities. It is NOT auto-added (unlike the interpolation config),
     // so without it receiving a predicted avatar panics in `receive_replication`.
+    // Repro rig (native only): `BS_SIM_LATENCY_MS` builds the client `Link` with a
+    // receive-side conditioner so a *loopback* client sees confirmed state arrive as
+    // stale as a phone over the real network (~110 ms). A ride's rollback storm depth
+    // is RTT-driven (confirmed state lands ~RTT old → prediction runs that many ticks
+    // ahead → each rollback re-sims that many ticks), so bare 3 ms loopback can't
+    // reproduce it — this makes a native client whose stdout `[rbdiag]` is directly
+    // readable behave like the phone for measuring prediction load. Off unless set.
+    // Built into the spawn tuple (not a post-spawn insert) so it's the entity's Link
+    // from the start, rather than racing the required-component `Link::default()`.
+    let link = match std::env::var("BS_SIM_LATENCY_MS").ok().and_then(|s| s.parse::<u64>().ok()) {
+        Some(ms) => {
+            let jitter = std::env::var("BS_SIM_JITTER_MS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(0);
+            println!("[simlat] link conditioner on: {ms} ms latency, {jitter} ms jitter");
+            Link::new(Some(RecvLinkConditioner::new(LinkConditionerConfig {
+                incoming_latency: Duration::from_millis(ms),
+                incoming_jitter: Duration::from_millis(jitter),
+                incoming_loss: 0.0,
+            })))
+        }
+        None => Link::default(),
+    };
     let client = commands
-        .spawn((netcode, io, PredictionManager::default(), input_timeline_config()))
+        .spawn((netcode, io, link, PredictionManager::default(), input_timeline_config()))
         .id();
     commands.trigger(Connect { entity: client });
     info!("connecting to multiplayer server at {url}");
