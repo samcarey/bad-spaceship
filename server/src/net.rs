@@ -36,9 +36,9 @@ use bad_spaceship_shared::character::{
 };
 use bad_spaceship_shared::net::{
     apply_hold_spring, apply_net_input, focused_part, monster_index, sanitize_name,
-    ClientPanicReport, InLargestAssembly, NetFacing, NetHold, NetInput, NetJoint, NetLockJoint,
-    NetFeltUp, NetMoving,
-    NetLaunch, NetName, NetPart, NetPlayer, NetRoomFrame, PartShape, ProtocolPlugin, RequestLaunch,
+    ClientPanicReport, InLargestAssembly, NetFacing, NetHold, NetInput, NetJoint, NetLaunch,
+    NetLockJoint, NetMoving, NetName, NetPart, NetPlayer, NetRoomFrame, PartShape,
+    ProtocolPlugin, RequestLaunch,
     ResetPosition, ResetRoom, RollbackReport, SaveGame, SetAvatar, SetLocked, SetName,
     GROUND_JOINT_ID, MONSTER_COUNT, TICK,
 };
@@ -3213,7 +3213,7 @@ fn apply_room_rocket_thrust(
     }
 }
 
-/// Feed every avatar's [`FeltUp`] window one sample of this tick's apparent-up
+/// Feed every avatar's [`FeltUp`] filter one sample of this tick's apparent-up
 /// direction: its room's launched-assembly plumb line (see [`RoomApparentUp`]), world
 /// +Y otherwise. The server half of the felt-up basis — the client sampler consumes the
 /// same formula's output from its own predicted burn, so the bases agree without
@@ -3222,22 +3222,26 @@ fn sample_felt_up(
     mut commands: Commands,
     apparent: Res<RoomApparentUp>,
     mut avatars: Query<
-        (Entity, &RoomMember, Option<&mut FeltUp>, &mut Rotation, &mut Position, &Collider),
+        (
+            Entity,
+            &RoomMember,
+            Option<&mut FeltUp>,
+            &mut Rotation,
+            &mut Position,
+            &Collider,
+            &NetPlayer,
+        ),
         With<ServerAvatar>,
     >,
+    // Tick-keyed avatar-pose trace (`BS_BURN_TRACE`) — see the client twin.
+    timeline: Res<LocalTimeline>,
 ) {
-    for (entity, member, felt, mut rotation, mut position, collider) in &mut avatars {
+    for (entity, member, felt, mut rotation, mut position, collider, net_player) in &mut avatars {
         let target = apparent.0.get(&member.0).copied().unwrap_or(Vec3::Y);
         let pivot = capsule_bottom_center(collider);
         let up_before = felt.as_ref().map(|f| f.up);
-        drive_felt_up(
-            &mut commands, entity, felt, &mut rotation, &mut position, pivot, target, None,
-        );
-        // Publish the averaged felt-up so predicting clients orient riders from the same
-        // value instead of their own (necessarily different) ring history — see `NetFeltUp`.
-        if let Some(up) = up_before {
-            commands.entity(entity).try_insert(NetFeltUp(up.to_array()));
-        }
+        let used =
+            drive_felt_up(&mut commands, entity, felt, &mut rotation, &mut position, pivot, target);
         if bad_spaceship_shared::launch::burn_trace() {
             if let Some(u) = up_before {
                 println!(
@@ -3245,6 +3249,24 @@ fn sample_felt_up(
                     target.x, target.y, target.z, u.x, u.y, u.z
                 );
             }
+            // The avatar's resulting pose, keyed by tick AND player, so the client's
+            // predicted copy of the SAME rider can be diffed at the same tick.
+            let up = used.unwrap_or(Vec3::Y);
+            println!(
+                "[av] S tick={:?} id={} u={:.6},{:.6},{:.6} p={:.6},{:.6},{:.6} r={:.6},{:.6},{:.6},{:.6}",
+                timeline.tick(),
+                net_player.client_id,
+                up.x,
+                up.y,
+                up.z,
+                position.0.x,
+                position.0.y,
+                position.0.z,
+                rotation.0.x,
+                rotation.0.y,
+                rotation.0.z,
+                rotation.0.w
+            );
         }
     }
 }

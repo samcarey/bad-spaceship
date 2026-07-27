@@ -325,25 +325,6 @@ pub struct NetJoint {
     pub anchor2: [f32; 3],
 }
 
-/// A rider's **felt-up direction**, replicated server → clients.
-///
-/// [`crate::character::FeltUp`] averages the last ~2 s of apparent-up samples in a
-/// 120-tick ring, and `drive_felt_up` writes the avatar's `Rotation` **directly** from
-/// that average. The ring is therefore predicted state — but it is *history*, not a
-/// function of the current tick, and the two peers' histories start at different moments
-/// (a client builds its avatar, and begins sampling, whenever it joins). Measured: with
-/// the per-tick apparent-up *target* agreeing to 6e-5, the ring *averages* still differed
-/// by a median 0.33 (server ~5.3° of tilt vs client ~0.3°) — which lands straight on the
-/// avatar's rotation and was the last standing rotation-divergence source.
-///
-/// Rolling it back can't fix that (it restores the client's own history); replicating the
-/// 120-sample ring would be absurd. So the server replicates the *averaged result* — one
-/// `Vec3`, and by construction a slow-moving one, so arriving ~RTT stale is imperceptible
-/// — and every peer orients riders from the identical value. Never triggers a rollback
-/// (see `NetFacing` for the same treatment of server-authored orientation data).
-#[derive(Component, Serialize, Deserialize, Clone, Copy, PartialEq, Debug, Default)]
-pub struct NetFeltUp(pub [f32; 3]);
-
 /// A replicated **player-lock weld**: a joint pinning a player's avatar to a part it
 /// was touching when the player pressed "Lock" (one per weld contact). Carries enough
 /// for each client to rebuild the constraint as *real predicted physics* — the exact
@@ -983,10 +964,22 @@ impl Plugin for ProtocolPlugin {
         // server gimbal of ~3e-3 rad against a client gimbal of ~1e-5 (i.e. zero), which
         // deflects the thrust vector differently on each peer and torques the assembly
         // apart. Replicated + predict-synced, never triggering a rollback itself.
-        app.component::<NetFeltUp>()
+        // The rider's felt-up filter state (see `character::FeltUp`), which drives every
+        // avatar's body `Rotation` directly. Replicated so a rollback re-seeds the filter
+        // from the server's state and replays it forward; each peer integrates it locally
+        // every tick in between, so it is never stale. Never triggers a rollback itself —
+        // the rider's `Rotation` is the observable that matters and this rides along with
+        // it. (Replicating a smoothed *result* for the client to consume verbatim was the
+        // previous design and could not work: the predicted copy refreshed only about
+        // every 9 ticks and sat frozen between, so the rider stood up along a staircase of
+        // stale directions — the server produced 1861 distinct values across one flight to
+        // the client's 216.)
+        app.component::<crate::character::FeltUp>()
             .replicate()
             .predict()
-            .with_rollback_condition(|_: &NetFeltUp, _: &NetFeltUp| false);
+            .with_rollback_condition(|_: &crate::character::FeltUp, _: &crate::character::FeltUp| {
+                false
+            });
         // The escape-cutoff latch (see `part::EscapeCut`): hidden hysteresis state that
         // gates the engines fully on/off, so peers latching on different ticks apply wildly
         // different thrust. Replicated for the same reason as the integral and gimbal — a

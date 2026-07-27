@@ -29,7 +29,6 @@ use bad_spaceship_shared::launch::{
 };
 use bad_spaceship_shared::map::apply_gravity_correction;
 use bad_spaceship_shared::net::{
-    NetFeltUp,
     ControlChannel, InLargestAssembly, NetLaunch, NetLockJoint, NetPart, NetPlayer, RequestLaunch,
     SetLocked,
 };
@@ -462,12 +461,19 @@ fn apply_sp_gravity(
 /// frame keeps the body near the local origin. Only `Predicted` bodies are locally
 /// simulated (interpolated remotes are replication-driven), so only they get the force;
 /// the server applies the identical field, so prediction converges.
+///
+/// Avatars are keyed on `NetPlayer` (which every avatar carries), NOT on `Character`:
+/// only the OWNER's avatar gets `Character` (`insert_remote_avatar_body` deliberately
+/// omits it for remote players), so filtering on it silently left every *other* rider
+/// weightless on this client while the server pulled them down — a full 1 g of force
+/// disagreement on every remote avatar, every tick, i.e. guaranteed rollback churn.
+/// The server's twin (`apply_server_gravity`) covers `Or<(NetPart, ServerAvatar)>`.
 fn apply_mp_gravity(
     gravity: Res<Gravity>,
     frame: Res<ClientRoomFrame>,
     mut bodies: Query<
         (&Position, Forces),
-        (With<Predicted>, Or<(With<NetPart>, With<Character>)>),
+        (With<Predicted>, Or<(With<NetPart>, With<NetPlayer>)>),
     >,
 ) {
     let offset = frame.offset.as_vec3();
@@ -767,7 +773,6 @@ fn apply_mp_thrust(
     let mut cut_latch = cut_seed;
     let guidance = program_guidance(true_com, true_vel, mp_plan.as_ref().unwrap(), &mut cut_latch);
     if burn_trace() {
-        use lightyear::prelude::Timeline;
         println!(
             "[burn] C tick={:?} com={:.6},{:.6},{:.6} ang={:.6},{:.6},{:.6} lin={:.6},{:.6},{:.6} inert={:.6} m={:.6} int={:.6},{:.6},{:.6} thr={:.6} dir={:.6},{:.6},{:.6} n={}",
             timeline.tick(),
@@ -833,37 +838,57 @@ fn reset_flame_targets(mut throttles: Query<&mut FlameThrottle>) {
     }
 }
 
-/// Feed every character's [`FeltUp`] window one sample of this tick's apparent-up
+/// Feed every character's [`FeltUp`] filter one sample of this tick's apparent-up
 /// direction (see [`ApparentUp`]): the launched assembly's plumb-line direction while
 /// launched, plain world-up otherwise. One system for both modes — the thrust systems
-/// (whichever ran) already published the target; predicted and single-player avatars
-/// alike carry `Character`.
+/// (whichever ran) already published the target.
+///
+/// Covers EVERY avatar this client simulates: the single-player character (`Character`,
+/// no `NetPlayer`) and, in multiplayer, every predicted avatar (`NetPlayer`) — remote
+/// riders included. Keying on `Character` alone skipped remote riders, because only the
+/// OWNER's avatar gets it (`insert_remote_avatar_body` omits it); the server tilts every
+/// avatar (`With<ServerAvatar>`), so a remote rider's `Rotation` — and the `Position`
+/// this pivots about the foot — diverged on every tick of a turning ascent. The
+/// `Confirmed` copies carry `NetPlayer` too but have no `Collider` (only predicted
+/// avatars get a body), so they never match this query.
 fn sample_felt_up(
     mut commands: Commands,
     apparent: Res<ApparentUp>,
     mut characters: Query<
-        (Entity, Option<&mut FeltUp>, &mut Rotation, &mut Position, &Collider),
-        With<Character>,
+        (Entity, Option<&mut FeltUp>, &mut Rotation, &mut Position, &Collider, Option<&NetPlayer>),
+        Or<(With<Character>, With<NetPlayer>)>,
     >,
-    // The server's averaged felt-up for each avatar (multiplayer only) — see `NetFeltUp`.
-    net_up: Query<&NetFeltUp>,
+    // Tick-keyed avatar-pose trace (`BS_BURN_TRACE`) — see the server twin.
+    timeline: Option<Res<lightyear::prelude::LocalTimeline>>,
 ) {
     let target = apparent.0.unwrap_or(Vec3::Y);
-    for (entity, felt, mut rotation, mut position, collider) in &mut characters {
+    for (entity, felt, mut rotation, mut position, collider, net_player) in &mut characters {
         let pivot = capsule_bottom_center(collider);
         let up_before = felt.as_ref().map(|f| f.up);
-        // In multiplayer take the server's averaged felt-up (`NetFeltUp`); in single-player
-        // there is no authority, so the local ring is it.
-        let authoritative = net_up.get(entity).ok().map(|u| Vec3::from_array(u.0));
-        drive_felt_up(
-            &mut commands, entity, felt, &mut rotation, &mut position, pivot, target,
-            authoritative,
-        );
+        let used =
+            drive_felt_up(&mut commands, entity, felt, &mut rotation, &mut position, pivot, target);
         if burn_trace() {
             if let Some(u) = up_before {
                 println!(
                     "[felt] C tgt={:.6},{:.6},{:.6} up={:.6},{:.6},{:.6}",
                     target.x, target.y, target.z, u.x, u.y, u.z
+                );
+            }
+            if let (Some(tl), Some(np), Some(up)) = (timeline.as_ref(), net_player, used) {
+                println!(
+                    "[av] C tick={:?} id={} u={:.6},{:.6},{:.6} p={:.6},{:.6},{:.6} r={:.6},{:.6},{:.6},{:.6}",
+                    tl.tick(),
+                    np.client_id,
+                    up.x,
+                    up.y,
+                    up.z,
+                    position.0.x,
+                    position.0.y,
+                    position.0.z,
+                    rotation.0.x,
+                    rotation.0.y,
+                    rotation.0.z,
+                    rotation.0.w
                 );
             }
         }
