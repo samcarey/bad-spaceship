@@ -26,7 +26,7 @@ use avian3d::prelude::{
     Position, Rotation, SphericalJoint, WriteRigidBodyForces,
 };
 use bad_spaceship_shared::assembly::largest_assembly_per_room;
-use bad_spaceship_shared::guidance::{program_guidance, PitchProgram, DEFAULT_PITCHOVER};
+use bad_spaceship_shared::guidance::{program_guidance, PitchProgram};
 use bad_spaceship_shared::launch::{
     assembly_burn, burn_impulse, measure_assembly_spin, LAUNCH_COUNTDOWN_SECS,
 };
@@ -2737,8 +2737,8 @@ struct RoomFuel(HashMap<RoomId, f32>);
 
 /// Per-room fuel-optimal ascent plan: the [`PitchProgram`] built on the first launched
 /// tick from the assembly's real thrust-to-weight (see `PitchProgram::plan` — what the
-/// autopilot actually flies, and why not closed-loop prograde). Its pitchover angle
-/// replicates via [`NetLaunch::pitchover`] so the predicted twin rebuilds the identical
+/// autopilot actually flies, and why not closed-loop prograde). Its whole planning seed
+/// replicates via [`NetLaunch::plan`] so the predicted twin rebuilds the identical
 /// program. Cleared when a fresh launch arms so a rebuilt/reloaded assembly gets
 /// re-planned (see [`handle_launch_requests`]).
 #[derive(Resource, Default)]
@@ -2878,17 +2878,15 @@ fn publish_room_launch(
     mut orbs: Query<(&RoomStateOf, &mut NetLaunch)>,
 ) {
     for (orb_room, mut launch) in &mut orbs {
-        // The optimizer's chosen ascent angle rides along (0 until the first launched
-        // tick computes it) so the predicted client rebuilds the same pitch program.
-        let pitchover =
-            policies.0.get(&orb_room.0).map(|plan| plan.pitchover).unwrap_or(DEFAULT_PITCHOVER);
+        // The optimizer's whole ascent seed rides along (default — straight up — until
+        // the first launched tick computes it) so the predicted client rebuilds the
+        // byte-identical pitch program instead of re-planning from its own state.
+        let plan = policies.0.get(&orb_room.0).map(|program| program.seed).unwrap_or_default();
         let next = match registry.by_room.get(&orb_room.0) {
             Some(RoomLaunch::Counting { remaining }) => {
-                NetLaunch { remaining: remaining.max(0.0), launched: false, pitchover }
+                NetLaunch { remaining: remaining.max(0.0), launched: false, plan }
             }
-            Some(RoomLaunch::Launched) => {
-                NetLaunch { remaining: 0.0, launched: true, pitchover }
-            }
+            Some(RoomLaunch::Launched) => NetLaunch { remaining: 0.0, launched: true, plan },
             None => NetLaunch::default(),
         };
         launch.set_if_neq(next);
@@ -3068,7 +3066,8 @@ fn apply_room_rocket_thrust(
                     .map(|deg| deg.to_radians());
                 PitchProgram::plan(true_com, true_vel, rockets.len(), gravity.0, total_mass, forced)
             });
-            let pitchover = plan.pitchover;
+            let pitchover = plan.seed.pitchover;
+            let plan_probe = plan.probe();
             let guidance =
                 program_guidance(true_com, true_vel, plan, escaped.0.entry(*room).or_default());
             static DEBUG_GUIDANCE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -3099,7 +3098,7 @@ fn apply_room_rocket_thrust(
                         .sum::<f32>();
                 let g = guidance;
                 println!(
-                    "[burn] S tick={:?} com={:.6},{:.6},{:.6} ang={:.6},{:.6},{:.6} lin={:.6},{:.6},{:.6} inert={:.6} m={:.6} int={:.6},{:.6},{:.6} thr={:.6} dir={:.6},{:.6},{:.6} n={}",
+                    "[burn] S tick={:?} com={:.6},{:.6},{:.6} ang={:.6},{:.6},{:.6} lin={:.6},{:.6},{:.6} inert={:.6} m={:.6} int={:.6},{:.6},{:.6} thr={:.6} dir={:.6},{:.6},{:.6} n={} ns={} a1k={:.9} off={:.6},{:.6},{:.6}",
                     timeline.tick(),
                     com.x, com.y, com.z,
                     spin.angular_velocity.x, spin.angular_velocity.y, spin.angular_velocity.z,
@@ -3110,6 +3109,15 @@ fn apply_room_rocket_thrust(
                     g.throttle,
                     g.thrust_dir.x, g.thrust_dir.y, g.thrust_dir.z,
                     rockets.len(),
+                    // The pitch program probed at a FIXED speed, so the two peers' tables
+                    // are comparable directly instead of only through their own live state
+                    // — the one measurement that separates "different program" from
+                    // "same program, different speed". `off` tests the other candidate:
+                    // a floating-origin frame that drifted, which tilts `up` and so the
+                    // commanded direction without either peer's local state disagreeing.
+                    plan_probe.0,
+                    plan_probe.1,
+                    frame.offset.x, frame.offset.y, frame.offset.z,
                 );
             }
             // Drop the `NetPart::id` sort key: `assembly_burn` takes the geometry tuple.

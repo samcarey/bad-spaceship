@@ -292,7 +292,7 @@ impl AutopilotSnapshot {
             true_pos,
             true_vel,
             vehicle: Vehicle::derated(engines, gravity, total_mass),
-            pitchover: program.pitchover,
+            pitchover: program.seed.pitchover,
             command_angle: program.angle_at(true_vel.length()),
             throttle,
             drag: bad_spaceship_shared::map::drag_force(true_pos.as_vec3(), true_vel).length(),
@@ -614,7 +614,7 @@ fn apply_mp_thrust(
     // The launch autopilot's per-assembly PID integral state (see `assembly_burn`).
 
     // The ascent plan mirror: the pitch program rebuilt from the server's replicated
-    // pitchover angle (keyed by that angle so a re-plan on the server rebuilds here too).
+    // planning seed (keyed by that seed, so a re-plan on the server rebuilds here too).
     mut mp_plan: Local<Option<PitchProgram>>,
     // Escape-cutoff hysteresis state (see `escape_cutoff`): stops the *predicted* engine
     // chattering at the `E ≈ 0` boundary (the flame flicker), cleared when the room idles.
@@ -678,11 +678,12 @@ fn apply_mp_thrust(
         autopilot.0 = None;
         return;
     };
-    // The server's optimized ascent angle, replicated so the predicted turn matches
-    // (`DEFAULT_PITCHOVER` = 0 for the tick or two before the first value arrives —
-    // that window is inside the vertical kick phase, where 0 and the real angle agree).
-    let pitchover = launch.pitchover;
-    let need_plan = mp_plan.as_ref().map(|p| p.pitchover) != Some(pitchover);
+    // The server's whole planning seed, replicated so the rebuilt program is identical
+    // rather than merely similar (a default seed — straight up — for the tick or two
+    // before the first value arrives; that window is inside the vertical kick phase,
+    // where the real program commands ~0 too).
+    let seed = launch.plan;
+    let need_plan = mp_plan.as_ref().map(|p| p.seed) != Some(seed);
     // The assembly's COM + motion state, via the shared measurement (see
     // `measure_assembly_spin`) so the trim matches the server exactly; collect
     // the member rockets' poses alongside (`Gimbal` marks the rockets — it rides
@@ -756,25 +757,21 @@ fn apply_mp_thrust(
     let true_com = com + frame.offset.as_vec3();
     let true_vel = spin.linear_velocity + frame.velocity;
     let total_mass = part_mass_total + riders.iter().map(|(_, _, mass, _)| mass.value()).sum::<f32>();
-    // Rebuild the pitch program when the replicated angle (re)arrives, through the same
-    // shared constructor the server plans with — locally measured masses are identical
-    // (same parts, same densities), so the rebuilt program matches the one it flies.
+    // Rebuild the pitch program when the replicated seed (re)arrives, from that seed
+    // ALONE — no locally measured state. Re-planning from the client's own live position,
+    // velocity and mass is what the seed replaces: the program is a table sampled off a
+    // forward-simulated trajectory, so seeding it a few ticks later (once the angle
+    // arrived) built a genuinely different table, not a slightly-late one.
     if need_plan {
-        *mp_plan = Some(PitchProgram::plan(
-            true_com,
-            true_vel,
-            geometry.len(),
-            gravity.0,
-            total_mass,
-            Some(pitchover),
-        ));
+        *mp_plan = Some(PitchProgram::build(seed));
     }
     // Same rollback discipline as the integral: latch from the replayed tick's state.
     let mut cut_latch = cut_seed;
     let guidance = program_guidance(true_com, true_vel, mp_plan.as_ref().unwrap(), &mut cut_latch);
     if burn_trace() {
+        let plan_probe = mp_plan.as_ref().unwrap().probe();
         println!(
-            "[burn] C tick={:?} com={:.6},{:.6},{:.6} ang={:.6},{:.6},{:.6} lin={:.6},{:.6},{:.6} inert={:.6} m={:.6} int={:.6},{:.6},{:.6} thr={:.6} dir={:.6},{:.6},{:.6} n={}",
+            "[burn] C tick={:?} com={:.6},{:.6},{:.6} ang={:.6},{:.6},{:.6} lin={:.6},{:.6},{:.6} inert={:.6} m={:.6} int={:.6},{:.6},{:.6} thr={:.6} dir={:.6},{:.6},{:.6} n={} ns={} a1k={:.9} off={:.6},{:.6},{:.6}",
             timeline.tick(),
             com.x, com.y, com.z,
             spin.angular_velocity.x, spin.angular_velocity.y, spin.angular_velocity.z,
@@ -785,6 +782,11 @@ fn apply_mp_thrust(
             guidance.throttle,
             guidance.thrust_dir.x, guidance.thrust_dir.y, guidance.thrust_dir.z,
             geometry.len(),
+            // See the server twin: the fixed-speed probe compares the two pitch programs
+            // directly, and `off` the two floating-origin frames.
+            plan_probe.0,
+            plan_probe.1,
+            frame.offset.x, frame.offset.y, frame.offset.z,
         );
     }
     // Integrate from the ROLLED-BACK value, not a `Local` that accumulates once per replay
