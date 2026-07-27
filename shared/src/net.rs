@@ -325,6 +325,25 @@ pub struct NetJoint {
     pub anchor2: [f32; 3],
 }
 
+/// A rider's **felt-up direction**, replicated server → clients.
+///
+/// [`crate::character::FeltUp`] averages the last ~2 s of apparent-up samples in a
+/// 120-tick ring, and `drive_felt_up` writes the avatar's `Rotation` **directly** from
+/// that average. The ring is therefore predicted state — but it is *history*, not a
+/// function of the current tick, and the two peers' histories start at different moments
+/// (a client builds its avatar, and begins sampling, whenever it joins). Measured: with
+/// the per-tick apparent-up *target* agreeing to 6e-5, the ring *averages* still differed
+/// by a median 0.33 (server ~5.3° of tilt vs client ~0.3°) — which lands straight on the
+/// avatar's rotation and was the last standing rotation-divergence source.
+///
+/// Rolling it back can't fix that (it restores the client's own history); replicating the
+/// 120-sample ring would be absurd. So the server replicates the *averaged result* — one
+/// `Vec3`, and by construction a slow-moving one, so arriving ~RTT stale is imperceptible
+/// — and every peer orients riders from the identical value. Never triggers a rollback
+/// (see `NetFacing` for the same treatment of server-authored orientation data).
+#[derive(Component, Serialize, Deserialize, Clone, Copy, PartialEq, Debug, Default)]
+pub struct NetFeltUp(pub [f32; 3]);
+
 /// A replicated **player-lock weld**: a joint pinning a player's avatar to a part it
 /// was touching when the player pressed "Lock" (one per weld contact). Carries enough
 /// for each client to rebuild the constraint as *real predicted physics* — the exact
@@ -606,7 +625,11 @@ fn over_tolerance(confirmed: Vec3, predicted: Vec3, tolerance: f32) -> bool {
 }
 
 fn linear_velocity_should_rollback(confirmed: &LinearVelocity, predicted: &LinearVelocity) -> bool {
-    over_tolerance(confirmed.0, predicted.0, LINEAR_VELOCITY_ROLLBACK_TOLERANCE)
+    let over = over_tolerance(confirmed.0, predicted.0, LINEAR_VELOCITY_ROLLBACK_TOLERANCE);
+    if over {
+        LINVEL_ROLLBACK_TRIGGERS.fetch_add(1, Ordering::Relaxed);
+    }
+    over
 }
 
 /// `NetFacing` must NEVER trigger a rollback: it's server-authored and cosmetic (not
@@ -622,7 +645,11 @@ fn angular_velocity_should_rollback(
     confirmed: &AngularVelocity,
     predicted: &AngularVelocity,
 ) -> bool {
-    over_tolerance(confirmed.0, predicted.0, ANGULAR_VELOCITY_ROLLBACK_TOLERANCE)
+    let over = over_tolerance(confirmed.0, predicted.0, ANGULAR_VELOCITY_ROLLBACK_TOLERANCE);
+    if over {
+        ANGVEL_ROLLBACK_TRIGGERS.fetch_add(1, Ordering::Relaxed);
+    }
+    over
 }
 
 /// Only roll back the predicted pose when it diverges from the server's confirmed
@@ -654,6 +681,39 @@ const ROTATION_ROLLBACK_TOLERANCE: f32 = 0.05; // radians (~3°)
 static MAX_POS_ERR_MM: AtomicU32 = AtomicU32::new(0);
 static POS_ROLLBACK_TRIGGERS: AtomicU32 = AtomicU32::new(0);
 
+/// Per-condition rollback trigger counts for the *non-position* conditions
+/// (rotation / linear-vel / angular-vel). Position has its own diag above; a flight
+/// rollback storm shows `trig=0` (position quiet) while `rb` is high, so the storm is
+/// driven by one of these three — but until now they were unmeasured. Counting them
+/// says *which* divergence axis drives the ride storm (rotation ringing, velocity
+/// disagreement, or spin), which picks the fix. Same free-fn / atomic shape as the
+/// position diag (the conditions are free fns lightyear calls with no resource access).
+static ROT_ROLLBACK_TRIGGERS: AtomicU32 = AtomicU32::new(0);
+static LINVEL_ROLLBACK_TRIGGERS: AtomicU32 = AtomicU32::new(0);
+static ANGVEL_ROLLBACK_TRIGGERS: AtomicU32 = AtomicU32::new(0);
+/// Largest rotation divergence (millidegrees) that triggered a rollback since the last
+/// flush — sizes the rotation storm (is the ring a few degrees over the 3° tolerance,
+/// or tens of degrees?), the rotation twin of `MAX_POS_ERR_MM`.
+static MAX_ROT_ERR_MDEG: AtomicU32 = AtomicU32::new(0);
+
+/// **Determinism floor.** The largest predicted-vs-confirmed divergence seen at ANY
+/// rollback check — *regardless of tolerance* — plus how many checks were compared. On
+/// a perfect single-player link a bit-deterministic sim would keep these at ~0; whatever
+/// they read is the raw non-determinism the tolerances have been masking. `pos` in
+/// micrometres, `rot` in microdegrees (fine enough to see float-ULP-scale drift).
+static MAX_POS_DIVERGENCE_UM: AtomicU32 = AtomicU32::new(0);
+static MAX_ROT_DIVERGENCE_UDEG: AtomicU32 = AtomicU32::new(0);
+static DIVERGENCE_CHECKS: AtomicU32 = AtomicU32::new(0);
+
+/// Take and reset the determinism-floor stats: `(max_pos_um, max_rot_udeg, checks)`.
+pub fn take_divergence_floor() -> (u32, u32, u32) {
+    (
+        MAX_POS_DIVERGENCE_UM.swap(0, Ordering::Relaxed),
+        MAX_ROT_DIVERGENCE_UDEG.swap(0, Ordering::Relaxed),
+        DIVERGENCE_CHECKS.swap(0, Ordering::Relaxed),
+    )
+}
+
 /// Take and reset the rollback-divergence diagnostics: `(max_pos_err_mm, triggers)`.
 pub fn take_rollback_diag() -> (u32, u32) {
     (
@@ -662,18 +722,41 @@ pub fn take_rollback_diag() -> (u32, u32) {
     )
 }
 
+/// Take and reset the per-condition non-position rollback trigger counts plus the
+/// largest rotation divergence: `(rotation, linear_vel, angular_vel, max_rot_mdeg)`.
+/// See the statics above.
+pub fn take_condition_triggers() -> (u32, u32, u32, u32) {
+    (
+        ROT_ROLLBACK_TRIGGERS.swap(0, Ordering::Relaxed),
+        LINVEL_ROLLBACK_TRIGGERS.swap(0, Ordering::Relaxed),
+        ANGVEL_ROLLBACK_TRIGGERS.swap(0, Ordering::Relaxed),
+        MAX_ROT_ERR_MDEG.swap(0, Ordering::Relaxed),
+    )
+}
+
 fn position_should_rollback(confirmed: &Position, predicted: &Position) -> bool {
+    // Determinism floor: record the raw divergence for EVERY check (µm), tolerance aside.
+    let dist = confirmed.0.distance(predicted.0);
+    MAX_POS_DIVERGENCE_UM.fetch_max((dist * 1_000_000.0) as u32, Ordering::Relaxed);
+    DIVERGENCE_CHECKS.fetch_add(1, Ordering::Relaxed);
     let over = over_tolerance(confirmed.0, predicted.0, POSITION_ROLLBACK_TOLERANCE);
     if over {
-        let mm = (confirmed.0.distance(predicted.0) * 1000.0) as u32;
-        MAX_POS_ERR_MM.fetch_max(mm, Ordering::Relaxed);
+        MAX_POS_ERR_MM.fetch_max((dist * 1000.0) as u32, Ordering::Relaxed);
         POS_ROLLBACK_TRIGGERS.fetch_add(1, Ordering::Relaxed);
     }
     over
 }
 
 fn rotation_should_rollback(confirmed: &Rotation, predicted: &Rotation) -> bool {
-    confirmed.0.angle_between(predicted.0) > ROTATION_ROLLBACK_TOLERANCE
+    let angle = confirmed.0.angle_between(predicted.0);
+    // Determinism floor: raw rotation divergence for every check (µdeg), tolerance aside.
+    MAX_ROT_DIVERGENCE_UDEG.fetch_max((angle.to_degrees() * 1_000_000.0) as u32, Ordering::Relaxed);
+    let over = angle > ROTATION_ROLLBACK_TOLERANCE;
+    if over {
+        ROT_ROLLBACK_TRIGGERS.fetch_add(1, Ordering::Relaxed);
+        MAX_ROT_ERR_MDEG.fetch_max((angle.to_degrees() * 1000.0) as u32, Ordering::Relaxed);
+    }
+    over
 }
 
 // lightyear's `LerpFn` takes its endpoints by value; `lightyear_avian3d`'s lerps
@@ -745,6 +828,16 @@ pub struct RollbackReport {
     /// chaos (large). See `take_rollback_diag`.
     pub max_pos_err_mm: u32,
     pub pos_triggers: u32,
+    /// Non-position rollback triggers this window: the count of rotation-divergence
+    /// triggers and the largest such divergence (millidegrees). A flight rollback storm
+    /// is `pos_triggers ≈ 0` (position quiet) while `rot_triggers` is high — the welded
+    /// assembly's part/rider orientations ringing past tolerance. Without this the storm
+    /// was invisible in telemetry (only position was reported), which is exactly why the
+    /// ride-crash took a full repro to pin down. Linear/angular *velocity* triggers were
+    /// measured to be ~always zero during flight, so they're not carried. See
+    /// `take_condition_triggers`.
+    pub rot_triggers: u32,
+    pub max_rot_mdeg: u32,
     /// Client render frame rate ×10 (so one decimal fits a `u16`): the smoothed
     /// (average) FPS and the *worst* single-frame FPS over the recent history buffer.
     /// This is the signal for "the phone's loop is throttling" — a sustained FPS
@@ -873,6 +966,43 @@ impl Plugin for ProtocolPlugin {
             .replicate()
             .predict()
             .with_rollback_condition(moving_should_rollback);
+        // The autopilot's attitude PID integral (see `part::AttitudeIntegral`): hidden
+        // controller state that steers the burn. It must be REPLICATED, not just predicted
+        // — a client that joins or reconnects mid-flight starts its own integral at zero
+        // while the server's has already wound up, so the two burns could never converge
+        // (measured directly in the tick-aligned burn trace as a steady integral gap).
+        // Predict-synced so it reaches the predicted rockets, and — like `NetFacing` — it
+        // never *triggers* a rollback itself: it's controller state, so a difference should
+        // just update the value, not re-simulate the world (the physics divergence it
+        // causes is caught by the Position/Rotation conditions).
+        // The thrust-vectoring nozzle deflection (see `part::Gimbal`). Like the PID
+        // integral above, the gimbal command is *incremental* — the nozzle IS the control
+        // loop's integrator — so it is hidden wound-up state, not a function of the current
+        // pose. Unreplicated, a client integrates its own deflection from zero while the
+        // server's has already wound up: measured in the per-rocket force trace as a
+        // server gimbal of ~3e-3 rad against a client gimbal of ~1e-5 (i.e. zero), which
+        // deflects the thrust vector differently on each peer and torques the assembly
+        // apart. Replicated + predict-synced, never triggering a rollback itself.
+        app.component::<NetFeltUp>()
+            .replicate()
+            .predict()
+            .with_rollback_condition(|_: &NetFeltUp, _: &NetFeltUp| false);
+        // The escape-cutoff latch (see `part::EscapeCut`): hidden hysteresis state that
+        // gates the engines fully on/off, so peers latching on different ticks apply wildly
+        // different thrust. Replicated for the same reason as the integral and gimbal — a
+        // client that joins after the server latched would otherwise start un-latched.
+        app.component::<crate::part::EscapeCut>()
+            .replicate()
+            .predict()
+            .with_rollback_condition(|_: &crate::part::EscapeCut, _: &crate::part::EscapeCut| false);
+        app.component::<crate::part::Gimbal>()
+            .replicate()
+            .predict()
+            .with_rollback_condition(|_: &crate::part::Gimbal, _: &crate::part::Gimbal| false);
+        app.component::<crate::part::AttitudeIntegral>()
+            .replicate()
+            .predict()
+            .with_rollback_condition(|_: &crate::part::AttitudeIntegral, _: &crate::part::AttitudeIntegral| false);
         // Each player's display name (see `NetName`): replicated so every client can
         // draw it over the avatar and list it in the roster. Changes rarely (only on
         // rename), so it just needs replicating — no interpolation.

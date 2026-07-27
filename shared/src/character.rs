@@ -114,6 +114,34 @@ pub fn register_ground_state_rollback(app: &mut App) {
     app.local_rollback::<TouchingGround>();
     app.local_rollback::<GroundVelocity>();
     app.local_rollback::<LastSupport>();
+    // The felt-up ring buffer drives the rider's *body rotation* directly (see
+    // `drive_felt_up`), so it is client-predicted state a rollback must restore — the
+    // same reason `TouchingGround`/`GroundVelocity` are registered above. Without it a
+    // replay re-samples into a ring still holding the pre-rollback timeline's samples,
+    // so the rider's orientation reconciles against a stale average. (A confirmed
+    // rider-side divergence source in the mid-ride rotation-rollback investigation; it
+    // is NOT the storm's dominant cause — the welded *parts* diverge in rotation on
+    // their own, even unmanned — but leaving predicted rotation state out of rollback is
+    // a genuine correctness gap, fixed regardless.)
+    app.local_rollback::<FeltUp>();
+    // The thrust-vectoring gimbal deflection (per rocket) is a control INTEGRATOR that
+    // directly steers the assembly's attitude — and, like the ground/felt-up state, it
+    // is client-predicted and must roll back. Left un-restored, every rollback replays
+    // the burn from the wrong nozzle deflection, so the re-simmed attitude diverges from
+    // the server's → a rotation rollback that re-corrupts the gimbal: the flight
+    // determinism floor. (The autopilot's PID integral is the same class of state but
+    // currently a `Local` — see `assembly_burn` callers — so it can't be registered here
+    // yet; converting it to a per-assembly component is the companion fix.)
+    app.local_rollback::<crate::part::Gimbal>();
+    // The autopilot's attitude PID integral — the same class of predicted control state as
+    // the gimbal, and the one that mattered most: without rollback the client re-integrates
+    // every replayed tick while the server integrates it once, so the integral (and the
+    // thrust it commands) drifts apart from the server's every rollback. See
+    // `AttitudeIntegral`.
+    app.local_rollback::<crate::part::AttitudeIntegral>();
+    // The escape-cutoff latch — same class again, and coarser: it switches the engines
+    // fully on/off (see `EscapeCut`).
+    app.local_rollback::<crate::part::EscapeCut>();
 }
 
 /// Window of the [`FeltUp`] average in physics ticks: ~2 s at the 16 ms tick. Long
@@ -130,9 +158,18 @@ const FELT_UP_TICKS: usize = 120;
 /// Maintained per world by the felt-up sampler systems (client SP/MP in
 /// `client::launch`, server in `server::net`) from the same replicated rocket
 /// rotations, so the server and the predicted client agree without replicating it.
-/// Not rollback-registered: the window average moves far too slowly for a replayed
-/// tick's worth of divergence to matter.
-#[derive(Component)]
+///
+/// **Rollback-registered** (`register_ground_state_rollback`). It drives the rider's
+/// body `Rotation` directly (`drive_felt_up`), so it is client-predicted state a
+/// rollback must restore — like `TouchingGround`/`GroundVelocity`. An earlier comment
+/// here claimed the window average "moves far too slowly for a replayed tick to
+/// matter" and skipped it; that was wrong and was the root cause of the mid-ride
+/// rotation-rollback storm: an unrestored ring re-sampled during replay drifts the
+/// averaged `up` from the server's, diverging the rider's orientation and triggering
+/// a rollback that corrupts the ring further (self-reinforcing). `Clone` is required
+/// by `local_rollback` (the `[Vec3; N]` ring is `Copy`, so it's free), along with
+/// `PartialEq`/`Debug` (the `SyncComponent` bound the rollback registration needs).
+#[derive(Component, Clone, PartialEq, Debug)]
 pub struct FeltUp {
     /// Ring of per-tick axis samples covering the window.
     ring: [Vec3; FELT_UP_TICKS],
@@ -197,12 +234,20 @@ pub fn drive_felt_up(
     position: &mut Position,
     pivot: Vec3,
     target: Vec3,
+    // When `Some`, orient from this authoritative averaged up instead of the local ring
+    // (see `NetFeltUp`): the ring is *history*, and two peers' histories never match, so
+    // a predicting client must take the server's average or the rider's rotation drifts.
+    // `None` = authoritative sim (server / single-player): use the local ring.
+    authoritative_up: Option<Vec3>,
 ) {
     match felt {
         Some(mut felt) => {
             felt.sample(target);
             let foot_world = position.0 + rotation.0 * pivot;
-            rotation.0 = felt.orientation();
+            rotation.0 = match authoritative_up {
+                Some(up) => Quat::from_rotation_arc(Vec3::Y, up),
+                None => felt.orientation(),
+            };
             position.0 = foot_world - rotation.0 * pivot;
         }
         None => {

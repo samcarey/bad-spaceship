@@ -168,6 +168,17 @@ pub fn assembly_burn(
 /// throttle can only *react* to rotation it can measure. Both are computed over the
 /// assembly's **members** (not just its rockets), by every thrust site the same way,
 /// so the server and the client's predicted twin command identical trims.
+/// Whether the tick-keyed burn trace (`BS_BURN_TRACE`) is on. The client and server each
+/// print their burn *inputs* (COM, spin, inertia, mass, PID integral) and *outputs*
+/// (throttle, thrust direction) tagged with the lightyear tick, so the two logs can be
+/// aligned by tick number and diffed — measuring which term first disagrees instead of
+/// inferring the divergence source by elimination. Latched once; diagnostics only.
+pub fn burn_trace() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("BS_BURN_TRACE").is_ok())
+}
+
 pub struct AssemblySpin {
     /// Mass-weighted mean linear velocity of the members (m/s) — the velocity-hold
     /// term leans the attitude target against its horizontal part so the stack

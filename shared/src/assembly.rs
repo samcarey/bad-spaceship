@@ -9,8 +9,8 @@
 //! which joints become edges, so excluding ground joints (the client filters them;
 //! the server never creates them) is a property of the edge list, not this core.
 
+use bevy::platform::collections::HashMap;
 use bevy::prelude::Vec3;
-use std::collections::HashMap;
 use std::hash::Hash;
 
 /// A tiny union-find (disjoint-set) over item indices, used to group parts into

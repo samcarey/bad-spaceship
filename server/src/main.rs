@@ -21,15 +21,25 @@ fn main() {
         }
     }
     let mut app = App::new();
-    app
-        // Bevy 0.11 merged ScheduleRunnerSettings into ScheduleRunnerPlugin;
-        // override the one MinimalPlugins adds to keep the fixed 60 Hz loop.
-        .add_plugins(MinimalPlugins.set(ScheduleRunnerPlugin::run_loop(
-            // BS_TIME_SCALE=N runs the whole sim N x faster than wall clock (the
-            // fixed 1/60 s tick is unchanged; ticks just FIRE N x as often via
-            // `Time<Virtual>` relative speed below) — accelerated full-stack tests.
-            Duration::from_secs_f64(1.0 / (60. * time_scale())),
-        )))
+    // Bevy 0.11 merged ScheduleRunnerSettings into ScheduleRunnerPlugin;
+    // override the one MinimalPlugins adds to keep the fixed 60 Hz loop.
+    let minimal = MinimalPlugins.set(ScheduleRunnerPlugin::run_loop(
+        // BS_TIME_SCALE=N runs the whole sim N x faster than wall clock (the
+        // fixed 1/60 s tick is unchanged; ticks just FIRE N x as often via
+        // `Time<Virtual>` relative speed below) — accelerated full-stack tests.
+        Duration::from_secs_f64(1.0 / (60. * time_scale())),
+    ));
+    // `BS_SINGLE_THREAD` forces a 1-thread task pool → the multi-threaded system
+    // executor can't run ambiguously-ordered systems in parallel, so the sim runs in a
+    // deterministic order. Determinism experiment (two identical runs must match).
+    let minimal = if std::env::var("BS_SINGLE_THREAD").is_ok() {
+        minimal.set(bevy::app::TaskPoolPlugin {
+            task_pool_options: bevy::app::TaskPoolOptions::with_num_threads(1),
+        })
+    } else {
+        minimal
+    };
+    app.add_plugins(minimal)
         // AssetServerSettings was folded into AssetPlugin in Bevy 0.9; 0.12
         // renamed `asset_folder` to `file_path` and swapped the `ChangeWatcher`
         // for a simple `watch_for_changes_override` flag.

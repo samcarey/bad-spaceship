@@ -56,6 +56,18 @@ pub fn add_physics(app: &mut bevy::app::App, multiplayer: bool) {
     } else {
         app.add_plugins(PhysicsPlugins::default());
     }
+    // Determinism experiment: `BS_SUBSTEPS=N` raises the solver substep count on both
+    // peers. If the flight determinism floor shrinks with more substeps, the divergence
+    // is under-convergence amplifying avian's cross-world constraint-COLOUR difference
+    // (the same constraint lands in a different graph colour on client vs server, so a
+    // body spanning colours is solved in a different effective order); if the floor is
+    // unchanged, the ordering difference is the whole story and only a deterministic
+    // re-colour fixes it. Must match on both peers or they diverge harder.
+    if let Ok(n) = std::env::var("BS_SUBSTEPS").map(|s| s.parse::<u32>().unwrap_or(0)) {
+        if n > 0 {
+            app.insert_resource(SubstepCount(n));
+        }
+    }
 }
 
 #[derive(Default, Component)]
