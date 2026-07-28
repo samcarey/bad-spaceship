@@ -30,8 +30,10 @@
 //! (its real thrust-to-weight), constrained by a ground floor (a too-aggressive turn arcs
 //! back into the terrain before escaping) and backed off from the crash boundary for
 //! attitude-lag margin. Weak stacks get a gentle lean (~5–15°), strong stacks a hard one
-//! (or fly nearly straight); the server replicates the chosen angle so predicted clients
-//! fly the identical turn.
+//! (or fly nearly straight); the server replicates the whole planning seed
+//! ([`LaunchSeed`]) so predicted clients rebuild the identical program — replicating just
+//! the chosen angle left each peer sampling its table from its own state, which is not
+//! the same program.
 
 use crate::map::{gravity_at, GRAVITY_MU, GRAVITY_REF_RADIUS, PLANET_CENTER};
 use bevy::math::Vec3;
@@ -53,11 +55,6 @@ pub const TURN_SPEED: f32 = 40.0;
 /// turn the same way.
 pub const DOWNRANGE_AZIMUTH: Vec3 = Vec3::X;
 
-/// Fallback pitchover (rad) when no optimized angle is available yet (e.g. the replicated
-/// value hasn't arrived, or an assembly with no measurable mass): straight up — always
-/// safe, never optimal for a heavy build.
-pub const DEFAULT_PITCHOVER: f32 = 0.0;
-
 /// The autopilot's command for a tick: which way to point the net thrust (unit vector)
 /// and how hard to burn (`throttle` ∈ {0, 1} — `0` once escape energy is reached).
 #[derive(Clone, Copy, Debug)]
@@ -70,7 +67,7 @@ pub struct Guidance {
 /// (m/s²) and total mass (kg — converts the shared [`crate::map::drag_force`] into a
 /// deceleration). Always derived together from the same assembly; bundled because as
 /// adjacent bare `f32`s a swapped call site compiles clean into a plausibly-wrong plan.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Vehicle {
     pub thrust_accel: f32,
     pub mass: f32,
@@ -146,6 +143,31 @@ fn tilt_downrange(up: Vec3, angle: f32) -> Vec3 {
     (up * angle.cos() + horiz * angle.sin()).normalize_or(up)
 }
 
+/// The complete input set a [`PitchProgram`] is sampled from — every value
+/// [`PitchProgram::build`] reads, and nothing else.
+///
+/// It exists as one replicated struct because the program is **not** reproducible from
+/// "the same rules applied to my own state": [`PitchProgram::build`] forward-simulates
+/// the ideal ascent and records a table at ~1 m/s knots, so two peers seeding it from
+/// their own live state a few ticks apart get *different tables*, and the interpolated
+/// command then stands apart for the entire burn. Measured on a ridden 4-rocket launch:
+/// the server planned at its blastoff tick and the client 7 ticks later (once the
+/// replicated angle arrived), and their programs disagreed by **1.2 mrad at the same
+/// speed** — a standing ~0.07 N lateral thrust error that drifted the two simulations
+/// apart quadratically until the position tolerance corrected them, over and over.
+/// Replicating the angle alone was not enough; the *seed* is the state.
+#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct LaunchSeed {
+    /// The pitchover angle (rad) the optimizer chose for this launch.
+    pub pitchover: f32,
+    /// The assembly's TRUE (frame-folded) position at the planning tick.
+    pub position: [f32; 3],
+    /// The assembly's TRUE (frame-folded) velocity at the planning tick.
+    pub velocity: [f32; 3],
+    /// The derated point-mass vehicle the plan was optimized for.
+    pub vehicle: Vehicle,
+}
+
 /// A **pitch program**: the ascent command precomputed as "flight-path angle vs speed",
 /// sampled off the ideal point-mass trajectory at launch. The live autopilot flies *this*
 /// instead of chasing the raw prograde direction.
@@ -161,9 +183,9 @@ fn tilt_downrange(up: Vec3, angle: f32) -> Vec3 {
 /// still bends into the fuel-saving arc.
 #[derive(Debug, Default)]
 pub struct PitchProgram {
-    /// The pitchover angle (rad) this program was planned with — what replicates via
-    /// `NetLaunch::pitchover`, and what a cached plan is keyed by.
-    pub pitchover: f32,
+    /// Everything this program was sampled from — replicated whole so a predicted
+    /// client rebuilds the identical table (see [`LaunchSeed`]).
+    pub seed: LaunchSeed,
     /// `(speed m/s, command angle from radial-up rad)`, speeds strictly ascending —
     /// the ideal law's own command schedule along its trajectory.
     samples: Vec<(f32, f32)>,
@@ -205,7 +227,12 @@ impl PitchProgram {
         let vehicle = Vehicle::derated(engines, gravity, total_mass);
         let pitchover =
             forced.unwrap_or_else(|| optimize_pitchover(true_pos, true_vel, vehicle));
-        Self::build(true_pos, true_vel, vehicle, pitchover)
+        Self::build(LaunchSeed {
+            pitchover,
+            position: true_pos.to_array(),
+            velocity: true_vel.to_array(),
+            vehicle,
+        })
     }
 
     /// Build the program by flying the ideal ascent law ([`ascent_thrust_dir`]) as a
@@ -214,10 +241,15 @@ impl PitchProgram {
     /// are byte-identical to the fixed vertical command. The [`Vehicle`]'s mass converts
     /// the shared [`crate::map::drag_force`] into a deceleration so the sampled arc
     /// matches the real drag-braked climb.
-    pub fn build(true_pos: Vec3, true_vel: Vec3, vehicle: Vehicle, pitchover: f32) -> Self {
+    ///
+    /// Takes the whole [`LaunchSeed`] rather than loose arguments precisely so a
+    /// multiplayer client can rebuild a launch's program from the replicated seed with
+    /// **no** input of its own — see that type for what re-planning locally cost.
+    pub fn build(seed: LaunchSeed) -> Self {
+        let (vehicle, pitchover) = (seed.vehicle, seed.pitchover);
         let mut samples = Vec::new();
-        let mut pos = true_pos;
-        let mut vel = true_vel;
+        let mut pos = Vec3::from_array(seed.position);
+        let mut vel = Vec3::from_array(seed.velocity);
         for _ in 0..OPTIMIZER_STEPS {
             let dir = ascent_thrust_dir(pos, vel, pitchover);
             let up = (pos - PLANET_CENTER).normalize_or(Vec3::Y);
@@ -240,7 +272,7 @@ impl PitchProgram {
                 break;
             }
         }
-        Self { pitchover, samples }
+        Self { seed, samples }
     }
 
     /// The command angle (rad from radial-up) at a given speed — linear interpolation,
@@ -255,6 +287,19 @@ impl PitchProgram {
             (Some(&(_, a)), None) | (None, Some(&(_, a))) => a, // past either table end
             (None, None) => 0.0,
         }
+    }
+
+    /// Diagnostic fingerprint of the sampled table: `(sample count, command angle at a
+    /// fixed probe speed)`. Every peer flying an assembly must build the *same* program
+    /// or their thrust commands stand apart for the whole burn, and this pair is how
+    /// that is measured (the `BS_BURN_TRACE` `[burn]` line prints it). The probe speed
+    /// is fixed on purpose: it compares the two tables directly, rather than each
+    /// through its own live speed, which is the only way to tell a genuinely different
+    /// program from the same program read at a slightly different point.
+    pub fn probe(&self) -> (usize, f32) {
+        /// Mid-ascent, comfortably inside the sampled range of any real launch.
+        const PROBE_SPEED: f32 = 1000.0;
+        (self.samples.len(), self.angle_at(PROBE_SPEED))
     }
 
     /// The commanded thrust direction at a true position + speed: radial-up tipped by
@@ -585,10 +630,10 @@ mod tests {
     fn plan_guards_zero_mass_and_honors_forced_angle() {
         let g = Vec3::new(0.0, -SURFACE_GRAVITY, 0.0);
         let empty = PitchProgram::plan(Vec3::ZERO, Vec3::ZERO, 4, g, 0.0, Some(0.3));
-        assert_eq!(empty.pitchover, 0.0);
+        assert_eq!(empty.seed.pitchover, 0.0);
         assert_eq!(empty.angle_at(100.0), 0.0);
         let forced = PitchProgram::plan(Vec3::ZERO, Vec3::ZERO, 4, g, 12.0, Some(0.3));
-        assert_eq!(forced.pitchover, 0.3);
+        assert_eq!(forced.seed.pitchover, 0.3);
         assert!(forced.angle_at(TURN_SPEED) > 0.2, "kick should approach the forced angle");
     }
 
