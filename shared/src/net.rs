@@ -687,6 +687,62 @@ static MAX_POS_DIVERGENCE_UM: AtomicU32 = AtomicU32::new(0);
 static MAX_ROT_DIVERGENCE_UDEG: AtomicU32 = AtomicU32::new(0);
 static DIVERGENCE_CHECKS: AtomicU32 = AtomicU32::new(0);
 
+/// **Culprit sites.** The counters above say *how much* a rollback storm there is, but
+/// lightyear calls the rollback conditions as free fns with no entity access, so they
+/// have never said *which body* diverges — and that is the thing that names the fix.
+/// Each trigger therefore records the *confirmed* value it fired on, and the client
+/// matches those values back to entities (`tally_rollback_culprits`). The match is exact
+/// rather than a nearest-neighbour guess, because the value recorded here IS the one the
+/// condition was handed — see that function for where it has to be looked up, which is
+/// NOT any live component.
+///
+/// Capped so a storm can't grow this without bound; the overflow count is reported so
+/// a truncated window is never mistaken for a quiet one. Diagnostic-only (native).
+#[cfg(not(target_arch = "wasm32"))]
+static TRIGGER_SITES: std::sync::Mutex<TriggerSites> = std::sync::Mutex::new(TriggerSites {
+    positions: Vec::new(),
+    rotations: Vec::new(),
+    dropped: 0,
+});
+
+/// The confirmed values that tripped a rollback this window — see [`TRIGGER_SITES`].
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Default)]
+pub struct TriggerSites {
+    /// Confirmed position, and the divergence (mm) that fired the trigger.
+    pub positions: Vec<(Vec3, u32)>,
+    /// Confirmed rotation, and the divergence (millidegrees) that fired the trigger.
+    pub rotations: Vec<(Quat, u32)>,
+    /// Triggers past [`MAX_TRIGGER_SITES`] that were not recorded.
+    pub dropped: u32,
+}
+
+/// Per-window cap on recorded sites. A storm can fire thousands of times per window and
+/// the tally only needs the shape, not every sample.
+#[cfg(not(target_arch = "wasm32"))]
+const MAX_TRIGGER_SITES: usize = 4096;
+
+/// Record one trigger's confirmed value in the bucket `pick` selects, honouring the cap
+/// and counting the overflow. `pick` runs twice (length check, then push), so it takes
+/// `Fn` rather than `FnOnce`.
+#[cfg(not(target_arch = "wasm32"))]
+fn record_site<T>(value: T, err: u32, pick: impl Fn(&mut TriggerSites) -> &mut Vec<(T, u32)>) {
+    let mut guard = TRIGGER_SITES.lock().unwrap_or_else(|e| e.into_inner());
+    let sites = &mut *guard;
+    if pick(sites).len() < MAX_TRIGGER_SITES {
+        pick(sites).push((value, err));
+    } else {
+        sites.dropped += 1;
+    }
+}
+
+/// Take and reset this window's rollback culprit sites. See [`TRIGGER_SITES`].
+#[cfg(not(target_arch = "wasm32"))]
+pub fn take_trigger_sites() -> TriggerSites {
+    let mut sites = TRIGGER_SITES.lock().unwrap_or_else(|e| e.into_inner());
+    core::mem::take(&mut *sites)
+}
+
 /// Take and reset the determinism-floor stats: `(max_pos_um, max_rot_udeg, checks)`.
 pub fn take_divergence_floor() -> (u32, u32, u32) {
     (
@@ -725,6 +781,8 @@ fn position_should_rollback(confirmed: &Position, predicted: &Position) -> bool 
     if over {
         MAX_POS_ERR_MM.fetch_max((dist * 1000.0) as u32, Ordering::Relaxed);
         POS_ROLLBACK_TRIGGERS.fetch_add(1, Ordering::Relaxed);
+        #[cfg(not(target_arch = "wasm32"))]
+        record_site(confirmed.0, (dist * 1000.0) as u32, |sites| &mut sites.positions);
     }
     over
 }
@@ -737,6 +795,10 @@ fn rotation_should_rollback(confirmed: &Rotation, predicted: &Rotation) -> bool 
     if over {
         ROT_ROLLBACK_TRIGGERS.fetch_add(1, Ordering::Relaxed);
         MAX_ROT_ERR_MDEG.fetch_max((angle.to_degrees() * 1000.0) as u32, Ordering::Relaxed);
+        #[cfg(not(target_arch = "wasm32"))]
+        record_site(confirmed.0, (angle.to_degrees() * 1000.0) as u32, |sites| {
+            &mut sites.rotations
+        });
     }
     over
 }
