@@ -114,16 +114,11 @@ pub fn register_ground_state_rollback(app: &mut App) {
     app.local_rollback::<TouchingGround>();
     app.local_rollback::<GroundVelocity>();
     app.local_rollback::<LastSupport>();
-    // The felt-up ring buffer drives the rider's *body rotation* directly (see
-    // `drive_felt_up`), so it is client-predicted state a rollback must restore — the
-    // same reason `TouchingGround`/`GroundVelocity` are registered above. Without it a
-    // replay re-samples into a ring still holding the pre-rollback timeline's samples,
-    // so the rider's orientation reconciles against a stale average. (A confirmed
-    // rider-side divergence source in the mid-ride rotation-rollback investigation; it
-    // is NOT the storm's dominant cause — the welded *parts* diverge in rotation on
-    // their own, even unmanned — but leaving predicted rotation state out of rollback is
-    // a genuine correctness gap, fixed regardless.)
-    app.local_rollback::<FeltUp>();
+    // NOTE: `FeltUp` belongs to this same class of predicted state, but it is
+    // *replicated*, so it is registered in `ProtocolPlugin` instead — a local-only
+    // rollback would restore the client's own filter state, never the server's, which is
+    // the distinction that mattered (see `FeltUp`).
+    //
     // The thrust-vectoring gimbal deflection (per rocket) is a control INTEGRATOR that
     // directly steers the assembly's attitude — and, like the ground/felt-up state, it
     // is client-predicted and must roll back. Left un-restored, every rollback replays
@@ -144,55 +139,68 @@ pub fn register_ground_state_rollback(app: &mut App) {
     app.local_rollback::<crate::part::EscapeCut>();
 }
 
-/// Window of the [`FeltUp`] average in physics ticks: ~2 s at the 16 ms tick. Long
+/// Smoothing rate of the [`FeltUp`] filter, per 16 ms physics tick.
+///
+/// This is a first-order low-pass, and the coefficient is the reciprocal of its lag in
+/// ticks: `1/60` ⇒ a 60-tick (~1 s) mean lag, which is exactly the mean lag of the
+/// 120-tick (~2 s) box-car average this replaced, so the ride feel carries over. Long
 /// enough to iron out attitude wobble and to double as the ease into/out of a launch
-/// (the average glides between world-up and the deck axis over the window).
-const FELT_UP_TICKS: usize = 120;
+/// (the value glides between world-up and the deck axis over about that time).
+///
+/// **Why a filter and not the old ring.** A 120-sample box-car average is *history*: its
+/// state is the last 120 samples, two peers' histories never match (a client starts
+/// sampling whenever it joins), and no practical amount of replication can reconcile
+/// them — measured as the rider's body rotation disagreeing by up to 2.9° mid-turn, right
+/// at the rollback tolerance, i.e. a permanent rollback source. Replicating the averaged
+/// *result* instead (the previous attempt) only moved the problem: the predicted avatar
+/// received a new value roughly every 9 ticks and held it frozen in between — the server
+/// produced 1861 distinct values over one flight and the client's predicted copy saw 216
+/// — so the rider stood up along a staircase of stale directions. A first-order filter
+/// has a *one-vector* state that is a pure function of (previous state, this tick's
+/// target), which is precisely what client-side prediction reconciles: both peers run the
+/// identical recurrence on a target that already agrees to 6e-5, so they agree to float
+/// precision, and a rollback restores the state and re-integrates it forward like any
+/// other predicted quantity.
+const FELT_UP_RATE: f32 = 1.0 / 60.0;
 
 /// A rider's sense of **up**: the direction of the felt (proper) acceleration aboard,
-/// averaged over the last ~2 seconds. Under thrust that is the assembly's body axis —
-/// gravity is free fall and isn't felt, so the deck pressing on your feet defines up —
-/// and it keeps the camera and the walking controls deck-relative as the autopilot
-/// pitches the rocket over. World +Y whenever not aboard a launched assembly.
+/// low-pass filtered over about a second (see [`FELT_UP_RATE`]). Under thrust that is the
+/// assembly's body axis — gravity is free fall and isn't felt, so the deck pressing on
+/// your feet defines up — and it keeps the camera and the walking controls deck-relative
+/// as the autopilot pitches the rocket over. World +Y whenever not aboard a launched
+/// assembly.
 ///
-/// Maintained per world by the felt-up sampler systems (client SP/MP in
-/// `client::launch`, server in `server::net`) from the same replicated rocket
-/// rotations, so the server and the predicted client agree without replicating it.
+/// Advanced per world by the felt-up sampler systems (client SP/MP in `client::launch`,
+/// server in `server::net`) from the same apparent-up target.
 ///
-/// **Rollback-registered** (`register_ground_state_rollback`). It drives the rider's
-/// body `Rotation` directly (`drive_felt_up`), so it is client-predicted state a
-/// rollback must restore — like `TouchingGround`/`GroundVelocity`. An earlier comment
-/// here claimed the window average "moves far too slowly for a replayed tick to
-/// matter" and skipped it; that was wrong and was the root cause of the mid-ride
-/// rotation-rollback storm: an unrestored ring re-sampled during replay drifts the
-/// averaged `up` from the server's, diverging the rider's orientation and triggering
-/// a rollback that corrupts the ring further (self-reinforcing). `Clone` is required
-/// by `local_rollback` (the `[Vec3; N]` ring is `Copy`, so it's free), along with
-/// `PartialEq`/`Debug` (the `SyncComponent` bound the rollback registration needs).
-#[derive(Component, Clone, PartialEq, Debug)]
+/// **Replicated and predicted** (registered in `ProtocolPlugin`). It drives the rider's
+/// body `Rotation` directly (`drive_felt_up`), so the whole filter state is one of the
+/// predicted quantities a rollback restores — exactly like `Position`. Each peer
+/// integrates it every tick locally (so it is never stale), and a rollback re-seeds it
+/// from the server's value and replays forward; on a quiet link the two recurrences agree
+/// to float precision and it never needs correcting. It never *triggers* a rollback of
+/// its own — `Rotation` diverging is the observable that matters, and this rides along.
+/// `Serialize`/`Deserialize` for replication; `Clone`/`PartialEq`/`Debug` are the
+/// `SyncComponent` bound the prediction registration needs.
+#[derive(Component, Clone, Copy, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
 pub struct FeltUp {
-    /// Ring of per-tick axis samples covering the window.
-    ring: [Vec3; FELT_UP_TICKS],
-    idx: usize,
-    /// The normalized window average — what the camera and movement basis read.
+    /// The filtered direction — what the camera, movement basis, and body rotation read.
     pub up: Vec3,
 }
 
 impl Default for FeltUp {
     fn default() -> Self {
-        Self { ring: [Vec3::Y; FELT_UP_TICKS], idx: 0, up: Vec3::Y }
+        Self { up: Vec3::Y }
     }
 }
 
 impl FeltUp {
-    /// Push this tick's felt-acceleration direction (unit) and refresh the average.
+    /// Advance the filter one tick toward this tick's felt-acceleration direction (unit).
     pub fn sample(&mut self, target: Vec3) {
-        self.ring[self.idx] = target;
-        self.idx = (self.idx + 1) % FELT_UP_TICKS;
-        self.up = self.ring.iter().copied().sum::<Vec3>().normalize_or(Vec3::Y);
+        self.up = self.up.lerp(target, FELT_UP_RATE).normalize_or(Vec3::Y);
     }
 
-    /// The body orientation that stands a rider up along the averaged felt up — the
+    /// The body orientation that stands a rider up along the filtered felt up — the
     /// single owner of a `ROTATION_LOCKED` avatar's rotation (collider, camera rig, and
     /// mesh inherit it as children).
     pub fn orientation(&self) -> Quat {
@@ -211,8 +219,8 @@ pub fn apparent_up(net_thrust_force: Vec3, total_mass: f32, true_com: Vec3) -> V
     (net_thrust_force / total_mass - gravity_at(true_com)).normalize_or(Vec3::Y)
 }
 
-/// Advance one avatar's [`FeltUp`] window by `target` and rewrite its body rotation from
-/// the new average — or insert a default `FeltUp` if it has none yet. The single owner of
+/// Advance one avatar's [`FeltUp`] filter by `target` and rewrite its body rotation from
+/// the new value — or insert a default `FeltUp` if it has none yet. The single owner of
 /// the "sample ⇒ body orientation" contract, called identically by the client and server
 /// felt-up samplers (which differ only in how they source `target`).
 ///
@@ -234,24 +242,19 @@ pub fn drive_felt_up(
     position: &mut Position,
     pivot: Vec3,
     target: Vec3,
-    // When `Some`, orient from this authoritative averaged up instead of the local ring
-    // (see `NetFeltUp`): the ring is *history*, and two peers' histories never match, so
-    // a predicting client must take the server's average or the rider's rotation drifts.
-    // `None` = authoritative sim (server / single-player): use the local ring.
-    authoritative_up: Option<Vec3>,
-) {
+    // Returns the up direction the rider was stood up along, for cross-peer traces.
+) -> Option<Vec3> {
     match felt {
         Some(mut felt) => {
             felt.sample(target);
             let foot_world = position.0 + rotation.0 * pivot;
-            rotation.0 = match authoritative_up {
-                Some(up) => Quat::from_rotation_arc(Vec3::Y, up),
-                None => felt.orientation(),
-            };
+            rotation.0 = felt.orientation();
             position.0 = foot_world - rotation.0 * pivot;
+            Some(felt.up)
         }
         None => {
             commands.entity(entity).try_insert(FeltUp::default());
+            None
         }
     }
 }
