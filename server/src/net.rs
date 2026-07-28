@@ -263,6 +263,8 @@ fn o<T: core::fmt::Display>(v: Option<T>) -> String {
 fn flush_telemetry(
     time: Res<Time>,
     mut acc: Local<f32>,
+    // Newest `RollbackReport` seen per link since the last flush — see the drain below.
+    mut latest: Local<HashMap<Entity, RollbackReport>>,
     db: Option<Res<TelemetryDb>>,
     mut links: Query<
         (Entity, &PingManager, &mut MessageReceiver<RollbackReport>),
@@ -270,6 +272,20 @@ fn flush_telemetry(
     >,
     mut avatars: Query<(&ControlledBy, &mut LateInputStats)>,
 ) {
+    // Drain the receiver EVERY frame, before the 2 s gate. lightyear clears message
+    // buffers each frame, so a report that lands on a non-flush frame is gone by the time
+    // this system next looks — and it only looked on 1 frame in ~120. Measured across
+    // every deployed version's log: just **50 of 1918** telemetry rows carried a rollback
+    // value (2.6%) and 13 carried fps (0.7%). The fields read as `-`, which looks exactly
+    // like "the client reported nothing" — so a real iPhone freeze-during-ascent was
+    // diagnosed blind, with rb/rbt/fps all blank for the whole flight. The client sends
+    // one report per 2 s on the reliable channel; this keeps whichever arrived.
+    for (entity, _, mut receiver) in &mut links {
+        if let Some(report) = receiver.receive().last() {
+            latest.insert(entity, report);
+        }
+    }
+
     *acc += time.delta_secs();
     if *acc < 2.0 {
         return;
@@ -290,7 +306,8 @@ fn flush_telemetry(
     let ts_ms = save::now_unix_ms() as i64;
     let sha = bad_spaceship_shared::net::BS_VERSION;
 
-    for (entity, ping, mut receiver) in &mut links {
+    // The reports were already drained above; only ping + the cached report are read here.
+    for (entity, ping, _) in &mut links {
         let client = entity.to_bits() as i64;
         let (rtt_ms, jitter_ms, samples) = if ping.latency_samples_recv() > 0 {
             (
@@ -301,9 +318,10 @@ fn flush_telemetry(
         } else {
             (None, None, None)
         };
-        // Unreliable channel → only the newest sample matters; the counters are
-        // cumulative, so an older one would just report a smaller total.
-        let report = receiver.receive().last();
+        // Whatever the per-frame drain caught since the last flush; `remove` so a window
+        // with no report still reads `-` rather than repeating a stale one — a client
+        // that has stopped reporting (frozen, mid-reload) is itself the signal.
+        let report = latest.remove(&entity);
         let rollbacks = report.as_ref().map(|r| r.rollbacks);
         let rollback_ticks = report.as_ref().map(|r| r.rollback_ticks);
         let max_pos_err_mm = report.as_ref().map(|r| r.max_pos_err_mm);
