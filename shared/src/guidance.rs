@@ -55,6 +55,13 @@ pub const TURN_SPEED: f32 = 40.0;
 /// turn the same way.
 pub const DOWNRANGE_AZIMUTH: Vec3 = Vec3::X;
 
+/// The optimizer's arc must hold this much altitude margin over the pad (latched — see
+/// [`propagate`]): the real vehicle flies the plan imperfectly (attitude lag, rider trim),
+/// and an ideal arc that grazes the terrain leaves no room for that. Module-scoped so the
+/// tests that ask whether the optimizer's verdict is self-consistent grade against its own
+/// ruler rather than a twin literal.
+pub const OPTIMIZER_CLEARANCE_M: f32 = 400.0;
+
 /// The autopilot's command for a tick: which way to point the net thrust (unit vector)
 /// and how hard to burn (`throttle` ∈ {0, 1} — `0` once escape energy is reached).
 #[derive(Clone, Copy, Debug)]
@@ -461,10 +468,6 @@ pub const OPTIMIZER_STEPS: usize = 4000;
 /// fuel for altitude margin.
 pub fn optimize_pitchover(true_pos: Vec3, true_vel: Vec3, vehicle: Vehicle) -> f32 {
     const SAFETY: f32 = 0.85;
-    /// The optimizer's arc must hold this much altitude margin over the pad (latched —
-    /// see `propagate`): the real vehicle flies the plan imperfectly (attitude lag,
-    /// rider trim), and an ideal arc that grazes the terrain leaves no room for that.
-    const OPTIMIZER_CLEARANCE_M: f32 = 400.0;
     /// Attitude-execution cost of a commanded lean, as extra fuel Δv (m/s) per radian of
     /// pitchover. The point-mass sim assumes thrust snaps to the guidance direction; the
     /// real stack must physically rotate, and imperfect tracking points some thrust
@@ -525,13 +528,118 @@ pub fn optimize_pitchover(true_pos: Vec3, true_vel: Vec3, vehicle: Vehicle) -> f
             lo = m1;
         }
     }
-    0.5 * (lo + hi) * SAFETY
+    // The refinement may only *improve* on the coarse winner. Ternary search needs a
+    // strictly unimodal cost; this one is `INFINITY` for every angle whose arc crashes,
+    // and `INFINITY < INFINITY` is false — so a bracket whose interior is entirely
+    // infeasible drives `lo` up to `hi` on every iteration and returns the top edge, an
+    // angle the planner itself scored as a crash. Measured: a TWR-1.14 stack (two riders
+    // on a four-engine build), where 0° is the ONLY feasible angle on the whole sweep,
+    // was handed 4.23° — and flew it into the ground at ~900 m where vertical reached
+    // 40 km. Falling back to the coarse best also gives the right answer when *nothing*
+    // is feasible: `best_angle` is still its 0.0 seed, i.e. straight up.
+    let refined = 0.5 * (lo + hi);
+    if cost(refined) < best_cost { refined * SAFETY } else { best_angle * SAFETY }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::map::SURFACE_GRAVITY;
+
+    /// Replay the *flown* command — the recorded table, sampled open-loop against speed —
+    /// through the same point-mass dynamics the planner uses. Returns `(peak radial
+    /// altitude, escaped)`.
+    fn replay(
+        program: &PitchProgram,
+        mut pos: Vec3,
+        mut vel: Vec3,
+        vehicle: Vehicle,
+    ) -> (f32, bool) {
+        let mut peak = f32::MIN;
+        for _ in 0..OPTIMIZER_STEPS {
+            peak = peak.max(crate::map::radial_altitude(pos));
+            let dir = program.thrust_dir(pos, vel.length());
+            let accel = dir * vehicle.thrust_accel
+                + gravity_at(pos)
+                + crate::map::drag_force(pos, vel) / vehicle.mass;
+            vel += accel * OPTIMIZER_DT;
+            pos += vel * OPTIMIZER_DT;
+            if (pos - PLANET_CENTER).length() < GROUND_RADIUS {
+                return (peak, false);
+            }
+            if escape_secured(pos, vel) {
+                return (peak, true);
+            }
+        }
+        (peak, false)
+    }
+
+    /// The optimizer must never hand back an angle its own model scores as a crash.
+    ///
+    /// Regression for the ternary refinement: the sweep's cost is `INFINITY` for any angle
+    /// whose arc crashes, and `INFINITY < INFINITY` is false, so a bracket with an entirely
+    /// infeasible interior walked `lo` up to `hi` and returned the top edge. A TWR-1.14
+    /// stack (two riders aboard a four-engine build), for which 0° is the ONLY feasible
+    /// angle, was handed 4.23° — and flew it into the ground at ~900 m where vertical
+    /// reached 40 km. The low end of this sweep is that vehicle.
+    #[test]
+    fn optimizer_never_returns_an_arc_it_scores_as_a_crash() {
+        let mass = 17.907f32;
+        let (pos, vel) = (Vec3::new(0.0, 1.0, 0.0), Vec3::ZERO);
+        for twr in [1.05f32, 1.10, 1.14, 1.20, 1.30, 1.50, 2.00] {
+            let vehicle = Vehicle { thrust_accel: twr * SURFACE_GRAVITY, mass };
+            let chosen = optimize_pitchover(pos, vel, vehicle);
+            let flies = propagate(
+                pos, vel, vehicle, chosen, OPTIMIZER_DT, OPTIMIZER_STEPS, OPTIMIZER_STEPS,
+                GRAVITY_REF_RADIUS + OPTIMIZER_CLEARANCE_M,
+            )
+            .burn_dv
+            .is_some();
+            // Vertical is the sanctioned fallback: a stack too weak to escape at any angle
+            // should climb, not lean into a turn the planner already priced as fatal.
+            assert!(
+                flies || chosen == 0.0,
+                "TWR {twr:.2}: chose {:.2}°, which the planner itself scores as a crash",
+                chosen.to_degrees(),
+            );
+        }
+    }
+
+    /// The flown command must reproduce the arc the optimizer priced.
+    ///
+    /// The optimizer ranks angles with `propagate`, which recomputes the ideal law from the
+    /// live state every step (closed loop); the autopilot instead replays [`PitchProgram`]'s
+    /// table indexed by speed (open loop). Those are only interchangeable while the table
+    /// round-trips — if it stops, the planner is optimizing a trajectory nothing flies.
+    #[test]
+    fn flown_table_reproduces_the_planned_arc() {
+        let vehicle = Vehicle { thrust_accel: 11.1760, mass: 17.907 };
+        let (pos, vel) = (Vec3::new(0.0, 1.0, 0.0), Vec3::ZERO);
+        for deg in [0.0f32, 1.0, 2.0, 4.0] {
+            let angle = deg.to_radians();
+            let planned = propagate(
+                pos, vel, vehicle, angle, OPTIMIZER_DT, OPTIMIZER_STEPS, 1,
+                GRAVITY_REF_RADIUS + OPTIMIZER_CLEARANCE_M,
+            );
+            let peak_planned = planned
+                .path
+                .iter()
+                .map(|p| crate::map::radial_altitude(*p))
+                .fold(f32::MIN, f32::max);
+            let program = PitchProgram::build(LaunchSeed {
+                pitchover: angle,
+                position: pos.to_array(),
+                velocity: vel.to_array(),
+                vehicle,
+            });
+            let (peak_flown, _) = replay(&program, pos, vel, vehicle);
+            assert!(
+                (peak_flown - peak_planned).abs() < 0.05 * peak_planned.abs(),
+                "{deg}°: flown table peaks at {peak_flown:.0} m but the plan priced \
+                 {peak_planned:.0} m",
+            );
+        }
+    }
 
     /// A point on the pad, at rest, is deep in the well: energy is very negative.
     #[test]

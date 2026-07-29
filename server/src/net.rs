@@ -3091,9 +3091,10 @@ fn apply_room_rocket_thrust(
                         0.0
                     };
                     println!(
-                        "[guid] alt={:.0}m tvel={:.0} e={:.0} thr={:.1} fuel={:.0} pitch={:.0}deg cmd={:.0}deg fpa={:.0}deg comY={:.0} offY={:.0} frameV={:.0}",
+                        "[guid] alt={:.0}m tvel={:.0} e={:.0} thr={:.1} fuel={:.0} pitch={:.4}deg cmd={:.0}deg fpa={:.0}deg comY={:.0} offY={:.0} frameV={:.0} ta={:.4} m={:.3} ns={}",
                         alt, true_vel.length(), e, guidance.throttle, f,
-                        pitchover.to_degrees(), cmd, fpa, com.y, frame.offset.y, frame.velocity.length()
+                        pitchover.to_degrees(), cmd, fpa, com.y, frame.offset.y, frame.velocity.length(),
+                        plan.seed.vehicle.thrust_accel, plan.seed.vehicle.mass, plan.probe().0
                     );
                 }
             }
