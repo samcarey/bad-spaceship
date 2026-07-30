@@ -417,9 +417,35 @@ pub struct NetRoomFrame {
     pub offset: [f64; 3],
     /// Room-frame velocity in true world coordinates (the co-moving boost).
     pub velocity: [f32; 3],
+    /// The server tick `offset` was sampled at. The frame is a linear recurrence
+    /// (`offset += velocity·TICK` every tick, exactly, in f64), so this is what lets a
+    /// predicted client reconstruct the frame at *its* tick instead of consuming the
+    /// replicated sample as-is — see [`Self::frame_at`].
+    pub tick: u32,
 }
 
 impl NetRoomFrame {
+    /// The frame `(offset, velocity)` advanced to `tick` — the server's recurrence
+    /// (`offset += velocity·TICK` per tick) replayed from the replicated sample, exact
+    /// in f64 because that is exactly how the server integrates it.
+    ///
+    /// Predicted physics MUST use this, not the raw replicated value and not the
+    /// client's visual frame mirror: the raw sample is ~1 packet stale (at 200 m/s
+    /// that is metres of `r` error in `gravity_at`/`drag_force` — a standing
+    /// differential acceleration against the server measured at ~0.003 m/s², enough
+    /// to saw through the position tolerance every ~8 s), and the visual mirror is
+    /// render-frame state, so a rollback replay would read ONE value across every
+    /// replayed tick while the server's frame advanced per tick.
+    pub fn frame_at(&self, tick: Tick) -> (bevy::math::DVec3, Vec3) {
+        let velocity = Vec3::from_array(self.velocity);
+        // Wrapping i16 tick delta: negative while a rollback replays ticks older than
+        // the sample, which extrapolates backward along the same recurrence.
+        let dticks: i32 = tick - Tick(self.tick);
+        let offset = bevy::math::DVec3::from_array(self.offset)
+            + velocity.as_dvec3() * (f64::from(dticks) * TICK.as_secs_f64());
+        (offset, velocity)
+    }
+
     /// Whether the room is currently rebased away from the true origin. An active
     /// frame means the true ground is far away: the server drops the ground bit from
     /// the room's collision filters and the client moves its ground to `-offset`.
