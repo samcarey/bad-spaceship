@@ -751,8 +751,14 @@ impl RoomFrame {
     fn is_active(&self) -> bool {
         self.offset != DVec3::ZERO || self.velocity != Vec3::ZERO
     }
-    fn net(&self) -> NetRoomFrame {
-        NetRoomFrame { offset: self.offset.to_array(), velocity: self.velocity.to_array() }
+    /// The replicated form, stamped with the tick `offset` was sampled at (see
+    /// `NetRoomFrame::frame_at` — the client re-advances the recurrence from it).
+    fn net(&self, tick: Tick) -> NetRoomFrame {
+        NetRoomFrame {
+            offset: self.offset.to_array(),
+            velocity: self.velocity.to_array(),
+            tick: tick.0,
+        }
     }
     fn save(&self) -> SaveFrame {
         SaveFrame { offset: self.offset.to_array(), velocity: self.velocity.to_array() }
@@ -793,6 +799,11 @@ fn room_layers(bit: u32, grounded: bool) -> CollisionLayers {
 /// no ordering.
 fn rebase_room_frames(
     time: Res<Time>,
+    // `Option`: the rebase unit tests drive this system in a minimal App with no
+    // lightyear, where the timeline resource doesn't exist. Tick 0 there is exact —
+    // the tests step Avian directly, and `frame_at` at any tick is correct as long as
+    // sample and read agree, which a single-world test trivially does.
+    timeline: Option<Res<LocalTimeline>>,
     mut commands: Commands,
     mut frames: ResMut<RoomFrames>,
     // `Has<LockJoint>`: a lock weld's `body1` is an avatar, not a part, so it looks
@@ -935,7 +946,7 @@ fn rebase_room_frames(
                 );
             }
         }
-        net_frame.set_if_neq(frame.net());
+        net_frame.set_if_neq(frame.net(timeline.as_ref().map(|t| t.tick()).unwrap_or(Tick(0))));
     }
 }
 
@@ -1932,7 +1943,9 @@ fn spawn_room_world_from_save(
     if world.launched {
         launches.by_room.insert(room.id, RoomLaunch::Launched);
     }
-    spawn_room_state(commands, room, frame.net());
+    // Stamped tick 0: `rebase_room_frames` republishes with the live tick on its first
+    // FixedUpdate — before any client can have joined the freshly-created room.
+    spawn_room_state(commands, room, frame.net(Tick(0)));
 }
 
 /// Tag a freshly-spawned part for room-scoped replication: its shape + stable id

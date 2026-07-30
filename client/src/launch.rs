@@ -29,8 +29,8 @@ use bad_spaceship_shared::launch::{
 };
 use bad_spaceship_shared::map::apply_gravity_correction;
 use bad_spaceship_shared::net::{
-    ControlChannel, InLargestAssembly, NetLaunch, NetLockJoint, NetPart, NetPlayer, RequestLaunch,
-    SetLocked,
+    ControlChannel, InLargestAssembly, NetLaunch, NetLockJoint, NetPart, NetPlayer, NetRoomFrame,
+    RequestLaunch, SetLocked,
 };
 use bad_spaceship_shared::part::{
     avatar_lock_contacts, capsule_bottom_center, cleanup_lock_joints, despawn_player_lock_welds,
@@ -47,7 +47,6 @@ use bevy_egui::{
 use lightyear::prelude::{Connected, LocalId, MessageSender, Predicted};
 use std::collections::HashSet;
 
-use crate::net::ClientRoomFrame;
 use crate::render_main_pass::flame_material::FlameThrottle;
 use crate::render_secondary_pass::{assembly_members, main_assembly};
 use crate::ui::EguiDrawSystems;
@@ -457,8 +456,9 @@ fn apply_sp_gravity(
 
 /// Planet gravity for the predicted multiplayer bodies — the same radial correction as
 /// [`apply_sp_gravity`], but true position folds in the room's floating-origin offset
-/// ([`ClientRoomFrame`]) so `r` is the real distance from the centre while the co-moving
-/// frame keeps the body near the local origin. Only `Predicted` bodies are locally
+/// (the replicated [`NetRoomFrame`] advanced to this tick — see `frame_at`) so `r` is the
+/// real distance from the centre while the co-moving frame keeps the body near the local
+/// origin. Only `Predicted` bodies are locally
 /// simulated (interpolated remotes are replication-driven), so only they get the force;
 /// the server applies the identical field, so prediction converges.
 ///
@@ -470,13 +470,21 @@ fn apply_sp_gravity(
 /// The server's twin (`apply_server_gravity`) covers `Or<(NetPart, ServerAvatar)>`.
 fn apply_mp_gravity(
     gravity: Res<Gravity>,
-    frame: Res<ClientRoomFrame>,
+    // The replicated frame advanced to THIS tick (`NetRoomFrame::frame_at`) — never the
+    // visual `ClientRoomFrame`, whose render-frame smoothing stood metres away from the
+    // server's frame and fed every predicted body a measurably wrong `r`.
+    frames: Query<&NetRoomFrame>,
+    timeline: Res<lightyear::prelude::LocalTimeline>,
     mut bodies: Query<
         (&Position, Forces),
         (With<Predicted>, Or<(With<NetPart>, With<NetPlayer>)>),
     >,
 ) {
-    let offset = frame.offset.as_vec3();
+    let offset = frames
+        .iter()
+        .next()
+        .map(|f| f.frame_at(timeline.tick()).0.as_vec3())
+        .unwrap_or_default();
     for (position, mut forces) in &mut bodies {
         apply_gravity_correction(&mut forces, position.0 + offset, gravity.0);
     }
@@ -645,7 +653,9 @@ fn apply_mp_thrust(
         // Write-back of the rolled-back attitude integral (see `AttitudeIntegral`).
         Query<(&mut AttitudeIntegral, &mut EscapeCut), (With<RocketEngine>, With<Predicted>)>,
     )>,
-    frame: Res<ClientRoomFrame>,
+    // Tick-exact frame for the physics (see `apply_mp_gravity` — same rule): the
+    // visual `ClientRoomFrame` must not feed thrust/drag/guidance.
+    frames: Query<&NetRoomFrame>,
     gravity: Res<Gravity>,
     mut fuel: ResMut<FuelUsed>,
     mut apparent: ResMut<ApparentUp>,
@@ -754,8 +764,13 @@ fn apply_mp_thrust(
     };
     // True planet-frame state folds in the room's floating-origin frame (offset +
     // co-moving velocity), so the guidance sees real altitude/velocity under a rebase.
-    let true_com = com + frame.offset.as_vec3();
-    let true_vel = spin.linear_velocity + frame.velocity;
+    let (frame_offset, frame_velocity) = frames
+        .iter()
+        .next()
+        .map(|f| f.frame_at(timeline.tick()))
+        .unwrap_or_default();
+    let true_com = com + frame_offset.as_vec3();
+    let true_vel = spin.linear_velocity + frame_velocity;
     let total_mass = part_mass_total + riders.iter().map(|(_, _, mass, _)| mass.value()).sum::<f32>();
     // Rebuild the pitch program when the replicated seed (re)arrives, from that seed
     // ALONE — no locally measured state. Re-planning from the client's own live position,
@@ -786,7 +801,7 @@ fn apply_mp_thrust(
             // directly, and `off` the two floating-origin frames.
             plan_probe.0,
             plan_probe.1,
-            frame.offset.x, frame.offset.y, frame.offset.z,
+            frame_offset.x, frame_offset.y, frame_offset.z,
         );
     }
     // Integrate from the ROLLED-BACK value, not a `Local` that accumulates once per replay
@@ -820,7 +835,7 @@ fn apply_mp_thrust(
     let program = mp_plan.as_ref().unwrap();
     autopilot.0 = (total_mass > 0.0).then(|| {
         AutopilotSnapshot::new(
-            frame.offset + com.as_dvec3(),
+            frame_offset + com.as_dvec3(),
             true_vel,
             geometry.len(),
             gravity.0,
