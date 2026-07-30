@@ -3078,10 +3078,23 @@ fn apply_room_rocket_thrust(
                     let alt = radial_altitude(true_com);
                     let e = bad_spaceship_shared::guidance::specific_energy(true_com, true_vel);
                     let f = fuel.0.get(room).copied().unwrap_or(0.0);
+                    // Commanded vs achieved lean, both measured off radial up. The plan
+                    // is only *executable* while these track each other; `fpa` running
+                    // away from `cmd` is the vehicle departing from its guidance — which
+                    // the altitude trace alone can't distinguish from a plan that simply
+                    // costs altitude.
+                    let up = (true_com - PLANET_CENTER).normalize_or(Vec3::Y);
+                    let cmd = guidance.thrust_dir.angle_between(up).to_degrees();
+                    let fpa = if true_vel.length() > 1.0 {
+                        true_vel.angle_between(up).to_degrees()
+                    } else {
+                        0.0
+                    };
                     println!(
-                        "[guid] alt={:.0}m tvel={:.0} e={:.0} thr={:.1} fuel={:.0} pitch={:.0}deg comY={:.0} offY={:.0} frameV={:.0}",
+                        "[guid] alt={:.0}m tvel={:.0} e={:.0} thr={:.1} fuel={:.0} pitch={:.4}deg cmd={:.0}deg fpa={:.0}deg comY={:.0} offY={:.0} frameV={:.0} ta={:.4} m={:.3} ns={}",
                         alt, true_vel.length(), e, guidance.throttle, f,
-                        pitchover.to_degrees(), com.y, frame.offset.y, frame.velocity.length()
+                        pitchover.to_degrees(), cmd, fpa, com.y, frame.offset.y, frame.velocity.length(),
+                        plan.seed.vehicle.thrust_accel, plan.seed.vehicle.mass, plan.probe().0
                     );
                 }
             }
