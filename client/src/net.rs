@@ -19,6 +19,9 @@ use avian3d::prelude::{
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::math::DVec3;
 use bevy::transform::TransformSystems;
+// Only the native-only rollback-culprit tally reads confirmed history.
+#[cfg(not(target_arch = "wasm32"))]
+use lightyear::core::confirmed_history::ConfirmedHistory;
 use lightyear::prediction::correction::VisualCorrection;
 use lightyear::prediction::rollback::RollbackSystems;
 
@@ -395,14 +398,137 @@ fn autostart_ingame(
     }
 }
 
+/// Every predicted body, with the server-authored history the rollback conditions are
+/// fed from. lightyear 0.28 predicts *in place* — there is no separate confirmed entity
+/// whose live `Position` holds the authoritative value; the confirmed samples live in
+/// `ConfirmedHistory<C>` on the predicted entity itself. Matching a trigger site
+/// against live `Position` therefore cannot work (the live value is the *predicted*
+/// one, which by definition differs), and matching against un-predicted entities finds
+/// only local scenery that happens to sit nearby.
+#[cfg(not(target_arch = "wasm32"))]
+type ConfirmedBodies<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static Position,
+        &'static ConfirmedHistory<Position>,
+        Option<&'static ConfirmedHistory<Rotation>>,
+        Option<&'static NetPart>,
+        Option<&'static NetPlayer>,
+    ),
+    With<Predicted>,
+>;
+
+/// Per-class rollback-trigger tally: label → (count, worst divergence seen).
+#[cfg(not(target_arch = "wasm32"))]
+type CulpritTally = std::collections::HashMap<String, (u32, u32)>;
+
+/// Name the bodies that tripped this window's rollbacks.
+///
+/// The trigger counters say *how big* a storm is; they never said *which* body drives
+/// it, because lightyear hands the rollback conditions bare component values with no
+/// entity. Each trigger records the confirmed value it fired on (`TRIGGER_SITES`), and
+/// this matches those values back to entities against the `ConfirmedHistory<C>` buffers
+/// — see [`ConfirmedBodies`] for why that, and not any live component, is where the
+/// authoritative value lives. Reported as a per-class histogram (`avatar`,
+/// `part:<shape>`, …), because the fix depends on the class, not the entity id.
+///
+/// Must be drained EVERY frame, not at the 2 s telemetry flush: `ConfirmedHistory` is a
+/// short ring buffer, so a site more than a few ticks old is no longer in it and comes
+/// back `unmatched`. (Draining on the flush measured >80% unmatched — the same
+/// shape of bug as the telemetry drain in PR #175.)
+///
+/// Native-only and diagnostic: O(sites × bodies), and must never run in a shipped wasm frame.
+#[cfg(not(target_arch = "wasm32"))]
+fn tally_rollback_culprits(bodies: &ConfirmedBodies, hits: &mut CulpritTally) {
+    use bad_spaceship_shared::net::take_trigger_sites;
+    let sites = take_trigger_sites();
+    if sites.positions.is_empty() && sites.rotations.is_empty() {
+        return;
+    }
+
+    // A body's class, not its id: two loose cubes diverging is one phenomenon, and the
+    // ids churn across runs. Unmatched sites are their own bucket so a systematically
+    // unresolvable culprit (a body already despawned, say) can't hide as a low count.
+    let label = |part: Option<&NetPart>, player: Option<&NetPlayer>| match (part, player) {
+        (Some(part), _) => format!("part:{:?}", part.shape),
+        (_, Some(_)) => "avatar".to_string(),
+        _ => "other".to_string(),
+    };
+    let mut note = |key: String, err: u32| {
+        let slot = hits.entry(key).or_insert((0, 0));
+        slot.0 += 1;
+        slot.1 = slot.1.max(err);
+    };
+    // The site value came *out* of one of these buffers, so this is an exact-equality
+    // lookup, not a nearest-neighbour guess: no risk of blaming the wrong body of a
+    // tightly-stacked rocket.
+    let holds = |history: &ConfirmedHistory<Position>, value: Vec3| {
+        (0..history.len()).any(|n| history.get_nth_present(n).is_some_and(|(_, p)| p.0 == value))
+    };
+    let holds_rot = |history: &ConfirmedHistory<Rotation>, value: Quat| {
+        (0..history.len()).any(|n| history.get_nth_present(n).is_some_and(|(_, r)| r.0 == value))
+    };
+    for (confirmed, err_mm) in &sites.positions {
+        if let Some((.., part, player)) = bodies.iter().find(|(_, pos, ..)| holds(pos, *confirmed)) {
+            note(format!("pos {}", label(part, player)), *err_mm);
+            continue;
+        }
+        // No history hit. Fall back to the nearest *live* predicted pose: if some body
+        // sits within a rollback's worth of the site, this is the same body with an
+        // aged-out ring buffer (`aged:`), not an unknown culprit — the distinction
+        // decides whether the sampling is lossy or the search space is wrong.
+        /// Comfortably past the largest routine misprediction but well inside the
+        /// spacing of distinct bodies, so `aged:` can't silently blame a neighbour.
+        const AGED_MATCH_M: f32 = 5.0;
+        let near = bodies
+            .iter()
+            .map(|(pos, _, _, part, player)| (pos.0.distance(*confirmed), label(part, player)))
+            .min_by(|a, b| a.0.total_cmp(&b.0));
+        match near {
+            Some((dist, who)) if dist < AGED_MATCH_M => note(format!("pos aged:{who}"), *err_mm),
+            _ => note("pos unmatched".to_string(), *err_mm),
+        }
+    }
+    for (confirmed, err_mdeg) in &sites.rotations {
+        let best = bodies
+            .iter()
+            .find(|(_, _, rot, ..)| rot.is_some_and(|rot| holds_rot(rot, *confirmed)))
+            .map(|(_, _, _, part, player)| label(part, player));
+        note(format!("rot {}", best.as_deref().unwrap_or("unmatched")), *err_mdeg);
+    }
+    if sites.dropped > 0 {
+        note("DROPPED".to_string(), sites.dropped);
+    }
+}
+
+/// Format and clear a window's accumulated culprit tally, worst offender first.
+#[cfg(not(target_arch = "wasm32"))]
+fn drain_culprit_tally(hits: &mut CulpritTally) -> String {
+    let mut ranked: Vec<_> = core::mem::take(hits).into_iter().collect();
+    ranked.sort_by(|a, b| b.1.0.cmp(&a.1.0));
+    ranked
+        .iter()
+        .take(8)
+        .map(|(key, (count, worst))| format!("{key}×{count}(max {worst})"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn report_rollbacks(
     time: Res<Time>,
     mut acc: Local<f32>,
     metrics: Option<Res<PredictionMetrics>>,
     diagnostics: Res<DiagnosticsStore>,
     windows: Query<&Window>,
+    #[cfg(not(target_arch = "wasm32"))] bodies: ConfirmedBodies,
+    #[cfg(not(target_arch = "wasm32"))] mut culprits: Local<CulpritTally>,
     mut sender: Query<&mut MessageSender<RollbackReport>, With<Connected>>,
 ) {
+    // Before the window gate — see `tally_rollback_culprits`: the confirmed history a
+    // site is matched against has aged out by the time the window closes.
+    #[cfg(not(target_arch = "wasm32"))]
+    tally_rollback_culprits(&bodies, &mut culprits);
     *acc += time.delta_secs();
     if *acc < 2.0 {
         return;
@@ -422,7 +548,8 @@ fn report_rollbacks(
     let (div_pos_um, div_rot_udeg, div_checks) = take_divergence_floor();
     #[cfg(not(target_arch = "wasm32"))]
     println!(
-        "[rbdiag] rb={} rbt={} pos_trig={} rot={} linvel={} angvel={} rotmaxdeg={:.1} | floor: posmax={:.3}mm rotmax={:.4}deg checks={}",
+        "[rbdiag] t={:.1} rb={} rbt={} pos_trig={} rot={} linvel={} angvel={} rotmaxdeg={:.1} | floor: posmax={:.3}mm rotmax={:.4}deg checks={}",
+        time.elapsed_secs(),
         metrics.rollbacks,
         metrics.rollback_ticks,
         pos_triggers,
@@ -434,6 +561,8 @@ fn report_rollbacks(
         div_rot_udeg as f32 / 1_000_000.0,
         div_checks
     );
+    #[cfg(not(target_arch = "wasm32"))]
+    println!("[rbwho] {}", drain_culprit_tally(&mut culprits));
     #[cfg(target_arch = "wasm32")]
     let _ = (div_pos_um, div_rot_udeg, div_checks);
     #[cfg(target_arch = "wasm32")]
