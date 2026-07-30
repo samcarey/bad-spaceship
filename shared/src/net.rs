@@ -407,10 +407,13 @@ pub struct NetLaunch {
 /// Client duties on a frame change: move the local ground to `-offset` (the true
 /// ground position in room-local coordinates — fixes rendering, predicted physics,
 /// and the flame ground raycast in one move) and derive HUD altitude/speed from the
-/// frame. The rebase itself reaches clients as ordinary replication: every room
-/// entity's confirmed `Position`/`LinearVelocity` jumps by the same delta, one
-/// uniform rollback re-simulates, and the correction slides the whole scene (camera
-/// included — it rides the avatar) rigidly, which is invisible.
+/// frame. The rebase itself is PREDICTED: the decision is a pure function of sim
+/// state ([`rebase_room_frame`]) that the client evaluates on its predicted world at
+/// the same tick as the server (`predict_room_rebase`), so the shifted confirmed
+/// state matches the shifted predicted state and no rollback fires. A mispredicted
+/// rebase tick (the anchor crossing the trigger within the sims' sub-mm disagreement
+/// of a tick boundary) degrades to the old behaviour: one uniform rollback whose
+/// correction slides the whole scene rigidly.
 #[derive(Component, Serialize, Deserialize, Clone, Copy, PartialEq, Debug, Default)]
 pub struct NetRoomFrame {
     /// Room-frame origin in true world coordinates (f64: it grows without bound).
@@ -438,7 +441,7 @@ impl NetRoomFrame {
     /// replayed tick while the server's frame advanced per tick.
     pub fn frame_at(&self, tick: Tick) -> (bevy::math::DVec3, Vec3) {
         let velocity = Vec3::from_array(self.velocity);
-        // Wrapping i16 tick delta: negative while a rollback replays ticks older than
+        // Wrapping i32 tick delta: negative while a rollback replays ticks older than
         // the sample, which extrapolates backward along the same recurrence.
         let dticks: i32 = tick - Tick(self.tick);
         let offset = bevy::math::DVec3::from_array(self.offset)
@@ -451,6 +454,103 @@ impl NetRoomFrame {
     /// the room's collision filters and the client moves its ground to `-offset`.
     pub fn is_active(&self) -> bool {
         self.offset != [0.0; 3] || self.velocity != [0.0; 3]
+    }
+}
+
+/// Local drift of a room's assembly that triggers a floating-origin rebase.
+pub const REBASE_TRIGGER_M: f32 = 2000.0;
+
+/// True distance from the origin below which an active frame resets to exactly
+/// zero (real coordinates, real ground). Half of [`REBASE_TRIGGER_M`], so the two
+/// can't flap: right after a reset the local drift is under the trigger.
+pub const REBASE_RESET_M: f64 = 1000.0;
+
+/// Where a rebase parks the assembly above the local origin. Keeps the freshly
+/// shifted content clear of the phantom ground collider (and of the client's
+/// not-yet-moved local ground while the client applies the shift).
+pub const REBASE_REST_Y: f32 = 100.0;
+
+/// A rebase decision applied to a room frame: subtract `(dpos, dvel)` from every
+/// room entity's position/velocity, and the frame becomes `(offset, velocity)`.
+pub struct RebaseOutcome {
+    pub dpos: Vec3,
+    pub dvel: Vec3,
+    pub offset: bevy::math::DVec3,
+    pub velocity: Vec3,
+}
+
+/// The floating-origin rebase decision for one room, as a pure function of the
+/// frame and the room's anchor (its largest assembly's volume-weighted mean
+/// position/velocity): `Some` when the room rebases this tick, with the shift to
+/// subtract from every room entity and the resulting frame.
+///
+/// This is THE single decision path — the server applies it authoritatively
+/// (`rebase_room_frames`) and a predicted client mirrors it on its predicted world
+/// at the same tick (`predict_room_rebase`), so the rebase never reaches the
+/// rollback comparator as a surprise. Any fork in this logic is a guaranteed
+/// rollback per rebase, so keep it here, shared.
+///
+/// The reset branch lands the frame *exactly* on zero (assignment, not
+/// accumulation of the inverse shift — an f32 round trip would leave a residue and
+/// the ground must become real again).
+pub fn rebase_room_frame(
+    offset: bevy::math::DVec3,
+    velocity: Vec3,
+    anchor_pos: Vec3,
+    anchor_vel: Vec3,
+) -> Option<RebaseOutcome> {
+    let active = offset != bevy::math::DVec3::ZERO || velocity != Vec3::ZERO;
+    let true_anchor = offset + anchor_pos.as_dvec3();
+    if active && true_anchor.length() < REBASE_RESET_M {
+        Some(RebaseOutcome {
+            dpos: -offset.as_vec3(),
+            dvel: -velocity,
+            offset: bevy::math::DVec3::ZERO,
+            velocity: Vec3::ZERO,
+        })
+    } else if anchor_pos.length() > REBASE_TRIGGER_M {
+        let dpos = anchor_pos - Vec3::Y * REBASE_REST_Y;
+        Some(RebaseOutcome {
+            dpos,
+            dvel: anchor_vel,
+            offset: offset + dpos.as_dvec3(),
+            velocity: velocity + anchor_vel,
+        })
+    } else {
+        None
+    }
+}
+
+/// The weighted mean position/velocity of a set of `(position, velocity, weight)`
+/// samples — the rebase anchor arithmetic, shared so the server's authoritative
+/// anchor and the client's predicted one ([`rebase_room_frame`]'s input) are the
+/// same reduction and can't fork. `None` when the samples carry no weight.
+/// (Iteration *order* still differs between the peers — ECS query order vs the
+/// server's index arrays — which is ULP-scale noise, dwarfed by the sims' sub-mm
+/// state drift.)
+pub fn weighted_anchor(
+    samples: impl Iterator<Item = (Vec3, Vec3, f32)>,
+) -> Option<(Vec3, Vec3)> {
+    let (mut weighted_pos, mut weighted_vel, mut mass) = (Vec3::ZERO, Vec3::ZERO, 0.0f32);
+    for (position, velocity, weight) in samples {
+        weighted_pos += position * weight;
+        weighted_vel += velocity * weight;
+        mass += weight;
+    }
+    (mass > 0.0).then(|| (weighted_pos / mass, weighted_vel / mass))
+}
+
+/// A part's volume — the mass proxy under uniform density (full cuboid volume, or the
+/// rocket's precomputed cylinder+cone volume). Shared by the server's assembly COM,
+/// the launch COM, and the client's predicted rebase anchor so all weigh parts
+/// identically.
+pub fn part_volume(shape: PartShape) -> f32 {
+    match shape {
+        PartShape::Cuboid { half_extents } => {
+            let he = Vec3::from_array(half_extents);
+            8.0 * he.x * he.y * he.z
+        }
+        PartShape::RocketEngine => crate::part::ROCKET_VOLUME,
     }
 }
 
@@ -1136,5 +1236,58 @@ impl Plugin for ProtocolPlugin {
         // TEMPORARY client-crash report on the reliable control channel.
         app.register_message::<ClientPanicReport>()
             .add_direction(NetworkDirection::ClientToServer);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::math::DVec3;
+
+    /// Drift past the trigger parks the anchor at `REBASE_REST_Y` and folds the
+    /// shift + boost into the frame.
+    #[test]
+    fn rebase_triggers_past_the_drift_threshold() {
+        let anchor = Vec3::new(0.0, 2500.0, 0.0);
+        let velocity = Vec3::new(0.0, 120.0, 0.0);
+        let out = rebase_room_frame(DVec3::ZERO, Vec3::ZERO, anchor, velocity).unwrap();
+        assert_eq!(out.dpos, Vec3::new(0.0, 2500.0 - REBASE_REST_Y, 0.0));
+        assert_eq!(out.dvel, velocity);
+        assert_eq!(out.offset, out.dpos.as_dvec3());
+        assert_eq!(out.velocity, velocity);
+    }
+
+    /// Inside the band nothing happens — including for an active frame still far
+    /// from the true origin (no reset flap on the way up).
+    #[test]
+    fn rebase_holds_inside_the_band() {
+        assert!(rebase_room_frame(
+            DVec3::ZERO,
+            Vec3::ZERO,
+            Vec3::new(0.0, 1999.0, 0.0),
+            Vec3::Y
+        )
+        .is_none());
+        assert!(rebase_room_frame(
+            DVec3::new(0.0, 10_000.0, 0.0),
+            Vec3::new(0.0, 50.0, 0.0),
+            Vec3::new(0.0, 100.0, 0.0),
+            Vec3::Y
+        )
+        .is_none());
+    }
+
+    /// Descending under `REBASE_RESET_M` true lands the frame EXACTLY on zero
+    /// (assignment, not accumulated inverse shifts).
+    #[test]
+    fn rebase_resets_exactly_to_zero_near_the_true_origin() {
+        let offset = DVec3::new(0.25, 900.0, -0.5);
+        let velocity = Vec3::new(0.0, -30.0, 0.0);
+        let out = rebase_room_frame(offset, velocity, Vec3::new(0.0, 50.0, 0.0), Vec3::ZERO)
+            .unwrap();
+        assert_eq!(out.dpos, -offset.as_vec3());
+        assert_eq!(out.dvel, -velocity);
+        assert_eq!(out.offset, DVec3::ZERO);
+        assert_eq!(out.velocity, Vec3::ZERO);
     }
 }
