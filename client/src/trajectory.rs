@@ -12,6 +12,13 @@
 //! does rather than freezing the launch-day plan; after the escape cutoff it shows the
 //! engines-off ballistic coast instead.
 //!
+//! The line is **transparent where you are**: alpha ramps from zero at the vehicle to
+//! full [`FADE_DIST_M`] of path-length ahead and behind, so the tube never paints over
+//! the rocket you are watching (or the cockpit view from aboard it) while the plan
+//! further out stays legible. The ramp is per-vertex colour on an alpha-blended
+//! material — the fade is in path-length along the line, not distance from the camera,
+//! so it stays put as the camera orbits.
+//!
 //! Rendering is one rebuilt-per-frame **3D tube** — a thin extruded pipe following the
 //! path, its radius scaling with camera distance so the line holds a roughly constant
 //! on-screen thickness from the pad to a plan-end tens of kilometres up. (A camera-facing
@@ -78,6 +85,11 @@ const MIN_RADIUS: f32 = 0.0125;
 /// round-ish from any angle, not be smooth.
 const TUBE_SIDES: usize = 5;
 
+/// Path-length either side of the vehicle over which the line fades in: zero alpha at
+/// the vehicle itself, full at this distance ahead and behind (smoothstepped, so it's
+/// already half-strength by the midpoint and reads as "visible from about here").
+const FADE_DIST_M: f32 = 50.0;
+
 /// The recorded + predicted flight path, in true planet-frame coordinates.
 #[derive(Resource, Default)]
 pub struct FlightPath {
@@ -120,6 +132,11 @@ fn spawn_trajectory_line(
             // fully-saturated bright yellow is what reads as "neon".
             base_color: Color::srgb(0.95, 1.0, 0.05),
             unlit: true,
+            // The near-the-vehicle fade rides in per-vertex alpha, which only means
+            // anything if the material blends (StandardMaterial multiplies base_color
+            // by the mesh's vertex colour). Blended geometry doesn't write depth, so
+            // the tube's own far side shows through — harmless, and it reads as glow.
+            alpha_mode: AlphaMode::Blend,
             // An instrument overlay: must read through the smog (see the module doc).
             fog_enabled: false,
             ..default()
@@ -257,14 +274,19 @@ fn draw_flight_path(
     );
     let mut points: Vec<Vec3> = Vec::with_capacity(path.trail.len() + path.future.len() + 1);
     points.extend(path.trail.iter().map(|p| (p - offset).as_vec3()));
+    // Where the trail hands over to the plan — the vehicle itself, and so the centre of
+    // the transparent gap. Clamped for the snapshot-less frame (the path is stale and
+    // about to be cleared; fading around its end is as meaningful as anything).
+    let mut anchor = points.len();
     if let Some(snap) = autopilot.0.as_ref() {
         points.push((snap.true_pos - offset).as_vec3());
     }
     // `future[0]` is the propagation start — the current position again; skip it.
     points.extend(path.future.iter().skip(1).map(|p| (p - offset).as_vec3()));
+    anchor = anchor.min(points.len().saturating_sub(1));
 
     let cam = camera.translation();
-    let Some(mesh) = tube_mesh(&points, cam) else {
+    let Some(mesh) = tube_mesh(&points, anchor, cam) else {
         *visibility = Visibility::Hidden;
         return;
     };
@@ -283,11 +305,21 @@ fn draw_flight_path(
 ///
 /// First the points are de-duplicated (a stalled assembly re-records the same spot; a
 /// zero-length segment has no tangent), so the frame math always sees a real direction.
-fn tube_mesh(points: &[Vec3], cam: Vec3) -> Option<Mesh> {
+///
+/// `anchor` indexes the vehicle's own point in `points`: alpha is smoothstepped from
+/// zero there to one [`FADE_DIST_M`] of arc length away in either direction, carried as
+/// vertex colour (see the module doc for why the gap exists).
+fn tube_mesh(points: &[Vec3], anchor: usize, cam: Vec3) -> Option<Mesh> {
     let mut pts: Vec<Vec3> = Vec::with_capacity(points.len());
-    for &p in points {
+    // Track the anchor across the de-duplication; if the anchor point *is* the duplicate
+    // that got dropped, the kept twin (within 1 mm) stands in for it.
+    let mut anchor_pt = 0;
+    for (i, &p) in points.iter().enumerate() {
         if p.is_finite() && pts.last().is_none_or(|&last| last.distance(p) > 1e-3) {
             pts.push(p);
+        }
+        if i == anchor {
+            anchor_pt = pts.len().saturating_sub(1);
         }
     }
     if pts.len() < 2 {
@@ -295,8 +327,20 @@ fn tube_mesh(points: &[Vec3], cam: Vec3) -> Option<Mesh> {
     }
 
     let n = pts.len();
+    // Arc length from the vehicle, signed only in the sense that both directions ramp
+    // the same way — the fade is symmetric, so the absolute distance is all that matters.
+    let mut arc: Vec<f32> = Vec::with_capacity(n);
+    let mut run = 0.0;
+    arc.push(0.0);
+    for i in 1..n {
+        run += pts[i].distance(pts[i - 1]);
+        arc.push(run);
+    }
+    let anchor_arc = arc[anchor_pt];
+
     let mut positions: Vec<[f32; 3]> = Vec::with_capacity(n * TUBE_SIDES);
     let mut normals: Vec<[f32; 3]> = Vec::with_capacity(n * TUBE_SIDES);
+    let mut colors: Vec<[f32; 4]> = Vec::with_capacity(n * TUBE_SIDES);
     // Seed the transported frame with any vector perpendicular to the first tangent.
     let first_tan = (pts[1] - pts[0]).normalize_or(Vec3::Y);
     let mut side = first_tan.any_orthonormal_vector();
@@ -313,11 +357,15 @@ fn tube_mesh(points: &[Vec3], cam: Vec3) -> Option<Mesh> {
         side = (side - tan * side.dot(tan)).normalize_or(tan.any_orthonormal_vector());
         let up = tan.cross(side);
         let radius = (pts[i].distance(cam) * LINE_RADIUS_PER_M).max(MIN_RADIUS);
+        // Smoothstep so the line emerges rather than switching on at a hard ring.
+        let t = ((arc[i] - anchor_arc).abs() / FADE_DIST_M).clamp(0.0, 1.0);
+        let alpha = t * t * (3.0 - 2.0 * t);
         for s in 0..TUBE_SIDES {
             let a = s as f32 / TUBE_SIDES as f32 * std::f32::consts::TAU;
             let dir = side * a.cos() + up * a.sin();
             positions.push((pts[i] + dir * radius).to_array());
             normals.push(dir.to_array());
+            colors.push([1.0, 1.0, 1.0, alpha]);
         }
     }
 
@@ -334,6 +382,7 @@ fn tube_mesh(points: &[Vec3], cam: Vec3) -> Option<Mesh> {
         Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default())
             .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
             .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+            .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, colors)
             .with_inserted_indices(Indices::U32(indices)),
     )
 }
