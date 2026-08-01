@@ -327,8 +327,8 @@ fn tube_mesh(points: &[Vec3], anchor: usize, cam: Vec3) -> Option<Mesh> {
     }
 
     let n = pts.len();
-    // Arc length from the vehicle, signed only in the sense that both directions ramp
-    // the same way — the fade is symmetric, so the absolute distance is all that matters.
+    // Cumulative arc length along the path. The fade is symmetric about the vehicle, so
+    // only each point's absolute distance from the anchor's arc length matters.
     let mut arc: Vec<f32> = Vec::with_capacity(n);
     let mut run = 0.0;
     arc.push(0.0);
