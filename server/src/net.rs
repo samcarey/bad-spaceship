@@ -35,12 +35,13 @@ use bad_spaceship_shared::character::{
     ServerAvatar,
 };
 use bad_spaceship_shared::net::{
-    apply_hold_spring, apply_net_input, focused_part, monster_index, sanitize_name,
-    ClientPanicReport, InLargestAssembly, NetFacing, NetHold, NetInput, NetJoint, NetLaunch,
-    NetLockJoint, NetMoving, NetName, NetPart, NetPlayer, NetRoomFrame, PartShape,
-    ProtocolPlugin, RequestLaunch,
-    ResetPosition, ResetRoom, RollbackReport, SaveGame, SetAvatar, SetLocked, SetName,
-    GROUND_JOINT_ID, MONSTER_COUNT, TICK,
+    apply_hold_spring, apply_net_input, focused_part, monster_index, part_volume,
+    rebase_room_frame, sanitize_name, weighted_anchor, ClientPanicReport, InLargestAssembly,
+    NetFacing, NetHold,
+    NetInput, NetJoint, NetLaunch, NetLockJoint, NetMoving, NetName, NetPart, NetPlayer,
+    NetRoomFrame, PartShape, ProtocolPlugin, RequestLaunch, ResetPosition, ResetRoom,
+    RollbackReport, SaveGame, SetAvatar, SetLocked, SetName, GROUND_JOINT_ID, MONSTER_COUNT,
+    REBASE_TRIGGER_M, TICK,
 };
 use bad_spaceship_shared::map::{
     apply_assembly_drag, apply_gravity_correction, radial_altitude, GROUND_LAYER, PLANET_CENTER,
@@ -52,7 +53,7 @@ use bad_spaceship_shared::part::{
     spawn_saved_cuboid, AttitudeIntegral, EscapeCut, Gimbal, LockJoint, RocketEngine,
     SuppressLocalParts,
     DELETE_RADIUS,
-    NUM_PARTS, NUM_ROCKET_ENGINES, PART_FALL_Y, ROCKET_VOLUME,
+    NUM_PARTS, NUM_ROCKET_ENGINES, PART_FALL_Y,
 };
 use bad_spaceship_shared::{DirectionalInput, Grass, SuppressLocalPlayer, Yaw};
 use bevy::math::DVec3;
@@ -725,19 +726,6 @@ struct RoomStateOf(RoomId);
 // the pad (which fell out of the world while the frame flew) get recycled by the
 // normal fall check the moment coordinates are true again.
 
-/// Local drift of the room's assembly that triggers a rebase.
-const REBASE_TRIGGER_M: f32 = 2000.0;
-
-/// True distance from the origin below which an active frame resets to exactly
-/// zero (real coordinates, real ground). Half of `REBASE_TRIGGER_M`, so the two
-/// can't flap: right after a reset the local drift is under the trigger.
-const REBASE_RESET_M: f64 = 1000.0;
-
-/// Where a rebase parks the assembly above the local origin. Keeps the freshly
-/// shifted content clear of the phantom ground collider (and of the client's
-/// not-yet-moved local ground during the rollback that applies the shift).
-const REBASE_REST_Y: f32 = 100.0;
-
 /// A room's authoritative floating-origin frame: local + frame = true. `offset`
 /// is f64 — it grows without bound and integrates every tick, and f32 would
 /// accumulate error in exactly the quantity this feature exists to keep exact.
@@ -861,15 +849,10 @@ fn rebase_room_frames(
     // or (no assembly — e.g. the ride broke up entirely) all of its parts, so the
     // frame keeps tracking whatever is left.
     let anchor = |room: RoomId| -> Option<(Vec3, Vec3)> {
+        // The reduction is the shared `weighted_anchor`, so the predicted client's
+        // anchor (`predict_room_rebase`) is the identical arithmetic.
         let com = |member_indices: &mut dyn Iterator<Item = usize>| {
-            let (mut weighted_pos, mut weighted_vel, mut mass) = (Vec3::ZERO, Vec3::ZERO, 0.0);
-            for i in member_indices {
-                let (position, weight, _) = items[i];
-                weighted_pos += position * weight;
-                weighted_vel += velocities[i] * weight;
-                mass += weight;
-            }
-            (mass > 0.0).then(|| (weighted_pos / mass, weighted_vel / mass))
+            weighted_anchor(member_indices.map(|i| (items[i].0, velocities[i], items[i].1)))
         };
         match assemblies.get(&room) {
             Some(a) => com(&mut a.members.iter().copied()),
@@ -882,24 +865,14 @@ fn rebase_room_frames(
         let room = orb_room.0;
         let frame = frames.by_room.entry(room).or_default();
         if let Some((anchor_pos, anchor_vel)) = anchor(room) {
-            let true_anchor = frame.offset + anchor_pos.as_dvec3();
-            // (shift, boost) to subtract from every room entity's position/velocity.
-            let shift = if frame.is_active() && true_anchor.length() < REBASE_RESET_M {
-                // Back near the true origin: land the frame exactly on zero so the
-                // ground is real again (assign directly — accumulating the inverse
-                // shift in f32 would leave a residue).
-                let shift = (-frame.offset.as_vec3(), -frame.velocity);
-                (frame.offset, frame.velocity) = (DVec3::ZERO, Vec3::ZERO);
-                Some(shift)
-            } else if anchor_pos.length() > REBASE_TRIGGER_M {
-                let dpos = anchor_pos - Vec3::Y * REBASE_REST_Y;
-                frame.offset += dpos.as_dvec3();
-                frame.velocity += anchor_vel;
-                Some((dpos, anchor_vel))
-            } else {
-                None
-            };
-            if let Some((dpos, dvel)) = shift {
+            // The decision is the shared `rebase_room_frame` — predicted clients
+            // evaluate the identical function at the same tick, so the shift never
+            // reaches their rollback comparator as a surprise. `(dpos, dvel)` is
+            // subtracted from every room entity's position/velocity below.
+            let shift = rebase_room_frame(frame.offset, frame.velocity, anchor_pos, anchor_vel);
+            if let Some(outcome) = shift {
+                (frame.offset, frame.velocity) = (outcome.offset, outcome.velocity);
+                let (dpos, dvel) = (outcome.dpos, outcome.dvel);
                 let grounded = !frame.is_active();
                 // A rebased room must have no part↔ground joints: the shared
                 // ground body does not ride the frame, so such a joint would pin
@@ -2698,19 +2671,6 @@ fn mark_largest_assembly(
     }
 }
 
-/// A part's volume — the mass proxy under uniform density (full cuboid volume, or the
-/// rocket's precomputed cylinder+cone volume). Shared by the assembly COM and the launch
-/// COM so both weigh parts identically.
-fn part_volume(shape: PartShape) -> f32 {
-    match shape {
-        PartShape::Cuboid { half_extents } => {
-            let he = Vec3::from_array(half_extents);
-            8.0 * he.x * he.y * he.z
-        }
-        PartShape::RocketEngine => ROCKET_VOLUME,
-    }
-}
-
 // ---- Rocket launch (server-authoritative) -----------------------------------
 //
 // A player touching its room's largest assembly can swipe to launch (`RequestLaunch`).
@@ -3832,6 +3792,7 @@ fn client_identity(link: Entity, remote: &Query<&RemoteId>) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bad_spaceship_shared::net::REBASE_REST_Y;
 
     /// A fallen (or diverged) roomed avatar is teleported to a fresh spawn with
     /// zeroed velocity — never despawned (a replicated despawn would recursively

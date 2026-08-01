@@ -175,7 +175,10 @@
       // match the room's version.
       let server = p.get('server') || '';
       if (!server && room && sha) server = 'wss://' + location.host + '/v/' + sha + '/ws';
-      window.__BS_NET__ = { room, server, sha, matchmaker };
+      // ?autolock=1: test hook — the client locks itself to the deck shortly after
+      // joining (the wasm twin of the native BS_AUTOLOCK env var; used by headless
+      // browser measurement runs).
+      window.__BS_NET__ = { room, server, sha, matchmaker, autolock: p.get('autolock') || '' };
       if (room) {
         document.getElementById('room').textContent = 'multiplayer · room ' + room;
       }

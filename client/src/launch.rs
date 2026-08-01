@@ -29,8 +29,8 @@ use bad_spaceship_shared::launch::{
 };
 use bad_spaceship_shared::map::apply_gravity_correction;
 use bad_spaceship_shared::net::{
-    ControlChannel, InLargestAssembly, NetLaunch, NetLockJoint, NetPart, NetPlayer, NetRoomFrame,
-    RequestLaunch, SetLocked,
+    part_volume, rebase_room_frame, weighted_anchor, ControlChannel, InLargestAssembly, NetLaunch,
+    NetLockJoint, NetPart, NetPlayer, NetRoomFrame, RequestLaunch, SetLocked,
 };
 use bad_spaceship_shared::part::{
     avatar_lock_contacts, capsule_bottom_center, cleanup_lock_joints, despawn_player_lock_welds,
@@ -44,7 +44,8 @@ use bevy_egui::{
     egui::{self, Align2, Color32, Frame},
     EguiContexts,
 };
-use lightyear::prelude::{Connected, LocalId, MessageSender, Predicted};
+use bevy::math::DVec3;
+use lightyear::prelude::{Connected, LocalId, MessageSender, Predicted, Tick};
 use std::collections::HashSet;
 
 use crate::render_main_pass::flame_material::FlameThrottle;
@@ -56,14 +57,13 @@ pub struct LaunchPlugin;
 impl Plugin for LaunchPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<LaunchLocal>()
+            .init_resource::<PredictedRebase>()
             .init_resource::<LaunchCameraZoom>()
             .init_resource::<FuelUsed>()
             .init_resource::<ApparentUp>()
             .init_resource::<Autopilot>()
             .add_message::<SpSetLock>()
-            .add_systems(Update, (tick_launch, ease_launch_zoom));
-        #[cfg(not(target_arch = "wasm32"))]
-        app.add_systems(Update, autolock_rider);
+            .add_systems(Update, (tick_launch, ease_launch_zoom, autolock_rider));
         app
             // Single-player half of the Lock button: weld/unweld the local character
             // to the parts it touches, plus the shared dangling-weld sweep. Gated off
@@ -87,6 +87,11 @@ impl Plugin for LaunchPlugin {
             .add_systems(
                 FixedUpdate,
                 (
+                    // The floating-origin rebase leads the chain, exactly like the
+                    // server's `rebase_room_frames`: everything below computes
+                    // world-space force targets for this tick, and a target computed
+                    // pre-shift but applied post-shift is a km-scale lever arm.
+                    predict_room_rebase.run_if(resource_exists::<SuppressLocalParts>),
                     // Zero every rocket's flame target first: only rockets the burn
                     // below actually fires this tick read back non-zero (a rocket
                     // that breaks off the assembly goes dark).
@@ -115,12 +120,12 @@ impl Plugin for LaunchPlugin {
     }
 }
 
-/// Test hook (native only): `BS_AUTOLOCK` welds this client to the deck it's standing
+/// Test hook: `BS_AUTOLOCK` (native) / `?autolock=1` (web — see
+/// [`crate::net::autolock_requested`]) welds this client to the deck it's standing
 /// on a few seconds after boot — turning a mid-flight-joining measurement client into a
 /// *locked rider* (the user's actual crash scenario: the rider's avatar↔deck lock-weld
 /// is the extra welded pair a spectator never has). Sends one `SetLocked(true)`, the
-/// same message the Lock button sends. No effect unless the env var is set.
-#[cfg(not(target_arch = "wasm32"))]
+/// same message the Lock button sends. No effect unless the flag is set.
 fn autolock_rider(
     time: Res<Time>,
     mut elapsed: Local<f32>,
@@ -129,7 +134,7 @@ fn autolock_rider(
 ) {
     use std::sync::OnceLock;
     static ON: OnceLock<bool> = OnceLock::new();
-    if !*ON.get_or_init(|| std::env::var("BS_AUTOLOCK").is_ok()) || *sent {
+    if !*ON.get_or_init(crate::net::autolock_requested) || *sent {
         return;
     }
     *elapsed += time.delta_secs();
@@ -254,6 +259,14 @@ pub struct AutopilotSnapshot {
     /// Assembly COM in the **true planet frame**, f64 (the flown trail must stay
     /// smooth at Mm-scale altitudes where f32 steps by whole metres).
     pub true_pos: bevy::math::DVec3,
+    /// The room-frame offset [`Self::true_pos`] was folded with, so a consumer can fold
+    /// back to the SAME room-local frame the rocket is rendered in
+    /// (`true_pos - frame_offset` is exactly the local COM). Load-bearing for the
+    /// trajectory line: it stores its path in true coordinates and must subtract this,
+    /// **not** the visual `ClientRoomFrame` — those two frames differ by tens of metres
+    /// for a packet or two around a rebase (that gap is what PR #178 measured), and
+    /// folding by the wrong one hangs the whole line that far off the rocket.
+    pub frame_offset: bevy::math::DVec3,
     /// Assembly velocity in the true planet frame (frame-folded in MP).
     pub true_vel: Vec3,
     /// The derated point-mass vehicle the plan was optimized for — what the trajectory
@@ -279,6 +292,7 @@ impl AutopilotSnapshot {
     /// vector (its magnitude is stored). Single-player passes local == true.
     fn new(
         true_pos: bevy::math::DVec3,
+        frame_offset: bevy::math::DVec3,
         true_vel: Vec3,
         engines: usize,
         gravity: Vec3,
@@ -289,6 +303,7 @@ impl AutopilotSnapshot {
     ) -> Self {
         Self {
             true_pos,
+            frame_offset,
             true_vel,
             vehicle: Vehicle::derated(engines, gravity, total_mass),
             pitchover: program.seed.pitchover,
@@ -454,6 +469,155 @@ fn apply_sp_gravity(
     }
 }
 
+/// The frame left behind by a client-predicted floating-origin rebase (see
+/// [`predict_room_rebase`]) that no replicated [`NetRoomFrame`] sample covers yet:
+/// the frame right after the predicted rebase, stamped with the tick it fired —
+/// literally a locally-authored `NetRoomFrame` sample. Predicted physics reads the
+/// frame through [`predicted_frame_at`], which prefers this over the (pre-rebase,
+/// ~1 RTT stale) replicated sample. Cleared the moment a replicated sample at or
+/// past its tick arrives — from then on the server's frame is the truth. Holding
+/// only the newest predicted rebase is deliberate: two rebases inside one RTT can
+/// only happen in the trigger→reset descent edge, and dropping the older one just
+/// degrades to the documented one-rollback fallback.
+#[derive(Resource, Default)]
+pub struct PredictedRebase(Option<NetRoomFrame>);
+
+/// The room frame advanced to `tick` via [`NetRoomFrame::frame_at`], reading the
+/// predicted-rebase sample when one applies (it post-dates the replicated sample by
+/// construction — see [`PredictedRebase`]). The `tick` bound keeps the read correct
+/// for any caller at any tick, independent of the prune in `predict_room_rebase`
+/// having run first.
+fn predicted_frame_at(
+    net: Option<&NetRoomFrame>,
+    rebase: &PredictedRebase,
+    tick: Tick,
+) -> (DVec3, Vec3) {
+    rebase
+        .0
+        .as_ref()
+        .filter(|frame| tick - Tick(frame.tick) >= 0)
+        .or(net)
+        .map(|frame| frame.frame_at(tick))
+        .unwrap_or_default()
+}
+
+/// Predict the room's floating-origin rebase on the predicted world — the client half
+/// of the server's `rebase_room_frames`, sharing its decision function
+/// ([`rebase_room_frame`]) so both peers rebase at the same tick with the same shift.
+///
+/// Why: the rebase used to reach clients as a rollback by construction — the server
+/// shifts every room entity ~2 km in one tick, the confirmed samples arrive, and the
+/// comparator can only see a km-scale "misprediction" (one rollback + one trigger per
+/// body at every rebase, the dominant remaining rollback source on a clean flight).
+/// But the decision is a pure function of sim state the two peers agree on to sub-mm,
+/// so the client can run it on its predicted parts at the same tick the server does:
+/// both sides shift together and nothing ever reaches the comparator. A mispredicted
+/// trigger tick (the anchor crossing the threshold within the sims' sub-mm
+/// disagreement of a tick boundary) just degrades to the old one-rollback behaviour.
+///
+/// Replay-safe by re-derivation: entries at or after the current tick are dropped at
+/// the top of every run, so a rollback replay that walks back through a predicted
+/// rebase discards the abandoned-future record and re-decides from the replayed
+/// (confirmed-reset) state — re-shifting at the same tick if the server really
+/// rebased, or not, if it didn't.
+///
+/// Ordering matches the server: first in the FixedUpdate chain, before anything that
+/// computes world-space force targets for the same tick (gravity/thrust) — a thrust
+/// point computed pre-shift but applied post-shift would be a km-scale lever arm.
+///
+/// The anchor mirrors the server's: volume-weighted mean position/velocity of the
+/// room's largest assembly (the replicated [`InLargestAssembly`] markers — the same
+/// membership the server's union-find computes), falling back to all parts when no
+/// marker is present. The float-reduction order differs from the server's ECS order,
+/// but the resulting ULP-scale anchor disagreement is dwarfed by the sims' existing
+/// sub-mm drift, and both are absorbed by the shift being ~identical, not identical.
+fn predict_room_rebase(
+    frames: Query<&NetRoomFrame>,
+    timeline: Res<lightyear::prelude::LocalTimeline>,
+    mut rebase: ResMut<PredictedRebase>,
+    // The anchor read and the shift write overlap on `Position`/`LinearVelocity`
+    // (B0001) — sequence them.
+    mut set: ParamSet<(
+        Query<(&Position, &LinearVelocity, &NetPart, Has<InLargestAssembly>), With<Predicted>>,
+        Query<
+            (&mut Position, &mut LinearVelocity),
+            (With<Predicted>, Or<(With<NetPart>, With<NetPlayer>)>),
+        >,
+    )>,
+) {
+    let Some(net) = frames.iter().next().copied() else {
+        // No room state (boot / disconnect teardown): nothing to predict against.
+        rebase.0 = None;
+        return;
+    };
+    let tick = timeline.tick();
+    // Prune (wrapping i32 tick compares): drop the entry once a replicated sample
+    // covers it (server truth arrived for that tick range), and drop an entry at or
+    // after the current tick (an abandoned future left by a rollback reset — this
+    // run re-derives this tick's decision from the replayed state).
+    //
+    // The covered-arm's promptness rests on an invariant of the server's
+    // `rebase_room_frames`: an ACTIVE frame republishes every tick (its offset
+    // integrates, so `set_if_neq` always fires) — after a real rebase the sample
+    // tick advances past the knot within ~1 RTT. The one mode where that fails is a
+    // rebase the client predicted but the server declined (possible only if the
+    // anchor membership churned inside the ~RTT marker-replication window — static
+    // in flight): the server keeps publishing the inactive default, only the
+    // replay-arm can kill the knot, and until the fresher markers arrive each
+    // replay re-predicts the same wrong rebase — a bounded, self-healing burst of
+    // km-scale rollbacks (the pre-#179 cost of every rebase) rather than one.
+    // Eager covering also means a rollback reaching BEHIND a just-covered rebase
+    // back-extrapolates the post-rebase sample across the discontinuity for the
+    // 1–2 replayed ticks before it (a frame that never existed) — worth at most one
+    // extra mispredicted-replay rollback in that packet-skew corner, which is the
+    // price of holding a single knot instead of a history.
+    if let Some(pending) = &rebase.0 {
+        if Tick(pending.tick) - Tick(net.tick) <= 0 || tick - Tick(pending.tick) <= 0 {
+            rebase.0 = None;
+        }
+    }
+
+    // The anchor, mirroring the server's: the largest assembly (here the replicated
+    // `InLargestAssembly` markers — written by the same union-find the server's
+    // anchor re-runs), falling back to all parts when no marker is present (the
+    // server's no-assembly fallback; markers exist iff a ≥2-part assembly does, so
+    // the rules coincide). Membership parity is temporal, not structural: the
+    // markers replicate ~1 RTT behind the server's fresh union-find, so joint/part
+    // churn within that window of a trigger crossing can mispredict the shift —
+    // accepted because flight membership is static and the markers are the
+    // codebase's canonical membership seam (COM orb, launch, thrust all read them).
+    // `.any()` short-circuits, so the common marked case costs barely more than one
+    // pass.
+    let parts = set.p0();
+    let any_marked = parts.iter().any(|(.., marked)| marked);
+    let anchor = weighted_anchor(
+        parts
+            .iter()
+            .filter(|(.., marked)| *marked || !any_marked)
+            .map(|(position, linear, part, _)| (position.0, linear.0, part_volume(part.shape))),
+    );
+    let Some((anchor_pos, anchor_vel)) = anchor else {
+        return;
+    };
+    let (offset, velocity) = predicted_frame_at(Some(&net), &rebase, tick);
+    let Some(outcome) = rebase_room_frame(offset, velocity, anchor_pos, anchor_vel) else {
+        return;
+    };
+    for (mut position, mut linear) in &mut set.p1() {
+        position.0 -= outcome.dpos;
+        linear.0 -= outcome.dvel;
+    }
+    println!(
+        "[c-rebase] tick={} shift {:?} boost {:?} -> offset {:?} vel {:?}",
+        tick.0, outcome.dpos, outcome.dvel, outcome.offset, outcome.velocity
+    );
+    rebase.0 = Some(NetRoomFrame {
+        offset: outcome.offset.to_array(),
+        velocity: outcome.velocity.to_array(),
+        tick: tick.0,
+    });
+}
+
 /// Planet gravity for the predicted multiplayer bodies — the same radial correction as
 /// [`apply_sp_gravity`], but true position folds in the room's floating-origin offset
 /// (the replicated [`NetRoomFrame`] advanced to this tick — see `frame_at`) so `r` is the
@@ -470,21 +634,20 @@ fn apply_sp_gravity(
 /// The server's twin (`apply_server_gravity`) covers `Or<(NetPart, ServerAvatar)>`.
 fn apply_mp_gravity(
     gravity: Res<Gravity>,
-    // The replicated frame advanced to THIS tick (`NetRoomFrame::frame_at`) — never the
-    // visual `ClientRoomFrame`, whose render-frame smoothing stood metres away from the
-    // server's frame and fed every predicted body a measurably wrong `r`.
+    // The frame advanced to THIS tick, predicted rebases included
+    // (`predicted_frame_at`) — never the visual `ClientRoomFrame`, whose render-frame
+    // smoothing stood metres away from the server's frame and fed every predicted
+    // body a measurably wrong `r`.
     frames: Query<&NetRoomFrame>,
+    rebase: Res<PredictedRebase>,
     timeline: Res<lightyear::prelude::LocalTimeline>,
     mut bodies: Query<
         (&Position, Forces),
         (With<Predicted>, Or<(With<NetPart>, With<NetPlayer>)>),
     >,
 ) {
-    let offset = frames
-        .iter()
-        .next()
-        .map(|f| f.frame_at(timeline.tick()).0.as_vec3())
-        .unwrap_or_default();
+    let offset =
+        predicted_frame_at(frames.iter().next(), &rebase, timeline.tick()).0.as_vec3();
     for (position, mut forces) in &mut bodies {
         apply_gravity_correction(&mut forces, position.0 + offset, gravity.0);
     }
@@ -602,6 +765,7 @@ fn apply_sp_thrust(
     autopilot.0 = (total_mass > 0.0).then(|| {
         AutopilotSnapshot::new(
             com.as_dvec3(),
+            bevy::math::DVec3::ZERO,
             spin.linear_velocity,
             geometry.len(),
             gravity.0,
@@ -656,6 +820,7 @@ fn apply_mp_thrust(
     // Tick-exact frame for the physics (see `apply_mp_gravity` — same rule): the
     // visual `ClientRoomFrame` must not feed thrust/drag/guidance.
     frames: Query<&NetRoomFrame>,
+    rebase: Res<PredictedRebase>,
     gravity: Res<Gravity>,
     mut fuel: ResMut<FuelUsed>,
     mut apparent: ResMut<ApparentUp>,
@@ -764,11 +929,8 @@ fn apply_mp_thrust(
     };
     // True planet-frame state folds in the room's floating-origin frame (offset +
     // co-moving velocity), so the guidance sees real altitude/velocity under a rebase.
-    let (frame_offset, frame_velocity) = frames
-        .iter()
-        .next()
-        .map(|f| f.frame_at(timeline.tick()))
-        .unwrap_or_default();
+    let (frame_offset, frame_velocity) =
+        predicted_frame_at(frames.iter().next(), &rebase, timeline.tick());
     let true_com = com + frame_offset.as_vec3();
     let true_vel = spin.linear_velocity + frame_velocity;
     let total_mass = part_mass_total + riders.iter().map(|(_, _, mass, _)| mass.value()).sum::<f32>();
@@ -836,6 +998,7 @@ fn apply_mp_thrust(
     autopilot.0 = (total_mass > 0.0).then(|| {
         AutopilotSnapshot::new(
             frame_offset + com.as_dvec3(),
+            frame_offset,
             true_vel,
             geometry.len(),
             gravity.0,

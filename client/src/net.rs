@@ -85,18 +85,22 @@ fn multiplayer_room() -> [u8; 6] {
 /// See the native counterpart. Absent/empty ⇒ all-zero (default room).
 #[cfg(target_arch = "wasm32")]
 fn multiplayer_room() -> [u8; 6] {
+    room_code_bytes(&bs_net_string("room").unwrap_or_default())
+}
+
+/// A string field off `window.__BS_NET__` — the config object `play.html` builds
+/// from the page's query params. `None` when absent (single-player boot, tests).
+/// The one seam every `__BS_NET__` consumer (`multiplayer_room`,
+/// `multiplayer_target`, `autolock_requested`) reads through.
+#[cfg(target_arch = "wasm32")]
+fn bs_net_string(field: &str) -> Option<String> {
     use wasm_bindgen::JsValue;
-    let code = (|| {
-        let window = web_sys::window()?;
-        let bs_net = js_sys::Reflect::get(&window, &JsValue::from_str("__BS_NET__")).ok()?;
-        if bs_net.is_undefined() || bs_net.is_null() {
-            return None;
-        }
-        let room = js_sys::Reflect::get(&bs_net, &JsValue::from_str("room")).ok()?;
-        room.as_string()
-    })()
-    .unwrap_or_default();
-    room_code_bytes(&code)
+    let window = web_sys::window()?;
+    let bs_net = js_sys::Reflect::get(&window, &JsValue::from_str("__BS_NET__")).ok()?;
+    if bs_net.is_undefined() || bs_net.is_null() {
+        return None;
+    }
+    js_sys::Reflect::get(&bs_net, &JsValue::from_str(field)).ok()?.as_string()
 }
 
 /// A stable per-player id persisted in `localStorage`, re-sent each session via
@@ -172,15 +176,22 @@ pub fn multiplayer_target() -> Option<String> {
 /// the `?server=` query param). Absent/empty ⇒ single-player.
 #[cfg(target_arch = "wasm32")]
 pub fn multiplayer_target() -> Option<String> {
-    use wasm_bindgen::JsValue;
-    let window = web_sys::window()?;
-    let bs_net = js_sys::Reflect::get(&window, &JsValue::from_str("__BS_NET__")).ok()?;
-    if bs_net.is_undefined() || bs_net.is_null() {
-        return None;
-    }
-    let server = js_sys::Reflect::get(&bs_net, &JsValue::from_str("server")).ok()?;
-    let url = server.as_string()?;
-    (!url.is_empty()).then_some(url)
+    bs_net_string("server").filter(|url| !url.is_empty())
+}
+
+/// Test hook: whether this client should lock itself to the deck shortly after
+/// joining (`autolock_rider`). Native reads the `BS_AUTOLOCK` env var; web reads
+/// `window.__BS_NET__.autolock` (play.html's `?autolock=` query param) so headless
+/// browser measurement runs can ride a launch without a screen.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn autolock_requested() -> bool {
+    std::env::var("BS_AUTOLOCK").is_ok()
+}
+
+/// See the native counterpart.
+#[cfg(target_arch = "wasm32")]
+pub fn autolock_requested() -> bool {
+    bs_net_string("autolock").is_some_and(|flag| !flag.is_empty())
 }
 
 /// Our own netcode id — the value the server stamps onto our avatar's
