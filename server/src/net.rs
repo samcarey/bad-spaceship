@@ -1013,6 +1013,7 @@ fn assign_rooms(
                         &lock_joints,
                         entity,
                         spawn_position(),
+                        Vec3::ZERO,
                         &mut position,
                         &mut linear,
                         &mut angular,
@@ -1186,6 +1187,7 @@ fn apply_position_resets(
                     &lock_joints,
                     avatar,
                     deck.copied().unwrap_or_else(spawn_position),
+                    Vec3::ZERO,
                     &mut position,
                     &mut linear,
                     &mut angular,
@@ -1245,6 +1247,7 @@ fn spawn_demo_players_on_deck(
             &lock_joints,
             avatar,
             *deck,
+            Vec3::ZERO,
             &mut position,
             &mut linear,
             &mut angular,
@@ -1583,6 +1586,7 @@ fn respawn_fallen_avatars(
                 &lock_joints,
                 avatar,
                 deck.copied().unwrap_or_else(spawn_position),
+                Vec3::ZERO,
                 &mut position,
                 &mut linear,
                 &mut angular,
@@ -1622,6 +1626,9 @@ fn relock_resumed_riders(
     mut commands: Commands,
     time: Res<Time>,
     parts: Query<(Entity, &NetPart, &Collider, &Position, &Rotation, &PartRoom)>,
+    // Read-only and `With<NetPart>`, so it is provably disjoint from the riders'
+    // `&mut LinearVelocity` below (`Without<NetPart>`) — B0001 otherwise.
+    part_velocities: Query<&LinearVelocity, With<NetPart>>,
     lock_joints: Query<(Entity, &SphericalJoint), With<LockJoint>>,
     mut riders: Query<
         (
@@ -1644,12 +1651,13 @@ fn relock_resumed_riders(
         &mut riders
     {
         let anchor = relock.anchor;
-        if let Some(target) = lock_target(&parts, member.0, anchor, rotation.0) {
+        if let Some((deck, target)) = lock_target(&parts, member.0, anchor, rotation.0) {
             teleport_avatar(
                 &mut commands,
                 &lock_joints,
                 avatar,
                 target,
+                deck_velocity(&part_velocities, deck),
                 &mut position,
                 &mut linear,
                 &mut angular,
@@ -1687,6 +1695,8 @@ fn relock_resumed_riders(
 fn keep_riders_aboard(
     mut commands: Commands,
     parts: Query<(Entity, &NetPart, &Collider, &Position, &Rotation, &PartRoom)>,
+    // See `relock_resumed_riders` — same disjointness argument.
+    part_velocities: Query<&LinearVelocity, With<NetPart>>,
     lock_joints: Query<(Entity, &SphericalJoint), With<LockJoint>>,
     mut riders: Query<
         (
@@ -1708,7 +1718,7 @@ fn keep_riders_aboard(
         &mut riders
     {
         let anchor = lock.0;
-        let Some(target) = lock_target(&parts, member.0, anchor, rotation.0) else {
+        let Some((deck, target)) = lock_target(&parts, member.0, anchor, rotation.0) else {
             commands.entity(avatar).remove::<RiderLock>();
             continue;
         };
@@ -1723,6 +1733,7 @@ fn keep_riders_aboard(
             &lock_joints,
             avatar,
             target,
+            deck_velocity(&part_velocities, deck),
             &mut position,
             &mut linear,
             &mut angular,
@@ -2233,8 +2244,11 @@ fn server_delete(
 
 /// Teleport an avatar: dissolve its lock welds first (a teleport while welded would
 /// drag the welded parts along — the deferred despawns apply before this tick's
-/// physics step, so the weld never solves across the jump), then set the pose and
-/// zero the velocities. THE way to move an avatar server-side; every teleport site
+/// physics step, so the weld never solves across the jump), then set the pose and the
+/// velocity. `velocity` is `ZERO` for every "put them back on the ground" site; the
+/// re-lock sites pass the DECK's velocity, because landing a rider at rest on a deck
+/// doing 100 m/s makes the weld absorb that whole difference in one solve — measured
+/// as a 200+ trigger rollback storm on a real phone after a mid-ascent reconnect. THE way to move an avatar server-side; every teleport site
 /// (reset-position, fall respawn, room reset, resume revoke) goes through it so the
 /// "teleport implies unlock" invariant can't be forgotten at a future site. Also drops
 /// the persistent [`RiderLock`] anchor, so a reset/respawn genuinely unlocks the rider
@@ -2245,6 +2259,7 @@ fn teleport_avatar(
     lock_joints: &Query<(Entity, &SphericalJoint), With<LockJoint>>,
     avatar: Entity,
     to: Vec3,
+    velocity: Vec3,
     position: &mut Position,
     linear: &mut LinearVelocity,
     angular: &mut AngularVelocity,
@@ -2252,7 +2267,7 @@ fn teleport_avatar(
     despawn_player_lock_welds(commands, lock_joints, avatar);
     commands.entity(avatar).try_remove::<RiderLock>();
     position.0 = to;
-    linear.0 = Vec3::ZERO;
+    linear.0 = velocity;
     angular.0 = Vec3::ZERO;
 }
 
@@ -2335,20 +2350,30 @@ fn weld_avatar_to_room_parts(
     (welds, primary)
 }
 
-/// The avatar position that lands its feet exactly on a [`LockAnchor`]'s deck point,
-/// given the referenced part's current pose (looked up by stable id within the rider's
-/// room). `None` if that part is no longer present (recycled/reset). Frame-invariant:
-/// both sides are room-local, so a floating-origin rebase can't spoof it.
+/// The deck part a [`LockAnchor`] references plus the avatar position that lands its
+/// feet exactly on its deck point, given that part's current pose (looked up by stable
+/// id within the rider's room). `None` if the part is no longer present
+/// (recycled/reset). Frame-invariant: both sides are room-local, so a floating-origin
+/// rebase can't spoof it. The entity comes back so the caller can also match the deck's
+/// **velocity** — a rider placed on a deck climbing at 100 m/s with zero velocity of its
+/// own hands the fresh weld the entire relative velocity to absorb.
 fn lock_target(
     parts: &Query<(Entity, &NetPart, &Collider, &Position, &Rotation, &PartRoom)>,
     member: RoomId,
     anchor: LockAnchor,
     rotation: Quat,
-) -> Option<Vec3> {
-    let (_, _, _, part_pos, part_rot, _) =
+) -> Option<(Entity, Vec3)> {
+    let (part, _, _, part_pos, part_rot, _) =
         parts.iter().find(|(_, np, _, _, _, pr)| pr.id == member && np.id == anchor.part_net_id)?;
     let anchor_world = part_pos.0 + part_rot.0 * anchor.part_local;
-    Some(anchor_world - rotation * anchor.foot_local)
+    Some((part, anchor_world - rotation * anchor.foot_local))
+}
+
+/// The velocity of the deck a rider is being placed on, so the placement matches its
+/// motion instead of handing the fresh weld the difference (see [`teleport_avatar`]).
+/// `ZERO` if the part has no velocity component — a static deck is already at rest.
+fn deck_velocity(velocities: &Query<&LinearVelocity, With<NetPart>>, deck: Entity) -> Vec3 {
+    velocities.get(deck).map(|v| v.0).unwrap_or(Vec3::ZERO)
 }
 
 /// Apply a client's "Lock"/"Unlock" request ([`SetLocked`]). Locking welds the
@@ -3671,6 +3696,10 @@ fn spawn_player_for_client(
     remote: Query<&RemoteId>,
     tokens: Query<&TokenUserData>,
     resume: Res<ResumeRegistry>,
+    // A LOCKED rider's remembered position is re-derived from its deck's CURRENT pose
+    // rather than replayed from the record — see the `resume_pos` comment below.
+    rooms: Res<RoomRegistry>,
+    parts: Query<(Entity, &NetPart, &Collider, &Position, &Rotation, &PartRoom)>,
 ) {
     let client = trigger.entity;
     let client_id = client_identity(client, &remote);
@@ -3749,6 +3778,28 @@ fn spawn_player_for_client(
         // unique per-room default), so the client never queries a nameless avatar.
         NetName::default(),
     ));
+    // A locked rider's recorded position is a snapshot of a body that was welded to a
+    // MOVING deck, and the record is throttled — mid-ascent it is metres to hundreds of
+    // metres stale by the time the player is back (the deck climbs at ~100 m/s). Spawning
+    // there put the avatar far below its ride, and `relock_resumed_riders` then yanked it
+    // up to the deck a tick later: one huge replicated jump, measured on a real phone as
+    // a 193 m rollback error with 598 triggers, which killed the session outright. The
+    // anchor is the durable fact — resolve the spot from the deck's pose NOW, so the
+    // avatar's very first replicated position is already correct. Falls back to the
+    // recorded position when the deck is gone (room reset, or the room was never created
+    // on this server), which is exactly when the stale value is the best guess left.
+    let resume_pos = resume_pos.map(|(pos, room, lock)| {
+        let live = lock
+            .zip(rooms.by_code.get(&room))
+            // `IDENTITY` because the body doesn't exist yet to have a rotation: that
+            // leaves the placement off by the rider's own tilt (≤ its capsule height),
+            // which `relock_resumed_riders` corrects with the real rotation a tick
+            // later. The point here is to kill the hundreds-of-metres error, not the
+            // centimetres.
+            .and_then(|(anchor, r)| lock_target(&parts, r.id, anchor, Quat::IDENTITY))
+            .map(|(_, target)| target);
+        (live.unwrap_or(pos), room, lock)
+    });
     if let Some((pos, room, lock)) = resume_pos {
         // Optimistically build at the remembered spot (the common case — an iOS
         // reload rejoining the same room — must not slide in from the origin).
