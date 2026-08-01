@@ -243,9 +243,18 @@ fn draw_flight_path(
     let Ok(camera) = camera.single() else {
         return;
     };
-    // trail → current position → plan, one polyline in local coordinates. The visual
-    // frame mirror keeps `true − offset` continuous through a rebase snap.
-    let offset = frame.map(|f| f.offset).unwrap_or(DVec3::ZERO);
+    // trail → current position → plan, one polyline in local coordinates, folded by
+    // the SAME frame the path was recorded with (`AutopilotSnapshot::frame_offset`) so
+    // the line's anchor is exactly the rendered rocket. Using the visual
+    // `ClientRoomFrame` here instead hung the line tens of metres off the rocket for a
+    // packet or two after every rebase (reported above 2 km — the first rebase): the
+    // snapshot folds with the tick-exact frame, and the two disagree exactly then.
+    let offset = autopilot.0.as_ref().map_or_else(
+        // No live snapshot: nothing anchors the path, so the stale visual frame is as
+        // good as it gets (the path is cleared on the next update anyway).
+        || frame.map(|f| f.offset).unwrap_or(DVec3::ZERO),
+        |snap| snap.frame_offset,
+    );
     let mut points: Vec<Vec3> = Vec::with_capacity(path.trail.len() + path.future.len() + 1);
     points.extend(path.trail.iter().map(|p| (p - offset).as_vec3()));
     if let Some(snap) = autopilot.0.as_ref() {

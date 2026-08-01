@@ -259,6 +259,14 @@ pub struct AutopilotSnapshot {
     /// Assembly COM in the **true planet frame**, f64 (the flown trail must stay
     /// smooth at Mm-scale altitudes where f32 steps by whole metres).
     pub true_pos: bevy::math::DVec3,
+    /// The room-frame offset [`Self::true_pos`] was folded with, so a consumer can fold
+    /// back to the SAME room-local frame the rocket is rendered in
+    /// (`true_pos - frame_offset` is exactly the local COM). Load-bearing for the
+    /// trajectory line: it stores its path in true coordinates and must subtract this,
+    /// **not** the visual `ClientRoomFrame` — those two frames differ by tens of metres
+    /// for a packet or two around a rebase (that gap is what PR #178 measured), and
+    /// folding by the wrong one hangs the whole line that far off the rocket.
+    pub frame_offset: bevy::math::DVec3,
     /// Assembly velocity in the true planet frame (frame-folded in MP).
     pub true_vel: Vec3,
     /// The derated point-mass vehicle the plan was optimized for — what the trajectory
@@ -284,6 +292,7 @@ impl AutopilotSnapshot {
     /// vector (its magnitude is stored). Single-player passes local == true.
     fn new(
         true_pos: bevy::math::DVec3,
+        frame_offset: bevy::math::DVec3,
         true_vel: Vec3,
         engines: usize,
         gravity: Vec3,
@@ -294,6 +303,7 @@ impl AutopilotSnapshot {
     ) -> Self {
         Self {
             true_pos,
+            frame_offset,
             true_vel,
             vehicle: Vehicle::derated(engines, gravity, total_mass),
             pitchover: program.seed.pitchover,
@@ -755,6 +765,7 @@ fn apply_sp_thrust(
     autopilot.0 = (total_mass > 0.0).then(|| {
         AutopilotSnapshot::new(
             com.as_dvec3(),
+            bevy::math::DVec3::ZERO,
             spin.linear_velocity,
             geometry.len(),
             gravity.0,
@@ -987,6 +998,7 @@ fn apply_mp_thrust(
     autopilot.0 = (total_mass > 0.0).then(|| {
         AutopilotSnapshot::new(
             frame_offset + com.as_dvec3(),
+            frame_offset,
             true_vel,
             geometry.len(),
             gravity.0,
