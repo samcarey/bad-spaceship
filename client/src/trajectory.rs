@@ -8,12 +8,24 @@
 //! through the room's visual floating-origin frame each frame, so a rebase slides the
 //! line rigidly with the rest of the world. The future half is a drag-aware point-mass
 //! forecast of the **pitch program the autopilot is holding** ([`propagate_program`]),
-//! re-run from the current state every [`REPLAN_SECS`] — so the line converges on what the
+//! re-run from the current state **every frame** — so the line converges on what the
 //! vehicle actually does rather than freezing the launch-day plan; after the escape cutoff
 //! it shows the engines-off ballistic coast instead. Forecasting the *optimizer's* law
 //! here instead (`propagate`) is what made the drawn path visibly wander during the climb:
 //! that law steers prograde, so it re-extrapolated the live velocity direction over the
 //! whole remaining burn every replan — see [`propagate_program`] for the measurements.
+//!
+//! **Why every frame and not on a timer.** The forecast used to be refreshed every 0.5 s,
+//! which left it frozen in space while the vehicle flew on — and a real stack does not
+//! track the point-mass model exactly (it is planned against *derated* thrust, and it
+//! lags its attitude command). The craft therefore drifted off the drawn line for half a
+//! second, and each re-propagation snapped the line back onto it: a 2 Hz sawtooth in the
+//! line's position relative to the rocket, reported from a real ride. Rebuilding is only
+//! **~25 µs** (0.15% of a 16.7 ms frame — the burn ends at the escape cutoff, ~700 integrator
+//! steps, not the full budget), so there was never anything to save; the timer bought a
+//! visible artifact for nothing. Note that easing the line toward each new forecast would
+//! only *smooth* that snap — the line would still be a stale forecast, lagging rather than
+//! jumping. Removing the staleness is the fix; smoothing it is makeup.
 //!
 //! The line is **transparent where you are**: fully clear inside [`FADE_HOLD_M`] of
 //! path length either side of the vehicle, then ramping to full over the next
@@ -61,10 +73,6 @@ impl Plugin for TrajectoryPlugin {
     }
 }
 
-/// Seconds between re-propagations of the future half. The point-mass sim is cheap
-/// (it's the optimizer's inner loop) but not per-frame cheap.
-const REPLAN_SECS: f32 = 0.5;
-
 /// Sample the burn preview every N integrator steps (× [`OPTIMIZER_DT`] = 0.5 s of
 /// flight per sample) — dense enough that the dot walk sees a smooth curve.
 const PREVIEW_SAMPLE_EVERY: usize = 5;
@@ -107,7 +115,7 @@ const FADE_STEP_M: f32 = 4.0;
 pub struct FlightPath {
     /// Where the assembly has been this launch (oldest first).
     trail: Vec<DVec3>,
-    /// Where the plan takes it from here (re-propagated every [`REPLAN_SECS`]).
+    /// Where the plan takes it from here (re-propagated from the live state each frame).
     future: Vec<DVec3>,
     /// HUD readout of the current burn preview; `None` while coasting (engines cut).
     pub plan: Option<PlanReadout>,
@@ -164,13 +172,11 @@ fn spawn_trajectory_line(
 /// Record the flown trail and re-propagate the future half from the autopilot's live
 /// state (see the module doc for the trail/preview policy).
 fn update_flight_path(
-    time: Res<Time>,
     autopilot: Res<Autopilot>,
     mut path: ResMut<FlightPath>,
-    mut replan_in: Local<f32>,
     // The pitch program being flown, rebuilt only when the launch's planning seed changes
     // (i.e. once per launch): sampling the table walks the whole ideal ascent, so
-    // rebuilding it every replan would double the preview's cost for an identical answer.
+    // rebuilding it every frame would dominate the preview's cost for an identical answer.
     mut flown: Local<Option<PitchProgram>>,
 ) {
     let Some(snap) = autopilot.0.as_ref() else {
@@ -178,7 +184,6 @@ fn update_flight_path(
         if !path.trail.is_empty() || !path.future.is_empty() || path.plan.is_some() {
             *path = FlightPath::default();
         }
-        *replan_in = 0.0;
         *flown = None;
         return;
     };
@@ -197,12 +202,6 @@ fn update_flight_path(
             });
         }
     }
-
-    *replan_in -= time.delta_secs();
-    if *replan_in > 0.0 {
-        return;
-    }
-    *replan_in = REPLAN_SECS;
 
     let pos = snap.true_pos.as_vec3();
     if snap.throttle > 0.0 {
@@ -460,7 +459,6 @@ mod tests {
     /// noise), so this is the everyday case — not an edge one.
     fn end_movement_on_a_wobble() -> f32 {
         use bad_spaceship_shared::map::SURFACE_GRAVITY;
-        use std::time::Duration;
 
         let gravity = Vec3::new(0.0, -SURFACE_GRAVITY, 0.0);
         let (engines, mass) = (4usize, 15.5f32);
@@ -498,8 +496,6 @@ mod tests {
             *app.world().resource::<FlightPath>().future.last().expect("a forecast")
         }
         let before = run(&mut app, vel, snapshot);
-        // Past REPLAN_SECS, so the second update really re-propagates.
-        app.world_mut().resource_mut::<Time>().advance_by(Duration::from_secs(1));
         let after = run(&mut app, Quat::from_rotation_z(1.0_f32.to_radians()) * vel, snapshot);
         before.distance(after) as f32
     }
@@ -519,6 +515,59 @@ mod tests {
             moved < 100.0,
             "a 1° velocity wobble moved the drawn path's end by {moved:.0} m",
         );
+    }
+
+    /// The forecast must start at the rocket on **every** frame, not on a timer.
+    ///
+    /// Regression for a 2 Hz sawtooth reported from a real ride: the future half was
+    /// re-propagated every 0.5 s, so between refreshes it hung frozen in space while the
+    /// vehicle flew on. Because a real stack does not track the point-mass model exactly
+    /// (planned against derated thrust; attitude lags the command), the rocket drifted off
+    /// the drawn line and each re-propagation snapped it back — the line visibly sliding
+    /// against the craft twice a second. This flies a few frames at 60 Hz and demands the
+    /// forecast be re-anchored at the live position each one; under the timer, every frame
+    /// but the first kept the stale start and this fails by the distance flown since.
+    #[test]
+    fn the_forecast_starts_at_the_rocket_every_frame() {
+        use bad_spaceship_shared::map::SURFACE_GRAVITY;
+
+        let gravity = Vec3::new(0.0, -SURFACE_GRAVITY, 0.0);
+        let (engines, mass) = (4usize, 15.5f32);
+        let seed =
+            PitchProgram::plan(Vec3::new(0.0, 1.0, 0.0), Vec3::ZERO, engines, gravity, mass, None)
+                .seed;
+        let vel = Vec3::new(20.0, 280.0, 0.0);
+
+        let mut app = App::new();
+        app.init_resource::<FlightPath>()
+            .init_resource::<Autopilot>()
+            .add_systems(Update, update_flight_path);
+
+        let dt = 1.0 / 60.0;
+        let mut pos = DVec3::new(0.0, 3000.0, 0.0);
+        for frame in 0..10 {
+            pos += vel.as_dvec3() * dt as f64;
+            app.world_mut().resource_mut::<Autopilot>().0 = Some(AutopilotSnapshot {
+                true_pos: pos,
+                frame_offset: DVec3::ZERO,
+                true_vel: vel,
+                vehicle: seed.vehicle,
+                seed,
+                command_angle: 0.0,
+                throttle: 1.0,
+                drag: 0.0,
+                net_thrust: 0.0,
+            });
+            app.update();
+            // `future[0]` is the propagation start — by contract the vehicle's own
+            // position, which the draw pass skips in favour of the live one.
+            let start = app.world().resource::<FlightPath>().future[0];
+            let stale = start.distance(pos);
+            assert!(
+                stale < 0.01,
+                "frame {frame}: the forecast starts {stale:.2} m from the rocket",
+            );
+        }
     }
 
     /// Ring centres and their alpha, for a path built along +Y. The ring offsets are
