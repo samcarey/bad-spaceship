@@ -34,6 +34,7 @@ use bad_spaceship_shared::guidance::{
     propagate, GROUND_RADIUS, OPTIMIZER_DT, OPTIMIZER_STEPS,
 };
 use bad_spaceship_shared::map::{drag_force, gravity_at, radial_altitude, PLANET_CENTER};
+use bad_spaceship_shared::net::TICK;
 use bevy::{
     asset::RenderAssetUsages,
     camera::visibility::NoFrustumCulling,
@@ -93,6 +94,10 @@ const FADE_HOLD_M: f32 = 30.0;
 /// core — smoothstepped, so it emerges gradually rather than switching on at a ring.
 /// Full strength at `FADE_HOLD_M + FADE_RAMP_M` ahead and behind.
 const FADE_RAMP_M: f32 = 50.0;
+/// Vertex spacing to resample the path to *inside* the fade window. Alpha is a
+/// per-vertex quantity, so the profile can only be as faithful as the spacing it is
+/// evaluated at, and the path's own spacing grows with the flight (see [`tube_mesh`]).
+const FADE_STEP_M: f32 = 4.0;
 
 /// The recorded + predicted flight path, in true planet-frame coordinates.
 #[derive(Resource, Default)]
@@ -283,7 +288,14 @@ fn draw_flight_path(
     // about to be cleared; fading around its end is as meaningful as anything).
     let mut anchor = points.len();
     if let Some(snap) = autopilot.0.as_ref() {
-        points.push((snap.true_pos - offset).as_vec3());
+        // One step forward from the snapshot. The thrust systems publish it from
+        // `FixedUpdate` — *before* the physics step whose output the rocket is actually
+        // drawn at — so the raw snapshot position is exactly one tick stale, a lag that
+        // grows with speed (19 m at 1.2 km/s) and drags the line, and the clear core with
+        // it, backwards off the vehicle. Integrating the step is exact to within one
+        // `a·dt²` (~6 mm under full thrust).
+        let step = snap.true_vel * TICK.as_secs_f32();
+        points.push(((snap.true_pos + step.as_dvec3()) - offset).as_vec3());
     }
     // `future[0]` is the propagation start — the current position again; skip it.
     points.extend(path.future.iter().skip(1).map(|p| (p - offset).as_vec3()));
@@ -341,6 +353,34 @@ fn tube_mesh(points: &[Vec3], anchor: usize, cam: Vec3) -> Option<Mesh> {
         arc.push(run);
     }
     let anchor_arc = arc[anchor_pt];
+
+    // Resample the fade window. Alpha lives on vertices and interpolates linearly
+    // between them, so the fade profile is only drawn where the path HAS vertices — and
+    // the path's spacing grows as the flight goes on: the plan samples every 0.5 s of
+    // flight (64 m at 129 m/s, 600 m at 1.2 km/s) and the trail records every 1% of
+    // altitude. One segment straddling the clear core therefore smears alpha linearly
+    // straight across it: at 129 m/s the line is already 36% opaque 30 m ahead of the
+    // rocket, where the profile calls for 0. Splitting only the stretch inside the
+    // window keeps the cost bounded (~40 extra rings) — beyond it alpha is a flat 1 and
+    // the original vertices are all it needs.
+    let window = FADE_HOLD_M + FADE_RAMP_M;
+    let mut fine: Vec<(Vec3, f32)> = Vec::with_capacity(n + 64);
+    fine.push((pts[0], arc[0]));
+    for i in 1..n {
+        let (a0, a1) = (arc[i - 1], arc[i]);
+        let seg = a1 - a0;
+        let hi = (anchor_arc + window).min(a1);
+        let mut s = (anchor_arc - window).max(a0);
+        while s < hi {
+            if s > a0 + 1e-3 && s < a1 - 1e-3 {
+                fine.push((pts[i - 1].lerp(pts[i], (s - a0) / seg), s));
+            }
+            s += FADE_STEP_M;
+        }
+        fine.push((pts[i], a1));
+    }
+    let (pts, arc): (Vec<Vec3>, Vec<f32>) = fine.into_iter().unzip();
+    let n = pts.len();
 
     let mut positions: Vec<[f32; 3]> = Vec::with_capacity(n * TUBE_SIDES);
     let mut normals: Vec<[f32; 3]> = Vec::with_capacity(n * TUBE_SIDES);
