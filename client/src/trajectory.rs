@@ -6,11 +6,14 @@
 //! Both halves live in the **true planet frame** (the trail in f64 — at Mm-scale
 //! altitudes f32 steps by whole metres) and are folded back to room-local coordinates
 //! through the room's visual floating-origin frame each frame, so a rebase slides the
-//! line rigidly with the rest of the world. The future half is the same point-mass
-//! [`propagate`] the pitchover optimizer flies (drag included), re-run from the current
-//! state every [`REPLAN_SECS`] — so the line converges on what the vehicle actually
-//! does rather than freezing the launch-day plan; after the escape cutoff it shows the
-//! engines-off ballistic coast instead.
+//! line rigidly with the rest of the world. The future half is a drag-aware point-mass
+//! forecast of the **pitch program the autopilot is holding** ([`propagate_program`]),
+//! re-run from the current state every [`REPLAN_SECS`] — so the line converges on what the
+//! vehicle actually does rather than freezing the launch-day plan; after the escape cutoff
+//! it shows the engines-off ballistic coast instead. Forecasting the *optimizer's* law
+//! here instead (`propagate`) is what made the drawn path visibly wander during the climb:
+//! that law steers prograde, so it re-extrapolated the live velocity direction over the
+//! whole remaining burn every replan — see [`propagate_program`] for the measurements.
 //!
 //! The line is **transparent where you are**: fully clear inside [`FADE_HOLD_M`] of
 //! path length either side of the vehicle, then ramping to full over the next
@@ -31,7 +34,7 @@
 //! occludes the far side of an orbit-scale arc.
 
 use bad_spaceship_shared::guidance::{
-    propagate, GROUND_RADIUS, OPTIMIZER_DT, OPTIMIZER_STEPS,
+    propagate_program, PitchProgram, GROUND_RADIUS, OPTIMIZER_DT, OPTIMIZER_STEPS,
 };
 use bad_spaceship_shared::map::{drag_force, gravity_at, radial_altitude, PLANET_CENTER};
 use bad_spaceship_shared::net::TICK;
@@ -165,6 +168,10 @@ fn update_flight_path(
     autopilot: Res<Autopilot>,
     mut path: ResMut<FlightPath>,
     mut replan_in: Local<f32>,
+    // The pitch program being flown, rebuilt only when the launch's planning seed changes
+    // (i.e. once per launch): sampling the table walks the whole ideal ascent, so
+    // rebuilding it every replan would double the preview's cost for an identical answer.
+    mut flown: Local<Option<PitchProgram>>,
 ) {
     let Some(snap) = autopilot.0.as_ref() else {
         // Launch over (or broke up): clear everything so the next launch starts fresh.
@@ -172,6 +179,7 @@ fn update_flight_path(
             *path = FlightPath::default();
         }
         *replan_in = 0.0;
+        *flown = None;
         return;
     };
 
@@ -198,13 +206,19 @@ fn update_flight_path(
 
     let pos = snap.true_pos.as_vec3();
     if snap.throttle > 0.0 {
-        // Burning: fly the same drag-aware point-mass law the optimizer ranked, from
-        // the live state — the preview IS the plan, continuously re-anchored.
-        let preview = propagate(
+        // Burning: forecast the pitch program the autopilot is *holding*, from the live
+        // state — same command schedule, same escape cutoff, so the line only moves as the
+        // vehicle's own state moves (see `propagate_program` for what re-running the ideal
+        // closed-loop law here cost instead).
+        if flown.as_ref().is_none_or(|p| p.seed != snap.seed) {
+            *flown = Some(PitchProgram::build(snap.seed));
+        }
+        let program = flown.as_ref().expect("just built");
+        let preview = propagate_program(
             pos,
             snap.true_vel,
             snap.vehicle,
-            snap.pitchover,
+            program,
             OPTIMIZER_DT,
             OPTIMIZER_STEPS,
             PREVIEW_SAMPLE_EVERY,
@@ -436,6 +450,76 @@ fn tube_mesh(points: &[Vec3], anchor: usize, cam: Vec3) -> Option<Mesh> {
 mod tests {
     use super::*;
     use bevy::mesh::VertexAttributeValues;
+    use bevy::math::DVec3;
+    use crate::launch::AutopilotSnapshot;
+
+    /// Run `update_flight_path` over a launch whose velocity vector wobbles by a degree
+    /// between replans, and return how far the drawn path's far end moved.
+    ///
+    /// A real ascent wobbles constantly (attitude lag, a rider shifting weight, contact
+    /// noise), so this is the everyday case — not an edge one.
+    fn end_movement_on_a_wobble() -> f32 {
+        use bad_spaceship_shared::map::SURFACE_GRAVITY;
+        use std::time::Duration;
+
+        let gravity = Vec3::new(0.0, -SURFACE_GRAVITY, 0.0);
+        let (engines, mass) = (4usize, 15.5f32);
+        let seed = PitchProgram::plan(
+            Vec3::new(0.0, 1.0, 0.0), Vec3::ZERO, engines, gravity, mass, None,
+        )
+        .seed;
+        // Mid-climb, well above TURN_SPEED — where the ideal law switches to prograde and
+        // so becomes maximally sensitive to the velocity direction.
+        let pos = DVec3::new(0.0, 2000.0, 0.0);
+        let vel = Vec3::new(20.0, 180.0, 0.0);
+        let snapshot = |true_vel: Vec3| {
+            Some(AutopilotSnapshot {
+                true_pos: pos,
+                frame_offset: DVec3::ZERO,
+                true_vel,
+                vehicle: seed.vehicle,
+                seed,
+                command_angle: 0.0,
+                throttle: 1.0,
+                drag: 0.0,
+                net_thrust: 0.0,
+            })
+        };
+
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<FlightPath>()
+            .init_resource::<Autopilot>()
+            .add_systems(Update, update_flight_path);
+
+        fn run(app: &mut App, v: Vec3, snap: impl Fn(Vec3) -> Option<AutopilotSnapshot>) -> DVec3 {
+            app.world_mut().resource_mut::<Autopilot>().0 = snap(v);
+            app.update();
+            *app.world().resource::<FlightPath>().future.last().expect("a forecast")
+        }
+        let before = run(&mut app, vel, snapshot);
+        // Past REPLAN_SECS, so the second update really re-propagates.
+        app.world_mut().resource_mut::<Time>().advance_by(Duration::from_secs(1));
+        let after = run(&mut app, Quat::from_rotation_z(1.0_f32.to_radians()) * vel, snapshot);
+        before.distance(after) as f32
+    }
+
+    /// The trajectory line must not leap ahead of the rocket when the vehicle wobbles.
+    ///
+    /// This pins the *call site* to the flown pitch program (`propagate_program`). Drawing
+    /// the optimizer's ideal law here instead re-extrapolates the live velocity direction
+    /// over the whole remaining burn — one degree of wobble then moved the far end of the
+    /// line by kilometres, and it landed somewhere new every half second for the whole
+    /// climb. `guidance::the_drawn_forecast_holds_still_while_the_ideal_law_wanders` is the
+    /// shared-side twin that measures the two laws directly.
+    #[test]
+    fn the_line_ahead_does_not_leap_on_a_wobble() {
+        let moved = end_movement_on_a_wobble();
+        assert!(
+            moved < 100.0,
+            "a 1° velocity wobble moved the drawn path's end by {moved:.0} m",
+        );
+    }
 
     /// Ring centres and their alpha, for a path built along +Y. The ring offsets are
     /// perpendicular to the tangent — which is +Y here — so every vertex of a ring
