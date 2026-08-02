@@ -431,3 +431,69 @@ fn tube_mesh(points: &[Vec3], anchor: usize, cam: Vec3) -> Option<Mesh> {
             .with_inserted_indices(Indices::U32(indices)),
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::mesh::VertexAttributeValues;
+
+    /// Ring centres and their alpha, for a path built along +Y. The ring offsets are
+    /// perpendicular to the tangent — which is +Y here — so every vertex of a ring
+    /// shares the ring's `y`, and the height doubles as the arc length.
+    fn rings(mesh: &Mesh) -> Vec<(f32, f32)> {
+        let Some(VertexAttributeValues::Float32x3(pos)) = mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+        else {
+            panic!("no positions")
+        };
+        let Some(VertexAttributeValues::Float32x4(col)) = mesh.attribute(Mesh::ATTRIBUTE_COLOR)
+        else {
+            panic!("no colours")
+        };
+        pos.iter()
+            .zip(col)
+            .step_by(TUBE_SIDES)
+            .map(|(p, c)| (p[1], c[3]))
+            .collect()
+    }
+
+    /// The fade profile must be *drawn*, not merely sampled wherever the path happens to
+    /// have vertices. Alpha is a vertex attribute and interpolates linearly between
+    /// rings, while the path's own spacing grows with the flight (the plan samples every
+    /// 0.5 s — 600 m at 1.2 km/s — and the trail records every 1% of altitude). Before
+    /// the window was resampled, one segment straddling the clear core smeared alpha
+    /// straight across it: 36% opaque 30 m ahead of the rocket, where the profile calls
+    /// for zero. This asserts the window is sampled finely enough to represent it.
+    #[test]
+    fn the_clear_core_survives_a_coarsely_sampled_path() {
+        // A straight climb sampled every 300 m, the vehicle on the middle vertex.
+        let points: Vec<Vec3> = (0..7).map(|i| Vec3::new(0.0, i as f32 * 300.0, 0.0)).collect();
+        let mesh = tube_mesh(&points, 3, Vec3::new(50.0, 900.0, 0.0)).expect("a drawable tube");
+        let rings = rings(&mesh);
+
+        // Check the alpha the GPU actually rasterises — linearly interpolated between
+        // the bracketing rings — not merely the values sitting on the rings. Testing
+        // ring spacing instead would be both self-referential (FADE_STEP_M is the
+        // constant under test) and vacuous when the window holds a single sample.
+        let shaded = |d: f32| {
+            let y = 900.0 + d;
+            let hi = rings.iter().position(|&(ry, _)| ry >= y).expect("bracketed");
+            if hi == 0 {
+                return rings[0].1;
+            }
+            let ((y0, a0), (y1, a1)) = (rings[hi - 1], rings[hi]);
+            a0 + (a1 - a0) * ((y - y0) / (y1 - y0))
+        };
+        for step in -80..=80 {
+            let d = step as f32;
+            let want = {
+                let t = ((d.abs() - FADE_HOLD_M) / FADE_RAMP_M).clamp(0.0, 1.0);
+                t * t * (3.0 - 2.0 * t)
+            };
+            let got = shaded(d);
+            assert!(
+                (got - want).abs() < 0.05,
+                "at {d} m the line renders at alpha {got:.2}, profile calls for {want:.2}"
+            );
+        }
+    }
+}
