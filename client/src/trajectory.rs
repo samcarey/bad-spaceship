@@ -12,12 +12,12 @@
 //! does rather than freezing the launch-day plan; after the escape cutoff it shows the
 //! engines-off ballistic coast instead.
 //!
-//! The line is **transparent where you are**: alpha ramps from zero at the vehicle to
-//! full [`FADE_DIST_M`] of path-length ahead and behind, so the tube never paints over
-//! the rocket you are watching (or the cockpit view from aboard it) while the plan
-//! further out stays legible. The ramp is per-vertex colour on an alpha-blended
-//! material — the fade is in path-length along the line, not distance from the camera,
-//! so it stays put as the camera orbits.
+//! The line is **transparent where you are**: fully clear inside [`FADE_HOLD_M`] of
+//! path length either side of the vehicle, then ramping to full over the next
+//! [`FADE_RAMP_M`], so the tube never paints over the rocket you are watching (or the
+//! view from aboard it) while the plan further out stays legible. The ramp is
+//! per-vertex colour on an alpha-blended material — the fade is measured in path length
+//! along the line, not distance from the camera, so it stays put as the camera orbits.
 //!
 //! Rendering is one rebuilt-per-frame **3D tube** — a thin extruded pipe following the
 //! path, its radius scaling with camera distance so the line holds a roughly constant
@@ -85,10 +85,14 @@ const MIN_RADIUS: f32 = 0.0125;
 /// round-ish from any angle, not be smooth.
 const TUBE_SIDES: usize = 5;
 
-/// Path-length either side of the vehicle over which the line fades in: zero alpha at
-/// the vehicle itself, full at this distance ahead and behind (smoothstepped, so it's
-/// already half-strength by the midpoint and reads as "visible from about here").
-const FADE_DIST_M: f32 = 50.0;
+/// Fully transparent inside this much path length either side of the vehicle — a hard
+/// clear core, so nothing is drawn over the rocket you're watching (or over the view
+/// from aboard it) no matter how the camera sits.
+const FADE_HOLD_M: f32 = 30.0;
+/// Path length over which the line then ramps in, starting at the edge of the clear
+/// core — smoothstepped, so it emerges gradually rather than switching on at a ring.
+/// Full strength at `FADE_HOLD_M + FADE_RAMP_M` ahead and behind.
+const FADE_RAMP_M: f32 = 50.0;
 
 /// The recorded + predicted flight path, in true planet-frame coordinates.
 #[derive(Resource, Default)]
@@ -306,9 +310,9 @@ fn draw_flight_path(
 /// First the points are de-duplicated (a stalled assembly re-records the same spot; a
 /// zero-length segment has no tangent), so the frame math always sees a real direction.
 ///
-/// `anchor` indexes the vehicle's own point in `points`: alpha is smoothstepped from
-/// zero there to one [`FADE_DIST_M`] of arc length away in either direction, carried as
-/// vertex colour (see the module doc for why the gap exists).
+/// `anchor` indexes the vehicle's own point in `points`: alpha is zero within
+/// [`FADE_HOLD_M`] of arc length either side of it and smoothsteps to one over the next
+/// [`FADE_RAMP_M`], carried as vertex colour (see the module doc for why the gap exists).
 fn tube_mesh(points: &[Vec3], anchor: usize, cam: Vec3) -> Option<Mesh> {
     let mut pts: Vec<Vec3> = Vec::with_capacity(points.len());
     // Track the anchor across the de-duplication; if the anchor point *is* the duplicate
@@ -357,8 +361,9 @@ fn tube_mesh(points: &[Vec3], anchor: usize, cam: Vec3) -> Option<Mesh> {
         side = (side - tan * side.dot(tan)).normalize_or(tan.any_orthonormal_vector());
         let up = tan.cross(side);
         let radius = (pts[i].distance(cam) * LINE_RADIUS_PER_M).max(MIN_RADIUS);
-        // Smoothstep so the line emerges rather than switching on at a hard ring.
-        let t = ((arc[i] - anchor_arc).abs() / FADE_DIST_M).clamp(0.0, 1.0);
+        // Clear core, then a smoothstepped ramp so the line emerges rather than
+        // switching on at a hard ring.
+        let t = (((arc[i] - anchor_arc).abs() - FADE_HOLD_M) / FADE_RAMP_M).clamp(0.0, 1.0);
         let alpha = t * t * (3.0 - 2.0 * t);
         for s in 0..TUBE_SIDES {
             let a = s as f32 / TUBE_SIDES as f32 * std::f32::consts::TAU;
