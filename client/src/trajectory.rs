@@ -49,7 +49,7 @@ use bad_spaceship_shared::guidance::{
     propagate_program, PitchProgram, GROUND_RADIUS, OPTIMIZER_DT, OPTIMIZER_STEPS,
 };
 use bad_spaceship_shared::map::{drag_force, gravity_at, radial_altitude, PLANET_CENTER};
-use bad_spaceship_shared::net::TICK;
+use avian3d::prelude::PhysicsSystems;
 use bevy::{
     asset::RenderAssetUsages,
     camera::visibility::NoFrustumCulling,
@@ -69,7 +69,16 @@ impl Plugin for TrajectoryPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<FlightPath>()
             .add_systems(Startup, spawn_trajectory_line)
-            .add_systems(Update, (update_flight_path, draw_flight_path).chain());
+            .add_systems(Update, (update_flight_path, draw_flight_path).chain())
+            // The mesh is BUILT in `Update` (rebuilding it in `PostUpdate` stops it
+            // rendering at all — see [`follow_rendered_pose`]), but the pose it must line
+            // up with only exists after frame interpolation, so the line is *placed* here.
+            .add_systems(
+                PostUpdate,
+                follow_rendered_pose
+                    .after(PhysicsSystems::Writeback)
+                    .before(TransformSystems::Propagate),
+            );
     }
 }
 
@@ -301,14 +310,7 @@ fn draw_flight_path(
     // about to be cleared; fading around its end is as meaningful as anything).
     let mut anchor = points.len();
     if let Some(snap) = autopilot.0.as_ref() {
-        // One step forward from the snapshot. The thrust systems publish it from
-        // `FixedUpdate` — *before* the physics step whose output the rocket is actually
-        // drawn at — so the raw snapshot position is exactly one tick stale, a lag that
-        // grows with speed (19 m at 1.2 km/s) and drags the line, and the clear core with
-        // it, backwards off the vehicle. Integrating the step is exact to within one
-        // `a·dt²` (~6 mm under full thrust).
-        let step = snap.true_vel * TICK.as_secs_f32();
-        points.push(((snap.true_pos + step.as_dvec3()) - offset).as_vec3());
+        points.push((snap.true_pos - offset).as_vec3());
     }
     // `future[0]` is the propagation start — the current position again; skip it.
     points.extend(path.future.iter().skip(1).map(|p| (p - offset).as_vec3()));
@@ -323,6 +325,51 @@ fn draw_flight_path(
     // A fresh asset per rebuild (see [`TrajectoryLine`] for why not in-place mutation);
     // replacing the `Mesh3d` handle drops the previous frame's mesh.
     commands.entity(entity).insert(Mesh3d(meshes.add(mesh)));
+}
+
+/// Slide the whole line onto the pose the rocket is actually **drawn** at.
+///
+/// The path is built from the raw fixed-step pose the autopilot flew, but predicted bodies
+/// are frame-interpolated between ticks (`FrameInterpolationPlugin<Position>`, `net.rs`),
+/// which runs *here* in `PostUpdate` — so by the time the rocket is rendered it has moved
+/// off that raw pose by a fraction of a tick of its ROOM-LOCAL motion. Left uncorrected the
+/// line saws against the craft with an amplitude that grows for ~15 s and then collapses:
+/// local velocity is ~0 right after a floating-origin rebase (the frame is co-moving) and
+/// climbs as the assembly accelerates away from it until the next rebase re-zeroes it.
+/// Measured in flight: 1.5 m at 690 m altitude, 3.3 m at 1186 m, 0.02 m after a rebase.
+///
+/// Two things here are load-bearing and were each learned the hard way:
+///
+/// - **The offset is applied to the line entity's `Transform`, not to the vertices.** The
+///   correction is a rigid translation of the whole path, which is precisely what a
+///   `Transform` is for, and it keeps the mesh build out of this schedule.
+/// - **It must be a separate system from the mesh build.** Moving `draw_flight_path` itself
+///   into `PostUpdate` was tried and silently stops the line rendering entirely — verified
+///   in a browser: the tube is rebuilt with 172+ points and set `Visible` every frame, and
+///   nothing draws (the per-frame `Mesh3d` handle swap is a deferred command, and it lands
+///   after the visibility bookkeeping that would have extracted it).
+///
+/// Reading the pose any earlier measures nothing: in `Update` the interpolation has not run,
+/// so `Position` still equals the snapshot's raw sample and the offset comes out exactly
+/// zero — which is a fix that changes nothing at all, as one ride confirmed.
+fn follow_rendered_pose(
+    autopilot: Res<Autopilot>,
+    bodies: Query<&Transform, Without<TrajectoryLine>>,
+    mut line: Query<&mut Transform, With<TrajectoryLine>>,
+) {
+    let Ok(mut transform) = line.single_mut() else {
+        return;
+    };
+    let drawn = autopilot
+        .0
+        .as_ref()
+        .and_then(|snap| snap.anchor)
+        .and_then(|(body, raw)| bodies.get(body).ok().map(|drawn| drawn.translation - raw))
+        .unwrap_or(Vec3::ZERO);
+    // Change-guarded: the line's transform feeds hierarchy propagation every frame.
+    if transform.translation != drawn {
+        transform.translation = drawn;
+    }
 }
 
 /// Build a thin tube following `points`: one [`TUBE_SIDES`]-gon ring per point (radius
@@ -478,6 +525,7 @@ mod tests {
                 vehicle: seed.vehicle,
                 seed,
                 command_angle: 0.0,
+                anchor: None,
                 throttle: 1.0,
                 drag: 0.0,
                 net_thrust: 0.0,
@@ -554,6 +602,7 @@ mod tests {
                 vehicle: seed.vehicle,
                 seed,
                 command_angle: 0.0,
+                anchor: None,
                 throttle: 1.0,
                 drag: 0.0,
                 net_thrust: 0.0,

@@ -291,6 +291,17 @@ pub struct AutopilotSnapshot {
     pub seed: LaunchSeed,
     /// The pitch program's commanded tilt from radial-up at the current speed (rad).
     pub command_angle: f32,
+    /// One member body of the flown assembly and its **raw** local position at this
+    /// fixed step — whichever body the stable `NetPart::id` order puts first.
+    ///
+    /// The trajectory line uses the pair to re-anchor itself onto the pose the rocket is
+    /// actually *drawn* at. Predicted bodies are frame-interpolated between fixed ticks
+    /// (`FrameInterpolationPlugin<Position>`, `net.rs`), which writes the interpolated
+    /// value into `Position` itself for the render frame — so comparing that against this
+    /// raw sample measures the render offset directly. Bundled as one field because they
+    /// are only meaningful together: the entity says *which* body, the position says where
+    /// it was before interpolation moved it.
+    pub anchor: Option<(Entity, Vec3)>,
     /// Guidance throttle after the escape cutoff: `0.0` = engines cut, coasting.
     pub throttle: f32,
     /// Current aerodynamic drag on the assembly (N).
@@ -313,6 +324,7 @@ impl AutopilotSnapshot {
         gravity: Vec3,
         total_mass: f32,
         program: &PitchProgram,
+        anchor: Option<(Entity, Vec3)>,
         throttle: f32,
         net_force: Vec3,
     ) -> Self {
@@ -323,6 +335,7 @@ impl AutopilotSnapshot {
             vehicle: Vehicle::derated(engines, gravity, total_mass),
             seed: program.seed,
             command_angle: program.angle_at(true_vel.length()),
+            anchor,
             throttle,
             drag: bad_spaceship_shared::map::drag_force(true_pos.as_vec3(), true_vel).length(),
             net_thrust: net_force.length(),
@@ -829,6 +842,7 @@ fn apply_sp_thrust(
             gravity.0,
             total_mass,
             program,
+            geometry.first().map(|(entity, position, ..)| (*entity, *position)),
             guidance.throttle,
             net_force,
         )
@@ -1062,6 +1076,7 @@ fn apply_mp_thrust(
             gravity.0,
             total_mass,
             program,
+            geometry.first().map(|(entity, position, ..)| (*entity, *position)),
             guidance.throttle,
             net_force,
         )
