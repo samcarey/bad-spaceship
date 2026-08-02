@@ -249,6 +249,7 @@ fn reset_controls(mut controls: ResMut<TouchControls>) {
 fn classify_touches(
     touches: Res<Touches>,
     layout: Res<ControlLayout>,
+    locked_out: Res<crate::launch::BuildingLockedOut>,
     mut controls: ResMut<TouchControls>,
     mut clicks: MessageWriter<PlayerClick>,
 ) {
@@ -288,16 +289,20 @@ fn classify_touches(
         }
         // Both action buttons fire a `PlayerClick`; the modifier set by
         // `apply_pointer` (from these tap flags) routes it to grab/drop vs
-        // join/delete.
-        if layout.hit(layout.grab, p) {
-            controls.grab_tap = true;
-            clicks.write(PlayerClick);
-            continue;
-        }
-        if layout.hit(layout.action, p) {
-            controls.action_tap = true;
-            clicks.write(PlayerClick);
-            continue;
+        // join/delete. In flight they aren't drawn (`draw_overlay`), so they must not
+        // be hit-tested either — otherwise an invisible button swallows the touch
+        // before the stick zones below get a look at it.
+        if !locked_out.0 {
+            if layout.hit(layout.grab, p) {
+                controls.grab_tap = true;
+                clicks.write(PlayerClick);
+                continue;
+            }
+            if layout.hit(layout.action, p) {
+                controls.action_tap = true;
+                clicks.write(PlayerClick);
+                continue;
+            }
         }
         // Sticks: grab whichever zone the finger lands in (one finger each), and
         // record the touch-down point as the deflection origin (the stick floats to
@@ -504,6 +509,7 @@ fn draw_overlay(
     mut contexts: EguiContexts,
     layout: Res<ControlLayout>,
     controls: Res<TouchControls>,
+    locked_out: Res<crate::launch::BuildingLockedOut>,
     holders: Query<&Holding>,
 ) -> Result {
     let ctx = contexts.ctx_mut()?;
@@ -528,15 +534,24 @@ fn draw_overlay(
     draw_stick(&painter, look_center, layout.joystick_radius, look_knob, "LOOK");
 
     // Context labels: the top action button joins (holding) or deletes (empty),
-    // the grab button drops (holding) or grabs (empty).
-    let holding = holders.iter().next().map(|h| h.0).unwrap_or(false);
-    let action_label = if holding { "Create\nJoints" } else { "Delete\nJoints" };
-    let grab_label = if holding { "DROP" } else { "GRAB" };
-
-    let r = layout.btn_r;
-    draw_button(&painter, layout.action, r, action_label, false);
-    draw_button(&painter, layout.grab, r, grab_label, false);
-    draw_button(&painter, layout.jump, r, "JUMP", controls.jump_touch.is_some());
+    // the grab button drops (holding) or grabs (empty). Both are gone in flight —
+    // they do nothing there (`classify_touches` stops hit-testing them too), and a
+    // button labelled "Delete Joints" that ignores you is worse than no button.
+    // Jump stays: a rider can still hop around the deck mid-ascent.
+    if !locked_out.0 {
+        let holding = holders.iter().next().map(|h| h.0).unwrap_or(false);
+        let action_label = if holding { "Create\nJoints" } else { "Delete\nJoints" };
+        let grab_label = if holding { "DROP" } else { "GRAB" };
+        draw_button(&painter, layout.action, layout.btn_r, action_label, false);
+        draw_button(&painter, layout.grab, layout.btn_r, grab_label, false);
+    }
+    draw_button(
+        &painter,
+        layout.jump,
+        layout.btn_r,
+        "JUMP",
+        controls.jump_touch.is_some(),
+    );
 
     Ok(())
 }

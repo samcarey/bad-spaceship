@@ -333,6 +333,7 @@ impl Plugin for NetClientPlugin {
                 // Recolor each joint's own persistent gizmo sphere red while it's in the
                 // delete zone. Runs after the shared detector fills `PredeleteJoints`.
                 recolor_replicated_joints.after(UpdateJointsLabel),
+                joint_gizmo_visibility,
                 // After the click → grab intent writes `Holding`, track the held part's
                 // target orientation. (The focus outline is driven mode-agnostically
                 // from `FocusedInteractable` in `outline.rs`.)
@@ -1488,6 +1489,29 @@ fn recolor_replicated_joints(
         // Change-guarded: only reassign (and re-upload) when the target differs.
         if material.0.id() != want.id() {
             material.0 = want.clone();
+        }
+    }
+}
+
+/// Hide every replicated joint's marker sphere once the room has blasted off. In flight
+/// the welds aren't editable — grab, attach, and delete are all gated on launch — so the
+/// green dots are pure clutter, scattered across the vehicle you're watching (and across
+/// the view from aboard it). Only the gizmo mesh is hidden; the joints themselves, and
+/// their red delete-zone recolor, are untouched and come straight back on landing.
+fn joint_gizmo_visibility(
+    launch: Query<&NetLaunch>,
+    mut joints: Query<&mut Visibility, With<NetJoint>>,
+) {
+    let want = if crate::launch::net_launched(&launch) {
+        Visibility::Hidden
+    } else {
+        Visibility::Visible
+    };
+    for mut visibility in &mut joints {
+        // Change-guarded: a blanket write would dirty every joint's visibility (and
+        // re-propagate it) every frame, on an assembly that can carry hundreds of welds.
+        if *visibility != want {
+            *visibility = want;
         }
     }
 }
