@@ -62,13 +62,14 @@ impl Plugin for LaunchPlugin {
             .init_resource::<FuelUsed>()
             .init_resource::<ApparentUp>()
             .init_resource::<Autopilot>()
+            .init_resource::<BuildingLockedOut>()
             .add_message::<SpSetLock>()
             .add_systems(Update, (tick_launch, ease_launch_zoom, autolock_rider))
             // Between the three `Modifying` writers (all in `InputEvents`) and every
             // reader of it — `update_predelete_joints` heads `UpdateJointsLabel`.
             .add_systems(
                 Update,
-                disarm_modifier_in_flight
+                lock_out_building_in_flight
                     .after(InputEvents)
                     .before(UpdateJointsLabel),
             );
@@ -374,8 +375,16 @@ pub(crate) fn room_launched(
     }
 }
 
+/// Whether the room is in flight, so building is locked out — grab, attach, and delete
+/// all stand down until it lands. Written every frame by [`lock_out_building_in_flight`]
+/// (the one place that reads the launch state for this purpose) and read by the touch
+/// overlay, which stops drawing *and* hit-testing the grab/action buttons rather than
+/// leaving two dead controls under the rider's thumb.
+#[derive(Resource, Default)]
+pub(crate) struct BuildingLockedOut(pub bool);
+
 /// Once the room has blasted off you're riding, not building — so force the build
-/// modifier off for the rest of the flight.
+/// modifier off for the rest of the flight, and publish that fact for the UI.
 ///
 /// [`Modifying`] is the **one** gate every piece of the delete gesture reads: the
 /// delete-zone sphere (`delete_zone_visibility`), the red in-zone joint markers
@@ -387,13 +396,19 @@ pub(crate) fn room_launched(
 /// It also matters most on **touch**, where `mobile::apply_pointer` holds the
 /// modifier on permanently while empty-handed — so on a phone the delete zone and
 /// the red joints were painted over the vehicle for the whole ascent.
-fn disarm_modifier_in_flight(
+fn lock_out_building_in_flight(
     local: Res<LaunchLocal>,
     multiplayer: Option<Res<SuppressLocalParts>>,
     orb: Query<&NetLaunch>,
+    mut locked_out: ResMut<BuildingLockedOut>,
     mut modifiers: Query<&mut Modifying>,
 ) {
-    if !room_launched(&local, multiplayer.is_some(), &orb) {
+    let launched = room_launched(&local, multiplayer.is_some(), &orb);
+    // Change-guarded so a settled flight doesn't wake every reader each frame.
+    if locked_out.0 != launched {
+        locked_out.0 = launched;
+    }
+    if !launched {
         return;
     }
     for mut modifying in &mut modifiers {
@@ -1466,27 +1481,33 @@ fn countdown_word(remaining: f32) -> String {
 mod tests {
     use super::*;
 
-    /// Run `disarm_modifier_in_flight` once over a single-player world in the given
-    /// phase, and report whether the build modifier survived.
-    fn modifier_survives(phase: SpPhase) -> bool {
+    /// Run `lock_out_building_in_flight` once over a single-player world in the given
+    /// phase, and report `(the build modifier survived, building is locked out)`.
+    fn build_state(phase: SpPhase) -> (bool, bool) {
         let mut app = App::new();
         app.insert_resource(LaunchLocal {
             sp: phase,
             ..default()
         })
-        .add_systems(Update, disarm_modifier_in_flight);
+        .init_resource::<BuildingLockedOut>()
+        .add_systems(Update, lock_out_building_in_flight);
         let player = app.world_mut().spawn(Modifying(true)).id();
         app.update();
-        app.world().get::<Modifying>(player).unwrap().0
+        (
+            app.world().get::<Modifying>(player).unwrap().0,
+            app.world().resource::<BuildingLockedOut>().0,
+        )
     }
 
     #[test]
-    fn the_build_modifier_is_held_down_on_the_pad_and_dropped_in_flight() {
-        // On the pad — and even mid-countdown — the delete gesture is still yours.
-        assert!(modifier_survives(SpPhase::Idle));
-        assert!(modifier_survives(SpPhase::Countdown { remaining: 1.5 }));
-        // After blastoff it must stand down: this one flag is what hides the delete
-        // sphere, keeps joints from flaring red, and makes a click a no-op.
-        assert!(!modifier_survives(SpPhase::Launched));
+    fn building_is_yours_on_the_pad_and_locked_out_in_flight() {
+        // On the pad — and even mid-countdown — the delete gesture is still yours,
+        // and the touch overlay keeps its grab/action buttons.
+        assert_eq!(build_state(SpPhase::Idle), (true, false));
+        assert_eq!(build_state(SpPhase::Countdown { remaining: 1.5 }), (true, false));
+        // After blastoff the modifier stands down — that one flag is what hides the
+        // delete sphere, keeps joints from flaring red, and makes a click a no-op —
+        // and the lockout flag pulls the two dead buttons off the rider's screen.
+        assert_eq!(build_state(SpPhase::Launched), (false, true));
     }
 }
