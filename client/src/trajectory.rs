@@ -12,6 +12,13 @@
 //! does rather than freezing the launch-day plan; after the escape cutoff it shows the
 //! engines-off ballistic coast instead.
 //!
+//! The line is **transparent where you are**: fully clear inside [`FADE_HOLD_M`] of
+//! path length either side of the vehicle, then ramping to full over the next
+//! [`FADE_RAMP_M`], so the tube never paints over the rocket you are watching (or the
+//! view from aboard it) while the plan further out stays legible. The ramp is
+//! per-vertex colour on an alpha-blended material — the fade is measured in path length
+//! along the line, not distance from the camera, so it stays put as the camera orbits.
+//!
 //! Rendering is one rebuilt-per-frame **3D tube** — a thin extruded pipe following the
 //! path, its radius scaling with camera distance so the line holds a roughly constant
 //! on-screen thickness from the pad to a plan-end tens of kilometres up. (A camera-facing
@@ -27,6 +34,7 @@ use bad_spaceship_shared::guidance::{
     propagate, GROUND_RADIUS, OPTIMIZER_DT, OPTIMIZER_STEPS,
 };
 use bad_spaceship_shared::map::{drag_force, gravity_at, radial_altitude, PLANET_CENTER};
+use bad_spaceship_shared::net::TICK;
 use bevy::{
     asset::RenderAssetUsages,
     camera::visibility::NoFrustumCulling,
@@ -78,6 +86,19 @@ const MIN_RADIUS: f32 = 0.0125;
 /// round-ish from any angle, not be smooth.
 const TUBE_SIDES: usize = 5;
 
+/// Fully transparent inside this much path length either side of the vehicle — a hard
+/// clear core, so nothing is drawn over the rocket you're watching (or over the view
+/// from aboard it) no matter how the camera sits.
+const FADE_HOLD_M: f32 = 30.0;
+/// Path length over which the line then ramps in, starting at the edge of the clear
+/// core — smoothstepped, so it emerges gradually rather than switching on at a ring.
+/// Full strength at `FADE_HOLD_M + FADE_RAMP_M` ahead and behind.
+const FADE_RAMP_M: f32 = 50.0;
+/// Vertex spacing to resample the path to *inside* the fade window. Alpha is a
+/// per-vertex quantity, so the profile can only be as faithful as the spacing it is
+/// evaluated at, and the path's own spacing grows with the flight (see [`tube_mesh`]).
+const FADE_STEP_M: f32 = 4.0;
+
 /// The recorded + predicted flight path, in true planet-frame coordinates.
 #[derive(Resource, Default)]
 pub struct FlightPath {
@@ -120,6 +141,11 @@ fn spawn_trajectory_line(
             // fully-saturated bright yellow is what reads as "neon".
             base_color: Color::srgb(0.95, 1.0, 0.05),
             unlit: true,
+            // The near-the-vehicle fade rides in per-vertex alpha, which only means
+            // anything if the material blends (StandardMaterial multiplies base_color
+            // by the mesh's vertex colour). Blended geometry doesn't write depth, so
+            // the tube's own far side shows through — harmless, and it reads as glow.
+            alpha_mode: AlphaMode::Blend,
             // An instrument overlay: must read through the smog (see the module doc).
             fog_enabled: false,
             ..default()
@@ -257,14 +283,26 @@ fn draw_flight_path(
     );
     let mut points: Vec<Vec3> = Vec::with_capacity(path.trail.len() + path.future.len() + 1);
     points.extend(path.trail.iter().map(|p| (p - offset).as_vec3()));
+    // Where the trail hands over to the plan — the vehicle itself, and so the centre of
+    // the transparent gap. Clamped for the snapshot-less frame (the path is stale and
+    // about to be cleared; fading around its end is as meaningful as anything).
+    let mut anchor = points.len();
     if let Some(snap) = autopilot.0.as_ref() {
-        points.push((snap.true_pos - offset).as_vec3());
+        // One step forward from the snapshot. The thrust systems publish it from
+        // `FixedUpdate` — *before* the physics step whose output the rocket is actually
+        // drawn at — so the raw snapshot position is exactly one tick stale, a lag that
+        // grows with speed (19 m at 1.2 km/s) and drags the line, and the clear core with
+        // it, backwards off the vehicle. Integrating the step is exact to within one
+        // `a·dt²` (~6 mm under full thrust).
+        let step = snap.true_vel * TICK.as_secs_f32();
+        points.push(((snap.true_pos + step.as_dvec3()) - offset).as_vec3());
     }
     // `future[0]` is the propagation start — the current position again; skip it.
     points.extend(path.future.iter().skip(1).map(|p| (p - offset).as_vec3()));
+    anchor = anchor.min(points.len().saturating_sub(1));
 
     let cam = camera.translation();
-    let Some(mesh) = tube_mesh(&points, cam) else {
+    let Some(mesh) = tube_mesh(&points, anchor, cam) else {
         *visibility = Visibility::Hidden;
         return;
     };
@@ -283,11 +321,21 @@ fn draw_flight_path(
 ///
 /// First the points are de-duplicated (a stalled assembly re-records the same spot; a
 /// zero-length segment has no tangent), so the frame math always sees a real direction.
-fn tube_mesh(points: &[Vec3], cam: Vec3) -> Option<Mesh> {
+///
+/// `anchor` indexes the vehicle's own point in `points`: alpha is zero within
+/// [`FADE_HOLD_M`] of arc length either side of it and smoothsteps to one over the next
+/// [`FADE_RAMP_M`], carried as vertex colour (see the module doc for why the gap exists).
+fn tube_mesh(points: &[Vec3], anchor: usize, cam: Vec3) -> Option<Mesh> {
     let mut pts: Vec<Vec3> = Vec::with_capacity(points.len());
-    for &p in points {
+    // Track the anchor across the de-duplication; if the anchor point *is* the duplicate
+    // that got dropped, the kept twin (within 1 mm) stands in for it.
+    let mut anchor_pt = 0;
+    for (i, &p) in points.iter().enumerate() {
         if p.is_finite() && pts.last().is_none_or(|&last| last.distance(p) > 1e-3) {
             pts.push(p);
+        }
+        if i == anchor {
+            anchor_pt = pts.len().saturating_sub(1);
         }
     }
     if pts.len() < 2 {
@@ -295,8 +343,48 @@ fn tube_mesh(points: &[Vec3], cam: Vec3) -> Option<Mesh> {
     }
 
     let n = pts.len();
+    // Cumulative arc length along the path. The fade is symmetric about the vehicle, so
+    // only each point's absolute distance from the anchor's arc length matters.
+    let mut arc: Vec<f32> = Vec::with_capacity(n);
+    let mut run = 0.0;
+    arc.push(0.0);
+    for i in 1..n {
+        run += pts[i].distance(pts[i - 1]);
+        arc.push(run);
+    }
+    let anchor_arc = arc[anchor_pt];
+
+    // Resample the fade window. Alpha lives on vertices and interpolates linearly
+    // between them, so the fade profile is only drawn where the path HAS vertices — and
+    // the path's spacing grows as the flight goes on: the plan samples every 0.5 s of
+    // flight (64 m at 129 m/s, 600 m at 1.2 km/s) and the trail records every 1% of
+    // altitude. One segment straddling the clear core therefore smears alpha linearly
+    // straight across it: at 129 m/s the line is already 36% opaque 30 m ahead of the
+    // rocket, where the profile calls for 0. Splitting only the stretch inside the
+    // window keeps the cost bounded (~40 extra rings) — beyond it alpha is a flat 1 and
+    // the original vertices are all it needs.
+    let window = FADE_HOLD_M + FADE_RAMP_M;
+    let mut fine: Vec<(Vec3, f32)> = Vec::with_capacity(n + 64);
+    fine.push((pts[0], arc[0]));
+    for i in 1..n {
+        let (a0, a1) = (arc[i - 1], arc[i]);
+        let seg = a1 - a0;
+        let hi = (anchor_arc + window).min(a1);
+        let mut s = (anchor_arc - window).max(a0);
+        while s < hi {
+            if s > a0 + 1e-3 && s < a1 - 1e-3 {
+                fine.push((pts[i - 1].lerp(pts[i], (s - a0) / seg), s));
+            }
+            s += FADE_STEP_M;
+        }
+        fine.push((pts[i], a1));
+    }
+    let (pts, arc): (Vec<Vec3>, Vec<f32>) = fine.into_iter().unzip();
+    let n = pts.len();
+
     let mut positions: Vec<[f32; 3]> = Vec::with_capacity(n * TUBE_SIDES);
     let mut normals: Vec<[f32; 3]> = Vec::with_capacity(n * TUBE_SIDES);
+    let mut colors: Vec<[f32; 4]> = Vec::with_capacity(n * TUBE_SIDES);
     // Seed the transported frame with any vector perpendicular to the first tangent.
     let first_tan = (pts[1] - pts[0]).normalize_or(Vec3::Y);
     let mut side = first_tan.any_orthonormal_vector();
@@ -313,11 +401,16 @@ fn tube_mesh(points: &[Vec3], cam: Vec3) -> Option<Mesh> {
         side = (side - tan * side.dot(tan)).normalize_or(tan.any_orthonormal_vector());
         let up = tan.cross(side);
         let radius = (pts[i].distance(cam) * LINE_RADIUS_PER_M).max(MIN_RADIUS);
+        // Clear core, then a smoothstepped ramp so the line emerges rather than
+        // switching on at a hard ring.
+        let t = (((arc[i] - anchor_arc).abs() - FADE_HOLD_M) / FADE_RAMP_M).clamp(0.0, 1.0);
+        let alpha = t * t * (3.0 - 2.0 * t);
         for s in 0..TUBE_SIDES {
             let a = s as f32 / TUBE_SIDES as f32 * std::f32::consts::TAU;
             let dir = side * a.cos() + up * a.sin();
             positions.push((pts[i] + dir * radius).to_array());
             normals.push(dir.to_array());
+            colors.push([1.0, 1.0, 1.0, alpha]);
         }
     }
 
@@ -334,6 +427,73 @@ fn tube_mesh(points: &[Vec3], cam: Vec3) -> Option<Mesh> {
         Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default())
             .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
             .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+            .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, colors)
             .with_inserted_indices(Indices::U32(indices)),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::mesh::VertexAttributeValues;
+
+    /// Ring centres and their alpha, for a path built along +Y. The ring offsets are
+    /// perpendicular to the tangent — which is +Y here — so every vertex of a ring
+    /// shares the ring's `y`, and the height doubles as the arc length.
+    fn rings(mesh: &Mesh) -> Vec<(f32, f32)> {
+        let Some(VertexAttributeValues::Float32x3(pos)) = mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+        else {
+            panic!("no positions")
+        };
+        let Some(VertexAttributeValues::Float32x4(col)) = mesh.attribute(Mesh::ATTRIBUTE_COLOR)
+        else {
+            panic!("no colours")
+        };
+        pos.iter()
+            .zip(col)
+            .step_by(TUBE_SIDES)
+            .map(|(p, c)| (p[1], c[3]))
+            .collect()
+    }
+
+    /// The fade profile must be *drawn*, not merely sampled wherever the path happens to
+    /// have vertices. Alpha is a vertex attribute and interpolates linearly between
+    /// rings, while the path's own spacing grows with the flight (the plan samples every
+    /// 0.5 s — 600 m at 1.2 km/s — and the trail records every 1% of altitude). Before
+    /// the window was resampled, one segment straddling the clear core smeared alpha
+    /// straight across it: 36% opaque 30 m ahead of the rocket, where the profile calls
+    /// for zero. This asserts the window is sampled finely enough to represent it.
+    #[test]
+    fn the_clear_core_survives_a_coarsely_sampled_path() {
+        // A straight climb sampled every 300 m, the vehicle on the middle vertex.
+        let points: Vec<Vec3> = (0..7).map(|i| Vec3::new(0.0, i as f32 * 300.0, 0.0)).collect();
+        let mesh = tube_mesh(&points, 3, Vec3::new(50.0, 900.0, 0.0)).expect("a drawable tube");
+        let rings = rings(&mesh);
+
+        // Check the alpha the GPU actually rasterises — linearly interpolated between
+        // the bracketing rings — not merely the values sitting on the rings. Testing
+        // ring spacing instead would be both self-referential (FADE_STEP_M is the
+        // constant under test) and vacuous when the window holds a single sample.
+        let shaded = |d: f32| {
+            let y = 900.0 + d;
+            let hi = rings.iter().position(|&(ry, _)| ry >= y).expect("bracketed");
+            if hi == 0 {
+                return rings[0].1;
+            }
+            let ((y0, a0), (y1, a1)) = (rings[hi - 1], rings[hi]);
+            a0 + (a1 - a0) * ((y - y0) / (y1 - y0))
+        };
+        for step in -80..=80 {
+            let d = step as f32;
+            let want = {
+                let t = ((d.abs() - FADE_HOLD_M) / FADE_RAMP_M).clamp(0.0, 1.0);
+                t * t * (3.0 - 2.0 * t)
+            };
+            let got = shaded(d);
+            assert!(
+                (got - want).abs() < 0.05,
+                "at {d} m the line renders at alpha {got:.2}, profile calls for {want:.2}"
+            );
+        }
+    }
 }
