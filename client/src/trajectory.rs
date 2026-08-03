@@ -6,11 +6,26 @@
 //! Both halves live in the **true planet frame** (the trail in f64 — at Mm-scale
 //! altitudes f32 steps by whole metres) and are folded back to room-local coordinates
 //! through the room's visual floating-origin frame each frame, so a rebase slides the
-//! line rigidly with the rest of the world. The future half is the same point-mass
-//! [`propagate`] the pitchover optimizer flies (drag included), re-run from the current
-//! state every [`REPLAN_SECS`] — so the line converges on what the vehicle actually
-//! does rather than freezing the launch-day plan; after the escape cutoff it shows the
-//! engines-off ballistic coast instead.
+//! line rigidly with the rest of the world. The future half is a drag-aware point-mass
+//! forecast of the **pitch program the autopilot is holding** ([`propagate_program`]),
+//! re-run from the current state **every frame** — so the line converges on what the
+//! vehicle actually does rather than freezing the launch-day plan; after the escape cutoff
+//! it shows the engines-off ballistic coast instead. Forecasting the *optimizer's* law
+//! here instead (`propagate`) is what made the drawn path visibly wander during the climb:
+//! that law steers prograde, so it re-extrapolated the live velocity direction over the
+//! whole remaining burn every replan — see [`propagate_program`] for the measurements.
+//!
+//! **Why every frame and not on a timer.** The forecast used to be refreshed every 0.5 s,
+//! which left it frozen in space while the vehicle flew on — and a real stack does not
+//! track the point-mass model exactly (it is planned against *derated* thrust, and it
+//! lags its attitude command). The craft therefore drifted off the drawn line for half a
+//! second, and each re-propagation snapped the line back onto it: a 2 Hz sawtooth in the
+//! line's position relative to the rocket, reported from a real ride. Rebuilding is only
+//! **~25 µs** (0.15% of a 16.7 ms frame — the burn ends at the escape cutoff, ~700 integrator
+//! steps, not the full budget), so there was never anything to save; the timer bought a
+//! visible artifact for nothing. Note that easing the line toward each new forecast would
+//! only *smooth* that snap — the line would still be a stale forecast, lagging rather than
+//! jumping. Removing the staleness is the fix; smoothing it is makeup.
 //!
 //! The line is **transparent where you are**: fully clear inside [`FADE_HOLD_M`] of
 //! path length either side of the vehicle, then ramping to full over the next
@@ -30,11 +45,11 @@
 //! the smog it is about to climb out of — while still depth-tested, so the planet properly
 //! occludes the far side of an orbit-scale arc.
 
+use avian3d::prelude::PhysicsSystems;
 use bad_spaceship_shared::guidance::{
-    propagate, GROUND_RADIUS, OPTIMIZER_DT, OPTIMIZER_STEPS,
+    propagate_program, PitchProgram, GROUND_RADIUS, OPTIMIZER_DT, OPTIMIZER_STEPS,
 };
 use bad_spaceship_shared::map::{drag_force, gravity_at, radial_altitude, PLANET_CENTER};
-use bad_spaceship_shared::net::TICK;
 use bevy::{
     asset::RenderAssetUsages,
     camera::visibility::NoFrustumCulling,
@@ -54,13 +69,18 @@ impl Plugin for TrajectoryPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<FlightPath>()
             .add_systems(Startup, spawn_trajectory_line)
-            .add_systems(Update, (update_flight_path, draw_flight_path).chain());
+            .add_systems(Update, (update_flight_path, draw_flight_path).chain())
+            // The mesh is BUILT in `Update` (rebuilding it in `PostUpdate` stops it
+            // rendering at all — see [`follow_rendered_pose`]), but the pose it must line
+            // up with only exists after frame interpolation, so the line is *placed* here.
+            .add_systems(
+                PostUpdate,
+                follow_rendered_pose
+                    .after(PhysicsSystems::Writeback)
+                    .before(TransformSystems::Propagate),
+            );
     }
 }
-
-/// Seconds between re-propagations of the future half. The point-mass sim is cheap
-/// (it's the optimizer's inner loop) but not per-frame cheap.
-const REPLAN_SECS: f32 = 0.5;
 
 /// Sample the burn preview every N integrator steps (× [`OPTIMIZER_DT`] = 0.5 s of
 /// flight per sample) — dense enough that the dot walk sees a smooth curve.
@@ -104,7 +124,7 @@ const FADE_STEP_M: f32 = 4.0;
 pub struct FlightPath {
     /// Where the assembly has been this launch (oldest first).
     trail: Vec<DVec3>,
-    /// Where the plan takes it from here (re-propagated every [`REPLAN_SECS`]).
+    /// Where the plan takes it from here (re-propagated from the live state each frame).
     future: Vec<DVec3>,
     /// HUD readout of the current burn preview; `None` while coasting (engines cut).
     pub plan: Option<PlanReadout>,
@@ -161,17 +181,19 @@ fn spawn_trajectory_line(
 /// Record the flown trail and re-propagate the future half from the autopilot's live
 /// state (see the module doc for the trail/preview policy).
 fn update_flight_path(
-    time: Res<Time>,
     autopilot: Res<Autopilot>,
     mut path: ResMut<FlightPath>,
-    mut replan_in: Local<f32>,
+    // The pitch program being flown, rebuilt only when the launch's planning seed changes
+    // (i.e. once per launch): sampling the table walks the whole ideal ascent, so
+    // rebuilding it every frame would dominate the preview's cost for an identical answer.
+    mut flown: Local<Option<PitchProgram>>,
 ) {
     let Some(snap) = autopilot.0.as_ref() else {
         // Launch over (or broke up): clear everything so the next launch starts fresh.
         if !path.trail.is_empty() || !path.future.is_empty() || path.plan.is_some() {
             *path = FlightPath::default();
         }
-        *replan_in = 0.0;
+        *flown = None;
         return;
     };
 
@@ -190,21 +212,21 @@ fn update_flight_path(
         }
     }
 
-    *replan_in -= time.delta_secs();
-    if *replan_in > 0.0 {
-        return;
-    }
-    *replan_in = REPLAN_SECS;
-
     let pos = snap.true_pos.as_vec3();
     if snap.throttle > 0.0 {
-        // Burning: fly the same drag-aware point-mass law the optimizer ranked, from
-        // the live state — the preview IS the plan, continuously re-anchored.
-        let preview = propagate(
+        // Burning: forecast the pitch program the autopilot is *holding*, from the live
+        // state — same command schedule, same escape cutoff, so the line only moves as the
+        // vehicle's own state moves (see `propagate_program` for what re-running the ideal
+        // closed-loop law here cost instead).
+        if flown.as_ref().is_none_or(|p| p.seed != snap.seed) {
+            *flown = Some(PitchProgram::build(snap.seed));
+        }
+        let program = flown.as_ref().expect("just built");
+        let preview = propagate_program(
             pos,
             snap.true_vel,
             snap.vehicle,
-            snap.pitchover,
+            program,
             OPTIMIZER_DT,
             OPTIMIZER_STEPS,
             PREVIEW_SAMPLE_EVERY,
@@ -288,14 +310,7 @@ fn draw_flight_path(
     // about to be cleared; fading around its end is as meaningful as anything).
     let mut anchor = points.len();
     if let Some(snap) = autopilot.0.as_ref() {
-        // One step forward from the snapshot. The thrust systems publish it from
-        // `FixedUpdate` — *before* the physics step whose output the rocket is actually
-        // drawn at — so the raw snapshot position is exactly one tick stale, a lag that
-        // grows with speed (19 m at 1.2 km/s) and drags the line, and the clear core with
-        // it, backwards off the vehicle. Integrating the step is exact to within one
-        // `a·dt²` (~6 mm under full thrust).
-        let step = snap.true_vel * TICK.as_secs_f32();
-        points.push(((snap.true_pos + step.as_dvec3()) - offset).as_vec3());
+        points.push((snap.true_pos - offset).as_vec3());
     }
     // `future[0]` is the propagation start — the current position again; skip it.
     points.extend(path.future.iter().skip(1).map(|p| (p - offset).as_vec3()));
@@ -310,6 +325,51 @@ fn draw_flight_path(
     // A fresh asset per rebuild (see [`TrajectoryLine`] for why not in-place mutation);
     // replacing the `Mesh3d` handle drops the previous frame's mesh.
     commands.entity(entity).insert(Mesh3d(meshes.add(mesh)));
+}
+
+/// Slide the whole line onto the pose the rocket is actually **drawn** at.
+///
+/// The path is built from the raw fixed-step pose the autopilot flew, but predicted bodies
+/// are frame-interpolated between ticks (`FrameInterpolationPlugin<Position>`, `net.rs`),
+/// which runs *here* in `PostUpdate` — so by the time the rocket is rendered it has moved
+/// off that raw pose by a fraction of a tick of its ROOM-LOCAL motion. Left uncorrected the
+/// line saws against the craft with an amplitude that grows for ~15 s and then collapses:
+/// local velocity is ~0 right after a floating-origin rebase (the frame is co-moving) and
+/// climbs as the assembly accelerates away from it until the next rebase re-zeroes it.
+/// Measured in flight: 1.5 m at 690 m altitude, 3.3 m at 1186 m, 0.02 m after a rebase.
+///
+/// Two things here are load-bearing and were each learned the hard way:
+///
+/// - **The offset is applied to the line entity's `Transform`, not to the vertices.** The
+///   correction is a rigid translation of the whole path, which is precisely what a
+///   `Transform` is for, and it keeps the mesh build out of this schedule.
+/// - **It must be a separate system from the mesh build.** Moving `draw_flight_path` itself
+///   into `PostUpdate` was tried and silently stops the line rendering entirely — verified
+///   in a browser: the tube is rebuilt with 172+ points and set `Visible` every frame, and
+///   nothing draws (the per-frame `Mesh3d` handle swap is a deferred command, and it lands
+///   after the visibility bookkeeping that would have extracted it).
+///
+/// Reading the pose any earlier measures nothing: in `Update` the interpolation has not run,
+/// so `Position` still equals the snapshot's raw sample and the offset comes out exactly
+/// zero — which is a fix that changes nothing at all, as one ride confirmed.
+fn follow_rendered_pose(
+    autopilot: Res<Autopilot>,
+    bodies: Query<&Transform, Without<TrajectoryLine>>,
+    mut line: Query<&mut Transform, With<TrajectoryLine>>,
+) {
+    let Ok(mut transform) = line.single_mut() else {
+        return;
+    };
+    let drawn = autopilot
+        .0
+        .as_ref()
+        .and_then(|snap| snap.anchor)
+        .and_then(|(body, raw)| bodies.get(body).ok().map(|drawn| drawn.translation - raw))
+        .unwrap_or(Vec3::ZERO);
+    // Change-guarded: the line's transform feeds hierarchy propagation every frame.
+    if transform.translation != drawn {
+        transform.translation = drawn;
+    }
 }
 
 /// Build a thin tube following `points`: one [`TUBE_SIDES`]-gon ring per point (radius
@@ -436,6 +496,128 @@ fn tube_mesh(points: &[Vec3], anchor: usize, cam: Vec3) -> Option<Mesh> {
 mod tests {
     use super::*;
     use bevy::mesh::VertexAttributeValues;
+    use bevy::math::DVec3;
+    use crate::launch::AutopilotSnapshot;
+
+    /// Run `update_flight_path` over a launch whose velocity vector wobbles by a degree
+    /// between replans, and return how far the drawn path's far end moved.
+    ///
+    /// A real ascent wobbles constantly (attitude lag, a rider shifting weight, contact
+    /// noise), so this is the everyday case — not an edge one.
+    fn end_movement_on_a_wobble() -> f32 {
+        use bad_spaceship_shared::map::SURFACE_GRAVITY;
+
+        let gravity = Vec3::new(0.0, -SURFACE_GRAVITY, 0.0);
+        let (engines, mass) = (4usize, 15.5f32);
+        let seed = PitchProgram::plan(
+            Vec3::new(0.0, 1.0, 0.0), Vec3::ZERO, engines, gravity, mass, None,
+        )
+        .seed;
+        // Mid-climb, well above TURN_SPEED — where the ideal law switches to prograde and
+        // so becomes maximally sensitive to the velocity direction.
+        let pos = DVec3::new(0.0, 2000.0, 0.0);
+        let vel = Vec3::new(20.0, 180.0, 0.0);
+        let snapshot = |true_vel: Vec3| {
+            Some(AutopilotSnapshot {
+                true_pos: pos,
+                frame_offset: DVec3::ZERO,
+                true_vel,
+                vehicle: seed.vehicle,
+                seed,
+                command_angle: 0.0,
+                anchor: None,
+                throttle: 1.0,
+                drag: 0.0,
+                net_thrust: 0.0,
+            })
+        };
+
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<FlightPath>()
+            .init_resource::<Autopilot>()
+            .add_systems(Update, update_flight_path);
+
+        fn run(app: &mut App, v: Vec3, snap: impl Fn(Vec3) -> Option<AutopilotSnapshot>) -> DVec3 {
+            app.world_mut().resource_mut::<Autopilot>().0 = snap(v);
+            app.update();
+            *app.world().resource::<FlightPath>().future.last().expect("a forecast")
+        }
+        let before = run(&mut app, vel, snapshot);
+        let after = run(&mut app, Quat::from_rotation_z(1.0_f32.to_radians()) * vel, snapshot);
+        before.distance(after) as f32
+    }
+
+    /// The trajectory line must not leap ahead of the rocket when the vehicle wobbles.
+    ///
+    /// This pins the *call site* to the flown pitch program (`propagate_program`). Drawing
+    /// the optimizer's ideal law here instead re-extrapolates the live velocity direction
+    /// over the whole remaining burn — one degree of wobble then moved the far end of the
+    /// line by kilometres, and it landed somewhere new every half second for the whole
+    /// climb. `guidance::the_drawn_forecast_holds_still_while_the_ideal_law_wanders` is the
+    /// shared-side twin that measures the two laws directly.
+    #[test]
+    fn the_line_ahead_does_not_leap_on_a_wobble() {
+        let moved = end_movement_on_a_wobble();
+        assert!(
+            moved < 100.0,
+            "a 1° velocity wobble moved the drawn path's end by {moved:.0} m",
+        );
+    }
+
+    /// The forecast must start at the rocket on **every** frame, not on a timer.
+    ///
+    /// Regression for a 2 Hz sawtooth reported from a real ride: the future half was
+    /// re-propagated every 0.5 s, so between refreshes it hung frozen in space while the
+    /// vehicle flew on. Because a real stack does not track the point-mass model exactly
+    /// (planned against derated thrust; attitude lags the command), the rocket drifted off
+    /// the drawn line and each re-propagation snapped it back — the line visibly sliding
+    /// against the craft twice a second. This flies a few frames at 60 Hz and demands the
+    /// forecast be re-anchored at the live position each one; under the timer, every frame
+    /// but the first kept the stale start and this fails by the distance flown since.
+    #[test]
+    fn the_forecast_starts_at_the_rocket_every_frame() {
+        use bad_spaceship_shared::map::SURFACE_GRAVITY;
+
+        let gravity = Vec3::new(0.0, -SURFACE_GRAVITY, 0.0);
+        let (engines, mass) = (4usize, 15.5f32);
+        let seed =
+            PitchProgram::plan(Vec3::new(0.0, 1.0, 0.0), Vec3::ZERO, engines, gravity, mass, None)
+                .seed;
+        let vel = Vec3::new(20.0, 280.0, 0.0);
+
+        let mut app = App::new();
+        app.init_resource::<FlightPath>()
+            .init_resource::<Autopilot>()
+            .add_systems(Update, update_flight_path);
+
+        let dt = 1.0 / 60.0;
+        let mut pos = DVec3::new(0.0, 3000.0, 0.0);
+        for frame in 0..10 {
+            pos += vel.as_dvec3() * dt as f64;
+            app.world_mut().resource_mut::<Autopilot>().0 = Some(AutopilotSnapshot {
+                true_pos: pos,
+                frame_offset: DVec3::ZERO,
+                true_vel: vel,
+                vehicle: seed.vehicle,
+                seed,
+                command_angle: 0.0,
+                anchor: None,
+                throttle: 1.0,
+                drag: 0.0,
+                net_thrust: 0.0,
+            });
+            app.update();
+            // `future[0]` is the propagation start — by contract the vehicle's own
+            // position, which the draw pass skips in favour of the live one.
+            let start = app.world().resource::<FlightPath>().future[0];
+            let stale = start.distance(pos);
+            assert!(
+                stale < 0.01,
+                "frame {frame}: the forecast starts {stale:.2} m from the rocket",
+            );
+        }
+    }
 
     /// Ring centres and their alpha, for a path built along +Y. The ring offsets are
     /// perpendicular to the tangent — which is +Y here — so every vertex of a ring

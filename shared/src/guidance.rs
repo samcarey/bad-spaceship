@@ -386,26 +386,31 @@ pub struct Prediction {
     pub escaped: bool,
 }
 
-/// Forward-integrate the ascent law as a **point mass** from a true position + velocity:
-/// thrust of magnitude `thrust_accel` (m/s²) along the guidance direction plus the
-/// planet's radial gravity, until escape, a crash below `floor_radius`, or `max_steps`.
-/// Semi-implicit Euler at `dt`; the path is sampled every `sample_every` steps. Reused by
-/// the trajectory preview (needs `path`) and the optimizer (needs `burn_dv`).
+/// Forward-integrate an ascent as a **point mass** from a true position + velocity under
+/// an arbitrary guidance law: thrust of magnitude `thrust_accel × throttle` (m/s²) along
+/// the commanded direction, plus the planet's radial gravity and drag, until the law cuts
+/// the throttle, a crash below `floor_radius`, or `max_steps`. Semi-implicit Euler at
+/// `dt`; the path is sampled every `sample_every` steps.
 ///
-/// It treats the stack as a point that thrusts exactly along the guidance direction —
+/// The law is a parameter because the two consumers genuinely fly different ones, and
+/// which one you integrate is *visible*: the optimizer ranks angles under the ideal
+/// closed-loop law ([`propagate`]), while the trajectory preview must fly the open-loop
+/// [`PitchProgram`] the autopilot is actually holding ([`propagate_program`]).
+///
+/// It treats the stack as a point that thrusts exactly along the commanded direction —
 /// i.e. it assumes attitude tracks instantly. That's the right fidelity for "where is the
 /// autopilot taking me" and for ranking pitchover angles; the live controller handles the
 /// real attitude lag (and the optimizer's safety backoff covers the difference).
 #[allow(clippy::too_many_arguments)]
-pub fn propagate(
+pub fn propagate_with(
     mut pos: Vec3,
     mut vel: Vec3,
     vehicle: Vehicle,
-    pitchover: f32,
     dt: f32,
     max_steps: usize,
     sample_every: usize,
     floor_radius: f32,
+    mut command: impl FnMut(Vec3, Vec3) -> Guidance,
 ) -> Prediction {
     let mut path = Vec::with_capacity(max_steps / sample_every.max(1) + 2);
     let mut burn_dv = 0.0f32;
@@ -415,19 +420,24 @@ pub fn propagate(
     // still applies.
     let mut cleared_floor = false;
     for step in 0..max_steps {
+        let Guidance { thrust_dir, throttle } = command(pos, vel);
+        // The law cut the engines: the burn is over, which is exactly the end of the
+        // trajectory these callers want (the coast beyond it is a separate preview).
+        // Queried before the sample push so the cut point is recorded once, not twice.
+        if throttle <= 0.0 {
+            path.push(pos);
+            return Prediction { path, burn_dv: Some(burn_dv), escaped: true };
+        }
         if step % sample_every.max(1) == 0 {
             path.push(pos);
         }
-        // Full-throttle ideal law: the loop terminates the moment escape energy is
-        // reached, so the escape cutoff never actually modulates the burn here.
-        let dir = ascent_thrust_dir(pos, vel, pitchover);
         // Drag brakes the climb (mass-independent force ÷ mass = deceleration); the burn
         // has to fight through it, so a draggier ascent naturally takes more steps and
         // more impulse to reach escape (`burn_dv` counts only thrust, as fuel should).
-        let accel = dir * vehicle.thrust_accel
+        let accel = thrust_dir * (vehicle.thrust_accel * throttle)
             + gravity_at(pos)
             + crate::map::drag_force(pos, vel) / vehicle.mass;
-        burn_dv += vehicle.thrust_accel * dt;
+        burn_dv += vehicle.thrust_accel * throttle * dt;
         vel += accel * dt;
         pos += vel * dt;
         // Sank below the (armed) floor before escaping → crashed; fuel-to-escape is
@@ -440,12 +450,66 @@ pub fn propagate(
             path.push(pos);
             return Prediction { path, burn_dv: None, escaped: false };
         }
-        if escape_secured(pos, vel) {
-            path.push(pos);
-            return Prediction { path, burn_dv: Some(burn_dv), escaped: true };
-        }
     }
     Prediction { path, burn_dv: None, escaped: false }
+}
+
+/// Forward-integrate the **ideal** ascent law ([`ascent_thrust_dir`]) at full throttle,
+/// terminating the instant escape is secured. This is the planning model: the optimizer
+/// ranks pitchover angles by the `burn_dv` it reports, and it prices escape at exactly
+/// `E ≥ 0` — no live hysteresis margin, which is a control detail, not a fuel cost.
+#[allow(clippy::too_many_arguments)]
+pub fn propagate(
+    pos: Vec3,
+    vel: Vec3,
+    vehicle: Vehicle,
+    pitchover: f32,
+    dt: f32,
+    max_steps: usize,
+    sample_every: usize,
+    floor_radius: f32,
+) -> Prediction {
+    propagate_with(pos, vel, vehicle, dt, max_steps, sample_every, floor_radius, |p, v| {
+        Guidance {
+            thrust_dir: ascent_thrust_dir(p, v, pitchover),
+            throttle: if escape_secured(p, v) { 0.0 } else { 1.0 },
+        }
+    })
+}
+
+/// Forward-integrate the ascent the autopilot is **actually flying**: the open-loop
+/// [`PitchProgram`] plus its live escape cutoff (hysteresis margin included), from a
+/// mid-flight state. This is what the trajectory line draws.
+///
+/// It is deliberately NOT [`propagate`]. The ideal law steers *prograde* above
+/// [`TURN_SPEED`], so re-running it from the live state bakes the vehicle's current
+/// velocity **direction** into the forecast and integrates that for the whole remaining
+/// burn — every deviation of the real stack from the ideal arc (attitude lag, a realized
+/// thrust above the derated plan) swings the far end of the line and re-draws it somewhere
+/// new on the next replan. Flying the program forecasts the same command schedule the
+/// rocket is holding, so the drawn path only moves as the vehicle's own state moves.
+/// Measured on a TWR-1.3 stack with 1 s of attitude lag: the ideal law wandered its
+/// predicted cutoff point over ~1 km and jumped 45–61 m per half-second replan through the
+/// early climb (~2.5 km and 550 m with the derated-thrust mismatch as well); the program
+/// forecast moved ~1 m per replan.
+#[allow(clippy::too_many_arguments)]
+pub fn propagate_program(
+    pos: Vec3,
+    vel: Vec3,
+    vehicle: Vehicle,
+    program: &PitchProgram,
+    dt: f32,
+    max_steps: usize,
+    sample_every: usize,
+    floor_radius: f32,
+) -> Prediction {
+    // The cutoff is hysteretic, so it carries state across the forecast's steps exactly
+    // as the live autopilot's does across ticks — starting `false` because a preview is
+    // only ever drawn while the engines are still burning.
+    let mut cut = false;
+    propagate_with(pos, vel, vehicle, dt, max_steps, sample_every, floor_radius, move |p, v| {
+        program_guidance(p, v, program, &mut cut)
+    })
 }
 
 /// Point-mass integration step for [`propagate`] / [`optimize_pitchover`] (s). Coarse is
@@ -639,6 +703,94 @@ mod tests {
                  {peak_planned:.0} m",
             );
         }
+    }
+
+    /// Fly `program` the way the real stack does — with first-order attitude lag, at a
+    /// realized thrust above the derated value it was planned against — and return the
+    /// true state every half second of the climb. Both of those are permanent facts about
+    /// the vehicle, not tuning: the plan is deliberately derated to the allocator's lift
+    /// floor, and a physical stack rotates toward a command rather than snapping to it.
+    fn lagged_flight(program: &PitchProgram, planned: Vehicle) -> Vec<(Vec3, Vec3)> {
+        const ATTITUDE_LAG_SECS: f32 = 1.0;
+        let real_thrust = planned.thrust_accel / crate::launch::LIFT_FLOOR;
+        let (mut pos, mut vel) = (Vec3::from_array(program.seed.position), Vec3::ZERO);
+        let (mut aim, mut cut, mut states) = (Vec3::Y, false, Vec::new());
+        for i in 0..OPTIMIZER_STEPS {
+            let g = program_guidance(pos, vel, program, &mut cut);
+            if g.throttle == 0.0 {
+                break;
+            }
+            if i % 5 == 0 {
+                states.push((pos, vel));
+            }
+            aim = (aim + (g.thrust_dir - aim) * (OPTIMIZER_DT / ATTITUDE_LAG_SECS)).normalize();
+            let accel = aim * real_thrust
+                + gravity_at(pos)
+                + crate::map::drag_force(pos, vel) / planned.mass;
+            vel += accel * OPTIMIZER_DT;
+            pos += vel * OPTIMIZER_DT;
+        }
+        states
+    }
+
+    /// The largest step the forecast's end point takes between consecutive replans — i.e.
+    /// how much the drawn trajectory jumps ahead of the rocket while you watch it.
+    fn worst_replan_jump(states: &[(Vec3, Vec3)], forecast: impl Fn(Vec3, Vec3) -> Vec3) -> f32 {
+        states
+            .windows(2)
+            .map(|w| forecast(w[0].0, w[0].1).distance(forecast(w[1].0, w[1].1)))
+            .fold(0.0, f32::max)
+    }
+
+    /// The trajectory line must forecast the program the autopilot is **holding**, not the
+    /// ideal law the optimizer ranked angles with.
+    ///
+    /// Regression for a visibly wandering flight line: the preview re-ran [`propagate`]
+    /// from the live state every half second, and that law steers *prograde* above
+    /// [`TURN_SPEED`] — so it baked the vehicle's current velocity direction into the
+    /// forecast and integrated it over the whole remaining burn. Because a real stack
+    /// deviates from the ideal arc (attitude lag; realized thrust above the derated plan),
+    /// the drawn end point swung by kilometres and landed somewhere new on every replan.
+    /// [`propagate_program`] forecasts the command schedule actually being flown, so it
+    /// moves only as the vehicle's own state does.
+    #[test]
+    fn the_drawn_forecast_holds_still_while_the_ideal_law_wanders() {
+        let g = Vec3::new(0.0, -SURFACE_GRAVITY, 0.0);
+        let (engines, mass) = (4usize, 15.5f32);
+        let start = Vec3::new(0.0, 1.0, 0.0);
+        let planned = Vehicle::derated(engines, g, mass);
+        let program = PitchProgram::plan(start, Vec3::ZERO, engines, g, mass, None);
+        let states = lagged_flight(&program, planned);
+        assert!(states.len() > 20, "need a real climb to watch: {} samples", states.len());
+
+        let end = |p: Prediction| *p.path.last().expect("a non-empty path");
+        let flown = worst_replan_jump(&states, |pos, vel| {
+            end(propagate_program(
+                pos, vel, planned, &program, OPTIMIZER_DT, OPTIMIZER_STEPS, 5, GROUND_RADIUS,
+            ))
+        });
+        let ideal = worst_replan_jump(&states, |pos, vel| {
+            end(propagate(
+                pos, vel, planned, program.seed.pitchover, OPTIMIZER_DT, OPTIMIZER_STEPS, 5,
+                GROUND_RADIUS,
+            ))
+        });
+        // The forecast is allowed to track the vehicle — it just can't leap. The bound is
+        // loose enough to be about the law and not the integrator, and the old behaviour
+        // misses it by a wide margin (measured: ~550 m).
+        assert!(
+            flown < 100.0,
+            "the flown-program forecast jumped {flown:.0} m between replans",
+        );
+        // The contrast is the point: if the two laws ever forecast a lagged flight equally
+        // well, this test has stopped demonstrating why the preview must fly the program
+        // (the client-side twin, `trajectory::the_line_ahead_does_not_leap_on_a_wobble`,
+        // is what pins the call site to it).
+        assert!(
+            ideal > 3.0 * flown,
+            "the ideal law was supposed to be the unstable one, but it jumped {ideal:.0} m \
+             against the program's {flown:.0} m",
+        );
     }
 
     /// A point on the pad, at rest, is deep in the well: energy is very negative.

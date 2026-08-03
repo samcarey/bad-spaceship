@@ -487,7 +487,7 @@ fn show_flight_hud(
         let burning = ap.throttle > 0.0;
         let phase = if !burning {
             "coasting"
-        } else if ap.pitchover.abs() < 0.01 {
+        } else if ap.seed.pitchover.abs() < 0.01 {
             "vertical climb"
         } else if speed < TURN_SPEED {
             "pitchover kick"

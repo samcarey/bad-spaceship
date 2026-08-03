@@ -22,7 +22,9 @@ use avian3d::prelude::{
     AngularVelocity, Collider, ComputedMass, Forces, Gravity, LinearVelocity, Position, Rotation,
     SphericalJoint, WriteRigidBodyForces,
 };
-use bad_spaceship_shared::guidance::{program_guidance, Guidance, PitchProgram, Vehicle};
+use bad_spaceship_shared::guidance::{
+    program_guidance, Guidance, LaunchSeed, PitchProgram, Vehicle,
+};
 use bad_spaceship_shared::launch::{
     assembly_burn, burn_impulse, burn_trace, measure_assembly_spin, AssemblySpin,
     LAUNCH_COUNTDOWN_SECS,
@@ -281,10 +283,26 @@ pub struct AutopilotSnapshot {
     /// The derated point-mass vehicle the plan was optimized for — what the trajectory
     /// preview re-propagates.
     pub vehicle: Vehicle,
-    /// The plan's pitchover angle (rad).
-    pub pitchover: f32,
+    /// The whole planning seed of the launch being flown — the pitchover angle plus the
+    /// state it was sampled from. The trajectory preview needs the seed rather than just
+    /// the angle so it can rebuild the *identical* [`PitchProgram`] the autopilot is
+    /// holding and forecast under that (see `guidance::propagate_program`); an angle alone
+    /// only identifies the ideal law, which is not what gets flown.
+    pub seed: LaunchSeed,
     /// The pitch program's commanded tilt from radial-up at the current speed (rad).
     pub command_angle: f32,
+    /// One member body of the flown assembly and its **raw** local position at this
+    /// fixed step — whichever body the stable `NetPart::id` order puts first.
+    ///
+    /// The trajectory line uses the pair to re-anchor itself onto the pose the rocket is
+    /// actually *drawn* at: predicted bodies are frame-interpolated between fixed ticks
+    /// (`FrameInterpolationPlugin<Position>`, `net.rs`), so by render time the body has
+    /// moved off this raw sample. The line's `follow_rendered_pose` reads the body's
+    /// resulting `Transform` in `PostUpdate` and shifts by the difference — which is why
+    /// the raw value has to be captured *here*, in `FixedUpdate`, before interpolation
+    /// touches it. Bundled as one field because they are only meaningful together: the
+    /// entity says *which* body, the position says where it was beforehand.
+    pub anchor: Option<(Entity, Vec3)>,
     /// Guidance throttle after the escape cutoff: `0.0` = engines cut, coasting.
     pub throttle: f32,
     /// Current aerodynamic drag on the assembly (N).
@@ -307,6 +325,7 @@ impl AutopilotSnapshot {
         gravity: Vec3,
         total_mass: f32,
         program: &PitchProgram,
+        anchor: Option<(Entity, Vec3)>,
         throttle: f32,
         net_force: Vec3,
     ) -> Self {
@@ -315,8 +334,9 @@ impl AutopilotSnapshot {
             frame_offset,
             true_vel,
             vehicle: Vehicle::derated(engines, gravity, total_mass),
-            pitchover: program.seed.pitchover,
+            seed: program.seed,
             command_angle: program.angle_at(true_vel.length()),
+            anchor,
             throttle,
             drag: bad_spaceship_shared::map::drag_force(true_pos.as_vec3(), true_vel).length(),
             net_thrust: net_force.length(),
@@ -823,6 +843,7 @@ fn apply_sp_thrust(
             gravity.0,
             total_mass,
             program,
+            geometry.first().map(|(entity, position, ..)| (*entity, *position)),
             guidance.throttle,
             net_force,
         )
@@ -1056,6 +1077,7 @@ fn apply_mp_thrust(
             gravity.0,
             total_mass,
             program,
+            geometry.first().map(|(entity, position, ..)| (*entity, *position)),
             guidance.throttle,
             net_force,
         )
