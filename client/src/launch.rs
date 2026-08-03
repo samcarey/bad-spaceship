@@ -295,12 +295,13 @@ pub struct AutopilotSnapshot {
     /// fixed step — whichever body the stable `NetPart::id` order puts first.
     ///
     /// The trajectory line uses the pair to re-anchor itself onto the pose the rocket is
-    /// actually *drawn* at. Predicted bodies are frame-interpolated between fixed ticks
-    /// (`FrameInterpolationPlugin<Position>`, `net.rs`), which writes the interpolated
-    /// value into `Position` itself for the render frame — so comparing that against this
-    /// raw sample measures the render offset directly. Bundled as one field because they
-    /// are only meaningful together: the entity says *which* body, the position says where
-    /// it was before interpolation moved it.
+    /// actually *drawn* at: predicted bodies are frame-interpolated between fixed ticks
+    /// (`FrameInterpolationPlugin<Position>`, `net.rs`), so by render time the body has
+    /// moved off this raw sample. The line's `follow_rendered_pose` reads the body's
+    /// resulting `Transform` in `PostUpdate` and shifts by the difference — which is why
+    /// the raw value has to be captured *here*, in `FixedUpdate`, before interpolation
+    /// touches it. Bundled as one field because they are only meaningful together: the
+    /// entity says *which* body, the position says where it was beforehand.
     pub anchor: Option<(Entity, Vec3)>,
     /// Guidance throttle after the escape cutoff: `0.0` = engines cut, coasting.
     pub throttle: f32,

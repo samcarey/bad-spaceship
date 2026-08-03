@@ -45,11 +45,11 @@
 //! the smog it is about to climb out of — while still depth-tested, so the planet properly
 //! occludes the far side of an orbit-scale arc.
 
+use avian3d::prelude::PhysicsSystems;
 use bad_spaceship_shared::guidance::{
     propagate_program, PitchProgram, GROUND_RADIUS, OPTIMIZER_DT, OPTIMIZER_STEPS,
 };
 use bad_spaceship_shared::map::{drag_force, gravity_at, radial_altitude, PLANET_CENTER};
-use avian3d::prelude::PhysicsSystems;
 use bevy::{
     asset::RenderAssetUsages,
     camera::visibility::NoFrustumCulling,
