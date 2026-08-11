@@ -27,6 +27,17 @@
 //! only *smooth* that snap — the line would still be a stale forecast, lagging rather than
 //! jumping. Removing the staleness is the fix; smoothing it is makeup.
 //!
+//! **The trail is continuity-gated.** The forecast half is rebuilt from scratch every frame,
+//! so a bad frame is gone the next one — but the trail is a *recording*, and a single
+//! glitch frame would bake a km-scale spike into the past that never happened and leave it
+//! there for the rest of the flight. A candidate point is therefore dropped unless its jump
+//! from the previous frame is within [`TRAIL_JUMP_SLACK`]·speed·dt + [`TRAIL_JUMP_FLOOR`].
+//! Real motion is exactly speed·dt, so that is generous headroom, while a rollback replay or
+//! a one-frame floating-origin `offset`↔`com` desync in multiplayer (the replicated frame
+//! offset updates a tick before the predicted centre of mass catches up, so the true position
+//! appears to teleport, then snaps back) is rejected. Gating the *true* position is what
+//! makes this safe: a real rebase leaves it continuous by construction.
+//!
 //! The line is **transparent where you are**: fully clear inside [`FADE_HOLD_M`] of
 //! path length either side of the vehicle, then ramping to full over the next
 //! [`FADE_RAMP_M`], so the tube never paints over the rocket you are watching (or the
@@ -96,6 +107,13 @@ const COAST_SAMPLE_EVERY: usize = 4;
 /// the pad and sparse (but never empty) across a thousand-kilometre coast.
 const MAX_TRAIL: usize = 4096;
 const TRAIL_MIN_STEP: f64 = 2.0;
+
+/// A trail candidate is rejected as a glitch when its jump from the previous frame exceeds
+/// `speed·dt·SLACK + FLOOR` (see the module doc). Real motion is exactly `speed·dt`, so the
+/// slack is 5× headroom at every speed, and the floor keeps slow/near-stationary frames —
+/// where `speed·dt` is a few centimetres — from rejecting ordinary jitter.
+const TRAIL_JUMP_SLACK: f64 = 5.0;
+const TRAIL_JUMP_FLOOR: f64 = 100.0;
 
 /// Line thickness: tube radius as a fraction of the camera distance (so it holds a
 /// roughly constant on-screen width from the pad to a plan-end tens of km up), floored so
@@ -182,11 +200,14 @@ fn spawn_trajectory_line(
 /// state (see the module doc for the trail/preview policy).
 fn update_flight_path(
     autopilot: Res<Autopilot>,
+    time: Res<Time>,
     mut path: ResMut<FlightPath>,
     // The pitch program being flown, rebuilt only when the launch's planning seed changes
     // (i.e. once per launch): sampling the table walks the whole ideal ascent, so
     // rebuilding it every frame would dominate the preview's cost for an identical answer.
     mut flown: Local<Option<PitchProgram>>,
+    // Last frame's true position, for the trail continuity gate below.
+    mut prev_pos: Local<Option<DVec3>>,
 ) {
     let Some(snap) = autopilot.0.as_ref() else {
         // Launch over (or broke up): clear everything so the next launch starts fresh.
@@ -194,21 +215,30 @@ fn update_flight_path(
             *path = FlightPath::default();
         }
         *flown = None;
+        *prev_pos = None;
         return;
     };
 
-    // Trail: append when we've moved a step past the last record; thin by halving when
-    // full (doubles the record's spacing everywhere — the ribbon just spans the wider
-    // gaps, so it stays continuous).
-    let step = (radial_altitude(snap.true_pos.as_vec3()) as f64 * 0.01).max(TRAIL_MIN_STEP);
-    if path.trail.last().is_none_or(|last| last.distance(snap.true_pos) >= step) {
-        path.trail.push(snap.true_pos);
-        if path.trail.len() > MAX_TRAIL {
-            let mut keep = false;
-            path.trail.retain(|_| {
-                keep = !keep;
-                keep
-            });
+    // Trail: only record on a frame whose motion is physically plausible (see the module
+    // doc) — a glitch frame is skipped rather than written into the past for good.
+    let plausible = snap.true_vel.length() as f64 * time.delta_secs() as f64 * TRAIL_JUMP_SLACK
+        + TRAIL_JUMP_FLOOR;
+    let continuous = prev_pos.is_none_or(|last| last.distance(snap.true_pos) <= plausible);
+    *prev_pos = Some(snap.true_pos);
+    if continuous {
+        // Append when we've moved a step past the last record; thin by halving when full
+        // (doubles the record's spacing everywhere — the tube just spans the wider gaps,
+        // so it stays continuous).
+        let step = (radial_altitude(snap.true_pos.as_vec3()) as f64 * 0.01).max(TRAIL_MIN_STEP);
+        if path.trail.last().is_none_or(|last| last.distance(snap.true_pos) >= step) {
+            path.trail.push(snap.true_pos);
+            if path.trail.len() > MAX_TRAIL {
+                let mut keep = false;
+                path.trail.retain(|_| {
+                    keep = !keep;
+                    keep
+                });
+            }
         }
     }
 
@@ -587,7 +617,8 @@ mod tests {
         let vel = Vec3::new(20.0, 280.0, 0.0);
 
         let mut app = App::new();
-        app.init_resource::<FlightPath>()
+        app.init_resource::<Time>()
+            .init_resource::<FlightPath>()
             .init_resource::<Autopilot>()
             .add_systems(Update, update_flight_path);
 
@@ -617,6 +648,62 @@ mod tests {
                 "frame {frame}: the forecast starts {stale:.2} m from the rocket",
             );
         }
+    }
+
+    /// One glitch frame must not be written into the flown trail.
+    ///
+    /// The forecast half is rebuilt from scratch every frame, so a bad frame there is gone
+    /// the next one — but the trail is a recording, and an ungated push leaves a km-scale
+    /// spike in the past for the rest of the flight. This flies straight up, teleports the
+    /// vehicle 2 km sideways for exactly one frame (the shape of a rollback replay or an MP
+    /// `offset`↔`com` desync), and demands the trail stay within the real flight.
+    #[test]
+    fn a_single_glitch_frame_never_enters_the_trail() {
+        use bad_spaceship_shared::map::SURFACE_GRAVITY;
+
+        let gravity = Vec3::new(0.0, -SURFACE_GRAVITY, 0.0);
+        let (engines, mass) = (4usize, 15.5f32);
+        let seed =
+            PitchProgram::plan(Vec3::new(0.0, 1.0, 0.0), Vec3::ZERO, engines, gravity, mass, None)
+                .seed;
+        let vel = Vec3::new(0.0, 300.0, 0.0);
+
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<FlightPath>()
+            .init_resource::<Autopilot>()
+            .add_systems(Update, update_flight_path);
+
+        let dt = 1.0 / 60.0;
+        let mut pos = DVec3::new(0.0, 3000.0, 0.0);
+        for frame in 0..20 {
+            pos += vel.as_dvec3() * dt as f64;
+            // One frame reports a 2 km sideways teleport, then the state is sane again.
+            let reported = if frame == 10 { pos + DVec3::new(2000.0, 0.0, 0.0) } else { pos };
+            app.world_mut().resource_mut::<Autopilot>().0 = Some(AutopilotSnapshot {
+                true_pos: reported,
+                frame_offset: DVec3::ZERO,
+                true_vel: vel,
+                vehicle: seed.vehicle,
+                seed,
+                command_angle: 0.0,
+                anchor: None,
+                throttle: 1.0,
+                drag: 0.0,
+                net_thrust: 0.0,
+            });
+            app.update();
+        }
+
+        // The flight never left the +Y axis, so any recorded sideways offset is the glitch.
+        let strayed = app
+            .world()
+            .resource::<FlightPath>()
+            .trail
+            .iter()
+            .map(|p| p.x.abs())
+            .fold(0.0f64, f64::max);
+        assert!(strayed < 1.0, "a one-frame teleport put a point {strayed:.0} m off the flight");
     }
 
     /// Ring centres and their alpha, for a path built along +Y. The ring offsets are
