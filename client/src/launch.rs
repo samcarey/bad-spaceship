@@ -31,8 +31,9 @@ use bad_spaceship_shared::launch::{
 };
 use bad_spaceship_shared::map::apply_gravity_correction;
 use bad_spaceship_shared::net::{
-    part_volume, rebase_room_frame, weighted_anchor, ControlChannel, InLargestAssembly, NetLaunch,
-    NetLockJoint, NetPart, NetPlayer, NetRoomFrame, RequestLaunch, SetLocked,
+    part_volume, rebase_room_frame, weighted_anchor, ControlChannel, InLargestAssembly, NetJoint,
+    NetLaunch, NetLockJoint, NetPart, NetPlayer, NetRoomFrame, RequestLaunch, SetLocked,
+    GROUND_JOINT_ID,
 };
 use bad_spaceship_shared::part::{
     avatar_lock_contacts, capsule_bottom_center, cleanup_lock_joints, despawn_player_lock_welds,
@@ -103,6 +104,10 @@ impl Plugin for LaunchPlugin {
                     // world-space force targets for this tick, and a target computed
                     // pre-shift but applied post-shift is a km-scale lever arm.
                     predict_room_rebase.run_if(resource_exists::<SuppressLocalParts>),
+                    // Let the pad go on the scheduled tick, before this tick's thrust —
+                    // the predicted twin of the server's `fire_scheduled_launches`.
+                    release_predicted_ground_joints
+                        .run_if(resource_exists::<SuppressLocalParts>),
                     // Zero every rocket's flame target first: only rockets the burn
                     // below actually fires this tick read back non-zero (a rocket
                     // that breaks off the assembly goes dark).
@@ -453,6 +458,45 @@ pub(crate) fn launch_armed(local: &LaunchLocal, net_launch: &Query<&NetLaunch>) 
             .iter()
             .next()
             .is_some_and(|l| l.launched || l.remaining > 0.0)
+}
+
+/// Release the client's *predicted* ground joints on the scheduled blastoff tick — the
+/// predicted twin of the server's [`fire_scheduled_launches`], and the other half of
+/// making liftoff tick-exact.
+///
+/// `bind_replicated_joints` rebuilds every replicated joint as **real Avian physics** in
+/// the predicted world, ground clamps included (they name the local ground through the
+/// `GROUND_JOINT_ID` sentinel). The server cuts those at blastoff by despawning the joint
+/// entities — but that is replication, so it arrives ~1 RTT later. Until it did, the client
+/// spent the opening ticks of every flight firing its engines against a pad clamp the
+/// server had already released: not merely a late burn, but the two sims solving a
+/// *different set of constraints*, which is the worst shape of prediction disagreement.
+///
+/// Only the constraint is dropped, never the entity — it is server-owned and replicated,
+/// and despawning it locally would fight replication. `bind_replicated_joints` cannot
+/// re-add it either: that is gated on `Without<JointAnchorBody>`, and the marker stays.
+///
+/// A rollback that replays ticks from before blastoff replays them without the clamp,
+/// since the removal is structural rather than per-tick state. That is harmless here: the
+/// assembly is at rest on the pad in those ticks, and the server is about to cut the same
+/// joint on the same tick anyway.
+fn release_predicted_ground_joints(
+    mut commands: Commands,
+    timeline: Res<lightyear::prelude::LocalTimeline>,
+    orb: Query<&NetLaunch>,
+    joints: Query<(Entity, &NetJoint), With<SphericalJoint>>,
+) {
+    let Some(launch) = orb.iter().next() else {
+        return;
+    };
+    if !launch.launched_at(timeline.tick()) {
+        return;
+    }
+    for (entity, joint) in &joints {
+        if joint.body1 == GROUND_JOINT_ID || joint.body2 == GROUND_JOINT_ID {
+            commands.entity(entity).remove::<SphericalJoint>();
+        }
+    }
 }
 
 /// Advance the single-player countdown + the blastoff banner, and detect the multiplayer
@@ -918,7 +962,10 @@ fn apply_mp_thrust(
     // can be diffed at the SAME tick number instead of inferred by elimination.
     timeline: Res<lightyear::prelude::LocalTimeline>,
 ) {
-    let Some(launch) = orb.iter().next().filter(|l| l.launched) else {
+    // Tick-exact, NOT the replicated `launched` level: the level is replicate-only, so
+    // reading it here started the predicted burn ~4 ticks after the server's with nothing
+    // to replay the gap (see `NetLaunch::launched_at`).
+    let Some(launch) = orb.iter().next().filter(|l| l.launched_at(timeline.tick())) else {
         fuel.0 = 0.0; // idle: keep the readout at zero until the room launches
         *mp_plan = None; // re-plan on the next launch
         *cut = false; // reset the cutoff hysteresis for the next launch
