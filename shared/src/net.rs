@@ -387,7 +387,8 @@ pub struct NetLaunch {
     /// and wrong for physics — see [`launched_at`](Self::launched_at).
     pub launched: bool,
     /// The tick blastoff fires on, scheduled when the countdown arms and replicated
-    /// ~180 ticks ahead of it. This is what makes liftoff tick-exact on every peer:
+    /// [`LAUNCH_COUNTDOWN_TICKS`] (188) ahead of it. This is what makes liftoff
+    /// tick-exact on every peer:
     /// the countdown gives everyone the answer long before the moment, so the client
     /// starts its burn (and cuts its predicted ground joints) on the *same* tick as
     /// the server instead of reacting to `launched` arriving late. `None` for a room
@@ -416,15 +417,19 @@ impl NetLaunch {
     /// Whether the engines are firing **at `tick`** — the predicate every physics site
     /// must use, on the server and on each predicted client alike.
     ///
-    /// The point is that this is a pure function of a tick and a value replicated ~180
-    /// ticks in advance, so both peers answer identically without either waiting to be
-    /// told. Reading the `launched` *level* instead is what made the client start its
-    /// burn **~4 ticks late, every single run**: the level is replicate-only (no
-    /// `.predict()`), so nothing ever replayed the missed ticks and the flight opened
-    /// with a fixed 0.1997 m/s velocity deficit (exactly 4 × the 0.04995 m/s a tick of
-    /// thrust adds — which is how the lag was first identified) plus a 4-tick-late
-    /// escape cutoff. Rollback absorbed the transient over ~100 ticks; it should never
-    /// have existed.
+    /// The point is that this is a pure function of a tick and a value replicated
+    /// [`LAUNCH_COUNTDOWN_TICKS`] in advance, so both peers answer identically without
+    /// either waiting to be told.
+    ///
+    /// Reading the `launched` *level* instead is what made the client start its burn
+    /// **late on every single flight**: the level is replicate-only (no `.predict()`), so
+    /// nothing ever replayed the missed ticks. How late depends on the link — measured at
+    /// 4 ticks on the campaign's setup (a fixed 0.1997 m/s velocity deficit, exactly 4 ×
+    /// the 0.04995 m/s a tick of thrust adds, which is how the lag was first identified)
+    /// and at 1–2 ticks over loopback, where it was still late every run and still
+    /// varied. Rollback absorbed the transient over ~100 ticks; it should never have
+    /// existed. Note the deficit is not the whole cost — the client also held its
+    /// predicted ground clamps for those ticks (see `release_predicted_ground_joints`).
     ///
     /// The tick delta is a wrapping `i32` (lightyear's `Tick` is a wrapping `u32`), so
     /// this stays correct across the counter's wrap and while a rollback replays ticks

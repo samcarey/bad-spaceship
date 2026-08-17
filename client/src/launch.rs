@@ -963,8 +963,8 @@ fn apply_mp_thrust(
     timeline: Res<lightyear::prelude::LocalTimeline>,
 ) {
     // Tick-exact, NOT the replicated `launched` level: the level is replicate-only, so
-    // reading it here started the predicted burn ~4 ticks after the server's with nothing
-    // to replay the gap (see `NetLaunch::launched_at`).
+    // reading it here started the predicted burn a link-dependent number of ticks after
+    // the server's, with nothing to replay the gap (see `NetLaunch::launched_at`).
     let Some(launch) = orb.iter().next().filter(|l| l.launched_at(timeline.tick())) else {
         fuel.0 = 0.0; // idle: keep the readout at zero until the room launches
         *mp_plan = None; // re-plan on the next launch
