@@ -2836,8 +2836,13 @@ fn handle_launch_requests(
                 // Schedule blastoff on a definite tick and replicate it now. Every client
                 // learns the moment ~`LAUNCH_COUNTDOWN_TICKS` ahead of it, which is what
                 // lets them fire on the same tick instead of on a late-arriving flag.
-                registry.by_room.entry(room).or_insert(RoomLaunch::Counting {
-                    blastoff_tick: timeline.tick() + LAUNCH_COUNTDOWN_TICKS,
+                registry.by_room.entry(room).or_insert_with(|| {
+                    let blastoff_tick = timeline.tick() + LAUNCH_COUNTDOWN_TICKS;
+                    println!(
+                        "[launch] room {room:?} armed at tick {:?} -> blastoff at {blastoff_tick:?}",
+                        timeline.tick()
+                    );
+                    RoomLaunch::Counting { blastoff_tick }
                 });
             }
         }
@@ -2873,13 +2878,19 @@ fn fire_scheduled_launches(
             continue;
         }
         *launch = RoomLaunch::Launched;
+        let mut cut = 0;
         for (entity, joint, member) in &joints {
             if member.0 == room
                 && (joint.body1 == GROUND_JOINT_ID || joint.body2 == GROUND_JOINT_ID)
             {
                 commands.entity(entity).despawn();
+                cut += 1;
             }
         }
+        println!(
+            "[launch] room {room:?} blastoff at tick {now:?} (scheduled {blastoff_tick:?}, \
+             slip {elapsed}) — cut {cut} ground joints"
+        );
     }
 }
 
