@@ -28,7 +28,7 @@ use avian3d::prelude::{
 use bad_spaceship_shared::assembly::largest_assembly_per_room;
 use bad_spaceship_shared::guidance::{program_guidance, PitchProgram};
 use bad_spaceship_shared::launch::{
-    assembly_burn, burn_impulse, measure_assembly_spin, LAUNCH_COUNTDOWN_SECS,
+    assembly_burn, burn_impulse, measure_assembly_spin,
 };
 use bad_spaceship_shared::character::{
     apparent_up, drive_felt_up, spawn_position, CharacterMovement, FeltUp, InitialPose,
@@ -40,8 +40,8 @@ use bad_spaceship_shared::net::{
     NetFacing, NetHold,
     NetInput, NetJoint, NetLaunch, NetLockJoint, NetMoving, NetName, NetPart, NetPlayer,
     NetRoomFrame, PartShape, ProtocolPlugin, RequestLaunch, ResetPosition, ResetRoom,
-    RollbackReport, SaveGame, SetAvatar, SetLocked, SetName, GROUND_JOINT_ID, MONSTER_COUNT,
-    REBASE_TRIGGER_M, TICK,
+    RollbackReport, SaveGame, SetAvatar, SetLocked, SetName, GROUND_JOINT_ID,
+    LAUNCH_COUNTDOWN_TICKS, MONSTER_COUNT, REBASE_TRIGGER_M, TICK,
 };
 use bad_spaceship_shared::map::{
     apply_assembly_drag, apply_gravity_correction, radial_altitude, GROUND_LAYER, PLANET_CENTER,
@@ -544,10 +544,7 @@ impl Plugin for NetServerPlugin {
         // Rocket launch: accept a client's launch request for its room, run that room's
         // countdown, and at blastoff cut the assembly's ground joints. Publishing the
         // countdown into each room's orb `NetLaunch` lets every client draw the banner.
-        app.add_systems(
-            Update,
-            (handle_launch_requests, tick_room_launches, publish_room_launch).chain(),
-        );
+        app.add_systems(Update, (handle_launch_requests, publish_room_launch).chain());
         // Session resume: continuously remember live avatars' positions (the reconnect
         // restore itself happens at connect, in `spawn_player_for_client`).
         app.add_systems(Update, record_resume_positions);
@@ -586,6 +583,10 @@ impl Plugin for NetServerPlugin {
                     .after(apply_net_input)
                     .before(CharacterMovement),
                 (server_grab, server_hold, server_attach, server_delete).chain(),
+                // Blastoff itself is a tick event: fire on the scheduled tick and cut the
+                // ground joints, immediately before the thrust that same tick, so liftoff
+                // is one atomic moment the client can land on exactly.
+                fire_scheduled_launches.before(apply_room_rocket_thrust),
                 // Balanced rocket thrust for launched rooms — a continuous force, so it
                 // runs per physics tick like the hold spring.
                 apply_room_rocket_thrust,
@@ -2705,11 +2706,17 @@ fn mark_largest_assembly(
 // applies the same thrust to its predicted rockets (smooth liftoff, minimal rollback).
 
 /// Per-room launch state, keyed by `RoomId`. A room is absent until launch is requested;
-/// `Counting` runs the pre-blastoff countdown, then `Launched` fires the rockets for the
-/// rest of the session.
+/// `Counting` holds the **tick** blastoff will fire on, then `Launched` fires the rockets
+/// for the rest of the session.
+///
+/// The countdown is a scheduled tick rather than a decrementing float because the client
+/// has to reach the same conclusion on the same tick without being told (see
+/// [`NetLaunch::launched_at`]). A float ticking down in `Update` also made the moment
+/// frame-rate dependent on the server itself — it fired on whatever fixed tick happened
+/// to follow the frame that crossed zero.
 #[derive(Clone, Copy)]
 enum RoomLaunch {
-    Counting { remaining: f32 },
+    Counting { blastoff_tick: Tick },
     Launched,
 }
 
@@ -2786,6 +2793,7 @@ fn handle_launch_requests(
     mut registry: ResMut<LaunchRegistry>,
     mut fuel: ResMut<RoomFuel>,
     mut policies: ResMut<RoomPolicy>,
+    timeline: Res<LocalTimeline>,
 ) {
     for (link, mut receiver) in &mut links {
         if receiver.receive().count() == 0 {
@@ -2825,45 +2833,64 @@ fn handle_launch_requests(
                     fuel.0.insert(room, 0.0);
                     policies.0.remove(&room);
                 }
-                registry
-                    .by_room
-                    .entry(room)
-                    .or_insert(RoomLaunch::Counting { remaining: LAUNCH_COUNTDOWN_SECS });
+                // Schedule blastoff on a definite tick and replicate it now. Every client
+                // learns the moment ~`LAUNCH_COUNTDOWN_TICKS` ahead of it, which is what
+                // lets them fire on the same tick instead of on a late-arriving flag.
+                registry.by_room.entry(room).or_insert_with(|| {
+                    let blastoff_tick = timeline.tick() + LAUNCH_COUNTDOWN_TICKS;
+                    println!(
+                        "[launch] room {room:?} armed at tick {:?} -> blastoff at {blastoff_tick:?}",
+                        timeline.tick()
+                    );
+                    RoomLaunch::Counting { blastoff_tick }
+                });
             }
         }
     }
 }
 
-/// Advance each room's countdown; at blastoff flip it to `Launched` and cut every joint
-/// pinning that room's assembly to the ground. Ground joints are identified
+/// Fire each room whose scheduled blastoff tick has arrived: flip it to `Launched` and cut
+/// every joint pinning that room's assembly to the ground. Ground joints are identified
 /// **positively** by the `GROUND_JOINT_ID` sentinel their replicated `NetJoint`
 /// carries (every server joint goes through `spawn_room_joint`) — not by "endpoint
 /// isn't a part", which would silently sever every future non-part joint class at
 /// blastoff (it already would have cut player-lock welds, severing riders at the
 /// exact moment of liftoff). Part-to-part joints and lock welds stay intact.
-fn tick_room_launches(
-    time: Res<Time>,
+///
+/// Runs in `FixedUpdate` **before** [`apply_room_rocket_thrust`], so the first tick that is
+/// at or past the schedule is both the tick the ground joints let go and the tick the
+/// engines light — one moment, not two. (This used to decrement a float in `Update`, which
+/// left blastoff landing on whatever fixed tick happened to follow the frame that crossed
+/// zero — frame-rate dependent on the server, and impossible for a client to match.)
+fn fire_scheduled_launches(
+    timeline: Res<LocalTimeline>,
     mut commands: Commands,
     mut registry: ResMut<LaunchRegistry>,
     joints: Query<(Entity, &NetJoint, &RoomMember)>,
 ) {
-    let dt = time.delta_secs();
+    let now = timeline.tick();
     for (&room, launch) in registry.by_room.iter_mut() {
-        let RoomLaunch::Counting { remaining } = launch else {
+        let RoomLaunch::Counting { blastoff_tick } = *launch else {
             continue;
         };
-        *remaining -= dt;
-        if *remaining > 0.0 {
+        let elapsed: i32 = now - blastoff_tick;
+        if elapsed < 0 {
             continue;
         }
         *launch = RoomLaunch::Launched;
+        let mut cut = 0;
         for (entity, joint, member) in &joints {
             if member.0 == room
                 && (joint.body1 == GROUND_JOINT_ID || joint.body2 == GROUND_JOINT_ID)
             {
                 commands.entity(entity).despawn();
+                cut += 1;
             }
         }
+        println!(
+            "[launch] room {room:?} blastoff at tick {now:?} (scheduled {blastoff_tick:?}, \
+             slip {elapsed}) — cut {cut} ground joints"
+        );
     }
 }
 
@@ -2873,18 +2900,35 @@ fn tick_room_launches(
 fn publish_room_launch(
     registry: Res<LaunchRegistry>,
     policies: Res<RoomPolicy>,
+    timeline: Res<LocalTimeline>,
     mut orbs: Query<(&RoomStateOf, &mut NetLaunch)>,
 ) {
+    let now = timeline.tick();
     for (orb_room, mut launch) in &mut orbs {
         // The optimizer's whole ascent seed rides along (default — straight up — until
         // the first launched tick computes it) so the predicted client rebuilds the
         // byte-identical pitch program instead of re-planning from its own state.
         let plan = policies.0.get(&orb_room.0).map(|program| program.seed).unwrap_or_default();
         let next = match registry.by_room.get(&orb_room.0) {
-            Some(RoomLaunch::Counting { remaining }) => {
-                NetLaunch { remaining: remaining.max(0.0), launched: false, plan }
+            Some(RoomLaunch::Counting { blastoff_tick }) => {
+                // The banner reads off the schedule too, so the digits and the engines
+                // can't disagree about when zero is.
+                let ticks_left: i32 = *blastoff_tick - now;
+                NetLaunch {
+                    remaining: (ticks_left.max(0) as f32 * TICK.as_secs_f32()).max(0.0),
+                    launched: false,
+                    blastoff_tick: Some(blastoff_tick.0),
+                    plan,
+                }
             }
-            Some(RoomLaunch::Launched) => NetLaunch { remaining: 0.0, launched: true, plan },
+            Some(RoomLaunch::Launched) => NetLaunch {
+                remaining: 0.0,
+                launched: true,
+                // Kept past blastoff: `launched_at` needs the schedule for the whole
+                // flight, including while a rollback replays ticks either side of it.
+                blastoff_tick: launch.blastoff_tick,
+                plan,
+            },
             None => NetLaunch::default(),
         };
         launch.set_if_neq(next);

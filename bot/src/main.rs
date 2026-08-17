@@ -41,8 +41,8 @@
 use avian3d::prelude::Position;
 use bad_spaceship_shared::time_scale;
 use bad_spaceship_shared::net::{
-    resume_user_data, room_code_bytes, ControlChannel, NetInput, NetPart, NetPlayer, PartShape,
-    ProtocolPlugin, RequestLaunch, ResetRoom, SetLocked, BS_PROTOCOL_ID, TICK,
+    resume_user_data, room_code_bytes, ControlChannel, NetInput, NetLaunch, NetPart, NetPlayer,
+    PartShape, ProtocolPlugin, RequestLaunch, ResetRoom, SetLocked, BS_PROTOCOL_ID, TICK,
 };
 use bevy::{app::ScheduleRunnerPlugin, prelude::*};
 use lightyear::netcode::ConnectToken;
@@ -125,7 +125,42 @@ fn main() {
         FixedPreUpdate,
         write_input.in_set(ClientInputSystems::WriteClientInputs),
     );
+    if bad_spaceship_shared::launch::burn_trace() {
+        app.add_systems(FixedUpdate, trace_blastoff_tick);
+    }
     app.run();
+}
+
+/// `BS_BURN_TRACE`: report, from a **real client's** timeline, the tick blastoff is due on
+/// versus the tick the replicated `launched` level actually arrives.
+///
+/// The bot runs no physics, but this measurement does not need any — it needs a peer with
+/// its own synced `LocalTimeline` and the replicated `NetLaunch`, which is exactly what a
+/// bot is. The gap between the two printed ticks IS the lag that used to open every
+/// flight: a client gating its burn on the level starts that many ticks after the server,
+/// with nothing to replay the difference. Gating on the schedule makes the first number
+/// match the server's blastoff tick exactly, no matter how late the second one lands.
+fn trace_blastoff_tick(
+    timeline: Res<lightyear::prelude::LocalTimeline>,
+    launch: Query<&NetLaunch>,
+    mut reported_due: Local<bool>,
+    mut reported_flag: Local<bool>,
+) {
+    let Some(state) = launch.iter().next() else {
+        return;
+    };
+    let tick = timeline.tick();
+    if !*reported_due && state.launched_at(tick) {
+        *reported_due = true;
+        println!(
+            "[sched] C scheduled={:?} fires_at_tick={tick:?}",
+            state.blastoff_tick
+        );
+    }
+    if !*reported_flag && state.launched {
+        *reported_flag = true;
+        println!("[sched] C launched-level arrived at tick={tick:?}");
+    }
 }
 
 /// Open the connection: the same dev connect token the game client builds
