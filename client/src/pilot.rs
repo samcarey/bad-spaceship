@@ -1,9 +1,21 @@
 //! Flying the rocket: the pilot's stick, and the chase camera it is flown from.
 //!
-//! Whoever presses Launch flies the ascent (`NetLaunch::pilot`). From blastoff until the
-//! room stops flying, that player's view snaps to a chase camera behind the craft and the
-//! whole screen becomes a joystick: touch anywhere and a stick appears under your thumb,
-//! push it, and the flight bends. Let go and the autopilot has it back on the next tick.
+//! Whoever presses Launch flies the ascent — for as long as they stay welded to it
+//! (`NetLaunch::pilot`; unlock and the server hands the stick to the next rider). From
+//! blastoff until the room stops flying, that player's view snaps to a chase camera behind
+//! the craft and their **movement stick becomes the steering stick**: push it and the
+//! flight bends, let go and the autopilot has it back on the next tick.
+//!
+//! The **look stick keeps looking**. It swings the chase camera around the craft while it
+//! is held and drifts back to dead astern when released, so a pilot can check their flank
+//! without giving up the default view or having to fly it back. It is a camera offset and
+//! nothing else — where you look has no bearing on where you steer, which is what lets both
+//! thumbs do their own job at once.
+//!
+//! Reusing the movement stick is deliberate: a locked rider cannot walk, so it and the
+//! keyboard and the gamepad's left stick have nothing else to mean during a flight. Routing
+//! them here gets touch, desktop and controller steering from one path — no second input
+//! scheme to keep in sync, and no controls to learn.
 //!
 //! **The stick steers the autopilot's command, it does not replace it.** The deflection is
 //! folded into the guidance direction in `shared::guidance::steer_guidance`, upstream of
@@ -21,15 +33,15 @@
 
 use bad_spaceship_shared::guidance::flight_frame;
 use bad_spaceship_shared::net::NetLaunch;
-use bad_spaceship_shared::{DirectionalInput, OrbitingCamera, PlayerCameraOrbitCenter};
+use bad_spaceship_shared::{
+    DirectionalInput, InputEvents, MouseMotionDelta, OrbitingCamera, PlayerCameraOrbitCenter,
+};
 use bevy::prelude::*;
-use bevy::window::PrimaryWindow;
-use bevy_egui::{egui, EguiContexts};
 use lightyear::prelude::{Connected, LocalId};
 
+use crate::input::get_look;
 use crate::launch::{Autopilot, LaunchLocal};
 use crate::net::my_netcode_id;
-use crate::ui::EguiDrawSystems;
 
 pub struct PilotPlugin;
 
@@ -37,20 +49,21 @@ impl Plugin for PilotPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<AtTheControls>()
             .init_resource::<PilotStick>()
+            .init_resource::<PilotLook>()
             .add_systems(
                 Update,
                 (
                     take_the_controls,
                     read_pilot_stick,
+                    // After every writer of the look delta — the mouse (`get_look`) and the
+                    // touch look-stick (`mobile::apply_pointer`, in `InputEvents`) — since
+                    // it is a per-frame rate that the last writer wins.
+                    read_pilot_look.after(get_look).after(InputEvents),
                     // Mount/unmount is a structural change (the camera leaves and rejoins
                     // the avatar's orbit rig), so it follows the state it reacts to.
                     mount_pilot_camera,
                 )
                     .chain(),
-            )
-            .add_systems(
-                bevy_egui::EguiPrimaryContextPass,
-                draw_pilot_stick.in_set(EguiDrawSystems),
             )
             // Same slot as the trajectory line's `follow_rendered_pose`, and for the same
             // reason: the pose the camera must sit behind only exists after frame
@@ -79,36 +92,40 @@ pub fn piloting(controls: Res<AtTheControls>) -> bool {
     controls.0
 }
 
-/// The pilot's stick this frame.
-///
-/// `value` is what flies: `[right, up]` on the screen, clamped to the unit disc, in the
-/// planet-relative [`flight_frame`]. `origin`/`knob` exist only to draw it.
+/// The pilot's steering deflection this frame: `[right, up]`, clamped to the unit disc, in
+/// the planet-relative [`flight_frame`]. Zero whenever we do not have the controls, so a
+/// bystander's idle keys can never reach a room's guidance.
 #[derive(Resource, Default)]
 pub struct PilotStick {
-    /// Where the finger went down (window-logical pixels), which is where the stick is
-    /// drawn. `None` when no finger is on the screen — including when the deflection is
-    /// coming from the keyboard or a gamepad instead, which have nowhere to draw.
-    origin: Option<Vec2>,
-    /// Where the finger is now, for the knob.
-    knob: Vec2,
-    /// The deflection the burn flies.
     pub value: Vec2,
 }
 
-/// How far the finger must travel from where it landed for full deflection (window-logical
-/// pixels, scaled by the short edge so a phone and a desktop feel alike).
+/// The pilot's temporary look offset from dead astern (radians), swung by the look stick or
+/// the mouse and eased back to zero the moment it is released.
 ///
-/// Generous on purpose: this stick asks for a *lean*, not a target, so the useful precision
-/// is in the first half of the travel. A tight radius makes every rock dodge an
-/// over-correction.
-const STICK_TRAVEL_FRACTION: f32 = 0.22;
-const MIN_STICK_TRAVEL: f32 = 70.0;
-
-/// Full-deflection travel for this window. Read by the reader and the painter alike, so the
-/// knob can't sit somewhere the deflection doesn't agree with.
-fn stick_travel(window: &Window) -> f32 {
-    (window.width().min(window.height()) * STICK_TRAVEL_FRACTION).max(MIN_STICK_TRAVEL)
+/// It is deliberately *not* the character's `Yaw`/`LookPitch`. Those drive the avatar's
+/// orbit rig and its replicated facing, and they persist — which is exactly wrong here: a
+/// pilot glances at a rock and needs the default view back without flying it back, and the
+/// glance must not survive into the next thing they do.
+#[derive(Resource, Default)]
+pub struct PilotLook {
+    yaw: f32,
+    pitch: f32,
 }
+
+/// How far the look stick can swing the camera off dead astern before it stops (rad). Yaw
+/// is unbounded — the pilot may look anywhere, including straight back at where they came
+/// from — but pitch stops short of the poles, where an up-vector rolled to the planet stops
+/// defining a view at all.
+const MAX_LOOK_PITCH: f32 = 1.05;
+
+/// Rate (per second) the look offset drifts back to dead astern once released. Fast enough
+/// that the default view is never more than a moment away, slow enough to read as the
+/// camera settling rather than snapping.
+const LOOK_RETURN_RATE: f32 = 2.2;
+
+/// Below this per-frame delta the look input counts as released and the drift takes over.
+const LOOK_IDLE: f32 = 1e-3;
 
 /// Decide whether this client has the stick. The pilot is named on the replicated launch
 /// state, so every peer agrees on the answer — including, importantly, the peers who do
@@ -139,80 +156,55 @@ fn take_the_controls(
     controls.0 = flying;
 }
 
-/// Read the stick: a floating touch joystick planted wherever the finger landed, or —
-/// when nothing is touching the screen — the movement intent, which is already fed by the
-/// keyboard and the gamepad and is otherwise idle while welded to a flying deck.
-///
-/// Reusing the movement intent for the fallback is deliberate. A locked rider cannot walk,
-/// so `W`/`A`/`S`/`D` and the left gamepad stick have nothing else to mean during a flight;
-/// routing them here gets desktop and controller steering with no second input path to keep
-/// in sync, and no key bindings to invent.
+/// Read the stick: the movement intent, which the touch move-stick, the keyboard and the
+/// gamepad all already feed, and which a rider welded to a flying deck has no other use for.
 fn read_pilot_stick(
     controls: Res<AtTheControls>,
-    touches: Res<Touches>,
-    windows: Query<&Window, With<PrimaryWindow>>,
     movement: Query<&DirectionalInput>,
     mut stick: ResMut<PilotStick>,
 ) {
-    if !controls.0 {
-        *stick = PilotStick::default();
-        return;
-    }
-    let Ok(window) = windows.single() else {
-        return;
+    stick.value = if controls.0 {
+        movement
+            .iter()
+            .next()
+            // `DirectionalInput` is the look-relative walk vector: x strafes, z goes
+            // forward. As a steering stick those are exactly right/up.
+            .map(|dir| Vec2::new(dir.0.x, dir.0.z).clamp_length_max(1.0))
+            .unwrap_or(Vec2::ZERO)
+    } else {
+        Vec2::ZERO
     };
-    let travel = stick_travel(window);
-
-    // One finger owns the stick: the first one still down. Anywhere on the screen — this
-    // is a cockpit, not a control layout, and the pilot shouldn't have to find a target.
-    if let Some(touch) = touches.iter().next() {
-        let origin = *stick.origin.get_or_insert(touch.start_position());
-        stick.knob = touch.position();
-        let offset = stick.knob - origin;
-        // Screen y grows downward; the stick's y is up.
-        stick.value = Vec2::new(offset.x, -offset.y).clamp_length_max(travel) / travel;
-        return;
-    }
-    stick.origin = None;
-    stick.value = movement
-        .iter()
-        .next()
-        .map(|dir| Vec2::new(dir.0.x, dir.0.z).clamp_length_max(1.0))
-        .unwrap_or(Vec2::ZERO);
 }
 
-/// Draw the stick under the pilot's thumb — a ring at the touch-down point and a knob at
-/// the finger. Only when a finger is actually down: a keyboard or gamepad deflection has no
-/// screen position, and a stick drawn in the middle of the view for it would be a lie about
-/// where the input came from.
-fn draw_pilot_stick(
-    mut contexts: EguiContexts,
+/// Swing the chase camera with the look input while it is held, and drift it back to dead
+/// astern when it is let go.
+///
+/// Reads the same per-frame `MouseMotionDelta` the walking camera does — the one sink the
+/// look stick, the mouse and the gamepad's right stick all write — at the same sensitivity,
+/// so looking around from the cockpit feels like looking around on foot.
+fn read_pilot_look(
+    time: Res<Time>,
     controls: Res<AtTheControls>,
-    stick: Res<PilotStick>,
-    windows: Query<&Window, With<PrimaryWindow>>,
-) -> Result {
-    let (Some(origin), true) = (stick.origin, controls.0) else {
-        return Ok(());
-    };
-    let Ok(window) = windows.single() else {
-        return Ok(());
-    };
-    let travel = stick_travel(window);
-    let ctx = contexts.ctx_mut()?;
-    let painter = ctx.layer_painter(egui::LayerId::new(
-        egui::Order::Foreground,
-        egui::Id::new("pilot-stick"),
-    ));
-    let centre = egui::pos2(origin.x, origin.y);
-    let knob = centre + egui::vec2(stick.value.x * travel, -stick.value.y * travel);
-    painter.circle_stroke(centre, travel, egui::Stroke::new(2.0, egui::Color32::from_white_alpha(70)));
-    painter.circle_filled(knob, travel * 0.28, egui::Color32::from_white_alpha(40));
-    painter.circle_stroke(
-        knob,
-        travel * 0.28,
-        egui::Stroke::new(2.0, egui::Color32::from_white_alpha(150)),
-    );
-    Ok(())
+    deltas: Query<&MouseMotionDelta>,
+    configs: Res<Assets<bad_spaceship_shared::player::Config>>,
+    mut look: ResMut<PilotLook>,
+) {
+    if !controls.0 {
+        *look = PilotLook::default();
+        return;
+    }
+    let sensitivity = configs.iter().next().map(|(_, c)| c.look_sensitivity).unwrap_or(0.42);
+    let delta = deltas.iter().next().map(|d| d.0).unwrap_or(Vec2::ZERO);
+    if delta.length() > LOOK_IDLE {
+        look.yaw += delta.x * time.delta_secs() * sensitivity;
+        look.pitch = (look.pitch + delta.y * time.delta_secs() * sensitivity)
+            .clamp(-MAX_LOOK_PITCH, MAX_LOOK_PITCH);
+    } else {
+        // Frame-rate-independent exponential drift home.
+        let alpha = 1.0 - (-LOOK_RETURN_RATE * time.delta_secs()).exp();
+        look.yaw -= look.yaw * alpha;
+        look.pitch -= look.pitch * alpha;
+    }
 }
 
 /// Take the camera out of the avatar's orbit rig while flying, and put it back after.
@@ -304,6 +296,7 @@ fn drive_pilot_camera(
     time: Res<Time>,
     controls: Res<AtTheControls>,
     autopilot: Res<Autopilot>,
+    look: Res<PilotLook>,
     mut eased: Local<Option<(Vec3, Vec3)>>,
     // The player's own camera by handle, NOT `Query<&mut Transform, With<Camera>>`: the
     // outline pass runs a second `Camera3d` (`outline::MaskCam`), so a `single_mut()` over
@@ -318,6 +311,7 @@ fn drive_pilot_camera(
         *eased = None;
         return;
     };
+    let look = &*look;
     let Some(camera) = players.iter().next() else {
         return;
     };
@@ -354,13 +348,21 @@ fn drive_pilot_camera(
     // off the flight axis, which is what keeps the lens out of the plume at any scale.
     let distance = (snap.radius * CHASE_DISTANCE).clamp(MIN_CHASE_DISTANCE, MAX_CHASE_DISTANCE);
     let elevation = CHASE_ELEVATION_DEG.to_radians();
-    let eye = target - forward * (distance * elevation.cos()) + up * (distance * elevation.sin());
+    let right = forward.cross(up).normalize_or(Vec3::X);
+    let astern = -forward * (distance * elevation.cos()) + up * (distance * elevation.sin());
+    // The pilot's glance, as an orbit of that standing offset — so looking around never
+    // moves the camera off its sphere, only around it, and letting go returns to exactly
+    // the pose it left. Both signs are negated against the raw look input for the same
+    // reason an orbit camera always is: to pan the *view* right the *eye* must swing left.
+    let yawed = Quat::from_axis_angle(up, -look.yaw);
+    let orbit = Quat::from_axis_angle(yawed * right, -look.pitch) * yawed;
+    let eye = target + orbit * astern;
     // Aim by tilting up off the craft rather than at a point some distance ahead of it: the
     // craft then sits at a *fixed* angle below the crosshair whatever the chase distance,
     // where a fixed lead point swings it from centred to off the bottom edge as the
     // distance changes with the build.
-    let right = forward.cross(up).normalize_or(Vec3::X);
     let to_craft = (target - eye).normalize_or(forward);
-    let look = Quat::from_axis_angle(right, CRAFT_BELOW_CENTRE_DEG.to_radians()) * to_craft;
-    *camera = Transform::from_translation(eye).looking_to(look, up);
+    let view_right = to_craft.cross(up).normalize_or(right);
+    let aim = Quat::from_axis_angle(view_right, CRAFT_BELOW_CENTRE_DEG.to_radians()) * to_craft;
+    *camera = Transform::from_translation(eye).looking_to(aim, up);
 }

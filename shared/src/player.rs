@@ -76,7 +76,10 @@ impl Plugin for PlayerPlugin {
 #[derive(Asset, Deserialize, Copy, Clone, TypePath)]
 pub struct Config {
     pub zoom_sensitivity: f32,
-    look_sensitivity: f32,
+    /// Radians of look per second at unit `MouseMotionDelta`. `pub` so the pilot's chase
+    /// camera can swing at the same rate the walking camera does — two look sensitivities
+    /// in one game is a bug the player feels but can't name.
+    pub look_sensitivity: f32,
 
     pub min_camera_distance: f32,
     pub max_camera_distance: f32,

@@ -430,6 +430,7 @@ impl Plugin for NetServerPlugin {
         app.init_resource::<RoomEscaped>();
         app.init_resource::<RoomSteer>();
         app.init_resource::<RoomAsteroids>();
+        app.init_resource::<LockSequence>();
         // Server-authoritative session resume: remember each player's last position
         // (keyed by its persistent `resume_id`) so a reconnect after an iOS reload
         // lands back in place rather than at the origin.
@@ -547,7 +548,13 @@ impl Plugin for NetServerPlugin {
         // Rocket launch: accept a client's launch request for its room, run that room's
         // countdown, and at blastoff cut the assembly's ground joints. Publishing the
         // countdown into each room's orb `NetLaunch` lets every client draw the banner.
-        app.add_systems(Update, (handle_launch_requests, publish_room_launch).chain());
+        // `maintain_pilot` between the two: the request can name a pilot, and the publisher
+        // must send whatever survives the "still aboard?" test in the same frame — a room
+        // that replicated a pilot who had already let go would hand a stick to nobody.
+        app.add_systems(
+            Update,
+            (handle_launch_requests, maintain_pilot, publish_room_launch).chain(),
+        );
         // Session resume: continuously remember live avatars' positions (the reconnect
         // restore itself happens at connect, in `spawn_player_for_client`).
         app.add_systems(Update, record_resume_positions);
@@ -1658,6 +1665,7 @@ struct RelockOnResume {
 fn relock_resumed_riders(
     mut commands: Commands,
     time: Res<Time>,
+    mut sequence: ResMut<LockSequence>,
     parts: Query<(Entity, &NetPart, &Collider, &Position, &Rotation, &PartRoom)>,
     // Read-only and `With<NetPart>`, so it is provably disjoint from the riders'
     // `&mut LinearVelocity` below (`Without<NetPart>`) — B0001 otherwise.
@@ -1707,6 +1715,10 @@ fn relock_resumed_riders(
                 player.client_id,
             );
             commands.entity(avatar).insert(RiderLock(primary.unwrap_or(anchor)));
+            // Back on the deck, so back in the pilot queue — at its tail. A reconnecting
+            // rider has been away; the people who held on through it are ahead of them.
+            sequence.0 += 1;
+            commands.entity(avatar).insert(LockedAt(sequence.0));
             commands.entity(avatar).remove::<RelockOnResume>();
             println!("[lock] client_id={} re-locked on resume ({} welds)", player.client_id, welds);
             continue;
@@ -2338,6 +2350,21 @@ struct LockAnchor {
 #[derive(Component, Clone, Copy)]
 struct RiderLock(LockAnchor);
 
+/// Monotonic counter stamped onto each avatar as it locks, so "the next person who locked"
+/// is a well-defined queue rather than whatever order the ECS happens to iterate in.
+///
+/// A counter rather than the tick: lightyear's `Tick` is a wrapping `u32`, and a queue
+/// ordered by a value that wraps mid-session reorders itself for no reason anyone watching
+/// could explain.
+#[derive(Resource, Default)]
+struct LockSequence(u64);
+
+/// Where this avatar stands in its room's lock queue (see [`LockSequence`]). Present only
+/// while locked — the unlock path removes it, and it dies with the avatar on disconnect, so
+/// the queue needs no separate pruning.
+#[derive(Component, Clone, Copy)]
+struct LockedAt(u64);
+
 /// Weld an avatar to every same-room part within the lock gap (skipping its own held
 /// part), spawning each `SphericalJoint` + replicated `NetLockJoint`. Returns the weld
 /// count and the PRIMARY anchor (the first weld) for the caller to store as the rider's
@@ -2450,6 +2477,7 @@ fn apply_lock_changes(
     >,
     parts: Query<(Entity, &NetPart, &Collider, &Position, &Rotation, &PartRoom)>,
     lock_joints: Query<(Entity, &SphericalJoint), With<LockJoint>>,
+    mut sequence: ResMut<LockSequence>,
 ) {
     for (link, mut receiver) in &mut links {
         let Some(want) = receiver.receive().last() else {
@@ -2464,6 +2492,9 @@ fn apply_lock_changes(
         if !want.0 {
             despawn_player_lock_welds(&mut commands, &lock_joints, avatar);
             commands.entity(avatar).remove::<RiderLock>();
+            // Leaves the pilot queue too — and if this was the pilot, `maintain_pilot`
+            // hands the stick on next frame.
+            commands.entity(avatar).remove::<LockedAt>();
             println!("[lock] client_id={} unlocked", player.client_id);
             continue;
         }
@@ -2486,7 +2517,12 @@ fn apply_lock_changes(
         if let Some(anchor) = anchor {
             commands.entity(avatar).insert(RiderLock(anchor));
         }
-        println!("[lock] client_id={} locked with {} welds", player.client_id, welds);
+        sequence.0 += 1;
+        commands.entity(avatar).insert(LockedAt(sequence.0));
+        println!(
+            "[lock] client_id={} locked with {} welds (queue #{})",
+            player.client_id, welds, sequence.0
+        );
     }
 }
 
@@ -2887,11 +2923,8 @@ fn handle_launch_requests(
         for (controlled, member, player) in &avatars {
             if controlled.owner == link {
                 let room = member.0;
-                let locked_to_assembly = |avatar: Entity| {
-                    lock_joints
-                        .iter()
-                        .any(|joint| joint.body1 == avatar && assembly.get(joint.body2).is_ok())
-                };
+                let locked_to_assembly =
+                    |avatar: Entity| welded_to_assembly(avatar, &lock_joints, &assembly);
                 // Test hook: BS_ALLOW_UNMANNED waives the everyone-locked launch gate so
                 // headless fuel/guidance A/B flights can fly WITHOUT a rider aboard — a
                 // rider's weld lands somewhere slightly different every boarding, and that
@@ -3104,6 +3137,71 @@ fn run_asteroid_field(
                 clock.until_next(),
             );
         }
+    }
+}
+
+/// Whether `avatar` is welded to its room's largest assembly — the same test the launch
+/// gate applies, so "aboard" means one thing on this server.
+fn welded_to_assembly(
+    avatar: Entity,
+    lock_joints: &Query<&SphericalJoint, With<LockJoint>>,
+    assembly: &Query<(), With<InLargestAssembly>>,
+) -> bool {
+    lock_joints
+        .iter()
+        .any(|joint| joint.body1 == avatar && assembly.get(joint.body2).is_ok())
+}
+
+/// Keep each room's pilot valid: **the stick belongs to whoever is holding on.**
+///
+/// Pressing Launch makes you the pilot, but staying the pilot means staying welded to the
+/// craft. Unlock — deliberately, or because the weld broke, or because you disconnected —
+/// and the stick passes immediately to the longest-standing other rider ([`LockedAt`]), or
+/// to nobody if the deck is empty, in which case the autopilot flies alone.
+///
+/// This is the same rule the launch gate already states, extended through the flight: a
+/// ship is flown from aboard it. It also closes the case the gate could not: a pilot who
+/// unlocks mid-ascent to walk around would otherwise keep steering a craft they are no
+/// longer attached to, from wherever they drifted to.
+fn maintain_pilot(
+    mut registry: ResMut<LaunchRegistry>,
+    avatars: Query<(Entity, &RoomMember, &NetPlayer, Option<&LockedAt>), With<ServerAvatar>>,
+    lock_joints: Query<&SphericalJoint, With<LockJoint>>,
+    assembly: Query<(), With<InLargestAssembly>>,
+) {
+    for (&room, launch) in registry.by_room.iter_mut() {
+        let aboard = |target: u64| {
+            avatars.iter().any(|(entity, member, player, _)| {
+                member.0 == room
+                    && player.client_id == target
+                    && welded_to_assembly(entity, &lock_joints, &assembly)
+            })
+        };
+        let current = launch.pilot();
+        if current != 0 && aboard(current) {
+            continue;
+        }
+        // The queue: everyone in this room still welded on, earliest lock first.
+        let successor = avatars
+            .iter()
+            .filter(|(entity, member, player, locked)| {
+                member.0 == room
+                    && locked.is_some()
+                    && player.client_id != current
+                    && welded_to_assembly(*entity, &lock_joints, &assembly)
+            })
+            .min_by_key(|(_, _, _, locked)| locked.map(|l| l.0).unwrap_or(u64::MAX))
+            .map(|(_, _, player, _)| player.client_id)
+            .unwrap_or(0);
+        if successor == current {
+            continue;
+        }
+        match launch {
+            RoomLaunch::Counting { pilot, .. } | RoomLaunch::Launched { pilot } => {
+                *pilot = successor;
+            }
+        }
+        println!("[launch] room {room:?} pilot {current} -> {successor}");
     }
 }
 

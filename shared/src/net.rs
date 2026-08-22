@@ -416,12 +416,20 @@ pub struct NetLaunch {
     /// chosen angle was not enough — see [`LaunchSeed`](crate::guidance::LaunchSeed) for
     /// the 1.2 mrad standing command error that left behind.
     pub plan: crate::guidance::LaunchSeed,
-    /// The netcode `client_id` of the player who pressed Launch — this flight's **pilot**,
-    /// the one whose stick steers it and who flies the chase camera. `0` when no launch is
-    /// armed, and for a world restored from a save already in flight (nobody pressed
-    /// anything). Replicated because every peer needs the same answer: the server to know
-    /// whose input to read, the pilot's own client to know to take the controls, and every
-    /// other client to know the stick it is being sent belongs to somebody else.
+    /// The netcode `client_id` of this flight's **pilot** — the one whose stick steers it
+    /// and who flies the chase camera.
+    ///
+    /// Pressing Launch makes you the pilot; **staying welded to the craft is what keeps you
+    /// one**. Unlock, break the weld, or disconnect and the server passes the stick to the
+    /// longest-standing other rider on the next frame — or to nobody, leaving the autopilot
+    /// to fly alone. That is the launch gate's own rule ("a ship is flown from aboard it")
+    /// extended through the flight rather than checked once at ignition.
+    ///
+    /// `0` when no launch is armed, when the deck has emptied, and for a world restored
+    /// from a save already in flight (nobody pressed anything). Replicated because every
+    /// peer needs the same answer: the server to know whose input to read, the pilot's own
+    /// client to know to take the controls, and every other client to know the stick it is
+    /// being sent belongs to somebody else.
     pub pilot: u64,
     /// The pilot's stick this tick, `[right, up]` in the planet-relative
     /// [`flight_frame`](crate::guidance::flight_frame), clamped to the unit disc.

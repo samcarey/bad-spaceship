@@ -67,20 +67,14 @@ impl Plugin for MobilePlugin {
                     detect_touch,
                     start_game_on_touch.run_if(in_state(AppState::Initial)),
                     compute_layout,
-                    // While the pilot has the stick, the touch cockpit owns every finger
-                    // on the screen (`pilot::read_pilot_stick`) — a locked rider can't walk
-                    // or build anyway, so the walking layout has nothing left to do and
-                    // would only fight for the same thumb. `reset_controls` runs in its
-                    // place so a finger that was on a control when the engines lit doesn't
-                    // stay latched to it for the whole flight.
+                    // The layout keeps running for the pilot: a locked rider can't walk, so
+                    // the move stick is free to *steer* the craft (`pilot::read_pilot_stick`
+                    // reads the same `DirectionalInput` it writes) and the look stick keeps
+                    // looking — it swings the chase camera instead of the orbit rig. Two
+                    // thumbs, the same two jobs, no cockpit layout to learn.
                     classify_touches
                         .after(compute_layout)
                         .run_if(mobile_active)
-                        .run_if(not(crate::pilot::piloting))
-                        .run_if(in_state(AppState::InGame)),
-                    reset_controls
-                        .after(compute_layout)
-                        .run_if(crate::pilot::piloting)
                         .run_if(in_state(AppState::InGame)),
                     apply_movement
                         .after(classify_touches)
@@ -112,7 +106,6 @@ impl Plugin for MobilePlugin {
                 draw_overlay
                     .in_set(crate::ui::EguiDrawSystems)
                     .run_if(mobile_active)
-                    .run_if(not(crate::pilot::piloting))
                     .run_if(in_state(AppState::InGame)),
             )
             .add_systems(OnExit(AppState::InGame), reset_controls);
@@ -522,6 +515,7 @@ fn draw_overlay(
     layout: Res<ControlLayout>,
     controls: Res<TouchControls>,
     locked_out: Res<crate::launch::BuildingLockedOut>,
+    piloting: Res<crate::pilot::AtTheControls>,
     holders: Query<&Holding>,
 ) -> Result {
     let ctx = contexts.ctx_mut()?;
@@ -542,7 +536,10 @@ fn draw_overlay(
     } else {
         (layout.look_center, layout.look_center)
     };
-    draw_stick(&painter, move_center, layout.joystick_radius, move_knob, "MOVE");
+    // In flight the move stick is the steering stick (see `pilot`), so it says so — the
+    // one place a pilot could be told what their left thumb now does.
+    let move_label = if piloting.0 { "STEER" } else { "MOVE" };
+    draw_stick(&painter, move_center, layout.joystick_radius, move_knob, move_label);
     draw_stick(&painter, look_center, layout.joystick_radius, look_knob, "LOOK");
 
     // Context labels: the top action button joins (holding) or deletes (empty),

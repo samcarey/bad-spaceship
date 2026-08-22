@@ -507,7 +507,7 @@ fn show_flight_hud(
                 stick.value.length() * 100.0
             )
         } else {
-            format!("PILOT · autopilot flying {phase} · touch to steer")
+            format!("PILOT · autopilot flying {phase} · move stick to steer")
         };
         autopilot_lines.push(flying);
         if burning {
