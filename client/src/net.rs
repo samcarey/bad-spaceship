@@ -32,21 +32,22 @@ use bad_spaceship_shared::character::{
     insert_character_body, insert_remote_avatar_body, CharacterMovement, Config as CharacterConfig,
 };
 use bad_spaceship_shared::net::{
-    apply_hold_spring, apply_net_input, focused_part, room_code_bytes, ClientPanicReport,
-    ControlChannel,
+    apply_hold_spring, apply_net_input, focused_part, room_code_bytes, Asteroid,
+    ClientPanicReport, ControlChannel,
     NetFacing, NetHold, NetInput, NetJoint, NetLaunch, NetLockJoint, NetPart, PartShape,
     take_condition_triggers, take_divergence_floor, take_rollback_diag,
     NetPlayer, NetRoomFrame, ProtocolPlugin, RollbackReport, GROUND_JOINT_ID,
     TICK,
 };
 use bad_spaceship_shared::part::{
-    insert_part_physics, insert_rocket_physics, is_interior_anchor, Holdable, LockJoint,
-    SuppressLocalParts,
+    insert_asteroid_physics, insert_part_physics, insert_rocket_physics, is_interior_anchor,
+    Holdable, LockJoint, SuppressLocalParts,
 };
 use bad_spaceship_shared::player::make_local_player;
 use crate::render_main_pass::flame_material::FlameMaterial;
 use crate::render_main_pass::insert_rocket_visual;
 use crate::render_main_pass::metal_material::{part_visual, MetalMaterial};
+use crate::render_main_pass::rock::asteroid_visual;
 use crate::render_secondary_pass::gizmo_material::GizmoMaterial;
 use crate::render_secondary_pass::JointAppearance;
 use bad_spaceship_shared::{
@@ -192,6 +193,25 @@ pub fn autolock_requested() -> bool {
 #[cfg(target_arch = "wasm32")]
 pub fn autolock_requested() -> bool {
     bs_net_string("autolock").is_some_and(|flag| !flag.is_empty())
+}
+
+/// Test hook: seconds after boot at which the client sends its own `RequestLaunch`, from
+/// `BS_AUTOLAUNCH` (native) / `window.__BS_NET__.autolaunch` (web — play.html's
+/// `?autolaunch=` query param). `None` disables it.
+///
+/// The launch control is a *swipe*, which a headless run has no way to perform — and
+/// without pressing it there is no pilot, so the chase camera and the steering stick are
+/// both unreachable from a screenless test. This is the twin of `autolock_requested`: that
+/// one gets the client aboard, this one gets it flying.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn autolaunch_after() -> Option<f32> {
+    std::env::var("BS_AUTOLAUNCH").ok().and_then(|s| s.parse().ok())
+}
+
+/// See the native counterpart.
+#[cfg(target_arch = "wasm32")]
+pub fn autolaunch_after() -> Option<f32> {
+    bs_net_string("autolaunch").and_then(|s| s.parse().ok())
 }
 
 /// Our own netcode id — the value the server stamps onto our avatar's
@@ -730,6 +750,11 @@ fn write_input(
     held_rotation: Res<HeldRotation>,
     my_room: Res<MyRoom>,
     resume_id: Res<ResumeId>,
+    // The pilot's stick. It rides the input channel rather than a message so the server
+    // applies the deflection we held on tick N to tick N's burn, and a rollback replays the
+    // same value — see `NetInput::steer`. Zero unless we are actually flying, so a
+    // non-pilot's idle keys can never reach a room's guidance.
+    stick: Res<crate::pilot::PilotStick>,
     mut controlled: Query<&mut ActionState<NetInput>, With<InputMarker<NetInput>>>,
 ) {
     let Some((dir, yaw, pitch, holding)) = character.iter().next() else {
@@ -751,6 +776,7 @@ fn write_input(
         state.0.room = my_room.0;
         // Persistent resume id — the server keys our remembered position on it.
         state.0.resume_id = resume_id.0;
+        state.0.steer = stick.value.to_array();
         match (grab_origin, hold_pos) {
             (Some(origin), Some(hold_pos)) => {
                 state.0.grab_origin = origin.to_array();
@@ -1120,9 +1146,21 @@ fn draw_replicated_parts(
                     &mut flame_materials,
                 );
             }
+            PartShape::Asteroid { radius } => {
+                insert_asteroid_physics(&mut e, radius);
+                let (mesh, material) =
+                    asteroid_visual(radius, part.seed, &mut meshes, &mut standard_materials);
+                // The marker is derived here rather than replicated: the shape that
+                // implies it is already on the wire (see `Asteroid`).
+                e.insert((mesh, material, Asteroid));
+            }
+        }
+        // `Holdable` marks the player's own world — a rock is scenery you dodge, not
+        // inventory you pick up, so it is deliberately not applied to one.
+        if !matches!(part.shape, PartShape::Asteroid { .. }) {
+            e.insert(Holdable);
         }
         e.insert((
-            Holdable,
             // Render-interpolate the predicted block between fixed ticks (same reason
             // as the character) so loose/held blocks move smoothly.
             FrameInterpolate::<Position>::default(),

@@ -12,6 +12,7 @@ pub mod flame_material;
 mod grass_material;
 pub mod magma_material;
 pub mod metal_material;
+pub mod rock;
 
 // Bevy 0.17's render-crate split relocated several types out of `bevy_render`:
 // `CascadeShadowConfigBuilder` → `bevy_light` (`bevy::light`), `Indices` /

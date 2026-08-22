@@ -143,11 +143,26 @@ pub fn ascent_thrust_dir(true_pos: Vec3, true_vel: Vec3, pitchover: f32) -> Vec3
 /// "lean the command downrange" construction, shared by the planning law and the flown
 /// program so the two can never disagree about what an angle means.
 fn tilt_downrange(up: Vec3, angle: f32) -> Vec3 {
+    tilt_toward(up, DOWNRANGE_AZIMUTH, angle)
+}
+
+/// Rotate `dir` by `angle` in the plane it spans with `toward` — the one "lean a unit
+/// command sideways" construction in the codebase, shared by the pitchover
+/// ([`tilt_downrange`]) and the pilot's stick ([`steer_guidance`]).
+///
+/// `toward` need not be perpendicular to `dir` or normalised: only its component across
+/// `dir` sets the direction of the lean, so a caller can hand it any nearby vector. When
+/// that component vanishes — `toward` parallel to `dir`, so the pair spans no plane and
+/// no rotation is defined — `dir` is returned unchanged rather than flipped.
+fn tilt_toward(dir: Vec3, toward: Vec3, angle: f32) -> Vec3 {
     if angle.abs() < 1e-4 {
-        return up; // vertical: never chases a sideways disturbance
+        return dir; // vertical: never chases a sideways disturbance
     }
-    let horiz = (DOWNRANGE_AZIMUTH - up * up.dot(DOWNRANGE_AZIMUTH)).normalize_or_zero();
-    (up * angle.cos() + horiz * angle.sin()).normalize_or(up)
+    let across = (toward - dir * dir.dot(toward)).normalize_or_zero();
+    if across == Vec3::ZERO {
+        return dir;
+    }
+    (dir * angle.cos() + across * angle.sin()).normalize_or(dir)
 }
 
 /// The complete input set a [`PitchProgram`] is sampled from — every value
@@ -373,6 +388,94 @@ pub fn program_guidance(
 ) -> Guidance {
     let throttle = if escape_cutoff(true_pos, true_vel, cut) { 0.0 } else { 1.0 };
     Guidance { thrust_dir: program.thrust_dir(true_pos, true_vel.length()), throttle }
+}
+
+/// The furthest the pilot's stick can tilt the autopilot's commanded thrust direction
+/// (rad, at full deflection).
+///
+/// The stick is a **tilt of the command**, not a handover of authority: everything under
+/// it — the throttle/gimbal allocator in [`crate::launch::assembly_burn`], the attitude
+/// PID, the anti-spin trim — keeps flying, it is just handed a different direction to
+/// point the net thrust. Two properties fall out of that and are the reason it is built
+/// this way. Releasing the stick restores the autopilot *exactly*, on the next tick, with
+/// no blend state to unwind, because the command is recomputed from the program every
+/// tick and the pilot's term is simply absent. And a steered command is flown by the same
+/// machinery — and within the same structural limits — as an autopilot one, so no stick
+/// input can ask the stack for a torque the allocator would refuse the autopilot.
+///
+/// 20° is the most a real stack tracks: the nozzles gimbal to
+/// [`crate::launch::GIMBAL_MAX_RAD`] (18°) and differential throttle covers the rest, so
+/// full deflection is an aggressive but trackable command rather than a tumble.
+pub const PILOT_STEER_MAX_RAD: f32 = 20.0 * std::f32::consts::PI / 180.0;
+
+/// The **planet-relative flight frame** at a true state: `(forward, right, up)`,
+/// orthonormal and right-handed in Bevy's convention (`forward × up = right`).
+///
+/// `forward` is the direction of flight. `up` is planet-radial *projected across*
+/// `forward` — which is precisely the statement "zero roll relative to the planet": the
+/// horizon sits level in this frame at every point of the ascent, from a vertical climb
+/// to a horizontal one. `right` completes it.
+///
+/// This is the single definition of the pilot's frame, shared by the stick
+/// ([`steer_guidance`]) and the chase camera, so "push right" and "the world tips right"
+/// are the same rotation by construction rather than by two agreeing implementations. The
+/// vehicle's own body axes are deliberately not involved: a launch stack rolls freely
+/// under its own gimbals, and a control frame that rode its roll would invert the stick
+/// mid-flight.
+///
+/// Below [`TURN_SPEED`] the velocity direction is noise — the same reason
+/// [`ascent_thrust_dir`] refuses to chase it — so `forward` falls back to radial-up and
+/// the frame stays still on the pad instead of spinning with the jitter.
+pub fn flight_frame(true_pos: Vec3, true_vel: Vec3) -> (Vec3, Vec3, Vec3) {
+    let radial = (true_pos - PLANET_CENTER).normalize_or(Vec3::Y);
+    let forward =
+        if true_vel.length() >= TURN_SPEED { true_vel.normalize_or(radial) } else { radial };
+    // Planet-up across the view plane. Degenerate exactly when flight is radial (climbing
+    // straight up), where no roll about the flight axis is defined at all; take the limit
+    // the vehicle actually approaches it from — the pitchover leans toward
+    // `DOWNRANGE_AZIMUTH`, so the frame is already aligned with the turn when it starts.
+    let across = radial - forward * forward.dot(radial);
+    // Both are unit, so `|across|` is the sine of the angle between them: the test is
+    // "flight within ~0.06° of radial", not float-epsilon — at a hair off vertical the
+    // projection is still numerically a direction but not yet a *meaningful* one, and
+    // normalising it there spins the frame on the pad's own jitter.
+    let up = if across.length() > 1e-3 {
+        across.normalize()
+    } else {
+        -(DOWNRANGE_AZIMUTH - radial * radial.dot(DOWNRANGE_AZIMUTH)).normalize_or(Vec3::X)
+    };
+    (forward, forward.cross(up).normalize_or(Vec3::X), up)
+}
+
+/// Fold the pilot's stick into the autopilot's command for this tick.
+///
+/// `stick` is `[right, up]` in the [`flight_frame`], each ∈ `[-1, 1]` and the pair clamped
+/// to the unit disc, so a full diagonal is no stronger than a full push. Zero — a released
+/// stick — returns `guidance` untouched, byte for byte, which is what makes the handback
+/// instantaneous.
+///
+/// A stick input also **relights a cut engine**. Once [`escape_cutoff`] has throttled to
+/// zero there is no thrust to vector, so a pilot pushing the stick against a dead engine
+/// would be pushing against nothing; asking for a turn is asking for the thrust that makes
+/// one. Releasing the stick hands the throttle straight back to the cutoff logic, so the
+/// only cost is the fuel the pilot chose to spend.
+pub fn steer_guidance(
+    guidance: Guidance,
+    true_pos: Vec3,
+    true_vel: Vec3,
+    stick: bevy::math::Vec2,
+) -> Guidance {
+    let stick = stick.clamp_length_max(1.0);
+    let deflection = stick.length();
+    if deflection < 1e-3 {
+        return guidance;
+    }
+    let (_, right, up) = flight_frame(true_pos, true_vel);
+    let toward = right * stick.x + up * stick.y;
+    Guidance {
+        thrust_dir: tilt_toward(guidance.thrust_dir, toward, deflection * PILOT_STEER_MAX_RAD),
+        throttle: 1.0,
+    }
 }
 
 /// The outcome of forward-simulating the ascent law as a point mass (see [`propagate`]).
@@ -636,6 +739,92 @@ mod tests {
             }
         }
         (peak, false)
+    }
+
+    /// The pilot's frame must keep the horizon level: `up` is planet-radial projected
+    /// across the flight direction, so at every point of an ascent — vertical, leaning,
+    /// horizontal — the frame is orthonormal, right-handed, and rolled to the planet
+    /// rather than to the vehicle.
+    #[test]
+    fn the_flight_frame_is_orthonormal_and_planet_rolled() {
+        let pad = PLANET_CENTER + Vec3::Y * GRAVITY_REF_RADIUS;
+        for (label, vel) in [
+            ("on the pad", Vec3::ZERO),
+            ("climbing", Vec3::Y * 900.0),
+            ("leaning", Vec3::new(400.0, 700.0, 0.0)),
+            ("horizontal", Vec3::X * 2000.0),
+            ("off-azimuth", Vec3::new(-300.0, 500.0, 800.0)),
+        ] {
+            let (forward, right, up) = flight_frame(pad, vel);
+            for (name, v) in [("forward", forward), ("right", right), ("up", up)] {
+                assert!((v.length() - 1.0).abs() < 1e-4, "{label}: {name} not unit: {v:?}");
+            }
+            assert!(forward.dot(right).abs() < 1e-4, "{label}: forward·right");
+            assert!(forward.dot(up).abs() < 1e-4, "{label}: forward·up");
+            assert!(right.dot(up).abs() < 1e-4, "{label}: right·up");
+            // Right-handed in Bevy's convention, the same one the camera is built with.
+            assert!(
+                forward.cross(up).distance(right) < 1e-3,
+                "{label}: forward x up != right"
+            );
+            // Zero roll about the flight axis: `up` leans toward planet-up, never away.
+            // (Exactly zero only in the degenerate vertical case, where no roll exists.)
+            let radial = (pad - PLANET_CENTER).normalize();
+            if vel.length() >= TURN_SPEED && vel.normalize().dot(radial).abs() < 0.999 {
+                assert!(up.dot(radial) > 0.0, "{label}: frame is rolled away from the planet");
+            }
+        }
+    }
+
+    /// The stick tilts the command by the deflection it asks for, in the plane it asks
+    /// for — and a released stick returns the autopilot's command untouched, which is the
+    /// whole handback mechanism.
+    #[test]
+    fn the_stick_tilts_the_command_and_releasing_it_restores_the_autopilot() {
+        let pad = PLANET_CENTER + Vec3::Y * GRAVITY_REF_RADIUS;
+        let vel = Vec3::new(400.0, 700.0, 0.0);
+        let base = Guidance { thrust_dir: vel.normalize(), throttle: 1.0 };
+        let (_, right, up) = flight_frame(pad, vel);
+
+        // Released: identical command, not merely a close one.
+        let idle = steer_guidance(base, pad, vel, bevy::math::Vec2::ZERO);
+        assert_eq!(idle.thrust_dir, base.thrust_dir);
+        assert_eq!(idle.throttle, base.throttle);
+
+        // Full right: exactly PILOT_STEER_MAX_RAD, and toward `right`.
+        let steered = steer_guidance(base, pad, vel, bevy::math::Vec2::new(1.0, 0.0));
+        let angle = steered.thrust_dir.angle_between(base.thrust_dir);
+        assert!(
+            (angle - PILOT_STEER_MAX_RAD).abs() < 1e-3,
+            "full deflection tilted {angle} rad, expected {PILOT_STEER_MAX_RAD}"
+        );
+        assert!(steered.thrust_dir.dot(right) > 0.0, "full right leaned left");
+        assert!(steered.thrust_dir.dot(up).abs() < 1e-3, "pure right picked up pitch");
+
+        // Half up: half the angle, toward `up`.
+        let pitched = steer_guidance(base, pad, vel, bevy::math::Vec2::new(0.0, 0.5));
+        let angle = pitched.thrust_dir.angle_between(base.thrust_dir);
+        assert!((angle - 0.5 * PILOT_STEER_MAX_RAD).abs() < 1e-3, "half deflection: {angle}");
+        assert!(pitched.thrust_dir.dot(up) > 0.0, "pitch up leaned down");
+
+        // A diagonal is clamped to the unit disc, so it is no stronger than a full push.
+        let diagonal = steer_guidance(base, pad, vel, bevy::math::Vec2::new(1.0, 1.0));
+        let angle = diagonal.thrust_dir.angle_between(base.thrust_dir);
+        assert!(
+            (angle - PILOT_STEER_MAX_RAD).abs() < 1e-3,
+            "diagonal exceeded the limit: {angle}"
+        );
+    }
+
+    /// Steering relights a cut engine — there is nothing to vector at zero throttle — and
+    /// releasing the stick hands the throttle straight back to the cutoff logic.
+    #[test]
+    fn steering_relights_a_cut_engine_and_release_hands_it_back() {
+        let pos = PLANET_CENTER + Vec3::Y * (GRAVITY_REF_RADIUS + 50_000.0);
+        let vel = Vec3::new(3000.0, 3000.0, 0.0);
+        let cut = Guidance { thrust_dir: vel.normalize(), throttle: 0.0 };
+        assert_eq!(steer_guidance(cut, pos, vel, bevy::math::Vec2::new(0.7, 0.0)).throttle, 1.0);
+        assert_eq!(steer_guidance(cut, pos, vel, bevy::math::Vec2::ZERO).throttle, 0.0);
     }
 
     /// The optimizer must never hand back an angle its own model scores as a crash.

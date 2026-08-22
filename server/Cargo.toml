@@ -46,4 +46,8 @@ default = [
     # lightyear uses Bevy states internally; the headless server (MinimalPlugins)
     # must add StatesPlugin, which needs the `bevy_state` crate/feature compiled in.
     "bevy/bevy_state",
+    # `LogPlugin` for the opt-in `BS_LOG` netcode/diagnostic trace (see `main`).
+    # Without it every lightyear `warn!`/`error!` — a refused connect token, a
+    # dropped link — is discarded and a failing handshake is completely silent.
+    "bevy/bevy_log",
 ]

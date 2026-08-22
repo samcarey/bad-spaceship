@@ -39,6 +39,14 @@ fn main() {
     } else {
         minimal
     };
+    // `BS_LOG=<filter>` turns tracing on. `MinimalPlugins` carries no `LogPlugin`, so by
+    // default every lightyear diagnostic — a refused connect token, a link that never
+    // completes its handshake, a replication error — is discarded, and a server that is
+    // rejecting every client is indistinguishable from one nobody is calling. Opt-in
+    // because the `[tel]`/`[burn]` measurement traces want a clean stdout.
+    if let Ok(filter) = std::env::var("BS_LOG") {
+        app.add_plugins(bevy::log::LogPlugin { filter, ..default() });
+    }
     app.add_plugins(minimal)
         // AssetServerSettings was folded into AssetPlugin in Bevy 0.9; 0.12
         // renamed `asset_folder` to `file_path` and swapped the `ChangeWatcher`
