@@ -41,8 +41,8 @@
 use avian3d::prelude::Position;
 use bad_spaceship_shared::time_scale;
 use bad_spaceship_shared::net::{
-    resume_user_data, room_code_bytes, ControlChannel, NetInput, NetPart, NetPlayer, PartShape,
-    ProtocolPlugin, RequestLaunch, ResetRoom, SetLocked, BS_PROTOCOL_ID, TICK,
+    resume_user_data, room_code_bytes, ControlChannel, NetInput, NetLaunch, NetPart, NetPlayer,
+    PartShape, ProtocolPlugin, RequestLaunch, ResetRoom, SetLocked, BS_PROTOCOL_ID, TICK,
 };
 use bevy::{app::ScheduleRunnerPlugin, prelude::*};
 use lightyear::netcode::ConnectToken;
@@ -113,6 +113,17 @@ fn main() {
     );
     // lightyear uses Bevy states internally; MinimalPlugins omits StatesPlugin.
     app.add_plugins(bevy::state::app::StatesPlugin);
+    // `BS_LOG` turns lightyear's own tracing on. `MinimalPlugins` has no `LogPlugin`, so
+    // by default every netcode diagnostic — an expired token, a refused protocol id, a
+    // link that never completes its handshake — is silently discarded, and a bot that
+    // fails to connect looks exactly like a bot with nothing to say. Opt-in because the
+    // measurement runs (`BS_BURN_TRACE`) want a clean stdout.
+    if std::env::var("BS_LOG").is_ok() {
+        app.add_plugins(bevy::log::LogPlugin {
+            filter: std::env::var("BS_LOG").unwrap_or_default(),
+            ..default()
+        });
+    }
     // Order matters (as in the real client): plugin group → protocol → connect.
     app.add_plugins(ClientPlugins { tick_duration: TICK });
     app.add_plugins(ProtocolPlugin);
@@ -125,7 +136,42 @@ fn main() {
         FixedPreUpdate,
         write_input.in_set(ClientInputSystems::WriteClientInputs),
     );
+    if bad_spaceship_shared::launch::burn_trace() {
+        app.add_systems(FixedUpdate, trace_blastoff_tick);
+    }
     app.run();
+}
+
+/// `BS_BURN_TRACE`: report, from a **real client's** timeline, the tick blastoff is due on
+/// versus the tick the replicated `launched` level actually arrives.
+///
+/// The bot runs no physics, but this measurement does not need any — it needs a peer with
+/// its own synced `LocalTimeline` and the replicated `NetLaunch`, which is exactly what a
+/// bot is. The gap between the two printed ticks IS the lag that used to open every
+/// flight: a client gating its burn on the level starts that many ticks after the server,
+/// with nothing to replay the difference. Gating on the schedule makes the first number
+/// match the server's blastoff tick exactly, no matter how late the second one lands.
+fn trace_blastoff_tick(
+    timeline: Res<lightyear::prelude::LocalTimeline>,
+    launch: Query<&NetLaunch>,
+    mut reported_due: Local<bool>,
+    mut reported_flag: Local<bool>,
+) {
+    let Some(state) = launch.iter().next() else {
+        return;
+    };
+    let tick = timeline.tick();
+    if !*reported_due && state.launched_at(tick) {
+        *reported_due = true;
+        println!(
+            "[sched] C scheduled={:?} fires_at_tick={tick:?}",
+            state.blastoff_tick
+        );
+    }
+    if !*reported_flag && state.launched {
+        *reported_flag = true;
+        println!("[sched] C launched-level arrived at tick={tick:?}");
+    }
 }
 
 /// Open the connection: the same dev connect token the game client builds
@@ -165,7 +211,7 @@ fn connect(mut commands: Commands, config: Res<BotConfig>) {
     }
     let client = client_entity.id();
     commands.trigger(Connect { entity: client });
-    println!("[bot] connecting to {url}");
+    println!("[bot] connecting to {url} proto={BS_PROTOCOL_ID} ver={}", bad_spaceship_shared::net::BS_VERSION);
 }
 
 /// Attach the input components to our own predicted avatar once it replicates —
@@ -300,7 +346,8 @@ fn platform_xz(
                 position.0,
                 Vec2::new(half_extents[0], half_extents[2]),
             )),
-            PartShape::RocketEngine => None,
+            // Neither a rocket nor a rock is a deck to walk onto.
+            PartShape::RocketEngine | PartShape::Asteroid { .. } => None,
         })
         .max_by(|a, b| a.0.total_cmp(&b.0))
         .map(|(_, p, half)| (Vec2::new(p.x, p.z), half))

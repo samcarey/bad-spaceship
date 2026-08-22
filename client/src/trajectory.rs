@@ -559,6 +559,7 @@ mod tests {
                 throttle: 1.0,
                 drag: 0.0,
                 net_thrust: 0.0,
+                radius: 5.0,
             })
         };
 
@@ -637,6 +638,7 @@ mod tests {
                 throttle: 1.0,
                 drag: 0.0,
                 net_thrust: 0.0,
+                radius: 5.0,
             });
             app.update();
             // `future[0]` is the propagation start — by contract the vehicle's own
@@ -691,6 +693,7 @@ mod tests {
                 throttle: 1.0,
                 drag: 0.0,
                 net_thrust: 0.0,
+                radius: 5.0,
             });
             app.update();
         }

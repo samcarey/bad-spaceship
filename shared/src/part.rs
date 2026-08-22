@@ -453,6 +453,71 @@ fn insert_part_dynamics(entity: &mut EntityCommands) {
     ));
 }
 
+/// Insert the shared asteroid physics onto an entity from its radius: a sphere collider
+/// at the rock's own low density, plus the same dynamics every part gets.
+///
+/// It is deliberately the *same* body kind as a part rather than something special. A rock
+/// has to collide with the stack, feel the planet's gravity, ride the room's
+/// floating-origin rebase and survive rollback exactly as a part does, and all of that is
+/// what `RigidBody::Dynamic` + a room-scoped `NetPart` already means here. Only two things
+/// differ, and both are physical rather than bookkeeping: the shape is a sphere, and the
+/// density is [`ROCK_DENSITY`](crate::asteroid::ROCK_DENSITY) — a porous rubble pile, well
+/// under a machined part's — which is what makes a small rock a shove and a big one a
+/// wall. Called by the server's spawner AND the client's predicted-part setup, so both
+/// ends simulate an identical body (the same rule as [`insert_part_physics`]).
+pub fn insert_asteroid_physics(entity: &mut EntityCommands, radius: f32) {
+    entity.insert((
+        BoundingRadius(radius),
+        Collider::sphere(radius),
+        RigidBody::Dynamic,
+        ColliderDensity(crate::asteroid::ROCK_DENSITY),
+        // Rock on metal: grippy, and it does not bounce off — a hit shoves the stack and
+        // stays in the scene rather than pinging away like a billiard ball.
+        Friction::new(0.9),
+        Restitution::new(0.05),
+        // Rocks close at up to a few hundred m/s against parts a metre across; without
+        // continuous detection a fast one steps straight through the stack between ticks
+        // and the hit simply never happens.
+        SweptCcd::default(),
+    ));
+}
+
+/// Roll and spawn one asteroid for an assembly at `com` moving at `ship_vel` (both
+/// room-local) and flying `true_pos`/`true_vel` in the true planet frame, at field
+/// intensity `d`. Returns the entity plus the radius and appearance seed the caller needs
+/// for its `NetPart`. See [`crate::asteroid::plan_rock`] for why both velocities are
+/// needed.
+///
+/// Owns its RNG, exactly like [`spawn_random_part`] — which is what keeps `rand` out of
+/// the server's dependencies — while the *placement* stays a pure function in
+/// [`crate::asteroid::plan_rock`] that can be tested against chosen numbers.
+pub fn spawn_asteroid(
+    commands: &mut Commands,
+    com: Vec3,
+    ship_vel: Vec3,
+    true_pos: Vec3,
+    true_vel: Vec3,
+    d: f32,
+) -> (Entity, f32, u32) {
+    let mut rng = rand::thread_rng();
+    let roll = [(); 6].map(|_| rng.gen_range(0.0..1.0));
+    let seed: u32 = rng.gen();
+    let rock = crate::asteroid::plan_rock(com, ship_vel, true_pos, true_vel, d, roll, seed);
+    let mut entity = commands.spawn_empty();
+    insert_asteroid_physics(&mut entity, rock.radius);
+    entity.insert((
+        // Seed both `Transform` and Avian `Position`/velocities: in multiplayer the
+        // server disables Avian's `PhysicsTransformPlugin`, so a spawn `Transform` alone
+        // is never copied into `Position` and the rock would appear at the origin (see
+        // `spawn_random_part`).
+        Transform::from_translation(rock.position),
+        Position(rock.position),
+        LinearVelocity(rock.velocity),
+        AngularVelocity(rock.spin),
+    ));
+    (entity.id(), rock.radius, rock.seed)
+}
+
 fn spawn_initial_parts(mut new_part_events: MessageWriter<NewPart>) {
     for _ in 0..NUM_PARTS {
         new_part_events.write(NewPart);

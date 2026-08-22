@@ -23,7 +23,7 @@ use avian3d::prelude::{
     SphericalJoint, WriteRigidBodyForces,
 };
 use bad_spaceship_shared::guidance::{
-    program_guidance, Guidance, LaunchSeed, PitchProgram, Vehicle,
+    program_guidance, steer_guidance, Guidance, LaunchSeed, PitchProgram, Vehicle,
 };
 use bad_spaceship_shared::launch::{
     assembly_burn, burn_impulse, burn_trace, measure_assembly_spin, AssemblySpin,
@@ -31,8 +31,9 @@ use bad_spaceship_shared::launch::{
 };
 use bad_spaceship_shared::map::apply_gravity_correction;
 use bad_spaceship_shared::net::{
-    part_volume, rebase_room_frame, weighted_anchor, ControlChannel, InLargestAssembly, NetLaunch,
-    NetLockJoint, NetPart, NetPlayer, NetRoomFrame, RequestLaunch, SetLocked,
+    part_volume, rebase_room_frame, weighted_anchor, ControlChannel, InLargestAssembly, NetJoint,
+    NetInput, NetLaunch, NetLockJoint, NetPart, NetPlayer, NetRoomFrame, RequestLaunch,
+    SetLocked, GROUND_JOINT_ID,
 };
 use bad_spaceship_shared::part::{
     avatar_lock_contacts, capsule_bottom_center, cleanup_lock_joints, despawn_player_lock_welds,
@@ -47,6 +48,7 @@ use bevy_egui::{
     EguiContexts,
 };
 use bevy::math::DVec3;
+use lightyear::prelude::input::native::{ActionState, InputMarker};
 use lightyear::prelude::{Connected, LocalId, MessageSender, Predicted, Tick};
 use std::collections::HashSet;
 
@@ -66,7 +68,7 @@ impl Plugin for LaunchPlugin {
             .init_resource::<Autopilot>()
             .init_resource::<BuildingLockedOut>()
             .add_message::<SpSetLock>()
-            .add_systems(Update, (tick_launch, ease_launch_zoom, autolock_rider))
+            .add_systems(Update, (tick_launch, ease_launch_zoom, autolock_rider, autolaunch))
             // Between the three `Modifying` writers (all in `InputEvents`) and every
             // reader of it — `update_predelete_joints` heads `UpdateJointsLabel`.
             .add_systems(
@@ -103,6 +105,10 @@ impl Plugin for LaunchPlugin {
                     // world-space force targets for this tick, and a target computed
                     // pre-shift but applied post-shift is a km-scale lever arm.
                     predict_room_rebase.run_if(resource_exists::<SuppressLocalParts>),
+                    // Let the pad go on the scheduled tick, before this tick's thrust —
+                    // the predicted twin of the server's `fire_scheduled_launches`.
+                    release_predicted_ground_joints
+                        .run_if(resource_exists::<SuppressLocalParts>),
                     // Zero every rocket's flame target first: only rockets the burn
                     // below actually fires this tick read back non-zero (a rocket
                     // that breaks off the assembly goes dark).
@@ -156,6 +162,36 @@ fn autolock_rider(
         s.send::<ControlChannel>(SetLocked(true));
         *sent = true;
         println!("[autolock] sent SetLocked(true)");
+    }
+}
+
+/// Test hook: `BS_AUTOLAUNCH` (native) / `?autolaunch=<secs>` (web) sends one
+/// `RequestLaunch` — the same message the swipe control sends — that many seconds after
+/// boot, making this client the flight's **pilot**. Without it a screenless run can never
+/// reach the chase camera or the steering stick, since both are gated on being the player
+/// who pressed the button. No effect unless the flag is set.
+fn autolaunch(
+    time: Res<Time>,
+    mut elapsed: Local<f32>,
+    mut sent: Local<bool>,
+    mut sender: Query<&mut MessageSender<RequestLaunch>, With<Connected>>,
+) {
+    use std::sync::OnceLock;
+    static AFTER: OnceLock<Option<f32>> = OnceLock::new();
+    let Some(after) = *AFTER.get_or_init(crate::net::autolaunch_after) else {
+        return;
+    };
+    if *sent {
+        return;
+    }
+    *elapsed += time.delta_secs();
+    if *elapsed < after {
+        return;
+    }
+    if let Ok(mut s) = sender.single_mut() {
+        s.send::<ControlChannel>(RequestLaunch);
+        *sent = true;
+        println!("[autolaunch] sent RequestLaunch at t={:.1}s", *elapsed);
     }
 }
 
@@ -309,6 +345,32 @@ pub struct AutopilotSnapshot {
     pub drag: f32,
     /// Net thrust force actually applied this tick (N) — the drag readout's yardstick.
     pub net_thrust: f32,
+    /// The flown assembly's own size: half the diagonal of the box its parts occupy (m).
+    ///
+    /// Measured here because this is the only place that already walks the members every
+    /// tick, and framing the craft is not something the camera can guess: a three-block
+    /// hopper and a forty-part tower need the chase camera at very different distances,
+    /// and a fixed number is wrong for one of them. Half the bounding diagonal rather than
+    /// a COM-relative radius on purpose — the camera is framing the *silhouette*, which
+    /// doesn't care where the mass sits.
+    pub radius: f32,
+}
+
+/// Half the diagonal of the axis-aligned box enclosing `points` — the craft's own size, as
+/// the chase camera frames it. Zero for a single point.
+fn spread(points: impl Iterator<Item = Vec3>) -> f32 {
+    let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+    let mut any = false;
+    for point in points {
+        lo = lo.min(point);
+        hi = hi.max(point);
+        any = true;
+    }
+    if any {
+        (hi - lo).length() * 0.5
+    } else {
+        0.0
+    }
 }
 
 impl AutopilotSnapshot {
@@ -328,8 +390,10 @@ impl AutopilotSnapshot {
         anchor: Option<(Entity, Vec3)>,
         throttle: f32,
         net_force: Vec3,
+        radius: f32,
     ) -> Self {
         Self {
+            radius,
             true_pos,
             frame_offset,
             true_vel,
@@ -453,6 +517,45 @@ pub(crate) fn launch_armed(local: &LaunchLocal, net_launch: &Query<&NetLaunch>) 
             .iter()
             .next()
             .is_some_and(|l| l.launched || l.remaining > 0.0)
+}
+
+/// Release the client's *predicted* ground joints on the scheduled blastoff tick — the
+/// predicted twin of the server's [`fire_scheduled_launches`], and the other half of
+/// making liftoff tick-exact.
+///
+/// `bind_replicated_joints` rebuilds every replicated joint as **real Avian physics** in
+/// the predicted world, ground clamps included (they name the local ground through the
+/// `GROUND_JOINT_ID` sentinel). The server cuts those at blastoff by despawning the joint
+/// entities — but that is replication, so it arrives ~1 RTT later. Until it did, the client
+/// spent the opening ticks of every flight firing its engines against a pad clamp the
+/// server had already released: not merely a late burn, but the two sims solving a
+/// *different set of constraints*, which is the worst shape of prediction disagreement.
+///
+/// Only the constraint is dropped, never the entity — it is server-owned and replicated,
+/// and despawning it locally would fight replication. `bind_replicated_joints` cannot
+/// re-add it either: that is gated on `Without<JointAnchorBody>`, and the marker stays.
+///
+/// A rollback that replays ticks from before blastoff replays them without the clamp,
+/// since the removal is structural rather than per-tick state. That is harmless here: the
+/// assembly is at rest on the pad in those ticks, and the server is about to cut the same
+/// joint on the same tick anyway.
+fn release_predicted_ground_joints(
+    mut commands: Commands,
+    timeline: Res<lightyear::prelude::LocalTimeline>,
+    orb: Query<&NetLaunch>,
+    joints: Query<(Entity, &NetJoint), With<SphericalJoint>>,
+) {
+    let Some(launch) = orb.iter().next() else {
+        return;
+    };
+    if !launch.launched_at(timeline.tick()) {
+        return;
+    }
+    for (entity, joint) in &joints {
+        if joint.body1 == GROUND_JOINT_ID || joint.body2 == GROUND_JOINT_ID {
+            commands.entity(entity).remove::<SphericalJoint>();
+        }
+    }
 }
 
 /// Advance the single-player countdown + the blastoff banner, and detect the multiplayer
@@ -610,7 +713,15 @@ fn predict_room_rebase(
     // The anchor read and the shift write overlap on `Position`/`LinearVelocity`
     // (B0001) — sequence them.
     mut set: ParamSet<(
-        Query<(&Position, &LinearVelocity, &NetPart, Has<InLargestAssembly>), With<Predicted>>,
+        Query<
+            (&Position, &LinearVelocity, &NetPart, Has<InLargestAssembly>),
+            // `Without<Asteroid>` mirrors the server's anchor exactly. It matters only in
+            // the no-assembly fallback below (with markers present, rocks are unmarked and
+            // already excluded) — but that fallback is precisely the broken-up-stack case,
+            // where the rocks are still in the room and the two peers must not choose
+            // different anchors while the frame is being decided.
+            (With<Predicted>, Without<bad_spaceship_shared::net::Asteroid>),
+        >,
         Query<
             (&mut Position, &mut LinearVelocity),
             (With<Predicted>, Or<(With<NetPart>, With<NetPlayer>)>),
@@ -757,6 +868,7 @@ fn apply_sp_thrust(
     // The rider's mass, for the ascent plan: locked aboard at launch, so their weight
     // flies with the stack and belongs in the planned thrust-to-weight.
     rider: Query<&ComputedMass, With<Character>>,
+    stick: Res<crate::pilot::PilotStick>,
 ) {
     if local.sp != SpPhase::Launched {
         fuel.0 = 0.0; // idle: keep the readout at zero until the next launch fires
@@ -817,7 +929,10 @@ fn apply_sp_thrust(
     let program = sp_plan.get_or_insert_with(|| {
         PitchProgram::plan(com, spin.linear_velocity, geometry.len(), gravity.0, total_mass, None)
     });
-    let guidance = program_guidance(com, spin.linear_velocity, program, &mut cut);
+    let autopilot_command = program_guidance(com, spin.linear_velocity, program, &mut cut);
+    // The pilot's stick, folded in exactly where the server folds it in (see
+    // `steer_guidance`) so single player and multiplayer fly the same law.
+    let guidance = steer_guidance(autopilot_command, com, spin.linear_velocity, stick.value);
     let net_force = apply_thrust(
         com,
         gravity.0,
@@ -846,8 +961,50 @@ fn apply_sp_thrust(
             geometry.first().map(|(entity, position, ..)| (*entity, *position)),
             guidance.throttle,
             net_force,
+            spread(
+                parts
+                    .iter()
+                    .filter(|(entity, ..)| members.contains(entity))
+                    .map(|(_, transform, _)| transform.translation()),
+            ),
         )
     });
+}
+
+/// Where the flown steering deflection comes from in multiplayer, bundled as one
+/// `SystemParam` because the choice between its two sources is the whole point.
+///
+/// **If we are the pilot, fly our own tick-stamped input** — `ActionState<NetInput>`, not
+/// the live `PilotStick` resource. lightyear buffers the action state per tick and restores
+/// it during a rollback replay, so a replayed tick re-flies the deflection that tick
+/// actually had; the resource holds only what the stick reads *now*, which would re-fly the
+/// present into the past and diverge a little further with every rollback. It is the same
+/// discipline as `AttitudeIntegral` — hidden per-tick state belongs on something that rolls
+/// back — and the same reason the server reads its copy off the input rather than a
+/// resource.
+///
+/// **If we are not, fly the replicated level** ([`NetLaunch::steer`]). A spectator or a
+/// second rider has no channel to the pilot's hands, so their prediction runs ~1 RTT behind
+/// the real command while it is moving. That is the ordinary standing of any remote
+/// player's intent here and the position rollback corrects it; there is no seed for a human
+/// hand to replicate instead.
+#[derive(bevy::ecs::system::SystemParam)]
+struct PilotInput<'w, 's> {
+    local: Query<'w, 's, &'static LocalId, With<Connected>>,
+    own: Query<'w, 's, &'static ActionState<NetInput>, With<InputMarker<NetInput>>>,
+}
+
+impl PilotInput<'_, '_> {
+    fn stick(&self, launch: &NetLaunch) -> Vec2 {
+        let mine = launch.pilot != 0
+            && crate::net::my_netcode_id(&self.local) == Some(launch.pilot);
+        let raw = if mine {
+            self.own.iter().next().map(|state| state.0.steer).unwrap_or_default()
+        } else {
+            launch.steer
+        };
+        Vec2::from(raw).clamp_length_max(1.0)
+    }
 }
 
 /// Apply balanced thrust to the multiplayer assembly's **predicted** rockets each physics
@@ -917,8 +1074,12 @@ fn apply_mp_thrust(
     // Tick-keyed burn trace (`BS_BURN_TRACE`), so the client's and server's burn inputs
     // can be diffed at the SAME tick number instead of inferred by elimination.
     timeline: Res<lightyear::prelude::LocalTimeline>,
+    pilot: PilotInput,
 ) {
-    let Some(launch) = orb.iter().next().filter(|l| l.launched) else {
+    // Tick-exact, NOT the replicated `launched` level: the level is replicate-only, so
+    // reading it here started the predicted burn a link-dependent number of ticks after
+    // the server's, with nothing to replay the gap (see `NetLaunch::launched_at`).
+    let Some(launch) = orb.iter().next().filter(|l| l.launched_at(timeline.tick())) else {
         fuel.0 = 0.0; // idle: keep the readout at zero until the room launches
         *mp_plan = None; // re-plan on the next launch
         *cut = false; // reset the cutoff hysteresis for the next launch
@@ -937,7 +1098,7 @@ fn apply_mp_thrust(
     // the member rockets' poses alongside (`Gimbal` marks the rockets — it rides
     // `insert_rocket_physics`). The mass sum feeds only a plan rebuild, so it's
     // gathered only on the (once-per-launch) tick that needs it.
-    let (measured, geometry, part_mass_total, integral_seed, cut_seed) = {
+    let (measured, geometry, part_mass_total, integral_seed, cut_seed, radius) = {
         let members = set.p0();
         // **Cross-world stable member order.** Everything below is an order-sensitive
         // float reduction: `measure_assembly_spin` mass-weights positions/velocities into
@@ -993,7 +1154,9 @@ fn apply_mp_thrust(
             .iter()
             .find_map(|(_, _, _, _, _, _, _, _, _, cut)| cut.map(|c| c.0))
             .unwrap_or(false);
-        (measure_assembly_spin(samples), geometry, part_mass_total, integral_seed, cut_seed)
+        // The craft's own size, for the chase camera's framing (see `AutopilotSnapshot`).
+        let radius = spread(ordered.iter().map(|(_, position, ..)| position.0));
+        (measure_assembly_spin(samples), geometry, part_mass_total, integral_seed, cut_seed, radius)
     };
     let Some((com, spin)) = measured else {
         apparent.0 = None;
@@ -1017,7 +1180,11 @@ fn apply_mp_thrust(
     }
     // Same rollback discipline as the integral: latch from the replayed tick's state.
     let mut cut_latch = cut_seed;
-    let guidance = program_guidance(true_com, true_vel, mp_plan.as_ref().unwrap(), &mut cut_latch);
+    let autopilot_command =
+        program_guidance(true_com, true_vel, mp_plan.as_ref().unwrap(), &mut cut_latch);
+    // Fold in the pilot's stick at the same seam the server does, from the source that
+    // rolls back correctly for whoever we are (see `PilotInput`).
+    let guidance = steer_guidance(autopilot_command, true_com, true_vel, pilot.stick(launch));
     if burn_trace() {
         let plan_probe = mp_plan.as_ref().unwrap().probe();
         println!(
@@ -1080,6 +1247,7 @@ fn apply_mp_thrust(
             geometry.first().map(|(entity, position, ..)| (*entity, *position)),
             guidance.throttle,
             net_force,
+            radius,
         )
     });
 }

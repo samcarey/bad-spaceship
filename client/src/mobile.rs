@@ -67,9 +67,20 @@ impl Plugin for MobilePlugin {
                     detect_touch,
                     start_game_on_touch.run_if(in_state(AppState::Initial)),
                     compute_layout,
+                    // While the pilot has the stick, the touch cockpit owns every finger
+                    // on the screen (`pilot::read_pilot_stick`) — a locked rider can't walk
+                    // or build anyway, so the walking layout has nothing left to do and
+                    // would only fight for the same thumb. `reset_controls` runs in its
+                    // place so a finger that was on a control when the engines lit doesn't
+                    // stay latched to it for the whole flight.
                     classify_touches
                         .after(compute_layout)
                         .run_if(mobile_active)
+                        .run_if(not(crate::pilot::piloting))
+                        .run_if(in_state(AppState::InGame)),
+                    reset_controls
+                        .after(compute_layout)
+                        .run_if(crate::pilot::piloting)
                         .run_if(in_state(AppState::InGame)),
                     apply_movement
                         .after(classify_touches)
@@ -101,6 +112,7 @@ impl Plugin for MobilePlugin {
                 draw_overlay
                     .in_set(crate::ui::EguiDrawSystems)
                     .run_if(mobile_active)
+                    .run_if(not(crate::pilot::piloting))
                     .run_if(in_state(AppState::InGame)),
             )
             .add_systems(OnExit(AppState::InGame), reset_controls);

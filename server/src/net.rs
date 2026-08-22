@@ -26,9 +26,10 @@ use avian3d::prelude::{
     Position, Rotation, SphericalJoint, WriteRigidBodyForces,
 };
 use bad_spaceship_shared::assembly::largest_assembly_per_room;
-use bad_spaceship_shared::guidance::{program_guidance, PitchProgram};
+use bad_spaceship_shared::asteroid::{rock_is_spent, FieldClock, MAX_LIVE_ROCKS};
+use bad_spaceship_shared::guidance::{program_guidance, steer_guidance, PitchProgram};
 use bad_spaceship_shared::launch::{
-    assembly_burn, burn_impulse, measure_assembly_spin, LAUNCH_COUNTDOWN_SECS,
+    assembly_burn, burn_impulse, measure_assembly_spin,
 };
 use bad_spaceship_shared::character::{
     apparent_up, drive_felt_up, spawn_position, CharacterMovement, FeltUp, InitialPose,
@@ -39,9 +40,9 @@ use bad_spaceship_shared::net::{
     rebase_room_frame, sanitize_name, weighted_anchor, ClientPanicReport, InLargestAssembly,
     NetFacing, NetHold,
     NetInput, NetJoint, NetLaunch, NetLockJoint, NetMoving, NetName, NetPart, NetPlayer,
-    NetRoomFrame, PartShape, ProtocolPlugin, RequestLaunch, ResetPosition, ResetRoom,
-    RollbackReport, SaveGame, SetAvatar, SetLocked, SetName, GROUND_JOINT_ID, MONSTER_COUNT,
-    REBASE_TRIGGER_M, TICK,
+    Asteroid, NetRoomFrame, PartShape, ProtocolPlugin, RequestLaunch, ResetPosition, ResetRoom,
+    RollbackReport, SaveGame, SetAvatar, SetLocked, SetName, GROUND_JOINT_ID,
+    LAUNCH_COUNTDOWN_TICKS, MONSTER_COUNT, REBASE_TRIGGER_M, TICK,
 };
 use bad_spaceship_shared::map::{
     apply_assembly_drag, apply_gravity_correction, radial_altitude, GROUND_LAYER, PLANET_CENTER,
@@ -50,7 +51,7 @@ use bad_spaceship_shared::map::{
 use bad_spaceship_shared::part::{
     avatar_lock_contacts, capsule_bottom_center, despawn_player_lock_welds, part_gap_contacts,
     part_state_diverged, spawn_random_part, spawn_random_rocket, spawn_rocket_engine,
-    spawn_saved_cuboid, AttitudeIntegral, EscapeCut, Gimbal, LockJoint, RocketEngine,
+    spawn_asteroid, spawn_saved_cuboid, AttitudeIntegral, EscapeCut, Gimbal, LockJoint, RocketEngine,
     SuppressLocalParts,
     DELETE_RADIUS,
     NUM_PARTS, NUM_ROCKET_ENGINES, PART_FALL_Y,
@@ -427,6 +428,8 @@ impl Plugin for NetServerPlugin {
         app.init_resource::<RoomPolicy>();
         app.init_resource::<RoomApparentUp>();
         app.init_resource::<RoomEscaped>();
+        app.init_resource::<RoomSteer>();
+        app.init_resource::<RoomAsteroids>();
         // Server-authoritative session resume: remember each player's last position
         // (keyed by its persistent `resume_id`) so a reconnect after an iOS reload
         // lands back in place rather than at the origin.
@@ -544,10 +547,7 @@ impl Plugin for NetServerPlugin {
         // Rocket launch: accept a client's launch request for its room, run that room's
         // countdown, and at blastoff cut the assembly's ground joints. Publishing the
         // countdown into each room's orb `NetLaunch` lets every client draw the banner.
-        app.add_systems(
-            Update,
-            (handle_launch_requests, tick_room_launches, publish_room_launch).chain(),
-        );
+        app.add_systems(Update, (handle_launch_requests, publish_room_launch).chain());
         // Session resume: continuously remember live avatars' positions (the reconnect
         // restore itself happens at connect, in `spawn_player_for_client`).
         app.add_systems(Update, record_resume_positions);
@@ -586,6 +586,23 @@ impl Plugin for NetServerPlugin {
                     .after(apply_net_input)
                     .before(CharacterMovement),
                 (server_grab, server_hold, server_attach, server_delete).chain(),
+                // Blastoff itself is a tick event: fire on the scheduled tick and cut the
+                // ground joints, immediately before the thrust that same tick, so liftoff
+                // is one atomic moment the client can land on exactly.
+                fire_scheduled_launches.before(apply_room_rocket_thrust),
+                // The asteroid field: age each flying room's clock, spawn what the
+                // difficulty curve calls for, sweep what's done. After the blastoff flip
+                // so a room that lights its engines this tick starts its field clock on
+                // the same tick, not the next one.
+                //
+                // `BS_NO_ROCKS` turns the field off. It is the A/B control for every
+                // question of the form "did the rocks do that, or does this stack tip over
+                // on its own?" — which is not answerable from a flight trace, because a
+                // hit and a slow attitude departure look identical in the altitude and
+                // flight-path angle (both are just the stack going the wrong way).
+                run_asteroid_field
+                    .after(fire_scheduled_launches)
+                    .run_if(|| std::env::var("BS_NO_ROCKS").is_err()),
                 // Balanced rocket thrust for launched rooms — a continuous force, so it
                 // runs per physics tick like the hold spring.
                 apply_room_rocket_thrust,
@@ -801,7 +818,18 @@ fn rebase_room_frames(
     // (~2 km).
     joints: Query<(Entity, &SphericalJoint, Option<&RoomMember>, Has<LockJoint>)>,
     mut orbs: Query<(&RoomStateOf, &mut NetRoomFrame)>,
-    mut parts: Query<(Entity, &NetPart, &PartRoom, &mut Position, &mut LinearVelocity)>,
+    // `Has<Asteroid>`, not `Without`: rocks must still be **shifted** by a rebase (they
+    // are in the room's frame like everything else, and one left behind would jump
+    // kilometres relative to the ship), but must not be **weighed** into the anchor the
+    // frame is chosen from — that has to follow the ship, not the nearest boulder.
+    mut parts: Query<(
+        Entity,
+        &NetPart,
+        &PartRoom,
+        &mut Position,
+        &mut LinearVelocity,
+        Has<Asteroid>,
+    )>,
     mut avatars: Query<
         (Entity, &RoomMember, &mut Position, &mut LinearVelocity),
         (With<ServerAvatar>, Without<NetPart>),
@@ -820,7 +848,9 @@ fn rebase_room_frames(
     // Publishing still runs (a fresh orb needs its zero frame written once).
     const TRIGGER_SQ: f32 = REBASE_TRIGGER_M * REBASE_TRIGGER_M;
     if frames.by_room.values().all(|f| !f.is_active())
-        && parts.iter().all(|(.., position, _)| position.0.length_squared() < TRIGGER_SQ)
+        && parts
+            .iter()
+            .all(|(.., position, _, rock)| rock || position.0.length_squared() < TRIGGER_SQ)
     {
         for (_, mut net_frame) in &mut orbs {
             net_frame.set_if_neq(NetRoomFrame::default());
@@ -833,7 +863,10 @@ fn rebase_room_frames(
     let mut index: HashMap<Entity, usize> = HashMap::new();
     let mut items: Vec<(Vec3, f32, RoomId)> = Vec::new();
     let mut velocities: Vec<Vec3> = Vec::new();
-    for (entity, part, room, position, linear) in &parts {
+    for (entity, part, room, position, linear, rock) in &parts {
+        if rock {
+            continue;
+        }
         index.insert(entity, items.len());
         items.push((position.0, part_volume(part.shape), room.id));
         velocities.push(linear.0);
@@ -896,7 +929,7 @@ fn rebase_room_frames(
                 // Avatars don't carry the room's collision bit; pick it up from the
                 // room's parts (a room always has parts).
                 let mut bit = None;
-                for (entity, _, part_room, mut position, mut linear) in &mut parts {
+                for (entity, _, part_room, mut position, mut linear, _) in &mut parts {
                     if part_room.id == room {
                         position.0 -= dpos;
                         linear.0 -= dvel;
@@ -1923,9 +1956,13 @@ fn spawn_room_world_from_save(
         );
     }
 
-    // A world saved after blastoff resumes with its rockets firing.
+    // A world saved after blastoff resumes with its rockets firing — but with **no
+    // pilot**: nobody pressed anything, and inventing one would hand the stick to whichever
+    // player happened to load the file. A restored mid-flight save therefore flies the
+    // autopilot alone. (Saves taken on the pad are unaffected: their launch is pressed
+    // normally and gets a real pilot.)
     if world.launched {
-        launches.by_room.insert(room.id, RoomLaunch::Launched);
+        launches.by_room.insert(room.id, RoomLaunch::Launched { pilot: 0 });
     }
     // Stamped tick 0: `rebase_room_frames` republishes with the live tick on its first
     // FixedUpdate — before any client can have joined the freshly-created room.
@@ -1970,7 +2007,8 @@ fn tag_room_part(
 /// the hold target. On release, let go. The part stays dynamic throughout.
 fn server_grab(
     mut players: Query<(&ActionState<NetInput>, &mut HeldPart, &RoomMember)>,
-    parts: Query<(Entity, &Position, &PartRoom), With<NetPart>>,
+    // `Without<Asteroid>`: a falling rock is scenery, not inventory.
+    parts: Query<(Entity, &Position, &PartRoom), (With<NetPart>, Without<Asteroid>)>,
     launches: Res<LaunchRegistry>,
 ) {
     for (state, mut held, member) in &mut players {
@@ -2048,7 +2086,12 @@ fn server_attach(
     // (`part_gap_contacts`). Includes the held part. Poses come from Avian `Position`/
     // `Rotation`, not `Transform` (`lightyear_avian` owns the Position→Transform sync,
     // so `Transform` can lag).
-    parts_q: Query<(Entity, &Collider, &Position, &Rotation, &PartRoom), With<NetPart>>,
+    // `Without<Asteroid>`: a rock is not a weld candidate — bolting the stack to a
+    // boulder mid-ascent would drag the whole flight down with it.
+    parts_q: Query<
+        (Entity, &Collider, &Position, &Rotation, &PartRoom),
+        (With<NetPart>, Without<Asteroid>),
+    >,
     // The shared ground bowl (`RigidBody::Static` at the world origin) is a weld
     // candidate too — `part_gap_contacts` thins its faceted manifold to a spread rigid
     // set, so a rocket clamps to the ground with no anchor triangle.
@@ -2541,7 +2584,14 @@ fn sync_net_hold(
 fn replace_fallen_room_parts(
     mut commands: Commands,
     frames: Res<RoomFrames>,
-    parts: Query<(Entity, &Position, &LinearVelocity, &AngularVelocity, &PartRoom, &NetPart)>,
+    // Asteroids are excluded: falling out of the world is what they are *for*, and
+    // "recycling" one would respawn a fresh boulder on the pad forever. The field runs its
+    // own cleanup (`run_asteroid_field`) — but the divergence half of this system still
+    // matters for them, so that is handled there too rather than dropped.
+    parts: Query<
+        (Entity, &Position, &LinearVelocity, &AngularVelocity, &PartRoom, &NetPart),
+        Without<Asteroid>,
+    >,
 ) {
     for (entity, position, linear, angular, part_room, part) in &parts {
         let diverged = part_state_diverged(position.0, linear.0, angular.0);
@@ -2575,6 +2625,9 @@ fn replace_fallen_room_parts(
                         &frames,
                     );
                 }
+                // Filtered out of the query above — a rock that falls away is doing its
+                // job, not leaking from the pool.
+                PartShape::Asteroid { .. } => {}
                 PartShape::RocketEngine => {
                     let new_entity = spawn_random_rocket(&mut commands);
                     tag_room_part(
@@ -2651,7 +2704,13 @@ fn ensure_spare_rocket(
 /// arise here. A lone part is not an assembly, so only components of ≥ 2 parts count.
 fn mark_largest_assembly(
     mut commands: Commands,
-    parts: Query<(Entity, &Position, &NetPart, &PartRoom, Has<InLargestAssembly>)>,
+    // `Without<Asteroid>`: rocks carry no joints, so they can only ever be
+    // single-part components — but a stack reduced to one part by a hit would then lose
+    // its assembly (and its thrust) to whichever boulder happened to be biggest.
+    parts: Query<
+        (Entity, &Position, &NetPart, &PartRoom, Has<InLargestAssembly>),
+        Without<Asteroid>,
+    >,
     joints: Query<&SphericalJoint>,
 ) {
     // Index every part so joints can reference them by position. Each entry carries
@@ -2705,12 +2764,29 @@ fn mark_largest_assembly(
 // applies the same thrust to its predicted rockets (smooth liftoff, minimal rollback).
 
 /// Per-room launch state, keyed by `RoomId`. A room is absent until launch is requested;
-/// `Counting` runs the pre-blastoff countdown, then `Launched` fires the rockets for the
-/// rest of the session.
+/// `Counting` holds the **tick** blastoff will fire on, then `Launched` fires the rockets
+/// for the rest of the session.
+///
+/// The countdown is a scheduled tick rather than a decrementing float because the client
+/// has to reach the same conclusion on the same tick without being told (see
+/// [`NetLaunch::launched_at`]). A float ticking down in `Update` also made the moment
+/// frame-rate dependent on the server itself — it fired on whatever fixed tick happened
+/// to follow the frame that crossed zero.
 #[derive(Clone, Copy)]
 enum RoomLaunch {
-    Counting { remaining: f32 },
-    Launched,
+    Counting { blastoff_tick: Tick, pilot: u64 },
+    Launched { pilot: u64 },
+}
+
+impl RoomLaunch {
+    /// The `client_id` of whoever pressed Launch — carried through both phases because
+    /// the pilot is a property of the *flight*, not of the countdown: the stick only means
+    /// anything after blastoff, which is precisely when the countdown is over.
+    fn pilot(self) -> u64 {
+        match self {
+            RoomLaunch::Counting { pilot, .. } | RoomLaunch::Launched { pilot } => pilot,
+        }
+    }
 }
 
 #[derive(Resource, Default)]
@@ -2750,6 +2826,17 @@ struct RoomPolicy(HashMap<RoomId, PitchProgram>);
 #[derive(Resource, Default)]
 struct RoomApparentUp(HashMap<RoomId, Vec3>);
 
+/// Per-room pilot stick, as read off the pilot's tick-stamped `NetInput` by
+/// [`apply_room_rocket_thrust`] and republished on [`NetLaunch::steer`] for the room's
+/// *other* clients to predict with.
+///
+/// It exists as a resource, rather than being read straight from the input inside
+/// `publish_room_launch`, so the value that reaches the wire is provably the same one the
+/// burn flew — including the clamp and the not-the-pilot rejection. Publishing a
+/// separately-derived copy is how two peers end up steering by almost the same number.
+#[derive(Resource, Default)]
+struct RoomSteer(HashMap<RoomId, Vec2>);
+
 /// Per-room escape-cutoff hysteresis state (see [`escape_cutoff`]): whether a room's
 /// assembly currently has its throttle cut for reaching escape. Held across ticks so the
 /// cut can't chatter at the boundary, yet re-fires if the ship falls back below escape.
@@ -2761,7 +2848,12 @@ impl LaunchRegistry {
     /// Whether a room has blasted off — the state the rocket thrust keys on and
     /// the save snapshot persists.
     fn is_launched(&self, room: RoomId) -> bool {
-        matches!(self.by_room.get(&room), Some(RoomLaunch::Launched))
+        matches!(self.by_room.get(&room), Some(RoomLaunch::Launched { .. }))
+    }
+
+    /// The room's pilot, or `0` if it has no launch armed.
+    fn pilot(&self, room: RoomId) -> u64 {
+        self.by_room.get(&room).map_or(0, |launch| launch.pilot())
     }
 }
 
@@ -2779,19 +2871,20 @@ fn handle_launch_requests(
         (Entity, &mut MessageReceiver<RequestLaunch>),
         (With<ClientOf>, With<Connected>),
     >,
-    avatars: Query<(&ControlledBy, &RoomMember)>,
+    avatars: Query<(&ControlledBy, &RoomMember, &NetPlayer)>,
     room_avatars: Query<(Entity, &RoomMember), With<ServerAvatar>>,
     lock_joints: Query<&SphericalJoint, With<LockJoint>>,
     assembly: Query<(), With<InLargestAssembly>>,
     mut registry: ResMut<LaunchRegistry>,
     mut fuel: ResMut<RoomFuel>,
     mut policies: ResMut<RoomPolicy>,
+    timeline: Res<LocalTimeline>,
 ) {
     for (link, mut receiver) in &mut links {
         if receiver.receive().count() == 0 {
             continue;
         }
-        for (controlled, member) in &avatars {
+        for (controlled, member, player) in &avatars {
             if controlled.owner == link {
                 let room = member.0;
                 let locked_to_assembly = |avatar: Entity| {
@@ -2825,44 +2918,191 @@ fn handle_launch_requests(
                     fuel.0.insert(room, 0.0);
                     policies.0.remove(&room);
                 }
-                registry
-                    .by_room
-                    .entry(room)
-                    .or_insert(RoomLaunch::Counting { remaining: LAUNCH_COUNTDOWN_SECS });
+                // Schedule blastoff on a definite tick and replicate it now. Every client
+                // learns the moment ~`LAUNCH_COUNTDOWN_TICKS` ahead of it, which is what
+                // lets them fire on the same tick instead of on a late-arriving flag.
+                registry.by_room.entry(room).or_insert_with(|| {
+                    let blastoff_tick = timeline.tick() + LAUNCH_COUNTDOWN_TICKS;
+                    // Whoever pressed the button flies it. Latched here, at the one moment
+                    // a launch has an unambiguous author, rather than inferred later from
+                    // who happens to be aboard.
+                    let pilot = player.client_id;
+                    let armed = timeline.tick();
+                    println!(
+                        "[launch] room {room:?} armed at tick {armed:?} -> blastoff at \
+                         {blastoff_tick:?}, pilot {pilot}"
+                    );
+                    RoomLaunch::Counting { blastoff_tick, pilot }
+                });
             }
         }
     }
 }
 
-/// Advance each room's countdown; at blastoff flip it to `Launched` and cut every joint
-/// pinning that room's assembly to the ground. Ground joints are identified
+/// Fire each room whose scheduled blastoff tick has arrived: flip it to `Launched` and cut
+/// every joint pinning that room's assembly to the ground. Ground joints are identified
 /// **positively** by the `GROUND_JOINT_ID` sentinel their replicated `NetJoint`
 /// carries (every server joint goes through `spawn_room_joint`) — not by "endpoint
 /// isn't a part", which would silently sever every future non-part joint class at
 /// blastoff (it already would have cut player-lock welds, severing riders at the
 /// exact moment of liftoff). Part-to-part joints and lock welds stay intact.
-fn tick_room_launches(
-    time: Res<Time>,
+///
+/// Runs in `FixedUpdate` **before** [`apply_room_rocket_thrust`], so the first tick that is
+/// at or past the schedule is both the tick the ground joints let go and the tick the
+/// engines light — one moment, not two. (This used to decrement a float in `Update`, which
+/// left blastoff landing on whatever fixed tick happened to follow the frame that crossed
+/// zero — frame-rate dependent on the server, and impossible for a client to match.)
+fn fire_scheduled_launches(
+    timeline: Res<LocalTimeline>,
     mut commands: Commands,
     mut registry: ResMut<LaunchRegistry>,
     joints: Query<(Entity, &NetJoint, &RoomMember)>,
 ) {
-    let dt = time.delta_secs();
+    let now = timeline.tick();
     for (&room, launch) in registry.by_room.iter_mut() {
-        let RoomLaunch::Counting { remaining } = launch else {
+        let RoomLaunch::Counting { blastoff_tick, pilot } = *launch else {
             continue;
         };
-        *remaining -= dt;
-        if *remaining > 0.0 {
+        let elapsed: i32 = now - blastoff_tick;
+        if elapsed < 0 {
             continue;
         }
-        *launch = RoomLaunch::Launched;
+        *launch = RoomLaunch::Launched { pilot };
+        let mut cut = 0;
         for (entity, joint, member) in &joints {
             if member.0 == room
                 && (joint.body1 == GROUND_JOINT_ID || joint.body2 == GROUND_JOINT_ID)
             {
                 commands.entity(entity).despawn();
+                cut += 1;
             }
+        }
+        println!(
+            "[launch] room {room:?} blastoff at tick {now:?} (scheduled {blastoff_tick:?}, \
+             slip {elapsed}) — cut {cut} ground joints"
+        );
+    }
+}
+
+/// Per-room asteroid-field clock (see [`FieldClock`]). Cleared when a room stops flying, so
+/// a reset-and-relaunched room starts the field from the beginning rather than
+/// mid-gauntlet.
+#[derive(Resource, Default)]
+struct RoomAsteroids(HashMap<RoomId, FieldClock>);
+
+/// Run each launched room's asteroid field: age its clock, spawn rocks as the curve calls
+/// for them, and sweep away the ones that are done.
+///
+/// **Why the whole field lives in one system.** Spawning and sweeping both need the same
+/// thing — where the assembly is right now — and it is the one quantity here that is
+/// expensive to get and easy to get *differently*. Computed twice, a rock could be placed
+/// against one centre and culled against another, which reads as rocks vanishing on
+/// approach.
+///
+/// Rocks are ordinary room-scoped `NetPart`s (see [`PartShape::Asteroid`]), so replication,
+/// prediction, planet gravity, collision layers and the floating-origin rebase are all
+/// inherited rather than reimplemented here. This system only decides *when* one exists.
+fn run_asteroid_field(
+    time: Res<Time>,
+    mut commands: Commands,
+    registry: Res<LaunchRegistry>,
+    frames: Res<RoomFrames>,
+    mut fields: ResMut<RoomAsteroids>,
+    assembly: Query<(&Position, &LinearVelocity, &PartRoom), With<InLargestAssembly>>,
+    rocks: Query<
+        (Entity, &Position, &LinearVelocity, &AngularVelocity, &PartRoom),
+        With<Asteroid>,
+    >,
+) {
+    // Where each launched room's ship is, as one pass over its assembly. The plain mean
+    // (not the mass-weighted COM the burn uses) is the right tool: the field only needs to
+    // know roughly where the ship is, and an unweighted centroid can't be dragged by one
+    // heavy part the way a weighted one can when the stack breaks up mid-hit.
+    let mut ships: HashMap<RoomId, (Vec3, Vec3, f32)> = HashMap::new();
+    for (position, linear, part_room) in &assembly {
+        if !registry.is_launched(part_room.id) {
+            continue;
+        }
+        let entry = ships.entry(part_room.id).or_insert((Vec3::ZERO, Vec3::ZERO, 0.0));
+        entry.0 += position.0;
+        entry.1 += linear.0;
+        entry.2 += 1.0;
+    }
+    let ships: HashMap<RoomId, (Vec3, Vec3)> =
+        ships.into_iter().map(|(room, (p, v, n))| (room, (p / n, v / n))).collect();
+
+    // A room that is no longer flying has no field: drop its clock, and let the sweep
+    // below clear its rubble (a room with no ship matches no `ships` entry, so every one
+    // of its rocks is out of range by definition).
+    fields.0.retain(|room, _| ships.contains_key(room));
+
+    let mut live: HashMap<RoomId, usize> = HashMap::new();
+    for (entity, position, linear, angular, part_room) in &rocks {
+        let gone = match ships.get(&part_room.id) {
+            Some(&(ship, ship_vel)) => rock_is_spent(position.0, linear.0, ship, ship_vel),
+            // No ship in this room at all: the flight is over, and so is its weather.
+            None => true,
+        };
+        // A rock whose state has blown up would panic Avian's broadphase on the next
+        // tick exactly as a part would (`replace_fallen_room_parts`), and it is excluded
+        // from that system — so it is caught here instead of simply not caught.
+        if gone || part_state_diverged(position.0, linear.0, angular.0) {
+            commands.entity(entity).despawn();
+        } else {
+            *live.entry(part_room.id).or_default() += 1;
+        }
+    }
+
+    let dt = time.delta_secs();
+    for (&room, &(com, ship_vel)) in &ships {
+        let clock = fields.0.entry(room).or_default();
+        let Some(d) = clock.tick(dt) else {
+            continue;
+        };
+        if live.get(&room).copied().unwrap_or(0) >= MAX_LIVE_ROCKS {
+            continue;
+        }
+        let frame = frames.get(room);
+        let (entity, radius, seed) = spawn_asteroid(
+            &mut commands,
+            com,
+            // Room-local for the rock's own velocity, true (frame-folded) for the flight
+            // frame and the planet's radial — see `plan_rock`.
+            ship_vel,
+            com + frame.offset.as_vec3(),
+            ship_vel + frame.velocity,
+            d,
+        );
+        // The room's collision bit comes off its assembly, which by construction exists
+        // (a launched room has one) — the same trick the rebase uses for avatars.
+        let Some(part_room) = assembly
+            .iter()
+            .find_map(|(_, _, pr)| (pr.id == room).then(|| pr.room()))
+        else {
+            continue;
+        };
+        tag_room_part(
+            &mut commands,
+            entity,
+            PartShape::Asteroid { radius },
+            seed,
+            part_room,
+            &frames,
+        );
+        commands.entity(entity).insert(Asteroid);
+        // `BS_DEBUG_ROCKS=1` traces the field. Off by default: at full difficulty it fires
+        // a few times a second, which would bury the `[launch]`/`[rebase]` events a real
+        // deploy log is read for. On, it is the only way to see the field at all — rocks
+        // are deliberately absent from saves and recordings (see `save_shape`), so there
+        // is no after-the-fact record of one to inspect.
+        static DEBUG_ROCKS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *DEBUG_ROCKS.get_or_init(|| std::env::var("BS_DEBUG_ROCKS").is_ok()) {
+            println!(
+                "[rocks] room {room:?} t={:.1}s d={d:.2} r={radius:.1}m live={} next in {:.2}s",
+                clock.elapsed,
+                live.get(&room).copied().unwrap_or(0) + 1,
+                clock.until_next(),
+            );
         }
     }
 }
@@ -2873,18 +3113,45 @@ fn tick_room_launches(
 fn publish_room_launch(
     registry: Res<LaunchRegistry>,
     policies: Res<RoomPolicy>,
+    steers: Res<RoomSteer>,
+    timeline: Res<LocalTimeline>,
     mut orbs: Query<(&RoomStateOf, &mut NetLaunch)>,
 ) {
+    let now = timeline.tick();
     for (orb_room, mut launch) in &mut orbs {
+        let pilot = registry.pilot(orb_room.0);
+        // The pilot's own client ignores this and reads its local input instead; it is
+        // here for everybody *else* in the room, whose predicted rockets would otherwise
+        // fly the autopilot's command while the real one is being steered.
+        let steer = steers.0.get(&orb_room.0).copied().unwrap_or(Vec2::ZERO).to_array();
         // The optimizer's whole ascent seed rides along (default — straight up — until
         // the first launched tick computes it) so the predicted client rebuilds the
         // byte-identical pitch program instead of re-planning from its own state.
         let plan = policies.0.get(&orb_room.0).map(|program| program.seed).unwrap_or_default();
         let next = match registry.by_room.get(&orb_room.0) {
-            Some(RoomLaunch::Counting { remaining }) => {
-                NetLaunch { remaining: remaining.max(0.0), launched: false, plan }
+            Some(RoomLaunch::Counting { blastoff_tick, .. }) => {
+                // The banner reads off the schedule too, so the digits and the engines
+                // can't disagree about when zero is.
+                let ticks_left: i32 = *blastoff_tick - now;
+                NetLaunch {
+                    remaining: (ticks_left.max(0) as f32 * TICK.as_secs_f32()).max(0.0),
+                    launched: false,
+                    blastoff_tick: Some(blastoff_tick.0),
+                    plan,
+                    pilot,
+                    steer,
+                }
             }
-            Some(RoomLaunch::Launched) => NetLaunch { remaining: 0.0, launched: true, plan },
+            Some(RoomLaunch::Launched { .. }) => NetLaunch {
+                remaining: 0.0,
+                launched: true,
+                // Kept past blastoff: `launched_at` needs the schedule for the whole
+                // flight, including while a rollback replays ticks either side of it.
+                blastoff_tick: launch.blastoff_tick,
+                plan,
+                pilot,
+                steer,
+            },
             None => NetLaunch::default(),
         };
         launch.set_if_neq(next);
@@ -2927,8 +3194,13 @@ fn apply_room_rocket_thrust(
     mut policies: ResMut<RoomPolicy>,
     mut escaped: ResMut<RoomEscaped>,
     mut apparent: ResMut<RoomApparentUp>,
+    mut steers: ResMut<RoomSteer>,
     frames: Res<RoomFrames>,
     gravity: Res<Gravity>,
+    // Every avatar's tick-stamped input, so the room's pilot can be picked out by
+    // `client_id`. Read here rather than in the publisher because this is the site that
+    // has to *fly* it — see `RoomSteer`.
+    pilots: Query<(&NetPlayer, &ActionState<NetInput>, &RoomMember), With<ServerAvatar>>,
     // Riders' masses, for the ascent plan: every avatar is locked to the assembly at
     // launch (the launch gate guarantees it), so their weight flies with the stack — a
     // plan built from parts-only mass overestimates thrust-to-weight and the real arc
@@ -2982,6 +3254,7 @@ fn apply_room_rocket_thrust(
     let launched: std::collections::HashSet<RoomId> = per_room.keys().copied().collect();
     apparent.0.retain(|room, _| launched.contains(room));
     escaped.0.retain(|room, _| launched.contains(room));
+    steers.0.retain(|room, _| launched.contains(room));
 
     // Resolve each room's burn (shared `assembly_burn`, so the client's predicted twin
     // computes the identical trims + gimbal slews). The COM + rotational state come
@@ -3066,8 +3339,19 @@ fn apply_room_rocket_thrust(
             });
             let pitchover = plan.seed.pitchover;
             let plan_probe = plan.probe();
-            let guidance =
+            let autopilot =
                 program_guidance(true_com, true_vel, plan, escaped.0.entry(*room).or_default());
+            // Fold in the pilot's stick for this tick. Everything downstream — the trace,
+            // the allocator, the HUD — sees only the flown command, so there is no second
+            // place where the two could be combined differently.
+            let pilot = registry.pilot(*room);
+            let stick = pilots
+                .iter()
+                .find(|(player, _, member)| member.0 == *room && player.client_id == pilot)
+                .map(|(_, input, _)| Vec2::from(input.0.steer).clamp_length_max(1.0))
+                .unwrap_or(Vec2::ZERO);
+            steers.0.insert(*room, stick);
+            let guidance = steer_guidance(autopilot, true_com, true_vel, stick);
             static DEBUG_GUIDANCE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
             if *DEBUG_GUIDANCE.get_or_init(|| std::env::var("BS_DEBUG_GUIDANCE").is_ok()) {
                 use std::sync::atomic::{AtomicU32, Ordering};
@@ -3329,6 +3613,21 @@ type SnapshotParts<'w, 's> = Query<
     ),
 >;
 
+/// A part's save representation, or `None` if this kind of body doesn't belong in a save.
+///
+/// The one place the question is asked, so the parts that get written, the index the
+/// joints are numbered against, and the shapes themselves can't disagree about who is in
+/// the snapshot. Asteroids are the `None` case: a save is the player's world, the asteroid
+/// field is weather — and giving rubble a save-format variant would freeze it into every
+/// future save's schema for the sake of debris nobody wants back.
+fn save_shape(shape: PartShape) -> Option<SaveShape> {
+    match shape {
+        PartShape::Cuboid { half_extents } => Some(SaveShape::Cuboid { half_extents }),
+        PartShape::RocketEngine => Some(SaveShape::RocketEngine),
+        PartShape::Asteroid { .. } => None,
+    }
+}
+
 /// Every joint's replicated data + room tag (`RoomMember` also rides on avatars,
 /// but only joints carry `NetJoint`).
 type SnapshotJoints<'w, 's> = Query<'w, 's, (&'static NetJoint, &'static RoomMember)>;
@@ -3363,8 +3662,12 @@ fn snapshot_room(
     parts: &SnapshotParts,
     joints: &SnapshotJoints,
 ) -> SaveWorld {
-    let mut room_parts: Vec<_> =
-        parts.iter().filter(|(_, part_room, ..)| part_room.id == room).collect();
+    let mut room_parts: Vec<_> = parts
+        .iter()
+        .filter(|(part, part_room, ..)| {
+            part_room.id == room && save_shape(part.shape).is_some()
+        })
+        .collect();
     room_parts.sort_by_key(|(part, ..)| part.id);
     let index: HashMap<u64, u32> = room_parts
         .iter()
@@ -3375,10 +3678,9 @@ fn snapshot_room(
     let save_parts = room_parts
         .iter()
         .map(|(part, _, position, rotation, linear, angular)| SavePart {
-            shape: match part.shape {
-                PartShape::Cuboid { half_extents } => SaveShape::Cuboid { half_extents },
-                PartShape::RocketEngine => SaveShape::RocketEngine,
-            },
+            // `room_parts` is already filtered to the savable shapes, so the fallback
+            // never fires; it keeps the save path total rather than panicking on a slip.
+            shape: save_shape(part.shape).unwrap_or(SaveShape::RocketEngine),
             seed: part.seed,
             position: position.0.to_array(),
             rotation: rotation.0.to_array(),
@@ -3681,7 +3983,11 @@ fn start_server(mut commands: Commands) {
         ))
         .id();
     commands.trigger(Start { entity: server });
-    info!("multiplayer server listening on ws://{addr}");
+    println!(
+        "[net] server listening on ws://{addr} proto={} ver={}",
+        bad_spaceship_shared::net::BS_PROTOCOL_ID,
+        bad_spaceship_shared::net::BS_VERSION
+    );
 }
 
 /// When a client finishes connecting (`Connected` added to its link entity),

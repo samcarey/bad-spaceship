@@ -431,6 +431,8 @@ fn show_flight_hud(
     fuel: Option<Res<crate::launch::FuelUsed>>,
     autopilot: Res<crate::launch::Autopilot>,
     flight_path: Res<crate::trajectory::FlightPath>,
+    controls: Res<crate::pilot::AtTheControls>,
+    stick: Res<crate::pilot::PilotStick>,
     mut smoothed_speed: Local<f32>,
 ) -> Result {
     /// Below this true altitude the readout is clutter (the pad, block towers,
@@ -494,10 +496,20 @@ fn show_flight_hud(
         } else {
             "gravity turn"
         };
-        autopilot_lines.push(format!(
-            "Autopilot: {phase} · tilt {:.0} deg",
-            ap.command_angle.to_degrees()
-        ));
+        // Who is flying. The chase camera already tells the pilot the controls are theirs,
+        // but not that letting go gives them back — and a rider watching someone else fly
+        // has no other way to know why the ship is not following the plan.
+        let flying = if !controls.0 {
+            format!("Autopilot: {phase} · tilt {:.0} deg", ap.command_angle.to_degrees())
+        } else if stick.value.length() > 0.02 {
+            format!(
+                "PILOT · steering {:.0}% · release for autopilot",
+                stick.value.length() * 100.0
+            )
+        } else {
+            format!("PILOT · autopilot flying {phase} · touch to steer")
+        };
+        autopilot_lines.push(flying);
         if burning {
             // The speed the engines shut off at *this* altitude (it falls as we
             // climb, so the two numbers race toward each other).

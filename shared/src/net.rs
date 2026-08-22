@@ -163,6 +163,14 @@ pub struct NetInput {
     /// session resume). An app-level token, NOT the netcode `client_id`, so a quick
     /// reconnect isn't rejected as a duplicate connection. `0` = no resume (native).
     pub resume_id: u64,
+    /// The pilot's steering stick, `[right, up]` in the planet-relative
+    /// [`flight_frame`](crate::guidance::flight_frame), clamped to the unit disc. Non-zero
+    /// only for the room's pilot (see [`NetLaunch::pilot`]) while its assembly is under
+    /// power; ignored from anyone else. It rides the input channel rather than a message
+    /// so it is *tick-stamped*: the server applies the deflection the pilot held on tick
+    /// N to tick N's burn, and a rollback replays the same value, which is what lets the
+    /// pilot's client predict its own steering with no lag and no divergence.
+    pub steer: [f32; 2],
 }
 
 // Focus range / look-angle and the held-part spring stiffnesses are defined once
@@ -281,6 +289,13 @@ pub enum PartShape {
     /// A rocket engine: cylinder body + cone flare, built from the shared `ROCKET_*`
     /// geometry constants (no per-instance parameters).
     RocketEngine,
+    /// A falling asteroid: a sphere of this radius (m). Shares the part pipeline because
+    /// an asteroid *is* what a `NetPart` models — a room-scoped dynamic body that
+    /// replicates, predicts, feels the planet's gravity and the room's floating-origin
+    /// rebase, and collides with the stack. Only the things it must NOT do are special:
+    /// it can't be grabbed, jointed, saved, or counted into an assembly (see the
+    /// [`Asteroid`] marker).
+    Asteroid { radius: f32 },
 }
 
 impl Default for PartShape {
@@ -379,16 +394,92 @@ pub struct InLargestAssembly;
 #[derive(Component, Serialize, Deserialize, Clone, Copy, PartialEq, Debug, Default)]
 pub struct NetLaunch {
     /// Seconds left in the countdown while counting down (`> 0`); `0` when idle or
-    /// already launched.
+    /// already launched. Derived from [`blastoff_tick`](Self::blastoff_tick) — a HUD
+    /// readout only. Never gate physics on it.
     pub remaining: f32,
-    /// Whether blastoff has happened and the rockets are firing.
+    /// Whether blastoff has happened and the rockets are firing. A *level*: it arrives
+    /// ~1 RTT after the fact, so it is right for visuals (banner, camera, planet ring)
+    /// and wrong for physics — see [`launched_at`](Self::launched_at).
     pub launched: bool,
+    /// The tick blastoff fires on, scheduled when the countdown arms and replicated
+    /// [`LAUNCH_COUNTDOWN_TICKS`] (188) ahead of it. This is what makes liftoff
+    /// tick-exact on every peer:
+    /// the countdown gives everyone the answer long before the moment, so the client
+    /// starts its burn (and cuts its predicted ground joints) on the *same* tick as
+    /// the server instead of reacting to `launched` arriving late. `None` for a room
+    /// that has never launched this session, and for a world restored from a save
+    /// already in flight (nothing to schedule — `launched` covers it).
+    pub blastoff_tick: Option<u32>,
     /// Everything the server's guidance optimizer sampled this launch's ascent program
     /// from, so the predicted client rebuilds the *identical* program rather than
     /// re-planning from its own live state a few ticks later. Replicating only the
     /// chosen angle was not enough — see [`LaunchSeed`](crate::guidance::LaunchSeed) for
     /// the 1.2 mrad standing command error that left behind.
     pub plan: crate::guidance::LaunchSeed,
+    /// The netcode `client_id` of the player who pressed Launch — this flight's **pilot**,
+    /// the one whose stick steers it and who flies the chase camera. `0` when no launch is
+    /// armed, and for a world restored from a save already in flight (nobody pressed
+    /// anything). Replicated because every peer needs the same answer: the server to know
+    /// whose input to read, the pilot's own client to know to take the controls, and every
+    /// other client to know the stick it is being sent belongs to somebody else.
+    pub pilot: u64,
+    /// The pilot's stick this tick, `[right, up]` in the planet-relative
+    /// [`flight_frame`](crate::guidance::flight_frame), clamped to the unit disc.
+    ///
+    /// This is a *level*, and knowingly so — it is the one quantity in the launch that has
+    /// no seed, because it is an exogenous human input rather than a recurrence anybody
+    /// could derive. The pilot's own client therefore does **not** read it: it steers from
+    /// its local `ActionState<NetInput>`, which lightyear's input timeline delivers to the
+    /// server for the *same* tick, so pilot and server agree exactly. The other clients in
+    /// the room have no such channel and read this instead, ~1 RTT behind — the same
+    /// standing of any remote player's intent in this game, and corrected by the ordinary
+    /// position rollback.
+    pub steer: [f32; 2],
+}
+
+/// How many ticks the pre-blastoff countdown runs for. Rounded **up** so the scheduled
+/// moment is never earlier than [`LAUNCH_COUNTDOWN_SECS`](crate::launch::LAUNCH_COUNTDOWN_SECS)
+/// — a countdown that fires a hair late is invisible; one that fires early clips the
+/// banner. (`TICK` is 16 ms, not exactly 1/60 s, so this is 188, not 180.)
+pub const LAUNCH_COUNTDOWN_TICKS: i32 = {
+    let tick_ms = TICK.as_millis() as i32;
+    let countdown_ms = (crate::launch::LAUNCH_COUNTDOWN_SECS * 1000.0) as i32;
+    (countdown_ms + tick_ms - 1) / tick_ms
+};
+
+impl NetLaunch {
+    /// Whether the engines are firing **at `tick`** — the predicate every physics site
+    /// must use, on the server and on each predicted client alike.
+    ///
+    /// The point is that this is a pure function of a tick and a value replicated
+    /// [`LAUNCH_COUNTDOWN_TICKS`] in advance, so both peers answer identically without
+    /// either waiting to be told.
+    ///
+    /// Reading the `launched` *level* instead is what made the client start its burn
+    /// **late on every single flight**: the level is replicate-only (no `.predict()`), so
+    /// nothing ever replayed the missed ticks. How late depends on the link — measured at
+    /// 4 ticks on the campaign's setup (a fixed 0.1997 m/s velocity deficit, exactly 4 ×
+    /// the 0.04995 m/s a tick of thrust adds, which is how the lag was first identified)
+    /// and at 1–2 ticks over loopback, where it was still late every run and still
+    /// varied. Rollback absorbed the transient over ~100 ticks; it should never have
+    /// existed. Note the deficit is not the whole cost — the client also held its
+    /// predicted ground clamps for those ticks (see `release_predicted_ground_joints`).
+    ///
+    /// The tick delta is a wrapping `i32` (lightyear's `Tick` is a wrapping `u32`), so
+    /// this stays correct across the counter's wrap and while a rollback replays ticks
+    /// older than the schedule.
+    pub fn launched_at(&self, tick: Tick) -> bool {
+        match self.blastoff_tick {
+            Some(scheduled) => {
+                let elapsed: i32 = tick - Tick(scheduled);
+                elapsed >= 0
+            }
+            // No schedule: a world restored from a save that was already in flight (or a
+            // peer that connected mid-flight). The replicated level is all there is, and
+            // it is correct — the launch is long past, so there is no tick to be exact about.
+            None => self.launched,
+        }
+    }
 }
 
 /// Replicated **floating-origin frame** of a room, authored by the server onto the
@@ -551,8 +642,27 @@ pub fn part_volume(shape: PartShape) -> f32 {
             8.0 * he.x * he.y * he.z
         }
         PartShape::RocketEngine => crate::part::ROCKET_VOLUME,
+        PartShape::Asteroid { radius } => {
+            4.0 / 3.0 * std::f32::consts::PI * radius * radius * radius
+        }
     }
 }
+
+/// Marks a replicated part as a falling asteroid rather than a piece of the player's
+/// world — derived locally on every peer from [`PartShape::Asteroid`] (the shape is
+/// already replicated, so the marker costs no bandwidth) and inserted by whichever system
+/// builds the body.
+///
+/// It exists to say what an asteroid is *not*. Sharing the part pipeline is what gets a
+/// rock replication, prediction, planet gravity, room scoping and floating-origin rebasing
+/// for free — all things it genuinely needs and all things `NetPart` already means — but a
+/// handful of systems ask "which parts belong to the player's world", and for those the
+/// answer must be "not this one": it can't be grabbed or jointed, it must not be respawned
+/// when it falls (falling is the point), it must not be written into a save, and it must
+/// not weigh into the room's floating-origin anchor, which has to follow the ship rather
+/// than the nearest boulder.
+#[derive(Component, Clone, Copy, PartialEq, Debug, Default)]
+pub struct Asteroid;
 
 /// Replicated hold state for a part a player is currently holding: who holds it
 /// (their [`NetPlayer::client_id`]) and the hold point + target orientation the server
@@ -1289,5 +1399,55 @@ mod tests {
         assert_eq!(out.dvel, -velocity);
         assert_eq!(out.offset, DVec3::ZERO);
         assert_eq!(out.velocity, Vec3::ZERO);
+    }
+
+    /// The countdown must schedule at least its advertised duration — never less, or the
+    /// banner is clipped. `TICK` is 16 ms, so 3 s is 187.5 ticks and has to round *up*.
+    #[test]
+    fn the_countdown_schedule_is_never_short() {
+        let scheduled = LAUNCH_COUNTDOWN_TICKS as f32 * TICK.as_secs_f32();
+        assert!(
+            scheduled >= crate::launch::LAUNCH_COUNTDOWN_SECS,
+            "{LAUNCH_COUNTDOWN_TICKS} ticks is only {scheduled} s",
+        );
+        // ...and not absurdly long: within one tick of the advertised duration.
+        assert!(scheduled - crate::launch::LAUNCH_COUNTDOWN_SECS < TICK.as_secs_f32());
+    }
+
+    /// Blastoff is decided by comparing ticks, so every peer fires on the *same* tick
+    /// rather than when a replicated flag happens to arrive.
+    ///
+    /// Regression for a fixed ~4-tick late burn on the client: the gate read the
+    /// `launched` level, which is replicate-only, so the missed ticks were never
+    /// replayed. Note this asserts the client answers `true` **while `launched` is still
+    /// false** — the whole point is that the schedule is known in advance.
+    #[test]
+    fn blastoff_fires_on_the_scheduled_tick_not_when_the_flag_arrives() {
+        let scheduled = 1000u32;
+        // What a client sees during the countdown: a schedule, and no launch yet.
+        let counting = NetLaunch { blastoff_tick: Some(scheduled), launched: false, ..default() };
+
+        assert!(!counting.launched_at(Tick(scheduled - 1)), "fired a tick early");
+        assert!(counting.launched_at(Tick(scheduled)), "missed the scheduled tick");
+        assert!(counting.launched_at(Tick(scheduled + 4)));
+
+        // The tick counter wraps; the delta is a wrapping i32, so a schedule either side
+        // of the wrap still compares correctly (this is the case a plain `>=` gets wrong).
+        let wrapped = NetLaunch { blastoff_tick: Some(u32::MAX), launched: false, ..default() };
+        assert!(!wrapped.launched_at(Tick(u32::MAX - 1)));
+        assert!(wrapped.launched_at(Tick(u32::MAX)));
+        assert!(wrapped.launched_at(Tick(0)), "wrapped past the schedule and forgot it");
+    }
+
+    /// A world restored from a save that was already in flight has no tick to be exact
+    /// about, so it falls back to the replicated level — which is correct there.
+    #[test]
+    fn an_unscheduled_launch_falls_back_to_the_replicated_level() {
+        let restored = NetLaunch { blastoff_tick: None, launched: true, ..default() };
+        assert!(restored.launched_at(Tick(0)));
+        assert!(restored.launched_at(Tick(9_999)));
+
+        let idle = NetLaunch::default();
+        assert!(!idle.launched_at(Tick(9_999)));
     }
 }

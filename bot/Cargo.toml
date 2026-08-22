@@ -13,7 +13,7 @@ edition = "2021"
 # replicated avatar (no physics plugins run here).
 avian3d = { workspace = true, features = ["3d", "f32"] }
 bad-spaceship-shared = { path = "../shared" }
-bevy = { workspace = true, features = ["bevy_state"] }
+bevy = { workspace = true, features = ["bevy_state", "bevy_log"] }
 # The client-role lightyear feature set (mirrors client/Cargo.toml minus
 # `frame_interpolation`, which only smooths rendering).
 lightyear = { workspace = true, features = [

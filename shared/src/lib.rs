@@ -11,6 +11,7 @@ use part::PartPlugin;
 use player::PlayerPlugin;
 
 pub mod assembly;
+pub mod asteroid;
 pub mod character;
 pub mod config;
 pub mod guidance;

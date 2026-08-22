@@ -24,7 +24,9 @@ mod launch;
 mod mobile;
 mod monster;
 mod net;
+mod asteroids;
 mod outline;
+mod pilot;
 mod planet;
 mod platform;
 mod render_main_pass;
@@ -90,6 +92,8 @@ fn main() {
             outline::OutlinePlugin,
             planet::PlanetPlugin,
             LaunchPlugin,
+            pilot::PilotPlugin,
+            asteroids::SinglePlayerAsteroidPlugin,
             trajectory::TrajectoryPlugin,
             RenderMainPassPlugin,
             monster::MonsterPlugin,
